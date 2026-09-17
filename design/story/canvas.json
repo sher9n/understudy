@@ -1,0 +1,16 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html",        "x": 0,    "y": 0, "w": 1000, "h": 2280, "title": "The story, and how we say it" },
+    { "file": "LandingNow.dc.html",  "x": 1120, "y": 0, "w": 1240, "h": 1360, "title": "Homepage today, and the six gaps" },
+    { "file": "LandingNew.dc.html",  "x": 2480, "y": 0, "w": 1240, "h": 3020, "title": "Homepage, new copy and pictures" },
+    { "file": "Pictures.dc.html",    "x": 3840, "y": 0, "w": 1240, "h": 1320, "title": "The four new drawings" },
+    { "file": "Inside.dc.html",      "x": 5200, "y": 0, "w": 1240, "h": 2620, "title": "The five inside pages" }
+  ],
+  "annotations": [
+    { "id": "start-here", "x": 0, "y": -150, "w": 420,
+      "text": "Start here. This artboard is the whole story plus the vocabulary rule, so nobody has to explain the site again.\n\nThe rest of the board applies it." },
+    { "id": "layout-kept", "x": 2480, "y": -150, "w": 460,
+      "text": "Layout is untouched: same hero, same four cards, same receipts table, same three steps.\n\nOnly the copy and the pictures move. Two sections are marked NEW SECTION, so they are easy to reject." }
+  ],
+  "launch": { "view": "canvas" }
+}

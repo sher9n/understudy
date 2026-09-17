@@ -1,0 +1,280 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <style>
+    [data-mode='light'] {
+      --bg: #ffffff; --panel: #f7f7f8; --raise: #ffffff; --line: #e7e7e9; --line-strong: #d5d5da;
+      --grid: #f0f0f2; --ink: #0d0d12; --mut: #6b6b7b; --mut-read: #55555f; --code: #f7f7f8;
+      --brand: #0f62fe; --brandq: #e9f0fe; --brand-hover: #0b52d6; --onbrand: #ffffff;
+      --ok: #0e8a5f; --okq: #e4f4ed; --warn: #a9721b; --warnq: #faf0dd; --bad: #be3a2b; --badq: #fbe9e7;
+    }
+    [data-mode='dark'] {
+      --bg: #000000; --panel: #08080a; --raise: #0d0d10; --line: #1e1e23; --line-strong: #2c2c33;
+      --grid: #16161a; --ink: #f0f0f3; --mut: #8a8a95; --mut-read: #a5a5b0; --code: #08080a;
+      --brand: #4c8dff; --brandq: #0c1830; --brand-hover: #6a9fff; --onbrand: #03060d;
+      --ok: #3fcf8e; --okq: #06180f; --warn: #d9a441; --warnq: #1b1508; --bad: #f2665a; --badq: #200b09;
+    }
+    body { margin: 0; }
+    .u { font-family: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif;
+         font-size: 14.5px; line-height: 1.5; letter-spacing: -0.006em; -webkit-font-smoothing: antialiased; }
+    .m { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; }
+    a { color: var(--brand); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button { background: none; border: 0; cursor: pointer; font: inherit; }
+    :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 6px; }
+    p { text-wrap: pretty; }
+    /* Lifted from theme.css so the mock has the page's real anatomy. */
+    .lp { max-width: 1240px; margin: 0 auto; padding: 0 24px 96px; }
+    .lp.wide { max-width: none; padding: 0 44px 96px; }
+    .lp section { padding-top: 78px; }
+    .lp-sec { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+    .lp-sec h2 { font-size: 30px; font-weight: 600; letter-spacing: -0.03em; margin: 0; text-wrap: balance; }
+    .lp-sec p { font-size: 14.5px; color: var(--mut-read); margin: 6px 0 0; max-width: 62ch; }
+    .lp-more { font-size: 13.5px; white-space: nowrap; }
+    .lp-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .lp-card { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden; display: flex; flex-direction: column; }
+    .lp-card .art { background: var(--panel); border-bottom: 1px solid var(--line); padding: 18px 16px; }
+    .lp-card .body { padding: 15px 17px 17px; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+    .lp-card .t { font-size: 15px; font-weight: 600; line-height: 1.35; letter-spacing: -0.018em; }
+    .lp-card .b { font-size: 14px; line-height: 1.55; color: var(--mut-read); }
+    .lp-open { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--raise); }
+    .lp-orow { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1.3fr) 76px; gap: 14px;
+               align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+    .lp-orow:last-child { border-bottom: none; }
+    .lp-orow .ds { font-size: 12.5px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+    .lp-orow .md { font-size: 12.5px; color: var(--ok); }
+    .lp-orow .pr { font-size: 12.5px; color: var(--ink); }
+    .lp-orow .pr em { color: var(--mut); font-style: normal; }
+    .lp-orow .xx { font-size: 19px; font-weight: 700; letter-spacing: -0.03em; color: var(--ok); text-align: right; }
+    .lp-orow.none .md { color: var(--mut); }
+    .lp-orow.none .xx { color: var(--mut); }
+    .lp-hf { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+    .lp-hfc { border: 1px solid var(--line); border-radius: 11px; background: var(--raise); padding: 13px 14px;
+              display: flex; flex-direction: column; gap: 7px; }
+    .lp-hfc .nm { font-size: 11px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; line-height: 1.35; }
+    .lp-hfc .lc { font-size: 9.5px; color: var(--ok); letter-spacing: 0.04em; margin-top: auto; }
+    .lp-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .lp-step { border-top: 2px solid var(--line-strong); padding-top: 15px; display: flex; flex-direction: column; }
+    .lp-step .h { display: flex; align-items: center; gap: 10px; font-size: 15.5px; font-weight: 600; letter-spacing: -0.018em; }
+    .lp-step .n { width: 24px; height: 24px; border-radius: 50%; background: var(--brandq); color: var(--brand);
+                  display: flex; align-items: center; justify-content: center;
+                  font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; font-weight: 700; flex: none; }
+    .lp-step .b { font-size: 14px; color: var(--mut-read); line-height: 1.6; margin: 9px 0 auto; }
+    .lp-step .sart { margin-top: 16px; }
+    .lp-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 60px auto 0; max-width: 860px; }
+    .lp-stats b { display: block; font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums;
+                  font-size: 36px; font-weight: 700; letter-spacing: -0.04em; line-height: 1; }
+    .lp-stats div:first-child b { color: var(--ok); }
+    .lp-stats span { display: block; font-size: 13.5px; color: var(--mut-read); margin-top: 10px; line-height: 1.5; }
+    .lp-end { text-align: center; border-top: 1px solid var(--line); margin-top: 84px; }
+    .lp-end h2 { font-size: 36px; font-weight: 700; letter-spacing: -0.035em; margin: 0; text-wrap: balance; }
+    .lp-end p { font-size: 15px; color: var(--mut); margin: 12px auto 0; max-width: 52ch; }
+    .lp-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 28px; }
+    .btn { padding: 9px 16px; border-radius: 9px; font-size: 13.5px; font-weight: 600; border: 1px solid var(--brand);
+           background: var(--brand); color: var(--onbrand); display: inline-block; }
+    .btn.sec { background: transparent; border-color: var(--line-strong); color: var(--ink); font-weight: 500; }
+    .btn.big { padding: 12px 22px; font-size: 14.5px; border-radius: 11px; }
+    .btn { transition: background 0.13s ease, border-color 0.13s ease; }
+    .btn:hover { background: var(--brand-hover); border-color: var(--brand-hover); text-decoration: none; }
+    .btn.sec:hover { background: var(--grid); border-color: var(--line-strong); text-decoration: none; }
+    .ni { display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: 8px; color: var(--mut);
+          font-size: 14px; font-weight: 500; transition: background 0.13s ease, color 0.13s ease; }
+    .ni:hover { color: var(--ink); background: var(--grid); }
+    .top nav a, .top .plain { color: var(--mut); font-size: 13.5px; transition: color 0.13s ease; }
+    .top nav a:hover, .top .plain:hover { color: var(--ink); text-decoration: none; }
+    .lp-more { transition: color 0.13s ease; }
+    .top { display: flex; align-items: center; gap: 28px; padding: 20px 44px; border-bottom: 1px solid var(--line); }
+    .foot { border-top: 1px solid var(--line); padding: 28px 44px; display: flex; gap: 18px; align-items: center; }
+
+    .hero-h1 { font-size: clamp(34px, 5.2vw, 64px); }
+    .hero-sub { font-size: clamp(16px, 1.5vw, 18px); }
+    .lp-end h2 { font-size: clamp(24px, 3.2vw, 36px); }
+    .lp-sec h2, .panel h2 { font-size: clamp(22px, 2.6vw, 30px); }
+    .three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .split { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 44px; align-items: center; }
+    @media (max-width: 1020px) {
+      .three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .split { grid-template-columns: minmax(0, 1fr); gap: 30px; }
+    }
+    @media (max-width: 720px) {
+      .lp { padding: 0 18px 72px; }
+      .lp section { padding-top: 56px; }
+      .three { grid-template-columns: minmax(0, 1fr); }
+      .top { padding: 16px 18px; gap: 16px; }
+      .top nav { display: none; }
+      .foot { padding: 22px 18px; flex-wrap: wrap; gap: 10px; }
+      .lp-cta .btn { flex: 1 1 auto; text-align: center; }
+    }
+
+    .split.rev { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); }
+    .artwell { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 22px 20px; }
+    .hiw { display: grid; gap: 52px; }
+    .step-k { font-size: 11.5px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--brand); font-weight: 600; }
+    .step-h { font-size: 24px; font-weight: 600; letter-spacing: -0.028em; margin: 10px 0 0; text-wrap: balance; }
+    .step-b { font-size: 15px; color: var(--mut-read); line-height: 1.62; margin: 12px 0 0; max-width: 46ch; }
+    .fact { display: grid; grid-template-columns: 178px minmax(0, 1fr); gap: 24px; padding: 18px 0; border-top: 1px solid var(--line); }
+    .fact .k { font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--mut); font-weight: 600; padding-top: 3px; }
+    .fact .v { font-size: 14.5px; color: var(--mut-read); line-height: 1.62; }
+    .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .wcard { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden; display: flex; flex-direction: column; }
+    .wcard .hd { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    .wcard .hd .t { font-size: 14.5px; font-weight: 600; letter-spacing: -0.018em; }
+    .wcard .ft { border-top: 1px solid var(--line); padding: 14px 18px; font-size: 13.5px; color: var(--mut-read); line-height: 1.55; }
+    .pill { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em;
+            padding: 3px 8px; border-radius: 6px; background: var(--brandq); color: var(--brand); }
+    .pill.q { background: var(--panel); color: var(--mut); }
+    .code { margin: 0; padding: 20px 18px; font-size: 12.5px; line-height: 1.9; color: var(--mut-read); background: var(--code); overflow-x: auto; flex: 1; }
+    @media (max-width: 760px) { .two { grid-template-columns: minmax(0, 1fr); }
+                                .fact { grid-template-columns: minmax(0, 1fr); gap: 6px; } }
+  </style>
+</helmet>
+<div class="u" data-mode="{{mode}}" style="background: var(--bg); color: var(--ink); min-height: 3290px; display: flex; flex-direction: column;">
+  <header class="top">
+    <span style="font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink);">Understudy</span>
+    <nav style="display: flex; gap: 22px; font-size: 13.5px;">
+      <a href="#">Measurements</a><a href="#">Datasets</a><a href="#">Method</a>
+    </nav>
+    <div style="flex-grow: 1;"></div>
+    <button class="ni" style="width: auto;" onClick="{{toggleTheme}}" aria-label="{{switchLabel}}">
+      <sc-if value="{{dark}}" hint-placeholder-val="{{true}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"></path>
+        </svg>
+      </sc-if>
+      <sc-if value="{{light}}" hint-placeholder-val="{{true}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <path d="M21 13a8.5 8.5 0 01-10-10 8.5 8.5 0 1010 10z"></path>
+        </svg>
+      </sc-if>
+    </button>
+    <a href="#" class="plain" style="font-size: 13.5px;">Sign in</a>
+    <a href="#" class="btn">Get an API key</a>
+  </header>
+  <div class="lp">
+
+    <section style="text-align: center; padding-top: 88px;">
+      <h1 class="hero-h1" style="line-height: 1.04; letter-spacing: -0.044em; font-weight: 700; margin: 0 auto; max-width: 880px; text-wrap: balance;">How it works</h1>
+      <p class="hero-sub" style="color: var(--mut-read); line-height: 1.5; max-width: 54ch; margin: 22px auto 0; text-wrap: balance;">You change one line. Everything after it is measurement.</p>
+    </section>
+
+    <section>
+      <div class="lp-sec"><div><h2>Two ways in</h2><p>Route your calls through us and a switch needs no deploy. Keep your own provider instead and send copies, and we will tell you what to switch to.</p></div></div>
+      <div class="two">
+        <div class="wcard">
+          <div class="hd"><span class="t">Route through us</span><span class="m pill">RECOMMENDED</span></div>
+          <pre class="m code"><span style="display: block; color: var(--ink);">client = OpenAI(</span><span style="display: block;"><span style="display: inline-block; background: var(--okq); color: var(--ok); border-radius: 4px; padding: 0 6px; font-weight: 600;">  base_url="https://api.understudy.dev/v1",</span></span><span style="display: block; color: var(--ink);">  api_key=os.environ["UNDERSTUDY_KEY"],</span><span style="display: block; color: var(--ink);">)</span></pre>
+          <div class="ft">Your existing client, with the base URL pointed at us. Every call still goes to the model you asked for until a cheaper one has proved it answers the same, and the switch itself never touches your code.</div>
+        </div>
+        <div class="wcard">
+          <div class="hd"><span class="t">Send copies</span><span class="m pill q">NO PROXY</span></div>
+          <pre class="m code"><span style="display: block; color: var(--ink);">POST /v1/traces</span><span style="display: block; color: var(--ink);">{</span><span style="display: block;">  "request":  { &hellip; },</span><span style="display: block;">  "response": { &hellip; },</span><span style="display: block; color: var(--ink);">}</span></pre>
+          <div class="ft">Your provider answers first and you post the pair afterwards. You get the same measurement and the same recommendation; making the switch stays a change on your side.</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="lp-sec"><div><h2>What happens to every call</h2><p>Four steps. None of them asks you for a label, a taxonomy or a deploy.</p></div></div>
+      <div class="hiw">
+      <div class="split">
+        <div>
+          <div class="m step-k">Step one</div>
+          <h3 class="step-h">Your calls group themselves</h3>
+          <p class="step-b">A call carries a shape: the instruction with the data stripped out of it, the tools it offers, the answer format it asks for and the order of the turns. Calls that share one are one workload. Nothing to label, nothing to configure.</p>
+        </div>
+        <div class="artwell">
+          <svg viewBox="0 0 500 220" width="100%" role="img" aria-label="A request broken into its system text, tools, answer format and turn order, which together name one workload called invoice extract."><text x="10" y="18" class="m" font-size="8.5" fill="var(--mut)">one request</text><rect x="10" y="26" width="228" height="132" rx="10" fill="var(--raise)" stroke="var(--line)" stroke-width="1.2"></rect><text x="24" y="54" class="m" font-size="8.5" fill="var(--mut)">system</text><rect x="92" y="44" width="134" height="20" rx="6" fill="var(--brandq)"></rect><text x="100" y="58" class="m" font-size="8" font-weight="600" fill="var(--brand)">you are an invoice&hellip;</text><text x="24" y="82" class="m" font-size="8.5" fill="var(--mut)">tools</text><rect x="92" y="72" width="134" height="20" rx="6" fill="var(--okq)"></rect><text x="100" y="86" class="m" font-size="8" font-weight="600" fill="var(--ok)">extract_line_items</text><text x="24" y="110" class="m" font-size="8.5" fill="var(--mut)">format</text><rect x="92" y="100" width="134" height="20" rx="6" fill="var(--warnq)"></rect><text x="100" y="114" class="m" font-size="8" font-weight="600" fill="var(--warn)">json_schema</text><text x="24" y="138" class="m" font-size="8.5" fill="var(--mut)">turns</text><rect x="92" y="128" width="134" height="20" rx="6" fill="var(--panel)"></rect><text x="100" y="142" class="m" font-size="8" font-weight="600" fill="var(--mut)">system &#8594; user</text><path d="M248 92 H278" fill="none" stroke="var(--line-strong)" stroke-width="1.6"></path><path d="M273 88 l5 4 -5 4" fill="none" stroke="var(--line-strong)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><text x="288" y="34" class="m" font-size="8.5" fill="var(--mut)">one workload</text><rect x="288" y="44" width="202" height="96" rx="10" fill="var(--raise)" stroke="var(--brand)" stroke-width="1.5"></rect><text x="304" y="74" class="m" font-size="11" font-weight="600" fill="var(--brand)">invoice-extract</text><text x="304" y="96" class="m" font-size="8.5" fill="var(--mut)">shape a91f2c</text><text x="304" y="116" class="m" font-size="8.5" fill="var(--mut)">412 calls this week</text><text x="10" y="190" class="m" font-size="8.5" fill="var(--mut)">the model is not part of the shape, so</text><text x="10" y="204" class="m" font-size="8.5" fill="var(--mut)">switching one never splits a workload in two</text></svg>
+        </div>
+      </div>
+
+      <div class="split rev">
+        <div class="artwell">
+          <svg viewBox="0 0 500 220" width="100%" role="img" aria-label="The same call run twice through your own model, the gap between the two answers read as the noise floor, and the bar set at one and a quarter times that noise."><text x="10" y="18" class="m" font-size="8.5" fill="var(--mut)">your own model, twice, on the same call</text><rect x="10" y="86" width="96" height="36" rx="8" fill="var(--raise)" stroke="var(--line-strong)" stroke-width="1.3"></rect><text x="58" y="108" text-anchor="middle" class="m" font-size="9" fill="var(--ink)">your call</text><path d="M112 100 C132 100 132 62 150 62" fill="none" stroke="var(--line-strong)" stroke-width="1.5"></path><path d="M145 58 l5 4 -5 4" fill="none" stroke="var(--line-strong)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path><path d="M112 108 C132 108 132 134 150 134" fill="none" stroke="var(--line-strong)" stroke-width="1.5"></path><path d="M145 130 l5 4 -5 4" fill="none" stroke="var(--line-strong)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path><rect x="156" y="44" width="150" height="36" rx="8" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"></rect><text x="231" y="66" text-anchor="middle" class="m" font-size="9" fill="var(--ink)">gpt-5.4, run 1</text><rect x="156" y="116" width="150" height="36" rx="8" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"></rect><text x="231" y="138" text-anchor="middle" class="m" font-size="9" fill="var(--ink)">gpt-5.4, run 2</text><path d="M312 62 H320 V134 H312" fill="none" stroke="var(--line-strong)" stroke-width="1.3"></path><text x="330" y="94" class="m" font-size="9" fill="var(--ink)">they differ by 2.4%</text><text x="330" y="110" class="m" font-size="8.5" fill="var(--mut)">that is the noise floor</text><rect x="10" y="170" width="480" height="32" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect><text x="250" y="190" text-anchor="middle" class="m" font-size="9" font-weight="600" fill="var(--ok)">the bar is 1.25 &#215; the noise, and never looser than 3%</text></svg>
+        </div>
+        <div>
+          <div class="m step-k">Step two</div>
+          <h3 class="step-h">Your own model sets the bar</h3>
+          <p class="step-b">We replay one sampled call through the model you run today, twice, and read how far its two answers drift apart. That is the noise floor. A candidate has to land inside it, not inside a number we picked.</p>
+        </div>
+      </div>
+
+      <div class="split">
+        <div>
+          <div class="m step-k">Step three</div>
+          <h3 class="step-h">Four gates, not one score</h3>
+          <p class="step-b">Structure, accuracy, coverage and completeness are judged separately, each against a tolerance that follows the floor. A candidate has to clear all four. Nothing is quietly dropped for being hard.</p>
+        </div>
+        <div class="artwell">
+          <svg viewBox="0 0 500 220" width="100%" role="img" aria-label="Four gates measured against the same bar: structure, accuracy and coverage clear it, completeness overshoots it and misses."><text x="10" y="18" class="m" font-size="8.5" fill="var(--mut)">one candidate, four gates</text><text x="250" y="30" text-anchor="middle" class="m" font-size="7.5" fill="var(--mut)">the bar</text><line x1="250" y1="34" x2="250" y2="196" stroke="var(--line-strong)" stroke-width="1" stroke-dasharray="4 4"></line><text x="10" y="58" class="m" font-size="9" fill="var(--ink)">structure</text><rect x="130" y="47" width="240" height="11" rx="5.5" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><rect x="130" y="47" width="32" height="11" rx="5.5" fill="var(--ok)"></rect><circle cx="392" cy="52" r="8" fill="var(--ok)"></circle><path d="M388.0 52 L390.5 54.8 L396.4 48.8" fill="none" stroke="var(--onbrand)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path><text x="408" y="56" class="m" font-size="8.5" fill="var(--ok)">clears</text><text x="10" y="98" class="m" font-size="9" fill="var(--ink)">accuracy</text><rect x="130" y="87" width="240" height="11" rx="5.5" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><rect x="130" y="87" width="84" height="11" rx="5.5" fill="var(--ok)"></rect><circle cx="392" cy="92" r="8" fill="var(--ok)"></circle><path d="M388.0 92 L390.5 94.8 L396.4 88.8" fill="none" stroke="var(--onbrand)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path><text x="408" y="96" class="m" font-size="8.5" fill="var(--ok)">clears</text><text x="10" y="138" class="m" font-size="9" fill="var(--ink)">coverage</text><rect x="130" y="127" width="240" height="11" rx="5.5" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><rect x="130" y="127" width="56" height="11" rx="5.5" fill="var(--ok)"></rect><circle cx="392" cy="132" r="8" fill="var(--ok)"></circle><path d="M388.0 132 L390.5 134.8 L396.4 128.8" fill="none" stroke="var(--onbrand)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path><text x="408" y="136" class="m" font-size="8.5" fill="var(--ok)">clears</text><text x="10" y="178" class="m" font-size="9" fill="var(--ink)">completeness</text><rect x="130" y="167" width="240" height="11" rx="5.5" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><rect x="130" y="167" width="184" height="11" rx="5.5" fill="var(--bad)"></rect><circle cx="392" cy="172" r="8" fill="var(--bad)"></circle><path d="M388.6 168.6 L395.4 175.4 M395.4 168.6 L388.6 175.4" stroke="var(--onbrand)" stroke-width="1.8" stroke-linecap="round"></path><text x="408" y="176" class="m" font-size="8.5" fill="var(--bad)">misses</text><text x="10" y="214" class="m" font-size="8.5" fill="var(--mut)">a timeout, a refusal or an answer that will not parse counts as total disagreement</text></svg>
+        </div>
+      </div>
+
+      <div class="split rev">
+        <div class="artwell">
+          <svg viewBox="0 0 500 220" width="100%" role="img" aria-label="Two outcomes after a trial: the cheaper model takes the workload and the monthly cost falls, or it slips on a later re-test and the workload goes back to your own model."><rect x="10" y="24" width="480" height="76" rx="10" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.3"></rect><circle cx="36" cy="52" r="9" fill="var(--ok)"></circle><path d="M32.0 52 L34.5 54.8 L40.4 48.8" fill="none" stroke="var(--onbrand)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path><text x="56" y="50" class="m" font-size="10" font-weight="600" fill="var(--ok)">it takes the workload</text><text x="56" y="72" class="m" font-size="8.5" fill="var(--mut)">the next call is served by the cheaper model, with no deploy</text><text x="474" y="56" text-anchor="end" class="m" font-size="11" font-weight="600" fill="var(--ok)">$212 &#8594; $8 / mo</text><rect x="10" y="116" width="480" height="92" rx="10" fill="var(--panel)" stroke="var(--line)" stroke-width="1.3"></rect><circle cx="36" cy="144" r="9" fill="var(--bad)"></circle><path d="M32.6 140.6 L39.4 147.4 M39.4 140.6 L32.6 147.4" stroke="var(--onbrand)" stroke-width="1.8" stroke-linecap="round"></path><text x="56" y="142" class="m" font-size="10" font-weight="600" fill="var(--ink)">if it ever slips, it reverts</text><text x="56" y="164" class="m" font-size="8.5" fill="var(--mut)">promoted models are re-tested on fresh calls</text><text x="56" y="181" class="m" font-size="8.5" fill="var(--mut)">one that misses goes back to your own model at once, and</text><text x="56" y="198" class="m" font-size="8.5" fill="var(--mut)">is never promoted automatically again</text></svg>
+        </div>
+        <div>
+          <div class="m step-k">Step four</div>
+          <h3 class="step-h">It switches, then keeps checking</h3>
+          <p class="step-b">The cheapest model that clears every gate can take the workload, in one click or on its own. It is then re-tested on calls you have made since, so a model that drifts is caught on new work rather than on the run that promoted it.</p>
+        </div>
+      </div>
+
+      </div>
+    </section>
+
+    <section>
+      <div class="lp-sec"><div><h2>The rules, in short</h2><p>The parts worth knowing before you point anything at us.</p></div></div>
+      <div>
+        <div class="fact"><div class="m k">The bar</div><div class="v">One and a quarter times your own model's noise on the same calls, and never looser than three percent.</div></div>
+        <div class="fact"><div class="m k">A failure</div><div class="v">A timeout, a refusal or an answer that will not parse counts as total disagreement. It is never dropped for being awkward.</div></div>
+        <div class="fact"><div class="m k">The sample</div><div class="v">Seeded and stratified by answer length, so a run can be repeated on exactly the calls it was decided on.</div></div>
+        <div class="fact"><div class="m k">The revert</div><div class="v">A promoted model that misses on fresh calls goes back at once, and is never promoted automatically again.</div></div>
+        <div class="fact"><div class="m k">Your calls</div><div class="v">Stored request and response bodies are deleted after thirty days by default, and the window is yours to set.</div></div>
+      </div>
+    </section>
+
+    <section class="lp-end">
+      <h2 style="line-height: 1.14;"><span style="display: block; text-wrap: balance;">Open weights have caught up.</span><span style="display: block; text-wrap: balance;">Your workloads should catch up too.</span></h2>
+      <p>Get up to 24x lower cost while holding the same quality and performance standard you run today.</p>
+      <div class="lp-cta">
+        <a href="#" class="btn big">Get an API key</a>
+        <a href="#" class="btn sec big">Talk to us</a>
+      </div>
+    </section>
+
+  </div>
+  <footer class="foot">
+    <span class="m" style="font-size: 12px; color: var(--mut);">Understudy</span>
+    <div style="flex-grow: 1;"></div>
+    <span class="m" style="font-size: 12px; color: var(--mut);">Zero data retention at the provider. Stored calls deleted after 30 days.</span>
+  </footer>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"}}'>
+class Component extends DCLogic {
+  renderVals() {
+    // The tweak sets where the page starts; the switch in the header takes
+    // over from the first press, the way the real app's does.
+    const dark = this.state && 'dark' in this.state ? this.state.dark : (this.props.dark ?? false);
+    return {
+      dark,
+      light: !dark,
+      mode: dark ? 'dark' : 'light',
+      switchLabel: dark ? 'Switch to light mode' : 'Switch to dark mode',
+      toggleTheme: () => this.setState({ dark: !dark }),
+    };
+  }
+}
+</script>
+</body>
+</html>

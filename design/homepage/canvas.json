@@ -1,0 +1,82 @@
+{
+  "artboards": [
+    {
+      "file": "App.dc.html",
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 2240,
+      "title": "The app, click through it",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "Main.dc.html",
+      "x": 1560,
+      "y": 0,
+      "w": 1440,
+      "h": 2180,
+      "title": "Homepage",
+      "expand": "fill"
+    },
+    {
+      "file": "SignIn.dc.html",
+      "x": 3120,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Sign in",
+      "expand": "fill"
+    },
+    {
+      "file": "SignUp.dc.html",
+      "x": 4680,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Sign up",
+      "expand": "fill"
+    },
+    {
+      "file": "Connect.dc.html",
+      "x": 6240,
+      "y": 0,
+      "w": 1440,
+      "h": 1120,
+      "title": "Connect",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "Connected.dc.html",
+      "x": 7800,
+      "y": 0,
+      "w": 1440,
+      "h": 1120,
+      "title": "Connect, a call lands",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "Dashboard.dc.html",
+      "x": 9360,
+      "y": 0,
+      "w": 1440,
+      "h": 1460,
+      "title": "Dashboard",
+      "expand": "fill"
+    },
+    {
+      "file": "Workloads.dc.html",
+      "x": 10920,
+      "y": 0,
+      "w": 1440,
+      "h": 1040,
+      "title": "Workloads",
+      "expand": "fill"
+    }
+  ],
+  "launch": {
+    "view": "canvas"
+  }
+}

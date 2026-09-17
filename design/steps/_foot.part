@@ -1,0 +1,26 @@
+  <footer class="foot">
+    <span class="m" style="font-size: 12px; color: var(--mut);">Understudy</span>
+    <div style="flex-grow: 1;"></div>
+    <span class="m" style="font-size: 12px; color: var(--mut);">Step markers, three ways</span>
+  </footer>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"}}'>
+class Component extends DCLogic {
+  renderVals() {
+    // The tweak sets where the page starts; the switch in the header takes
+    // over from the first press, the way the real app's does.
+    const dark = this.state && 'dark' in this.state ? this.state.dark : (this.props.dark ?? false);
+    return {
+      dark,
+      light: !dark,
+      mode: dark ? 'dark' : 'light',
+      switchLabel: dark ? 'Switch to light mode' : 'Switch to dark mode',
+      toggleTheme: () => this.setState({ dark: !dark }),
+    };
+  }
+}
+</script>
+</body>
+</html>

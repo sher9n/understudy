@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <style>
+    body { margin: 0; background: #000; color: #f0f0f3;
+      font-family: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif;
+      font-size: 14.5px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #4c8dff; text-decoration: none; } a:hover { color: #6a9fff; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; }
+    .gap { display: flex; align-items: flex-start; gap: 9px; border-left: 2px solid #f2665a;
+      padding: 2px 0 2px 12px; font-size: 12.5px; color: #f2665a; line-height: 1.5; }
+    .dim { opacity: 0.42; }
+  </style>
+</helmet>
+
+<div style="padding: 0 0 56px;">
+
+  <div style="height: 56px; border-bottom: 1px solid #1e1e23; display: flex; align-items: center; gap: 10px; padding: 0 20px;">
+    <div class="mono" style="font-size: 10px; letter-spacing: 0.14em; color: #8a8a95;">WHAT THE PAGE SAYS TODAY</div>
+    <div style="flex: 1;"></div>
+    <span class="mono" style="font-size: 10px; letter-spacing: 0.12em; color: #f2665a;">7 GAPS</span>
+  </div>
+
+  <div style="max-width: 1240px; margin: 0 auto; padding: 0 24px;">
+
+    <div class="dim" style="text-align: center; padding: 56px 0 0;">
+      <div style="font-size: 60px; line-height: 1.02; letter-spacing: -0.045em; font-weight: 700;">
+        Open weights caught up.<br>Your bill did not.
+      </div>
+      <div style="font-size: 18px; color: #8a8a95; line-height: 1.5; max-width: 54ch; margin: 18px auto 0;">
+        On 5 of 6 datasets, an open model already matches the expensive one for up to 20x less.
+        We find out about yours.
+      </div>
+    </div>
+
+    <div style="margin-top: 26px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 30px;">
+      <div class="gap">The premise is a bill, not a measurement. "Your bill did not" is about their spending, so the result we actually have never gets stated first.</div>
+      <div class="gap">"the expensive one" invites the reader to rank models by price. The reference model is never named, so the claim cannot be checked from the hero.</div>
+    </div>
+
+    <div style="padding-top: 54px;">
+      <div class="mono" style="font-size: 10px; letter-spacing: 0.14em; color: #8a8a95; margin-bottom: 14px;">THE FOUR CARDS</div>
+      <div class="dim" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px;">
+        <div style="border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; padding: 15px 17px;">
+          <div style="font-size: 15px; font-weight: 600; line-height: 1.35;">Measured against your own model, not a leaderboard</div>
+          <div style="font-size: 12.5px; color: #8a8a95; margin-top: 6px; line-height: 1.5;">Your model disagrees with itself. That gap is the bar.</div>
+        </div>
+        <div style="border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; padding: 15px 17px;">
+          <div style="font-size: 15px; font-weight: 600; line-height: 1.35;">Runs inside your account, in your region</div>
+          <div style="font-size: 12.5px; color: #8a8a95; margin-top: 6px; line-height: 1.5;">Bedrock makes that ordinary now. Your data stays yours.</div>
+        </div>
+        <div style="border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; padding: 15px 17px;">
+          <div style="font-size: 15px; font-weight: 600; line-height: 1.35;">Never in your request path</div>
+          <div style="font-size: 12.5px; color: #8a8a95; margin-top: 6px; line-height: 1.5;">A copy arrives after your provider has already answered.</div>
+        </div>
+        <div style="border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; padding: 15px 17px;">
+          <div style="font-size: 15px; font-weight: 600; line-height: 1.35;">Goes back on its own if it drifts</div>
+          <div style="font-size: 12.5px; color: #8a8a95; margin-top: 6px; line-height: 1.5;">A slice of live traffic keeps checking, forever.</div>
+        </div>
+      </div>
+      <div style="margin-top: 16px;">
+        <div class="gap">Card two is the whole compliance story compressed into six words. Zero data retention and residency, the two things a buyer needs, are said nowhere on any screen.</div>
+      </div>
+    </div>
+
+    <div style="padding-top: 54px;">
+      <div class="mono" style="font-size: 10px; letter-spacing: 0.14em; color: #8a8a95; margin-bottom: 14px;">THE RECEIPTS HEADING</div>
+      <div class="dim" style="border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; padding: 18px 20px;">
+        <div style="font-size: 26px; font-weight: 600; letter-spacing: -0.03em;">The claim, and the receipts</div>
+        <div style="font-size: 14px; color: #8a8a95; margin-top: 6px;">The cheapest model with open weights that matched, on each dataset.</div>
+      </div>
+      <div style="margin-top: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 30px;">
+        <div class="gap">"cheapest" is the exact word the story has to avoid. It reframes a matched model as the bargain option.</div>
+        <div class="gap">These six datasets come from Hugging Face and are openly licensed. A reader is never told, so the most checkable thing about the project is invisible.</div>
+      </div>
+    </div>
+
+    <div style="padding-top: 54px;">
+      <div class="mono" style="font-size: 10px; letter-spacing: 0.14em; color: #8a8a95; margin-bottom: 14px;">THE THREE STEPS</div>
+      <div class="dim" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px;">
+        <div style="border-top: 2px solid #2c2c33; padding-top: 14px;">
+          <div style="font-size: 15.5px; font-weight: 600;">1. Add one line</div>
+          <div style="font-size: 13.5px; color: #8a8a95; margin-top: 8px;">Your key works the moment you copy it.</div>
+        </div>
+        <div style="border-top: 2px solid #2c2c33; padding-top: 14px;">
+          <div style="font-size: 15.5px; font-weight: 600;">2. It keeps testing</div>
+          <div style="font-size: 13.5px; color: #8a8a95; margin-top: 8px;">Not once. Over and over, on your real calls.</div>
+        </div>
+        <div style="border-top: 2px solid #2c2c33; padding-top: 14px;">
+          <div style="font-size: 15.5px; font-weight: 600;">3. You press the switch</div>
+          <div style="font-size: 13.5px; color: #8a8a95; margin-top: 8px;">Nothing moves until you say so.</div>
+        </div>
+      </div>
+      <div style="margin-top: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 30px;">
+        <div class="gap">Step two never says the grouping is automatic. The single most surprising thing the product does is described as "it keeps testing".</div>
+        <div class="gap">Nothing anywhere says what is coming. Four fine-tunes already sit on the board and the roadmap they imply is never claimed.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

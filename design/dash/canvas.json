@@ -1,0 +1,107 @@
+{
+  "artboards": [
+    {
+      "file": "Main.dc.html",
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 990,
+      "title": "1  Minute one",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "V2.dc.html",
+      "x": 1560,
+      "y": 0,
+      "w": 1440,
+      "h": 1030,
+      "title": "2  Week one",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "V3.dc.html",
+      "x": 0,
+      "y": 1290,
+      "w": 1440,
+      "h": 1220,
+      "title": "3  Workload, day one",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "V4.dc.html",
+      "x": 1560,
+      "y": 1290,
+      "w": 1440,
+      "h": 1865,
+      "title": "4  Workload, week three, automatic",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "V5.dc.html",
+      "x": 3120,
+      "y": 1290,
+      "w": 1440,
+      "h": 1840,
+      "title": "5  Workload, week three, ask me first",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "V6.dc.html",
+      "x": 0,
+      "y": 5000,
+      "w": 1440,
+      "h": 1840,
+      "title": "6  How your bar is set, 4 ways",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "V7.dc.html",
+      "x": 0,
+      "y": 3550,
+      "w": 1440,
+      "h": 690,
+      "title": "7  Workloads",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "V8.dc.html",
+      "x": 1560,
+      "y": 3550,
+      "w": 1440,
+      "h": 1215,
+      "title": "8  Models",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "V9.dc.html",
+      "x": 3120,
+      "y": 3550,
+      "w": 1440,
+      "h": 1210,
+      "title": "9  Settings, account open",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    {
+      "file": "V10.dc.html",
+      "x": 3120,
+      "y": 0,
+      "w": 1440,
+      "h": 1090,
+      "title": "10  Dashboard, week three",
+      "expand": "fill",
+      "is_interactive": true
+    }
+  ],
+  "launch": {
+    "view": "canvas"
+  }
+}

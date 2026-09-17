@@ -1,0 +1,248 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <style>
+    [data-mode='light'] {
+      --bg: #ffffff; --panel: #f7f7f8; --raise: #ffffff; --line: #e7e7e9; --line-strong: #d5d5da;
+      --grid: #f0f0f2; --ink: #0d0d12; --mut: #6b6b7b; --mut-read: #55555f; --code: #f7f7f8;
+      --brand: #0f62fe; --brandq: #e9f0fe; --brand-hover: #0b52d6; --onbrand: #ffffff;
+      --ok: #0e8a5f; --okq: #e4f4ed; --warn: #a9721b; --warnq: #faf0dd; --bad: #be3a2b; --badq: #fbe9e7;
+    }
+    [data-mode='dark'] {
+      --bg: #000000; --panel: #08080a; --raise: #0d0d10; --line: #1e1e23; --line-strong: #2c2c33;
+      --grid: #16161a; --ink: #f0f0f3; --mut: #8a8a95; --mut-read: #a5a5b0; --code: #08080a;
+      --brand: #4c8dff; --brandq: #0c1830; --brand-hover: #6a9fff; --onbrand: #03060d;
+      --ok: #3fcf8e; --okq: #06180f; --warn: #d9a441; --warnq: #1b1508; --bad: #f2665a; --badq: #200b09;
+    }
+    body { margin: 0; }
+    .u { font-family: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif;
+         font-size: 14.5px; line-height: 1.5; letter-spacing: -0.006em; -webkit-font-smoothing: antialiased; }
+    .m { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; }
+    a { color: var(--brand); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button { background: none; border: 0; cursor: pointer; font: inherit; }
+    :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 6px; }
+    p { text-wrap: pretty; }
+    /* Lifted from theme.css so the mock has the page's real anatomy. */
+    .lp { max-width: 1240px; margin: 0 auto; padding: 0 24px 96px; }
+    .lp.wide { max-width: none; padding: 0 44px 96px; }
+    .lp section { padding-top: 78px; }
+    .lp-sec { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+    .lp-sec h2 { font-size: 30px; font-weight: 600; letter-spacing: -0.03em; margin: 0; text-wrap: balance; }
+    .lp-sec p { font-size: 14.5px; color: var(--mut-read); margin: 6px 0 0; max-width: 62ch; }
+    .lp-more { font-size: 13.5px; white-space: nowrap; }
+    .lp-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .lp-card { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden; display: flex; flex-direction: column; }
+    .lp-card .art { background: var(--panel); border-bottom: 1px solid var(--line); padding: 18px 16px; }
+    .lp-card .body { padding: 15px 17px 17px; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+    .lp-card .t { font-size: 15px; font-weight: 600; line-height: 1.35; letter-spacing: -0.018em; }
+    .lp-card .b { font-size: 14px; line-height: 1.55; color: var(--mut-read); }
+    .lp-open { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--raise); }
+    .lp-orow { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1.3fr) 76px; gap: 14px;
+               align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+    .lp-orow:last-child { border-bottom: none; }
+    .lp-orow .ds { font-size: 12.5px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+    .lp-orow .md { font-size: 12.5px; color: var(--ok); }
+    .lp-orow .pr { font-size: 12.5px; color: var(--ink); }
+    .lp-orow .pr em { color: var(--mut); font-style: normal; }
+    .lp-orow .xx { font-size: 19px; font-weight: 700; letter-spacing: -0.03em; color: var(--ok); text-align: right; }
+    .lp-orow.none .md { color: var(--mut); }
+    .lp-orow.none .xx { color: var(--mut); }
+    .lp-hf { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+    .lp-hfc { border: 1px solid var(--line); border-radius: 11px; background: var(--raise); padding: 13px 14px;
+              display: flex; flex-direction: column; gap: 7px; }
+    .lp-hfc .nm { font-size: 11px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; line-height: 1.35; }
+    .lp-hfc .lc { font-size: 9.5px; color: var(--ok); letter-spacing: 0.04em; margin-top: auto; }
+    .lp-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .lp-step { border-top: 2px solid var(--line-strong); padding-top: 15px; display: flex; flex-direction: column; }
+    .lp-step .h { display: flex; align-items: center; gap: 10px; font-size: 15.5px; font-weight: 600; letter-spacing: -0.018em; }
+    .lp-step .n { width: 24px; height: 24px; border-radius: 50%; background: var(--brandq); color: var(--brand);
+                  display: flex; align-items: center; justify-content: center;
+                  font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; font-weight: 700; flex: none; }
+    .lp-step .b { font-size: 14px; color: var(--mut-read); line-height: 1.6; margin: 9px 0 auto; }
+    .lp-step .sart { margin-top: 16px; }
+    .lp-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 60px auto 0; max-width: 860px; }
+    .lp-stats b { display: block; font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums;
+                  font-size: 36px; font-weight: 700; letter-spacing: -0.04em; line-height: 1; }
+    .lp-stats div:first-child b { color: var(--ok); }
+    .lp-stats span { display: block; font-size: 13.5px; color: var(--mut-read); margin-top: 10px; line-height: 1.5; }
+    .lp-end { text-align: center; border-top: 1px solid var(--line); margin-top: 84px; }
+    .lp-end h2 { font-size: 36px; font-weight: 700; letter-spacing: -0.035em; margin: 0; text-wrap: balance; }
+    .lp-end p { font-size: 15px; color: var(--mut); margin: 12px auto 0; max-width: 52ch; }
+    .lp-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 28px; }
+    .btn { padding: 9px 16px; border-radius: 9px; font-size: 13.5px; font-weight: 600; border: 1px solid var(--brand);
+           background: var(--brand); color: var(--onbrand); display: inline-block; }
+    .btn.sec { background: transparent; border-color: var(--line-strong); color: var(--ink); font-weight: 500; }
+    .btn.big { padding: 12px 22px; font-size: 14.5px; border-radius: 11px; }
+    .btn { transition: background 0.13s ease, border-color 0.13s ease; }
+    .btn:hover { background: var(--brand-hover); border-color: var(--brand-hover); text-decoration: none; }
+    .btn.sec:hover { background: var(--grid); border-color: var(--line-strong); text-decoration: none; }
+    .ni { display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: 8px; color: var(--mut);
+          font-size: 14px; font-weight: 500; transition: background 0.13s ease, color 0.13s ease; }
+    .ni:hover { color: var(--ink); background: var(--grid); }
+    .top nav a, .top .plain { color: var(--mut); font-size: 13.5px; transition: color 0.13s ease; }
+    .top nav a:hover, .top .plain:hover { color: var(--ink); text-decoration: none; }
+    .lp-more { transition: color 0.13s ease; }
+    .top { display: flex; align-items: center; gap: 28px; padding: 20px 44px; border-bottom: 1px solid var(--line); }
+    .foot { border-top: 1px solid var(--line); padding: 28px 44px; display: flex; gap: 18px; align-items: center; }
+
+    .hero-h1 { font-size: clamp(34px, 5.2vw, 64px); }
+    .hero-sub { font-size: clamp(16px, 1.5vw, 18px); }
+    .lp-end h2 { font-size: clamp(24px, 3.2vw, 36px); }
+    .lp-sec h2, .panel h2 { font-size: clamp(22px, 2.6vw, 30px); }
+    .three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .split { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 44px; align-items: center; }
+    @media (max-width: 1020px) {
+      .three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .split { grid-template-columns: minmax(0, 1fr); gap: 30px; }
+    }
+    @media (max-width: 720px) {
+      .lp { padding: 0 18px 72px; }
+      .lp section { padding-top: 56px; }
+      .three { grid-template-columns: minmax(0, 1fr); }
+      .top { padding: 16px 18px; gap: 16px; }
+      .top nav { display: none; }
+      .foot { padding: 22px 18px; flex-wrap: wrap; gap: 10px; }
+      .lp-cta .btn { flex: 1 1 auto; text-align: center; }
+    }
+
+    .split.rev { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); }
+    .artwell { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 22px 20px; }
+    .hiw { display: grid; gap: 52px; }
+    .step-k { font-size: 11.5px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--brand); font-weight: 600; }
+    .step-h { font-size: 24px; font-weight: 600; letter-spacing: -0.028em; margin: 10px 0 0; text-wrap: balance; }
+    .step-b { font-size: 15px; color: var(--mut-read); line-height: 1.62; margin: 12px 0 0; max-width: 46ch; }
+    .fact { display: grid; grid-template-columns: 178px minmax(0, 1fr); gap: 24px; padding: 18px 0; border-top: 1px solid var(--line); }
+    .fact .k { font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--mut); font-weight: 600; padding-top: 3px; }
+    .fact .v { font-size: 14.5px; color: var(--mut-read); line-height: 1.62; }
+    .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .wcard { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden; display: flex; flex-direction: column; }
+    .wcard .hd { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    .wcard .hd .t { font-size: 14.5px; font-weight: 600; letter-spacing: -0.018em; }
+    .wcard .ft { border-top: 1px solid var(--line); padding: 14px 18px; font-size: 13.5px; color: var(--mut-read); line-height: 1.55; }
+    .pill { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em;
+            padding: 3px 8px; border-radius: 6px; background: var(--brandq); color: var(--brand); }
+    .pill.q { background: var(--panel); color: var(--mut); }
+    .code { margin: 0; padding: 20px 18px; font-size: 12.5px; line-height: 1.9; color: var(--mut-read); background: var(--code); overflow-x: auto; flex: 1; }
+    @media (max-width: 760px) { .two { grid-template-columns: minmax(0, 1fr); }
+                                .fact { grid-template-columns: minmax(0, 1fr); gap: 6px; } }
+    .lp-card .t { display: flex; align-items: center; gap: 9px; }
+    .lp-card .n { flex: 0 0 auto; width: 21px; height: 21px; border-radius: 50%; background: var(--brandq);
+                  color: var(--brand); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px;
+                  font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+    .authsplit { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 900px; }
+    .pitch { background: var(--panel); border-right: 1px solid var(--line); padding: 34px 56px 40px; display: flex; flex-direction: column; }
+    .brand { font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink); }
+    .pitchmid { margin: auto 0; display: flex; flex-direction: column; gap: 30px; }
+    .pitchtext { max-width: 464px; }
+    .exhibit { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); padding: 20px 18px; }
+    .pitch-h { font-size: 30px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.22; margin: 0; text-wrap: balance; }
+    .pts { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; }
+    .pts li { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; border-radius: 999px;
+              background: var(--raise); border: 1px solid var(--line); font-size: 13px; font-weight: 600;
+              color: var(--ink); line-height: 1; }
+    .pitchfoot { font-size: 11.5px; letter-spacing: 0.05em; color: var(--mut); }
+    .formside { padding: 34px 56px 40px; display: flex; flex-direction: column; }
+    .toprow { display: flex; justify-content: flex-end; align-items: center; gap: 16px; font-size: 13.5px; color: var(--mut-read); }
+    .authcard { margin: auto; width: 100%; max-width: 374px; }
+    .authcard h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.03em; margin: 0 0 8px; }
+    .authcard .sub { font-size: 14.5px; color: var(--mut-read); margin: 0 0 26px; line-height: 1.5; }
+    .fields { display: grid; gap: 15px; }
+    .fl { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+    .fl label { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+    .fl a { font-size: 12.5px; }
+    .field { width: 100%; box-sizing: border-box; padding: 11px 13px; border-radius: 9px; border: 1px solid var(--line-strong);
+             background: var(--raise); color: var(--ink); font-family: inherit; font-size: 14.5px; }
+    .field::placeholder { color: var(--mut); }
+    .btn.full { width: 100%; box-sizing: border-box; text-align: center; padding: 12px 16px; font-size: 14.5px;
+                border-radius: 10px; margin-top: 5px; display: block; }
+    .authfoot { font-size: 13.5px; color: var(--mut-read); margin: 22px 0 0; }
+    .fineprint { font-size: 12.5px; color: var(--mut); margin: 14px 0 0; line-height: 1.5; }
+    @media (max-width: 900px) {
+      .authsplit { grid-template-columns: minmax(0, 1fr); }
+      .pitch { order: 2; border-right: 0; border-top: 1px solid var(--line); }
+      .pitch, .formside { padding: 28px 22px 34px; }
+    }
+    .pitch-sub { font-size: 15.5px; color: var(--mut-read); line-height: 1.55; margin: 14px 0 0; }
+    .btn { cursor: pointer; }
+    a[onClick], [onClick] { cursor: pointer; }
+    .plain, a.plain { cursor: pointer; }
+    .lnk { color: var(--brand); cursor: pointer; }
+    .lnk:hover { text-decoration: underline; }
+  </style>
+</helmet>
+<div class="u" data-mode="{{mode}}" style="background: var(--bg); color: var(--ink);">
+  <div class="authsplit">
+    <aside class="pitch">
+      <div class="brand">Understudy</div>
+      <div class="pitchmid">
+        <div class="pitchtext">
+          <h1 class="pitch-h">Your LLM stack should keep getting better</h1>
+        </div>
+        <div class="exhibit"><svg viewBox="0 0 480 192" width="100%" role="img" aria-label="Cost falling along a curve from one hundred and twenty dollars today to forty, twelve and five, noted as quality holding at every step."><path d="M60 62 C104 62 134 91 172 100 C212 110 240 123 276 130 C312 136 348 143 378 146 L378 160 L60 160 Z" fill="var(--ok)" opacity="0.10"></path><path d="M60 62 C104 62 134 91 172 100 C212 110 240 123 276 130 C312 136 348 143 378 146" fill="none" stroke="var(--ok)" stroke-width="2.6" stroke-linecap="round"></path><path d="M394 146 H424" fill="none" stroke="var(--ok)" stroke-width="2.4" opacity="0.45" stroke-linecap="round"></path><path d="M419 141 l5 5 -5 5" fill="none" stroke="var(--ok)" stroke-width="2.4" opacity="0.45" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="60" cy="62" r="9" fill="var(--mut)" opacity="1.0"></circle><circle cx="60" cy="62" r="3.6" fill="var(--raise)"></circle><text x="60" y="41" text-anchor="middle" font-size="16" font-weight="700" fill="var(--ink)">$120</text><circle cx="172" cy="100" r="9" fill="var(--ok)" opacity="0.45"></circle><circle cx="172" cy="100" r="3.6" fill="var(--raise)"></circle><text x="172" y="79" text-anchor="middle" font-size="15" font-weight="700" fill="var(--ink)">$40</text><circle cx="276" cy="130" r="9" fill="var(--ok)" opacity="0.72"></circle><circle cx="276" cy="130" r="3.6" fill="var(--raise)"></circle><text x="276" y="109" text-anchor="middle" font-size="14.5" font-weight="700" fill="var(--ink)">$12</text><circle cx="378" cy="146" r="10" fill="var(--ok)" opacity="1.0"></circle><circle cx="378" cy="146" r="3.6" fill="var(--raise)"></circle><text x="378" y="124" text-anchor="middle" font-size="14.5" font-weight="700" fill="var(--ok)">$5</text><line x1="30" y1="160" x2="452" y2="160" stroke="var(--line)" stroke-width="1.6"></line><text x="32" y="181" font-size="13.5" fill="var(--mut)">Today</text><text x="452" y="181" text-anchor="end" font-size="13.5" fill="var(--mut)">Continuously gets better &#8594;</text><circle cx="256" cy="16" r="9" fill="var(--ok)"></circle><path d="M252 16 L254.6 18.7 L260.3 12.8" fill="none" stroke="var(--onbrand)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path><text x="452" y="21" text-anchor="end" font-size="13" font-weight="600" fill="var(--ink)">Quality holds at every step</text></svg></div>
+        <ul class="pts">
+          <li><svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" style="flex: 0 0 auto;"><circle cx="8" cy="8" r="8" fill="var(--okq)"></circle><path d="M4.7 8.2 L6.9 10.4 L11.3 5.7" stroke="var(--ok)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"></path></svg><span>No manual benchmarking</span></li>
+          <li><svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" style="flex: 0 0 auto;"><circle cx="8" cy="8" r="8" fill="var(--okq)"></circle><path d="M4.7 8.2 L6.9 10.4 L11.3 5.7" stroke="var(--ok)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"></path></svg><span>Same quality bar</span></li>
+          <li><svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" style="flex: 0 0 auto;"><circle cx="8" cy="8" r="8" fill="var(--okq)"></circle><path d="M4.7 8.2 L6.9 10.4 L11.3 5.7" stroke="var(--ok)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"></path></svg><span>Up to 24x lower cost</span></li>
+        </ul>
+      </div>
+    </aside>
+    <main class="formside">
+      <div class="toprow"><a href="#">Create an account</a><button class="ni" style="width: auto;" onClick="{{toggleTheme}}" aria-label="{{switchLabel}}">
+      <sc-if value="{{dark}}" hint-placeholder-val="{{true}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"></path>
+        </svg>
+      </sc-if>
+      <sc-if value="{{light}}" hint-placeholder-val="{{true}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <path d="M21 13a8.5 8.5 0 01-10-10 8.5 8.5 0 1010 10z"></path>
+        </svg>
+      </sc-if>
+    </button></div>
+      <form class="authcard">
+        <h1>Sign in to Understudy</h1>
+        <p class="sub">Continue to your workspace.</p>
+        <div class="fields">
+          <div>
+            <div class="fl"><label for="email">Email</label></div>
+            <input class="field" id="email" type="email" placeholder="you@company.com" autocomplete="email">
+          </div>
+          <div>
+            <div class="fl"><label for="password">Password</label><a href="#">Forgot?</a></div>
+            <input class="field" id="password" type="password" placeholder="Your password" autocomplete="current-password">
+          </div>
+          <button type="submit" class="btn full">Sign in</button>
+        </div>
+        <p class="authfoot">New to Understudy? <a href="#">Create an account</a>.</p>
+      </form>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"}}'>
+class Component extends DCLogic {
+  renderVals() {
+    // The tweak sets where the page starts; the switch in the header takes
+    // over from the first press, the way the real app's does.
+    const dark = this.state && 'dark' in this.state ? this.state.dark : (this.props.dark ?? false);
+    return {
+      dark,
+      light: !dark,
+      mode: dark ? 'dark' : 'light',
+      switchLabel: dark ? 'Switch to light mode' : 'Switch to dark mode',
+      toggleTheme: () => this.setState({ dark: !dark }),
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,554 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <style>
+    [data-mode='light'] {
+      --bg: #ffffff; --panel: #f7f7f8; --raise: #ffffff; --line: #e7e7e9; --line-strong: #d5d5da;
+      --grid: #f0f0f2; --ink: #0d0d12; --mut: #6b6b7b; --mut-read: #55555f; --code: #f7f7f8;
+      --brand: #0f62fe; --brandq: #e9f0fe; --brand-hover: #0b52d6; --onbrand: #ffffff;
+      --ok: #0e8a5f; --okq: #e4f4ed; --warn: #a9721b; --warnq: #faf0dd; --bad: #be3a2b; --badq: #fbe9e7;
+    }
+    [data-mode='dark'] {
+      --bg: #000000; --panel: #08080a; --raise: #0d0d10; --line: #1e1e23; --line-strong: #2c2c33;
+      --grid: #16161a; --ink: #f0f0f3; --mut: #8a8a95; --mut-read: #a5a5b0; --code: #08080a;
+      --brand: #4c8dff; --brandq: #0c1830; --brand-hover: #6a9fff; --onbrand: #03060d;
+      --ok: #3fcf8e; --okq: #06180f; --warn: #d9a441; --warnq: #1b1508; --bad: #f2665a; --badq: #200b09;
+    }
+    body { margin: 0; }
+    .u { font-family: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif;
+         font-size: 14.5px; line-height: 1.5; letter-spacing: -0.006em; -webkit-font-smoothing: antialiased; }
+    .m { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; }
+    a { color: var(--brand); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button { background: none; border: 0; cursor: pointer; font: inherit; }
+    :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 6px; }
+    p { text-wrap: pretty; }
+    /* Lifted from theme.css so the mock has the page's real anatomy. */
+    .lp { max-width: 1240px; margin: 0 auto; padding: 0 24px 96px; }
+    .lp section { padding-top: 78px; }
+    .lp-sec { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+    .lp-sec h2 { font-size: 30px; font-weight: 600; letter-spacing: -0.03em; margin: 0; text-wrap: balance; }
+    .lp-sec p { font-size: 14.5px; color: var(--mut-read); margin: 6px 0 0; max-width: 62ch; }
+    .lp-more { font-size: 13.5px; white-space: nowrap; }
+    .lp-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .lp-card { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden; display: flex; flex-direction: column; }
+    .lp-card .art { background: var(--panel); border-bottom: 1px solid var(--line); padding: 18px 16px; }
+    .lp-card .body { padding: 15px 17px 17px; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+    .lp-card .t { font-size: 15px; font-weight: 600; line-height: 1.35; letter-spacing: -0.018em; }
+    .lp-card .b { font-size: 14px; line-height: 1.55; color: var(--mut-read); }
+    .lp-open { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--raise); }
+    .lp-orow { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1.3fr) 76px; gap: 14px;
+               align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+    .lp-orow:last-child { border-bottom: none; }
+    .lp-orow .ds { font-size: 12.5px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+    .lp-orow .md { font-size: 12.5px; color: var(--ok); }
+    .lp-orow .pr { font-size: 12.5px; color: var(--ink); }
+    .lp-orow .pr em { color: var(--mut); font-style: normal; }
+    .lp-orow .xx { font-size: 19px; font-weight: 700; letter-spacing: -0.03em; color: var(--ok); text-align: right; }
+    .lp-orow.none .md { color: var(--mut); }
+    .lp-orow.none .xx { color: var(--mut); }
+    .lp-hf { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+    .lp-hfc { border: 1px solid var(--line); border-radius: 11px; background: var(--raise); padding: 13px 14px;
+              display: flex; flex-direction: column; gap: 7px; }
+    .lp-hfc .nm { font-size: 11px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; line-height: 1.35; }
+    .lp-hfc .lc { font-size: 9.5px; color: var(--ok); letter-spacing: 0.04em; margin-top: auto; }
+    .lp-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .lp-step { border-top: 2px solid var(--line-strong); padding-top: 15px; display: flex; flex-direction: column; }
+    .lp-step .h { display: flex; align-items: center; gap: 10px; font-size: 15.5px; font-weight: 600; letter-spacing: -0.018em; }
+    .lp-step .n { width: 24px; height: 24px; border-radius: 50%; background: var(--brandq); color: var(--brand);
+                  display: flex; align-items: center; justify-content: center;
+                  font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; font-weight: 700; flex: none; }
+    .lp-step .b { font-size: 14px; color: var(--mut-read); line-height: 1.6; margin: 9px 0 auto; }
+    .lp-step .sart { margin-top: 16px; }
+    .lp-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 60px auto 0; max-width: 860px; }
+    .lp-stats b { display: block; font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums;
+                  font-size: 36px; font-weight: 700; letter-spacing: -0.04em; line-height: 1; }
+    .lp-stats div:first-child b { color: var(--ok); }
+    .lp-stats span { display: block; font-size: 13.5px; color: var(--mut-read); margin-top: 10px; line-height: 1.5; }
+    .lp-end { text-align: center; border-top: 1px solid var(--line); margin-top: 84px; }
+    .lp-end h2 { font-size: 36px; font-weight: 700; letter-spacing: -0.035em; margin: 0; text-wrap: balance; }
+    .lp-end p { font-size: 15px; color: var(--mut); margin: 12px auto 0; max-width: 52ch; }
+    .lp-cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 28px; }
+    .btn { padding: 9px 16px; border-radius: 9px; font-size: 13.5px; font-weight: 600; border: 1px solid var(--brand);
+           background: var(--brand); color: var(--onbrand); display: inline-block; }
+    .btn.sec { background: transparent; border-color: var(--line-strong); color: var(--ink); font-weight: 500; }
+    .btn.big { padding: 12px 22px; font-size: 14.5px; border-radius: 11px; }
+    .btn { transition: background 0.13s ease, border-color 0.13s ease; }
+    .btn:hover { background: var(--brand-hover); border-color: var(--brand-hover); text-decoration: none; }
+    .btn.sec:hover { background: var(--grid); border-color: var(--line-strong); text-decoration: none; }
+    .ni { display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: 8px; color: var(--mut);
+          font-size: 14px; font-weight: 500; transition: background 0.13s ease, color 0.13s ease; }
+    .ni:hover { color: var(--ink); background: var(--grid); }
+    .top nav a, .top .plain { color: var(--mut); font-size: 13.5px; transition: color 0.13s ease; }
+    .top nav a:hover, .top .plain:hover { color: var(--ink); text-decoration: none; }
+    .lp-more { transition: color 0.13s ease; }
+    .top { display: flex; align-items: center; gap: 28px; padding: 20px 44px; border-bottom: 1px solid var(--line); }
+    .foot { border-top: 1px solid var(--line); padding: 28px 44px; display: flex; gap: 18px; align-items: center; }
+
+    .hero-h1 { font-size: clamp(34px, 5.2vw, 64px); }
+    .hero-sub { font-size: clamp(16px, 1.5vw, 18px); }
+    .lp-end h2 { font-size: clamp(24px, 3.2vw, 36px); }
+    .lp-sec h2, .panel h2 { font-size: clamp(22px, 2.6vw, 30px); }
+    .three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .split { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 44px; align-items: center; }
+    @media (max-width: 1020px) {
+      .three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .split { grid-template-columns: minmax(0, 1fr); gap: 30px; }
+    }
+    @media (max-width: 720px) {
+      .lp { padding: 0 18px 72px; }
+      .lp section { padding-top: 56px; }
+      .three { grid-template-columns: minmax(0, 1fr); }
+      .top { padding: 16px 18px; gap: 16px; }
+      .top nav { display: none; }
+      .foot { padding: 22px 18px; flex-wrap: wrap; gap: 10px; }
+      .lp-cta .btn { flex: 1 1 auto; text-align: center; }
+    }
+
+    .sheet { max-width: 1432px; margin: 0 auto; padding: 0 44px 80px; }
+    .slot { padding-top: 52px; }
+    .slot + .slot { border-top: 1px solid var(--line); margin-top: 52px; }
+    .opts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-top: 22px; }
+    .opt { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden; display: flex; flex-direction: column; }
+    .opt.keep { border-color: var(--line-strong); }
+    .opt .well { background: var(--panel); border-bottom: 1px solid var(--line); padding: 16px 16px; }
+    .opt .meta { padding: 13px 15px 15px; display: flex; flex-direction: column; gap: 5px; flex: 1; }
+    .opt .nm { font-size: 13.5px; font-weight: 600; letter-spacing: -0.015em; display: flex; align-items: center; gap: 8px; }
+    .opt .wh { font-size: 12.5px; color: var(--mut-read); line-height: 1.5; }
+    .tag { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px; font-weight: 600;
+           padding: 2px 6px; border-radius: 5px; letter-spacing: 0.04em; }
+    .tag.now { background: var(--panel); color: var(--mut); }
+    .tag.new { background: var(--brandq); color: var(--brand); }
+    .opts.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    @media (max-width: 1100px) { .opts, .opts.three { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 700px) { .opts, .opts.three { grid-template-columns: minmax(0, 1fr); } }
+
+  </style>
+</helmet>
+<div class="u" data-mode="{{mode}}" style="background: var(--bg); color: var(--ink); min-height: 2810px;">
+  <header class="top" style="padding: 20px 44px;">
+    <span style="font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink);">Homepage images</span>
+    <span class="m" style="font-size: 11.5px; color: var(--mut); letter-spacing: 0.06em;">WHAT IS ON THE PAGE, AND THE ALTERNATIVES BESIDE IT</span>
+    <div style="flex-grow: 1;"></div>
+    <button class="ni" style="width: auto;" onClick="{{toggleTheme}}" aria-label="{{switchLabel}}">
+      <sc-if value="{{dark}}" hint-placeholder-val="{{true}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"></path>
+        </svg>
+      </sc-if>
+      <sc-if value="{{light}}" hint-placeholder-val="{{true}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <path d="M21 13a8.5 8.5 0 01-10-10 8.5 8.5 0 1010 10z"></path>
+        </svg>
+      </sc-if>
+    </button>
+  </header>
+
+  <div class="sheet">
+    <section class="slot" style="padding-top: 30px;">
+      <p style="font-size: 13.5px; color: var(--mut-read); line-height: 1.6; margin: 0; max-width: 88ch;">
+        Four slots, each showing the drawing that is on the page with the alternatives worth a look beside it. Card
+        three carries four new ones. Everything is still: the animated round was tried and dropped. No captions
+        under the drawings any more.
+      </p>
+    </section>
+
+    <!-- ============================================================ card one -->
+    <section class="slot">
+      <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--brand); font-weight: 600;">Card one</div>
+      <h2 style="font-size: 24px; font-weight: 600; letter-spacing: -0.028em; margin: 10px 0 0;">Connect your traffic</h2>
+      <div class="opts three">
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 370 168" width="100%" role="img" aria-label="Six sample calls on the left flowing through one automatic step into three named jobs on the right: invoice extract, support reply and doc classify."><text x="6" y="14" class="m" font-size="8.5" fill="var(--mut)">incoming calls</text><rect x="6" y="24" width="96" height="30" rx="7" fill="var(--raise)" stroke="var(--line)" stroke-width="1"></rect><rect x="12" y="30" width="18" height="18" rx="5" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><path d="M18.0 35.0 h4.4 l1.9 1.9 v6.6 h-6.3 z" fill="none" stroke="var(--mut)" stroke-width="1.1" stroke-linejoin="round"></path><path d="M19.4 39.0 h3.4 M19.4 41.0 h2.2" stroke="var(--mut)" stroke-width="1"></path><rect x="36" y="33" width="52" height="4.5" rx="2.2" fill="var(--line-strong)"></rect><rect x="36" y="42" width="34" height="4.5" rx="2.2" fill="var(--line-strong)" opacity="0.6"></rect><rect x="6" y="58" width="96" height="30" rx="7" fill="var(--raise)" stroke="var(--line)" stroke-width="1"></rect><rect x="12" y="64" width="18" height="18" rx="5" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><path d="M16.8 69.6 h8.4 v5.6 h-4.6 l-2.4 2.1 v-2.1 h-1.4 z" fill="none" stroke="var(--mut)" stroke-width="1.1" stroke-linejoin="round"></path><rect x="36" y="67" width="52" height="4.5" rx="2.2" fill="var(--line-strong)"></rect><rect x="36" y="76" width="34" height="4.5" rx="2.2" fill="var(--line-strong)" opacity="0.6"></rect><rect x="6" y="92" width="96" height="30" rx="7" fill="var(--raise)" stroke="var(--line)" stroke-width="1"></rect><rect x="12" y="98" width="18" height="18" rx="5" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><path d="M19.4 104.0 l-2.6 3.1 2.6 3.1 M22.8 104.0 l2.6 3.1 -2.6 3.1" fill="none" stroke="var(--mut)" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"></path><rect x="36" y="101" width="52" height="4.5" rx="2.2" fill="var(--line-strong)"></rect><rect x="36" y="110" width="34" height="4.5" rx="2.2" fill="var(--line-strong)" opacity="0.6"></rect><rect x="6" y="126" width="96" height="30" rx="7" fill="var(--raise)" stroke="var(--line)" stroke-width="1"></rect><rect x="12" y="132" width="18" height="18" rx="5" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><rect x="16.7" y="137.8" width="8.6" height="6.4" rx="1.2" fill="none" stroke="var(--mut)" stroke-width="1.1"></rect><path d="M17.1 138.6 L21.0 141.6 L24.9 138.6" fill="none" stroke="var(--mut)" stroke-width="1.1" stroke-linejoin="round"></path><rect x="36" y="135" width="52" height="4.5" rx="2.2" fill="var(--line-strong)"></rect><rect x="36" y="144" width="34" height="4.5" rx="2.2" fill="var(--line-strong)" opacity="0.6"></rect><g stroke="var(--line-strong)" stroke-width="1.1" fill="none" stroke-dasharray="3 3"><path d="M104 39 C116 39 114 93 126 93"></path><path d="M104 73 C116 73 114 93 126 93"></path><path d="M104 107 C116 107 114 93 126 93"></path><path d="M104 141 C116 141 114 93 126 93"></path></g><path d="M150 41 Q151.4 46.6 157 48 Q151.4 49.4 150 55 Q148.6 49.4 143 48 Q148.6 46.6 150 41 Z" fill="var(--brand)"></path><path d="M159 38 Q159.8 41.2 163 42 Q159.8 42.8 159 46 Q158.2 42.8 155 42 Q158.2 41.2 159 38 Z" fill="var(--brand)" opacity="0.65"></path><text x="150" y="66" text-anchor="middle" class="m" font-size="8.5" fill="var(--mut)">automatic</text><circle cx="150" cy="93" r="22" fill="var(--raise)" stroke="var(--line)" stroke-width="1.3"></circle><path d="M139 84 L161 84 L152.5 94.5 L152.5 103 L147.5 100 L147.5 94.5 Z" fill="var(--mut)"></path><text x="150" y="141" text-anchor="middle" class="m" font-size="8.5" fill="var(--mut)">grouped by job</text><path d="M165 78 C186 68 196 50 212 50" fill="none" stroke="var(--brand)" stroke-width="1.6"></path><path d="M207 46 l5 4 -5 4" fill="none" stroke="var(--brand)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><rect x="217" y="35" width="147" height="30" rx="8" fill="var(--brandq)"></rect><circle cx="230" cy="50" r="3.5" fill="var(--brand)"></circle><circle cx="240" cy="50" r="3.5" fill="var(--brand)"></circle><circle cx="250" cy="50" r="3.5" fill="var(--brand)"></circle><circle cx="260" cy="50" r="3.5" fill="var(--brand)"></circle><text x="273" y="53" class="m" font-size="8" font-weight="600" fill="var(--brand)">invoice-extract</text><path d="M172 93 H212" fill="none" stroke="var(--ok)" stroke-width="1.6"></path><path d="M207 89 l5 4 -5 4" fill="none" stroke="var(--ok)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><rect x="217" y="78" width="147" height="30" rx="8" fill="var(--okq)"></rect><circle cx="230" cy="93" r="3.5" fill="var(--ok)"></circle><circle cx="240" cy="93" r="3.5" fill="var(--ok)"></circle><circle cx="250" cy="93" r="3.5" fill="var(--ok)"></circle><circle cx="260" cy="93" r="3.5" fill="var(--ok)"></circle><text x="273" y="96" class="m" font-size="8" font-weight="600" fill="var(--ok)">support-reply</text><path d="M160 112 C182 122 196 136 212 136" fill="none" stroke="var(--warn)" stroke-width="1.6"></path><path d="M207 132 l5 4 -5 4" fill="none" stroke="var(--warn)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><rect x="217" y="121" width="147" height="30" rx="8" fill="var(--warnq)"></rect><circle cx="230" cy="136" r="3.5" fill="var(--warn)"></circle><circle cx="240" cy="136" r="3.5" fill="var(--warn)"></circle><circle cx="250" cy="136" r="3.5" fill="var(--warn)"></circle><text x="273" y="139" class="m" font-size="8" font-weight="600" fill="var(--warn)">doc-classify</text></svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag now">ON THE PAGE</span>Calls into jobs</div><div class="wh">Sample calls on the left, one automatic step in the middle, and the named jobs they land in on the right.</div></div>
+        </div>
+
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 -5 320 130" width="100%" role="img" aria-label="Calls fanning out to three job rows marked with the answer shape they ask for, the rows arriving one after another.">
+              <g fill="var(--line-strong)"><circle cx="10" cy="46" r="4"></circle><circle cx="10" cy="60" r="4"></circle><circle cx="10" cy="74" r="4"></circle></g>
+              <text x="4" y="94" class="m" font-size="8" fill="var(--mut)">your calls</text>
+              <g fill="none" stroke-width="1.4" opacity="0.75">
+                <path d="M24,60 C58,60 58,22 92,22" stroke="var(--brand)"></path>
+                <path d="M24,60 C58,60 58,60 92,60" stroke="var(--ok)"></path>
+                <path d="M24,60 C58,60 58,98 92,98" stroke="var(--warn)"></path>
+              </g>
+              <g>
+                <rect x="96" y="10" width="214" height="24" rx="7" fill="var(--brandq)" stroke="var(--brand)" stroke-width="1.2"></rect>
+                <g stroke="var(--brand)" stroke-width="1.4" fill="none"><rect x="106" y="16" width="14" height="12" rx="3"></rect><path d="M110 21 h6"></path></g>
+                <text x="128" y="26" class="m" font-size="9.5" fill="var(--brand)">invoice-extract</text><text x="298" y="26" text-anchor="end" class="m" font-size="9" fill="var(--brand)">41%</text>
+              </g>
+              <g>
+                <rect x="96" y="48" width="214" height="24" rx="7" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+                <g stroke="var(--ok)" stroke-width="1.4" fill="none"><path d="M110 54 q-4 6 0 12"></path><path d="M120 54 q4 6 0 12"></path></g>
+                <text x="128" y="64" class="m" font-size="9.5" fill="var(--ok)">route-ticket</text><text x="298" y="64" text-anchor="end" class="m" font-size="9" fill="var(--ok)">37%</text>
+              </g>
+              <g>
+                <rect x="96" y="86" width="214" height="24" rx="7" fill="var(--warnq)" stroke="var(--warn)" stroke-width="1.2"></rect>
+                <g stroke="var(--warn)" stroke-width="1.4" fill="none"><path d="M106 93 h16"></path><path d="M106 99 h10"></path></g>
+                <text x="128" y="102" class="m" font-size="9.5" fill="var(--warn)">chat-summarise</text><text x="298" y="102" text-anchor="end" class="m" font-size="9" fill="var(--warn)">22%</text>
+              </g>
+            </svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag new">L</span>Jobs as rows</div><div class="wh">The same calls arriving as named rows, each marked with the answer shape it asks for. Sibling of card two, which makes the link between the two explicit.</div></div>
+        </div>
+
+        <div style="display: flex; align-items: center;">
+          <p style="font-size: 13px; color: var(--mut-read); line-height: 1.6; margin: 0;">
+            Both keep every label from the version you approved. The difference is the shape: a pile becoming stacks,
+            or the same calls landing as named rows.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ card two -->
+    <section class="slot">
+      <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--brand); font-weight: 600;">Card two</div>
+      <h2 style="font-size: 24px; font-weight: 600; letter-spacing: -0.028em; margin: 10px 0 0;">Auto-run randomized trials</h2>
+      <div class="opts three">
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 370 168" width="100%" role="img" aria-label="Sampled calls from one job priced on four models, the cheapest one that clears the quality bar marked chosen, and what you run today at the bottom for scale."><text x="250" y="15" text-anchor="end" class="m" font-size="7" fill="var(--mut)">COST</text><text x="280" y="15" class="m" font-size="7" fill="var(--mut)">QUALITY BAR</text><line x1="256" y1="20" x2="256" y2="150" stroke="var(--line-strong)" stroke-width="1" stroke-dasharray="4 4"></line><rect x="6" y="26" width="96" height="92" rx="9" fill="var(--raise)" stroke="var(--line)" stroke-width="1.2"></rect><text x="54" y="42" text-anchor="middle" class="m" font-size="8.5" font-weight="600" fill="var(--ink)">invoice-extract</text><rect x="14" y="50" width="76" height="9" rx="4.5" fill="var(--brandq)"></rect><circle cx="20" cy="54.5" r="2.8" fill="var(--brand)"></circle><rect x="14" y="62" width="76" height="9" rx="4.5" fill="var(--brandq)"></rect><circle cx="20" cy="66.5" r="2.8" fill="var(--brand)"></circle><rect x="14" y="74" width="76" height="9" rx="4.5" fill="var(--brandq)"></rect><circle cx="20" cy="78.5" r="2.8" fill="var(--brand)"></circle><rect x="14" y="86" width="76" height="9" rx="4.5" fill="var(--brandq)"></rect><circle cx="20" cy="90.5" r="2.8" fill="var(--brand)"></circle><rect x="14" y="98" width="76" height="9" rx="4.5" fill="var(--brandq)"></rect><circle cx="20" cy="102.5" r="2.8" fill="var(--brand)"></circle><text x="54" y="131" text-anchor="middle" class="m" font-size="8" fill="var(--mut)">sampled calls</text><path d="M104 60 C118 60 114 37 126 37" fill="none" stroke="var(--bad)" stroke-width="1.5"></path><path d="M104 68 C118 68 114 69 126 69" fill="none" stroke="var(--ok)" stroke-width="1.5"></path><path d="M104 80 C118 80 114 101 126 101" fill="none" stroke="var(--brand)" stroke-width="1.5"></path><path d="M104 92 C118 92 114 133 126 133" fill="none" stroke="var(--line-strong)" stroke-width="1.5" stroke-dasharray="4 3"></path><rect x="128" y="24" width="236" height="26" rx="7" fill="var(--badq)" stroke="var(--bad)" stroke-width="1.2"></rect><text x="138" y="40" class="m" font-size="8.5" fill="var(--bad)">flash-lite</text><text x="250" y="40" text-anchor="end" class="m" font-size="8.5" fill="var(--bad)">$3</text><circle cx="268" cy="37" r="6" fill="var(--bad)"></circle><path d="M265.8 34.8 L270.2 39.2 M270.2 34.8 L265.8 39.2" stroke="var(--onbrand)" stroke-width="1.5" stroke-linecap="round"></path><text x="280" y="40" class="m" font-size="8" fill="var(--bad)">misses</text><rect x="128" y="56" width="236" height="26" rx="7" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.8"></rect><text x="138" y="72" class="m" font-size="8.5" font-weight="600" fill="var(--ok)">mistral-small</text><text x="250" y="72" text-anchor="end" class="m" font-size="8.5" font-weight="600" fill="var(--ok)">$8</text><circle cx="268" cy="69" r="6" fill="var(--ok)"></circle><path d="M265.4 69 L267.2 71.0 L270.8 66.8" fill="none" stroke="var(--onbrand)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path><text x="280" y="72" class="m" font-size="8" fill="var(--ok)">clears</text><rect x="314" y="61" width="42" height="16" rx="8" fill="var(--ok)"></rect><text x="335" y="72" text-anchor="middle" class="m" font-size="7.5" font-weight="600" fill="var(--onbrand)">chosen</text><rect x="128" y="88" width="236" height="26" rx="7" fill="var(--brandq)" stroke="var(--brand)" stroke-width="1.2"></rect><text x="138" y="104" class="m" font-size="8.5" fill="var(--brand)">haiku-4.5</text><text x="250" y="104" text-anchor="end" class="m" font-size="8.5" fill="var(--brand)">$41</text><circle cx="268" cy="101" r="6" fill="var(--ok)"></circle><path d="M265.4 101 L267.2 103.0 L270.8 98.8" fill="none" stroke="var(--onbrand)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path><text x="280" y="104" class="m" font-size="8" fill="var(--brand)">clears</text><rect x="128" y="120" width="236" height="26" rx="7" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"></rect><text x="138" y="136" class="m" font-size="8.5" fill="var(--mut)">what you run now</text><text x="250" y="136" text-anchor="end" class="m" font-size="8.5" fill="var(--mut)">$212</text><path d="M264 133 h8" stroke="var(--mut)" stroke-width="1.5" stroke-linecap="round"></path><text x="280" y="136" class="m" font-size="8" fill="var(--mut)">sets the bar</text><text x="262" y="160" class="m" font-size="7" fill="var(--mut)">higher quality &#8594;</text></svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag now">ON THE PAGE</span>Models against the bar</div><div class="wh">Four models priced on the same sampled calls against one quality bar, with the cheapest that clears marked chosen and what you run today for scale.</div></div>
+        </div>
+
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 320 132" width="100%" role="img" aria-label="The same model rows, each with a bar showing how far it drifted, the bars growing out to their length against the line marking your bar.">
+              <g fill="var(--line-strong)"><circle cx="10" cy="46" r="4"></circle><circle cx="10" cy="60" r="4"></circle><circle cx="10" cy="74" r="4"></circle></g>
+              <circle cx="10" cy="60" r="8" fill="none" stroke="var(--brand)" stroke-width="1.5"></circle>
+              <g fill="none" stroke-width="1.4" opacity="0.7">
+                <path d="M24,60 C50,60 50,18 76,18" stroke="var(--bad)"></path>
+                <path d="M24,60 C50,60 50,46 76,46" stroke="var(--ok)"></path>
+                <path d="M24,60 C50,60 50,74 76,74" stroke="var(--brand)"></path>
+                <path d="M24,60 C50,60 50,102 76,102" stroke="var(--mut)"></path>
+              </g>
+              <rect x="80" y="6" width="230" height="24" rx="7" fill="var(--raise)" stroke="var(--line)" stroke-width="1.2"></rect>
+              <text x="90" y="22" class="m" font-size="9" fill="var(--mut)">flash-lite</text>
+              <rect x="164" y="14" width="86" height="8" rx="4" fill="var(--bad)"></rect>
+              <text x="302" y="22" text-anchor="end" class="m" font-size="8.5" fill="var(--mut)">$3</text>
+              <rect x="80" y="34" width="230" height="24" rx="7" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.6"></rect>
+              <text x="90" y="50" class="m" font-size="9" font-weight="600" fill="var(--ok)">mistral-small</text>
+              <rect x="164" y="42" width="22" height="8" rx="4" fill="var(--ok)"></rect>
+              <text x="302" y="50" text-anchor="end" class="m" font-size="8.5" font-weight="600" fill="var(--ok)">$8</text>
+              <rect x="80" y="62" width="230" height="24" rx="7" fill="var(--raise)" stroke="var(--line)" stroke-width="1.2"></rect>
+              <text x="90" y="78" class="m" font-size="9" fill="var(--mut)">haiku-4.5</text>
+              <rect x="164" y="70" width="14" height="8" rx="4" fill="var(--ok)"></rect>
+              <text x="302" y="78" text-anchor="end" class="m" font-size="8.5" fill="var(--mut)">$41</text>
+              <rect x="80" y="90" width="230" height="24" rx="7" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"></rect>
+              <text x="90" y="106" class="m" font-size="9" fill="var(--mut)">what you run now</text>
+              <text x="302" y="106" text-anchor="end" class="m" font-size="8.5" fill="var(--mut)">$212</text>
+              <line x1="230" y1="2" x2="230" y2="118" stroke="var(--brand)" stroke-width="1.8"></line>
+              <text x="230" y="130" text-anchor="middle" class="m" font-size="8" font-weight="600" fill="var(--brand)">YOUR BAR</text>
+            </svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag new">E</span>Rows with the drift shown</div><div class="wh">The same rows with the drift drawn as a bar against the line marking your bar, so the one that overshoots is visible rather than stated.</div></div>
+        </div>
+
+        <div style="display: flex; align-items: center;">
+          <p style="font-size: 13px; color: var(--mut-read); line-height: 1.6; margin: 0;">
+            The first shows the price of each model. The second shows how far each one drifted, which is the
+            measurement behind the price.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ card three -->
+    <section class="slot">
+      <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--brand); font-weight: 600;">Card three</div>
+      <h2 style="font-size: 24px; font-weight: 600; letter-spacing: -0.028em; margin: 10px 0 0;">Continuously optimize</h2>
+      <p style="font-size: 13.5px; color: var(--mut-read); line-height: 1.6; margin: 10px 0 0; max-width: 72ch;">What is on the page, then four other ways to draw the same month over month savings, and the log that was already here.</p>
+      <div class="opts three">
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 370 168" width="100%" role="img" aria-label="Quality held above the bar across five months while cost per month falls from two hundred and twelve dollars to seventy four, with the months a model was re-tested or switched called out."><circle cx="12" cy="8" r="4" fill="var(--brand)"></circle><text x="21" y="11" class="m" font-size="8" fill="var(--mut)">Cost</text><circle cx="60" cy="8" r="4" fill="var(--ok)"></circle><text x="69" y="11" class="m" font-size="8" fill="var(--mut)">Quality</text><path d="M278 8 h22" stroke="var(--ok)" stroke-width="1.6" stroke-dasharray="4 3"></path><text x="306" y="11" class="m" font-size="8" fill="var(--mut)">Quality bar</text><rect x="24.1" y="16" width="51.8" height="16" rx="8" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><text x="50.0" y="27" text-anchor="middle" class="m" font-size="7" fill="var(--mut)">re-tested</text><path d="M50 32 V44" stroke="var(--line-strong)" stroke-width="1" stroke-dasharray="2 2"></path><rect x="157.6" y="16" width="72.8" height="16" rx="8" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><text x="194.0" y="27" text-anchor="middle" class="m" font-size="7" fill="var(--mut)">switched model</text><path d="M194 32 V40" stroke="var(--line-strong)" stroke-width="1" stroke-dasharray="2 2"></path><rect x="312.1" y="16" width="51.8" height="16" rx="8" fill="var(--panel)" stroke="var(--line)" stroke-width="1"></rect><text x="338.0" y="27" text-anchor="middle" class="m" font-size="7" fill="var(--mut)">re-tested</text><path d="M338 32 V42" stroke="var(--line-strong)" stroke-width="1" stroke-dasharray="2 2"></path><path d="M50 52 L122 58 L194 48 L266 60 L338 50 L338 72 L50 72 Z" fill="var(--ok)" opacity="0.10"></path><path d="M50 52 L122 58 L194 48 L266 60 L338 50" fill="none" stroke="var(--ok)" stroke-width="2" stroke-linejoin="round"></path><circle cx="50" cy="52" r="7" fill="var(--ok)"></circle><path d="M47.0 52 L48.9 54.1 L53.2 49.6" fill="none" stroke="var(--onbrand)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="122" cy="58" r="7" fill="var(--ok)"></circle><path d="M119.0 58 L120.9 60.1 L125.2 55.6" fill="none" stroke="var(--onbrand)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="194" cy="48" r="7" fill="var(--ok)"></circle><path d="M191.0 48 L192.9 50.1 L197.2 45.6" fill="none" stroke="var(--onbrand)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="266" cy="60" r="7" fill="var(--ok)"></circle><path d="M263.0 60 L264.9 62.1 L269.2 57.6" fill="none" stroke="var(--onbrand)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="338" cy="50" r="7" fill="var(--ok)"></circle><path d="M335.0 50 L336.9 52.1 L341.2 47.6" fill="none" stroke="var(--onbrand)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><line x1="10" y1="72" x2="360" y2="72" stroke="var(--ok)" stroke-width="1.5" stroke-dasharray="5 4"></line><rect x="28" y="92.0" width="44" height="58.0" rx="5" fill="var(--brand)"></rect><text x="50" y="87.0" text-anchor="middle" class="m" font-size="8.5" font-weight="600" fill="var(--brand)">$212</text><rect x="100" y="104.0" width="44" height="46.0" rx="5" fill="var(--brand)"></rect><text x="122" y="99.0" text-anchor="middle" class="m" font-size="8.5" font-weight="600" fill="var(--brand)">$168</text><rect x="172" y="115.5" width="44" height="34.5" rx="5" fill="var(--brand)"></rect><text x="194" y="110.5" text-anchor="middle" class="m" font-size="8.5" font-weight="600" fill="var(--brand)">$126</text><rect x="244" y="124.8" width="44" height="25.2" rx="5" fill="var(--brand)"></rect><text x="266" y="119.8" text-anchor="middle" class="m" font-size="8.5" font-weight="600" fill="var(--brand)">$92</text><rect x="316" y="129.8" width="44" height="20.2" rx="5" fill="var(--brand)"></rect><text x="338" y="124.80000000000001" text-anchor="middle" class="m" font-size="8.5" font-weight="600" fill="var(--brand)">$74</text><line x1="10" y1="150" x2="360" y2="150" stroke="var(--line)" stroke-width="1.2"></line><text x="50" y="161" text-anchor="middle" class="m" font-size="8" fill="var(--mut)">may</text><text x="122" y="161" text-anchor="middle" class="m" font-size="8" fill="var(--mut)">jun</text><text x="194" y="161" text-anchor="middle" class="m" font-size="8" fill="var(--mut)">jul</text><text x="266" y="161" text-anchor="middle" class="m" font-size="8" fill="var(--mut)">aug</text><text x="338" y="161" text-anchor="middle" class="m" font-size="8" fill="var(--mut)">sep</text></svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag now">ON THE PAGE</span>Cost and quality together</div><div class="wh">Quality held above the bar on top, cost falling underneath, and the months a model was re-tested or switched called out.</div></div>
+        </div>
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 320 130" width="100%" role="img" aria-label="One continuous staircase climbing left to right across five months, the last two steps filled solid, under a row of five green ticks.">
+              <g stroke="var(--ok)" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M42 16 l4 5 8 -11"></path>
+                <path d="M98 16 l4 5 8 -11"></path>
+                <path d="M154 16 l4 5 8 -11"></path>
+                <path d="M210 16 l4 5 8 -11"></path>
+                <path d="M266 16 l4 5 8 -11"></path>
+              </g>
+              <rect x="20" y="90" width="56" height="16" fill="var(--brandq)"></rect>
+              <rect x="76" y="76" width="56" height="30" fill="var(--brandq)"></rect>
+              <rect x="132" y="62" width="56" height="44" fill="var(--brandq)"></rect>
+              <rect x="188" y="46" width="57" height="60" fill="var(--brand)"></rect>
+              <rect x="244" y="30" width="56" height="76" fill="var(--brand)"></rect>
+              <path d="M20 90 H76 V76 H132 V62 H188 V46 H244 V30 H300" fill="none" stroke="var(--brand)" stroke-width="2" stroke-linejoin="round"></path>
+              <line x1="14" y1="106" x2="306" y2="106" stroke="var(--line)" stroke-width="1.4"></line>
+              <g class="m" font-size="8" fill="var(--mut)" text-anchor="middle">
+                <text x="48" y="120">may</text><text x="104" y="120">jun</text><text x="160" y="120">jul</text><text x="216" y="120">aug</text><text x="272" y="120">sep</text>
+              </g>
+            </svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag new">S</span>The running total</div><div class="wh">One shape instead of five bars, so the eye follows a total climbing rather than five separate months. The two steps already switched are filled in.</div></div>
+        </div>
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 320 130" width="100%" role="img" aria-label="Five months down the page, each with a bar of savings growing longer, the amount written out and a green tick at the end of every row.">
+              <text x="6" y="27" class="m" font-size="8.5" fill="var(--mut)">may</text>
+              <rect x="30" y="18" width="33" height="10" rx="5" fill="var(--brandq)" stroke="var(--brand)" stroke-width="1.2"></rect>
+              <text x="272" y="27" text-anchor="end" class="m" font-size="8.5" fill="var(--ok)">$96</text>
+              <path d="M284 23 l4 5 8 -11" stroke="var(--ok)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+              <text x="6" y="50" class="m" font-size="8.5" fill="var(--mut)">jun</text>
+              <rect x="30" y="41" width="65" height="10" rx="5" fill="var(--brandq)" stroke="var(--brand)" stroke-width="1.2"></rect>
+              <text x="272" y="50" text-anchor="end" class="m" font-size="8.5" fill="var(--ok)">$188</text>
+              <path d="M284 46 l4 5 8 -11" stroke="var(--ok)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+              <text x="6" y="73" class="m" font-size="8.5" fill="var(--mut)">jul</text>
+              <rect x="30" y="64" width="105" height="10" rx="5" fill="var(--brandq)" stroke="var(--brand)" stroke-width="1.2"></rect>
+              <text x="272" y="73" text-anchor="end" class="m" font-size="8.5" fill="var(--ok)">$304</text>
+              <path d="M284 69 l4 5 8 -11" stroke="var(--ok)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+              <text x="6" y="96" class="m" font-size="8.5" fill="var(--mut)">aug</text>
+              <rect x="30" y="87" width="145" height="10" rx="5" fill="var(--brand)"></rect>
+              <text x="272" y="96" text-anchor="end" class="m" font-size="8.5" font-weight="600" fill="var(--ok)">$421</text>
+              <path d="M284 92 l4 5 8 -11" stroke="var(--ok)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+              <text x="6" y="119" class="m" font-size="8.5" fill="var(--mut)">sep</text>
+              <rect x="30" y="110" width="188" height="10" rx="5" fill="var(--brand)"></rect>
+              <text x="272" y="119" text-anchor="end" class="m" font-size="8.5" font-weight="600" fill="var(--ok)">$544</text>
+              <path d="M284 115 l4 5 8 -11" stroke="var(--ok)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag new">T</span>The ledger</div><div class="wh">Months down the page with the amount spelled out, which answers how much before it answers how fast. Closest to card two in language, which is either a family resemblance or a repetition.</div></div>
+        </div>
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 320 130" width="100%" role="img" aria-label="Five columns of the same height, one per month, where the blue part you paid shrinks and the green part you saved grows, under a row of green ticks.">
+              <g stroke="var(--ok)" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M33 11 l4 5 8 -11"></path>
+                <path d="M91 11 l4 5 8 -11"></path>
+                <path d="M149 11 l4 5 8 -11"></path>
+                <path d="M207 11 l4 5 8 -11"></path>
+                <path d="M265 11 l4 5 8 -11"></path>
+              </g>
+              <rect x="22" y="34" width="34" height="8" rx="4" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+              <rect x="22" y="42" width="34" height="64" rx="6" fill="var(--brand)"></rect>
+              <rect x="80" y="34" width="34" height="18" rx="4" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+              <rect x="80" y="52" width="34" height="54" rx="6" fill="var(--brand)"></rect>
+              <rect x="138" y="34" width="34" height="30" rx="4" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+              <rect x="138" y="64" width="34" height="42" rx="6" fill="var(--brand)"></rect>
+              <rect x="196" y="34" width="34" height="42" rx="4" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+              <rect x="196" y="76" width="34" height="30" rx="6" fill="var(--brand)"></rect>
+              <rect x="254" y="34" width="34" height="50" rx="4" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+              <rect x="254" y="84" width="34" height="22" rx="6" fill="var(--brand)"></rect>
+              <text x="271" y="62" text-anchor="middle" class="m" font-size="8" fill="var(--ok)">saved</text>
+              <text x="271" y="98" text-anchor="middle" class="m" font-size="8" fill="var(--onbrand)">paid</text>
+              <line x1="14" y1="106" x2="306" y2="106" stroke="var(--line)" stroke-width="1.4"></line>
+              <g class="m" font-size="8" fill="var(--mut)" text-anchor="middle">
+                <text x="39" y="120">may</text><text x="97" y="120">jun</text><text x="155" y="120">jul</text><text x="213" y="120">aug</text><text x="271" y="120">sep</text>
+              </g>
+            </svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag new">U</span>The widening gap</div><div class="wh">Every column is the same height, because that is what you would have paid. The blue is what you actually paid and the green is what you kept, so the saving is the thing that grows.</div></div>
+        </div>
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 320 130" width="100%" role="img" aria-label="Twenty six short bars in a row, one per check, three of them tall and blue where the model changed, under a row of five green ticks.">
+              <g stroke="var(--ok)" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M39 16 l4 5 8 -11"></path>
+                <path d="M96 16 l4 5 8 -11"></path>
+                <path d="M154 16 l4 5 8 -11"></path>
+                <path d="M212 16 l4 5 8 -11"></path>
+                <path d="M269 16 l4 5 8 -11"></path>
+              </g>
+              <rect x="16.0" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="27.3" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="38.6" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="49.8" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="61.1" y="46" width="6" height="60" rx="3" fill="var(--brand)"></rect>
+              <rect x="72.4" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="83.7" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="95.0" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="106.2" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="117.5" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="128.8" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="140.1" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="151.4" y="46" width="6" height="60" rx="3" fill="var(--brand)"></rect>
+              <rect x="162.6" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="173.9" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="185.2" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="196.5" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="207.8" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="219.0" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="230.3" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="241.6" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="252.9" y="46" width="6" height="60" rx="3" fill="var(--brand)"></rect>
+              <rect x="264.2" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="275.4" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="286.7" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <rect x="298.0" y="76" width="6" height="30" rx="3" fill="var(--line-strong)"></rect>
+              <text x="64.1" y="40" text-anchor="middle" class="m" font-size="7.5" fill="var(--brand)">&rarr; haiku</text>
+              <text x="154.4" y="40" text-anchor="middle" class="m" font-size="7.5" fill="var(--brand)">&rarr; mistral</text>
+              <text x="255.9" y="40" text-anchor="middle" class="m" font-size="7.5" fill="var(--brand)">&rarr; gemini</text>
+              <line x1="14" y1="106" x2="306" y2="106" stroke="var(--line)" stroke-width="1.4"></line>
+              <g class="m" font-size="8" fill="var(--mut)" text-anchor="middle">
+                <text x="45" y="120">may</text><text x="102" y="120">jun</text><text x="160" y="120">jul</text><text x="218" y="120">aug</text><text x="275" y="120">sep</text>
+              </g>
+            </svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag new">V</span>Every check, in order</div><div class="wh">The routine is the picture: a long run of checks that changed nothing, three that moved you to a cheaper model, and a tick for every month the quality held.</div></div>
+        </div>
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 -5 320 130" width="100%" role="img" aria-label="A log of three switches since connecting, the last entry a check that found nothing cheaper.">
+              <text x="8" y="16" class="m" font-size="8" fill="var(--mut)">every switch since you connected</text>
+              <g>
+                <rect x="8" y="24" width="302" height="26" rx="7" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.3"></rect>
+                <text x="20" y="41" class="m" font-size="8.5" fill="var(--mut)">12 sep</text>
+                <text x="66" y="41" class="m" font-size="9" fill="var(--ok)">gpt-5.4 &rarr; haiku-4.5</text>
+                <text x="298" y="41" text-anchor="end" class="m" font-size="9" font-weight="600" fill="var(--ok)">-$171 / mo</text>
+              </g>
+              <g>
+                <rect x="8" y="56" width="302" height="26" rx="7" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.3"></rect>
+                <text x="20" y="73" class="m" font-size="8.5" fill="var(--mut)">28 sep</text>
+                <text x="66" y="73" class="m" font-size="9" fill="var(--ok)">haiku-4.5 &rarr; mistral-small</text>
+                <text x="298" y="73" text-anchor="end" class="m" font-size="9" font-weight="600" fill="var(--ok)">-$33 / mo</text>
+              </g>
+              <g>
+                <rect x="8" y="88" width="302" height="26" rx="7" fill="var(--panel)" stroke="var(--line)" stroke-width="1.2"></rect>
+                <text x="20" y="105" class="m" font-size="8.5" fill="var(--mut)">04 oct</text>
+                <text x="66" y="105" class="m" font-size="9" fill="var(--mut)">checked, nothing cheaper passed</text>
+                <text x="298" y="105" text-anchor="end" class="m" font-size="9" fill="var(--mut)">no change</text>
+              </g>
+            </svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag new">P</span>The switch log</div><div class="wh">A log rather than a chart, ending on the check that found nothing cheaper, which is what most entries are.</div></div>
+        </div>
+      </div>
+      <p style="font-size: 13px; color: var(--mut-read); line-height: 1.6; margin: 20px 0 0; max-width: 84ch;">
+        All six say the same thing and differ in where the eye lands. The bars and the running total land on the
+        amount, the gap lands on the comparison with what you were paying, and the check strip lands on the part
+        that is hardest to say in a chart, which is that it never stops. The log is the only one that names models.
+      </p>
+    </section>
+
+    <!-- ============================================================ the panel -->
+    <section class="slot">
+      <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ok); font-weight: 600;">The panel</div>
+      <h2 style="font-size: 24px; font-weight: 600; letter-spacing: -0.028em; margin: 10px 0 0;">Built for stricter data requirements</h2>
+      <div class="opts three">
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 360 168" width="100%" role="img" aria-label="Your call entering a dedicated Understudy endpoint inside a dashed region marked as your own, which fans out to two model providers, over three chips: zero data retention available, EU or US residency, and configurable retention.">
+            <text x="18" y="14" class="m" font-size="8.5" fill="var(--ok)">YOUR DEDICATED ENDPOINT &middot; YOUR REGION</text>
+            <rect x="6" y="22" width="348" height="96" rx="10" fill="none" stroke="var(--ok)" stroke-width="1.6" stroke-dasharray="6 4"></rect>
+
+            <rect x="18" y="52" width="74" height="36" rx="8" fill="var(--raise)" stroke="var(--line-strong)" stroke-width="1.4"></rect>
+            <text x="55" y="74" text-anchor="middle" class="m" font-size="9" fill="var(--ink)">your call</text>
+
+            <path d="M96 70 h18" stroke="var(--brand)" stroke-width="1.8" fill="none"></path>
+            <path d="M112 65 l6 5 -6 5" stroke="var(--brand)" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
+
+            <rect x="122" y="44" width="82" height="52" rx="10" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.5"></rect>
+            <text x="163" y="64" text-anchor="middle" class="m" font-size="9" fill="var(--ok)">Understudy</text>
+            <text x="163" y="78" text-anchor="middle" class="m" font-size="9" fill="var(--ok)">endpoint</text>
+
+            <g stroke="var(--line-strong)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M208 64 L228 50" stroke-dasharray="4 3"></path>
+              <path d="M222 50 L228 50 L226 55"></path>
+              <path d="M208 76 L228 90" stroke-dasharray="4 3"></path>
+              <path d="M222 90 L228 90 L226 85"></path>
+            </g>
+
+            <rect x="232" y="32" width="110" height="32" rx="8" fill="var(--raise)" stroke="var(--line)" stroke-width="1.2"></rect>
+            <g stroke="var(--ink)" stroke-width="1.1" fill="none"><path d="M244.0 45.0 L251.0 45.0 L247.5 51.5 Z"></path></g><g fill="var(--ink)"><circle cx="244.0" cy="45.0" r="1.9"></circle><circle cx="251.0" cy="45.0" r="1.9"></circle><circle cx="247.5" cy="51.5" r="1.9"></circle></g>
+            <text x="259" y="51" class="m" font-size="7.5" fill="var(--ink)">Model provider A</text>
+            <rect x="232" y="76" width="110" height="32" rx="8" fill="var(--raise)" stroke="var(--line)" stroke-width="1.2"></rect>
+            <g stroke="var(--ink)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M243.5 87.5 L247.5 91.5 L243.5 95.5"></path><path d="M248.5 87.5 L252.5 91.5 L248.5 95.5"></path></g>
+            <text x="259" y="95" class="m" font-size="7.5" fill="var(--ink)">Model provider B</text>
+
+            <rect x="6" y="128" width="89" height="32" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+            <g stroke="var(--ok)" stroke-width="1.4" fill="none" stroke-linecap="round"><rect x="14.0" y="143.0" width="9" height="6.5" rx="1.8"></rect><path d="M15.8 143.0 v-2.2 a2.7 2.7 0 0 1 5.4 0 v2.2"></path></g>
+            <text x="28" y="147" class="m" font-size="7.5" font-weight="600" fill="var(--ok)">ZDR AVAILABLE</text>
+            <rect x="104" y="128" width="111" height="32" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+            <g stroke="var(--ok)" stroke-width="1.3" fill="none"><circle cx="116.5" cy="144.0" r="5"></circle><ellipse cx="116.5" cy="144.0" rx="2.2" ry="5"></ellipse><path d="M111.5 144.0 h10"></path></g>
+            <text x="126" y="147" class="m" font-size="7.5" font-weight="600" fill="var(--ok)">EU OR US RESIDENCY</text>
+            <rect x="224" y="128" width="130" height="32" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+            <g stroke="var(--ok)" stroke-width="1.3" fill="none" stroke-linecap="round"><circle cx="236.5" cy="144.0" r="5"></circle><path d="M236.5 141.0 V144.0 H239.3"></path></g>
+            <text x="246" y="147" class="m" font-size="7.5" font-weight="600" fill="var(--ok)">CONFIGURABLE RETENTION</text>
+          </svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag now">ON THE PAGE</span>The boundary</div><div class="wh">The region drawn as a container, with the call, the endpoint and the providers it reaches all inside it, and the three commitments named underneath.</div></div>
+        </div>
+
+        <div class="opt">
+          <div class="well">
+            <svg viewBox="0 0 320 150" width="100%" role="img" aria-label="A card listing where your endpoint runs, that the model keeps nothing, and that your copies are deleted after thirty days, each ticked.">
+              <rect x="8" y="8" width="304" height="126" rx="12" fill="var(--raise)" stroke="var(--line)" stroke-width="1.3"></rect>
+              <text x="22" y="30" class="m" font-size="9.5" font-weight="600" fill="var(--ink)">your endpoint</text>
+              <rect x="228" y="18" width="70" height="17" rx="5" fill="var(--okq)"></rect>
+              <text x="263" y="30" text-anchor="middle" class="m" font-size="8.5" font-weight="600" fill="var(--ok)">DEDICATED</text>
+              <line x1="8" y1="44" x2="312" y2="44" stroke="var(--line)" stroke-width="1.2"></line>
+              <g stroke="var(--ok)" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M24 62 l4 5 7 -9"></path>
+                <path d="M24 90 l4 5 7 -9"></path>
+                <path d="M24 118 l4 5 7 -9"></path>
+              </g>
+              <text x="46" y="67" class="m" font-size="9" fill="var(--mut)">runs in</text>
+              <text x="298" y="67" text-anchor="end" class="m" font-size="9" fill="var(--ink)">eu-central &middot; frankfurt</text>
+              <line x1="22" y1="78" x2="298" y2="78" stroke="var(--line)" stroke-width="1"></line>
+              <text x="46" y="95" class="m" font-size="9" fill="var(--mut)">the model keeps</text>
+              <text x="298" y="95" text-anchor="end" class="m" font-size="9" font-weight="600" fill="var(--ok)">nothing</text>
+              <line x1="22" y1="106" x2="298" y2="106" stroke="var(--line)" stroke-width="1"></line>
+              <text x="46" y="123" class="m" font-size="9" fill="var(--mut)">we keep</text>
+              <text x="298" y="123" text-anchor="end" class="m" font-size="9" fill="var(--ink)">30 days, then deleted</text>
+            </svg>
+          </div>
+          <div class="meta"><div class="nm"><span class="tag new">H</span>The credential</div><div class="wh">The same two facts as plain values, plus the one the boundary cannot show: how long we keep your copies.</div></div>
+        </div>
+
+        <div style="display: flex; align-items: center;">
+          <p style="font-size: 13px; color: var(--mut-read); line-height: 1.6; margin: 0;">
+            The boundary is the one on the page. The credential sits beside it because it answers the question the
+            boundary leaves open, which is what becomes of the copy afterwards.
+          </p>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</div>
+  <footer class="foot">
+    <span class="m" style="font-size: 12px; color: var(--mut);">Understudy</span>
+    <div style="flex-grow: 1;"></div>
+    <span class="m" style="font-size: 12px; color: var(--mut);">Zero data retention at the provider. Stored calls deleted after 30 days.</span>
+  </footer>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"}}'>
+class Component extends DCLogic {
+  renderVals() {
+    // The tweak sets where the page starts; the switch in the header takes
+    // over from the first press, the way the real app's does.
+    const dark = this.state && 'dark' in this.state ? this.state.dark : (this.props.dark ?? false);
+    return {
+      dark,
+      light: !dark,
+      mode: dark ? 'dark' : 'light',
+      switchLabel: dark ? 'Switch to light mode' : 'Switch to dark mode',
+      toggleTheme: () => this.setState({ dark: !dark }),
+    };
+  }
+}
+</script>
+</body>
+</html>

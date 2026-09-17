@@ -1,0 +1,22 @@
+  <header class="top">
+    <span style="font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink);">Understudy</span>
+    <nav style="display: flex; gap: 22px; font-size: 13.5px;">
+      <a href="#">Measurements</a><a href="#">Datasets</a><a href="#">Method</a>
+    </nav>
+    <div style="flex-grow: 1;"></div>
+    <button class="ni" style="width: auto;" onClick="{{toggleTheme}}" aria-label="{{switchLabel}}">
+      <sc-if value="{{dark}}" hint-placeholder-val="{{true}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"></path>
+        </svg>
+      </sc-if>
+      <sc-if value="{{light}}" hint-placeholder-val="{{true}}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <path d="M21 13a8.5 8.5 0 01-10-10 8.5 8.5 0 1010 10z"></path>
+        </svg>
+      </sc-if>
+    </button>
+    <a href="#" class="plain" style="font-size: 13.5px;">Sign in</a>
+    <a href="#" class="btn">Get an API key</a>
+  </header>

@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <style>
+    body { margin: 0; background: #000; color: #f0f0f3;
+      font-family: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif;
+      font-size: 14.5px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #4c8dff; text-decoration: none; } a:hover { color: #6a9fff; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; }
+    .tag { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px;
+      letter-spacing: 0.12em; padding: 3px 7px; border-radius: 5px; }
+    .now { background: #16161a; color: #8a8a95; border: 1px solid #1e1e23; }
+    .nxt { background: #0c1830; color: #4c8dff; border: 1px solid #24365c; }
+    .h1 { font-size: 27px; font-weight: 700; letter-spacing: -0.032em; line-height: 1.15; }
+    .lede { font-size: 14.5px; color: #8a8a95; line-height: 1.55; margin-top: 8px; max-width: 68ch; }
+    .row { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 26px;
+      border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; padding: 22px 24px; }
+    .pane { display: flex; flex-direction: column; gap: 9px; }
+  </style>
+</helmet>
+
+<div style="padding: 44px 48px 56px; display: flex; flex-direction: column; gap: 20px;">
+
+  <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px;">
+    <div class="mono" style="font-size: 11px; letter-spacing: 0.14em; color: #8a8a95;">THE INSIDE PAGES</div>
+    <div style="font-size: 32px; font-weight: 700; letter-spacing: -0.035em;">The same story, five more times</div>
+    <div style="font-size: 15px; color: #8a8a95; line-height: 1.55; max-width: 76ch;">
+      Layout untouched on every one of these. Only the heading and the line under it move, so a
+      reader who lands on any page from a shared link meets the same frame the homepage set.
+    </div>
+  </div>
+
+  <!-- BOARD -->
+  <div class="row">
+    <div style="display: flex; flex-direction: column; gap: 7px;">
+      <div class="mono" style="font-size: 12px; font-weight: 600; color: #f0f0f3;">/board</div>
+      <div style="font-size: 12px; color: #8a8a95; line-height: 1.45;">The leaderboard, the page most people are sent to first.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 20px;">
+      <div class="pane" style="opacity: 0.45;">
+        <span class="tag now" style="align-self: flex-start;">NOW</span>
+        <div class="h1">Which model can do this job for a fraction of the price?</div>
+        <div class="lede">Run your model twice. Keep the <span style="text-decoration: line-through; color: #f2665a;">cheaper</span> ones that landed inside the gap.</div>
+      </div>
+      <div class="pane">
+        <span class="tag nxt" style="align-self: flex-start;">NEW</span>
+        <div class="h1">Every model we measured, against the model you already run</div>
+        <div class="lede">
+          22 runs on 6 public datasets. A model passes only when its answers sit closer to gpt-5.4
+          than gpt-5.4's own second run sits to its first.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DATASETS -->
+  <div class="row">
+    <div style="display: flex; flex-direction: column; gap: 7px;">
+      <div class="mono" style="font-size: 12px; font-weight: 600; color: #f0f0f3;">/datasets</div>
+      <div style="font-size: 12px; color: #8a8a95; line-height: 1.45;">Where the open data claim finally gets its own page.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 20px;">
+      <div class="pane" style="opacity: 0.45;">
+        <span class="tag now" style="align-self: flex-start;">NOW</span>
+        <div class="h1">Six public datasets, and what each costs to get right</div>
+        <div class="lede">Openly licensed, so the rows we tested on can be republished.</div>
+      </div>
+      <div class="pane">
+        <span class="tag nxt" style="align-self: flex-start;">NEW</span>
+        <div class="h1">Six open datasets from Hugging Face. Pull them and check us.</div>
+        <div class="lede">
+          Every row we measured on is public and openly licensed, with the licence and the source
+          printed beside it. More are queued, and the board grows as they land.
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px;">
+          <span class="tag" style="background: #06180f; color: #3fcf8e; border: 1px solid #1f4a35;">SOURCE PRINTED</span>
+          <span class="tag" style="background: #06180f; color: #3fcf8e; border: 1px solid #1f4a35;">LICENCE PRINTED</span>
+          <span class="tag" style="background: #06180f; color: #3fcf8e; border: 1px solid #1f4a35;">ROWS REPUBLISHABLE</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- METHOD -->
+  <div class="row">
+    <div style="display: flex; flex-direction: column; gap: 7px;">
+      <div class="mono" style="font-size: 12px; font-weight: 600; color: #f0f0f3;">/method</div>
+      <div style="font-size: 12px; color: #8a8a95; line-height: 1.45;">The page that has to make "matched" mean something.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 20px;">
+      <div class="pane" style="opacity: 0.45;">
+        <span class="tag now" style="align-self: flex-start;">NOW</span>
+        <div class="h1">The floor, and why every other benchmark misses it</div>
+        <div class="lede">Every other benchmark compares models to a fixed answer key. None of them measure how much your own model disagrees with itself.</div>
+      </div>
+      <div class="pane">
+        <span class="tag nxt" style="align-self: flex-start;">NEW</span>
+        <div class="h1">What it takes to be called a match</div>
+        <div class="lede">
+          A fixed answer key cannot tell you whether a swap is safe for your work. Your own model's
+          disagreement with itself can, and that is the bar every candidate here has to clear.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- WORKLOADS -->
+  <div class="row">
+    <div style="display: flex; flex-direction: column; gap: 7px;">
+      <div class="mono" style="font-size: 12px; font-weight: 600; color: #f0f0f3;">/app/workloads</div>
+      <div style="font-size: 12px; color: #8a8a95; line-height: 1.45;">The first screen after traffic arrives.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 20px;">
+      <div class="pane" style="opacity: 0.45;">
+        <span class="tag now" style="align-self: flex-start;">NOW</span>
+        <div class="h1">Your traffic, grouped by the job it does</div>
+        <div class="lede">Clustered on prompt template, output schema and tool signature. Never on which model happens to serve it.</div>
+      </div>
+      <div class="pane">
+        <span class="tag nxt" style="align-self: flex-start;">NEW</span>
+        <div class="h1">We found these jobs in your traffic. You labelled nothing.</div>
+        <div class="lede">
+          Grouped on prompt template, output schema and tool signature, never on which model happens
+          to serve it. Each job gets its own floor and its own verdict.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CERTIFICATE -->
+  <div class="row">
+    <div style="display: flex; flex-direction: column; gap: 7px;">
+      <div class="mono" style="font-size: 12px; font-weight: 600; color: #f0f0f3;">/app/certificates</div>
+      <div style="font-size: 12px; color: #8a8a95; line-height: 1.45;">The moment the whole product exists for.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 20px;">
+      <div class="pane" style="opacity: 0.45;">
+        <span class="tag now" style="align-self: flex-start;">NOW</span>
+        <div class="h1">Certificate</div>
+        <div class="lede">Panel headings only. The screen never says what earned it or what happens next.</div>
+      </div>
+      <div class="pane">
+        <span class="tag nxt" style="align-self: flex-start;">NEW</span>
+        <div class="h1">Certified on your own data. The switch is yours.</div>
+        <div class="lede">
+          Issued after enough of your calls cleared your own floor, with every run behind it kept.
+          Promote when you want to. It reverts by itself if the model drifts.
+        </div>
+        <div style="border: 1px solid #1f4a35; border-radius: 12px; background: #06180f; padding: 16px 18px; display: flex; align-items: center; gap: 18px; margin-top: 6px; max-width: 620px;">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#3fcf8e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5" /></svg>
+          <div style="flex: 1;">
+            <div class="mono" style="font-size: 12px; color: #3fcf8e; letter-spacing: 0.08em; font-weight: 600;">CERTIFIED</div>
+            <div style="font-size: 13px; color: #8a8a95; margin-top: 3px;">invoice-extract, 4,180 calls measured, inside floor on all four gates</div>
+          </div>
+          <span style="padding: 9px 18px; border-radius: 9px; font-size: 13.5px; font-weight: 600; background: #4c8dff; color: #03060d;">Promote</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

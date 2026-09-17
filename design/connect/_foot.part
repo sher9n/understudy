@@ -1,0 +1,41 @@
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{"dark":{"editor":"boolean","default":false,"section":"Theme"},"step":{"editor":"number","default":1,"section":"State"},"calls":{"editor":"boolean","default":false,"section":"State"}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const s = this.state || {};
+    const dark = 'dark' in s ? s.dark : (this.props.dark ?? false);
+    const step = s.step || this.props.step || 1;
+    const way = s.way || 'route';
+    const lang = s.lang || 'python';
+    const calls = 'calls' in s ? s.calls : (this.props.calls ?? false);
+    const put = (patch) => () => this.setState({ dark, step, way, lang, calls, ...patch });
+    const vals = {
+      dark, light: !dark, mode: dark ? 'dark' : 'light',
+      switchLabel: dark ? 'Switch to light mode' : 'Switch to dark mode',
+      toggleTheme: () => this.setState({ dark: !dark, step, way, lang, calls }),
+      isStep1: step === 1, isStep2: step === 2,
+      s1Cls: step === 1 ? 'st on' : 'st done',
+      s2Cls: step === 1 ? 'st' : (calls ? 'st done' : 'st on'),
+      s3Cls: (step === 2 && calls) ? 'st on done' : 'st',
+      next: put({ step: 2 }), back: put({ step: 1 }),
+      noCalls: !calls, hasCalls: calls,
+      arrive: put({ calls: true }),
+      keyState: calls ? 'in use' : 'not used yet',
+      is_route: way === 'route', is_copy: way === 'copy',
+      routeCls: way === 'route' ? 'way on' : 'way',
+      copyCls: way === 'copy' ? 'way on' : 'way',
+      pick_route: put({ way: 'route' }), pick_copy: put({ way: 'copy' }),
+    };
+    for (const l of ['python', 'node', 'curl', 'claude']) {
+      vals['tab_' + l] = lang === l ? 'tab on' : 'tab';
+      vals['pick_' + l] = put({ lang: l });
+      for (const w of ['route', 'copy']) vals['is_' + w + '_' + l] = (way === w && lang === l);
+    }
+    return vals;
+  }
+}
+</script>
+</body>
+</html>

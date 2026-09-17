@@ -1,0 +1,9 @@
+node_modules/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.log
+.env
+.DS_Store
+web/dist/
+design/_gen/env.backup

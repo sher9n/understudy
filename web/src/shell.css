@@ -1,0 +1,27 @@
+/* The few rules the artboards carried as inline styles on the root. */
+html, body, #root { height: 100%; }
+body { margin: 0; }
+.u {
+  display: flex; flex-direction: column; min-height: 100%;
+  background: var(--bg); color: var(--ink);
+  font-family: 'Schibsted Grotesk', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.u > .shell { flex: 1; }
+[data-clickable], .lnk, .btn, .plain, .optrow, .acctbtn, .whyb, .sw, .choicebox, .mini, .minig { cursor: pointer; }
+.loading { padding: 60px 20px; text-align: center; color: var(--mut); font-size: 14px; }
+.errbox { margin: 14px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--badq); color: var(--bad);
+          font-size: 13.5px; line-height: 1.5; }
+.okbox { margin: 14px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--okq); color: var(--ok);
+         font-size: 13.5px; line-height: 1.5; word-break: break-all; }
+
+/* The one thing the artboards did not need: real form inputs and the seeded demo banner. */
+.inp { font: inherit; font-size: 14px; color: var(--ink); background: var(--raise);
+       border: 1px solid var(--line-strong); border-radius: 9px; padding: 9px 11px; min-width: 200px; }
+.inp:focus-visible, .field:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.acctrow:focus-visible, .nv:focus-visible, .btn:focus-visible, .mini:focus-visible,
+.minig:focus-visible, .sw:focus-visible, .choicebox:focus-visible, .optrow:focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 2px; }
+.sw:disabled { opacity: 0.55; cursor: default; }
+.mini:disabled, .minig:disabled, .btn:disabled { opacity: 0.6; cursor: default; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

@@ -1,0 +1,389 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <style>
+    body { margin: 0; background: #000; color: #f0f0f3;
+      font-family: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif;
+      font-size: 14.5px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #4c8dff; text-decoration: none; } a:hover { color: #6a9fff; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace; }
+    .btn { padding: 12px 22px; border-radius: 11px; font-size: 14.5px; font-weight: 600;
+      border: 1px solid #4c8dff; background: #4c8dff; color: #03060d; display: inline-block; }
+    .btn.sec { background: transparent; border-color: #2c2c33; color: #f0f0f3; font-weight: 500; }
+    .new { display: inline-flex; align-items: center; gap: 5px; font-size: 9.5px; font-weight: 700;
+      letter-spacing: 0.1em; color: #4c8dff; background: #0c1830; border: 1px solid #24365c;
+      padding: 3px 7px; border-radius: 5px; vertical-align: middle; }
+  </style>
+</helmet>
+
+<div style="background: #000;">
+
+  <!-- header, exactly the app's .hd: 56px, 1px line, 0 20px -->
+  <div style="height: 56px; border-bottom: 1px solid #1e1e23; display: flex; align-items: center; gap: 10px; padding: 0 20px;">
+    <div style="display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 15.5px; letter-spacing: -0.02em; color: #4c8dff; padding-right: 8px;">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#4c8dff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c3 0 3.5-8 6.5-8s3.5 8 6.5 8 3.5-5 6.5-5" /></svg>
+      Understudy
+    </div>
+    <div style="display: flex; gap: 3px; align-items: center;">
+      <span style="padding: 6px 11px; border-radius: 8px; font-size: 13.5px; color: #8a8a95; font-weight: 500;">Leaderboard</span>
+      <span style="padding: 6px 11px; border-radius: 8px; font-size: 13.5px; color: #8a8a95; font-weight: 500;">Datasets</span>
+      <span style="padding: 6px 11px; border-radius: 8px; font-size: 13.5px; color: #8a8a95; font-weight: 500;">Models</span>
+      <span style="padding: 6px 11px; border-radius: 8px; font-size: 13.5px; color: #8a8a95; font-weight: 500;">Method</span>
+    </div>
+    <div style="flex: 1;"></div>
+    <span style="font-size: 13.5px; color: #8a8a95; font-weight: 500;">Sign in</span>
+    <span style="padding: 9px 16px; border-radius: 9px; font-size: 13.5px; font-weight: 600; background: #4c8dff; color: #03060d;">Run this on my data</span>
+  </div>
+
+  <div style="max-width: 1240px; margin: 0 auto; padding: 0 24px 96px;">
+
+    <!-- HERO -->
+    <div style="text-align: center; padding: 84px 0 0;">
+      <div style="font-size: 76px; line-height: 1.02; letter-spacing: -0.045em; font-weight: 700; margin: 0;">
+        The same answers.<br>A fraction of the spend.
+      </div>
+      <div style="font-size: 19px; color: #8a8a95; line-height: 1.5; max-width: 54ch; margin: 20px auto 0;">
+        On 5 of 6 public datasets an open weight model matched gpt-5.4 inside its own margin of error,
+        at up to 19.8x lower cost. We run the same measurement on your traffic.
+      </div>
+      <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 28px;">
+        <span class="btn">Get API key</span>
+        <span class="btn sec">See the measurements</span>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 60px auto 0; max-width: 860px;">
+        <div>
+          <b class="mono" style="display: block; font-size: 36px; font-weight: 700; letter-spacing: -0.04em; line-height: 1; color: #3fcf8e;">5 of 6</b>
+          <span style="display: block; font-size: 12.5px; color: #8a8a95; margin-top: 9px; line-height: 1.4;">datasets where an open model matched</span>
+        </div>
+        <div>
+          <b class="mono" style="display: block; font-size: 36px; font-weight: 700; letter-spacing: -0.04em; line-height: 1;">2.7-20x</b>
+          <span style="display: block; font-size: 12.5px; color: #8a8a95; margin-top: 9px; line-height: 1.4;">lower cost where it did</span>
+        </div>
+        <div>
+          <b class="mono" style="display: block; font-size: 36px; font-weight: 700; letter-spacing: -0.04em; line-height: 1;">22</b>
+          <span style="display: block; font-size: 12.5px; color: #8a8a95; margin-top: 9px; line-height: 1.4;">runs, 9 models, 6 vendors</span>
+        </div>
+        <div>
+          <b class="mono" style="display: block; font-size: 36px; font-weight: 700; letter-spacing: -0.04em; line-height: 1;">$54,228</b>
+          <span style="display: block; font-size: 12.5px; color: #8a8a95; margin-top: 9px; line-height: 1.4;">a year, on the open models below</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- CARDS -->
+    <div style="padding-top: 78px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px;">
+
+      <div style="border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; overflow: hidden; display: flex; flex-direction: column;">
+        <div style="background: #000; border-bottom: 1px solid #1e1e23; padding: 18px 16px;">
+          <svg viewBox="0 0 240 118" width="100%" role="img" aria-label="A shaded band showing how far the reference model sits from its own second run, with two candidates inside it and one outside.">
+            <text x="120" y="11" text-anchor="middle" class="mono" font-size="8.5" font-weight="600" fill="#4c8dff" letter-spacing="0.08em">THE FLOOR</text>
+            <rect x="14" y="20" width="106" height="62" rx="4" fill="#0c1830" />
+            <line x1="120" y1="16" x2="120" y2="88" stroke="#4c8dff" stroke-width="2" />
+            <circle cx="52" cy="36" r="6" fill="none" stroke="#3fcf8e" stroke-width="2" />
+            <circle cx="88" cy="52" r="6" fill="none" stroke="#3fcf8e" stroke-width="2" />
+            <circle cx="40" cy="68" r="6" fill="none" stroke="#3fcf8e" stroke-width="2" />
+            <rect x="176" y="46" width="12" height="12" fill="none" stroke="#f2665a" stroke-width="2" />
+            <line x1="14" y1="92" x2="226" y2="92" stroke="#1e1e23" stroke-width="1.4" />
+            <text x="14" y="108" class="mono" font-size="8.5" fill="#8a8a95" letter-spacing="0.05em">NOBODY COULD TELL</text>
+            <text x="226" y="108" text-anchor="end" class="mono" font-size="8.5" fill="#f2665a" letter-spacing="0.05em">DIFFERENT ANSWERS</text>
+          </svg>
+        </div>
+        <div style="padding: 15px 17px 17px; flex: 1; display: flex; flex-direction: column; gap: 6px;">
+          <div style="font-size: 15px; font-weight: 600; line-height: 1.35; letter-spacing: -0.018em;">Measured against your own model</div>
+          <div style="font-size: 12.5px; line-height: 1.5; color: #8a8a95;">The bar is how far it lands from itself. Inside that, nothing is given up.</div>
+        </div>
+      </div>
+
+      <div style="border: 1px solid #24365c; border-radius: 14px; background: #0d0d10; overflow: hidden; display: flex; flex-direction: column;">
+        <div style="background: #000; border-bottom: 1px solid #1e1e23; padding: 18px 16px;">
+          <svg viewBox="0 0 240 118" width="100%" role="img" aria-label="The model running inside your own account inside your chosen region, with nothing retained afterwards.">
+            <rect x="8" y="16" width="224" height="60" rx="7" fill="none" stroke="#3fcf8e" stroke-width="1.4" stroke-dasharray="4 3" />
+            <text x="16" y="12" class="mono" font-size="8" fill="#3fcf8e" letter-spacing="0.08em">EU OR US REGION - YOUR ACCOUNT</text>
+            <rect x="22" y="32" width="88" height="28" rx="6" fill="#06180f" stroke="#3fcf8e" stroke-width="1.4" />
+            <text x="66" y="50" text-anchor="middle" class="mono" font-size="9" fill="#3fcf8e">open model</text>
+            <path d="M148,46 L118,46" stroke="#4c8dff" stroke-width="1.6" />
+            <path d="M124,42 L118,46 L124,50" fill="none" stroke="#4c8dff" stroke-width="1.6" />
+            <rect x="150" y="32" width="66" height="28" rx="6" fill="#0d0d10" stroke="#2c2c33" stroke-width="1.4" />
+            <text x="183" y="50" text-anchor="middle" class="mono" font-size="9" fill="#f0f0f3">your call</text>
+            <g>
+              <rect x="8" y="88" width="102" height="22" rx="5" fill="#06180f" stroke="#1f4a35" stroke-width="1" />
+              <text x="59" y="102" text-anchor="middle" class="mono" font-size="8.5" fill="#3fcf8e" letter-spacing="0.05em">ZERO RETENTION</text>
+              <rect x="120" y="88" width="112" height="22" rx="5" fill="#06180f" stroke="#1f4a35" stroke-width="1" />
+              <text x="176" y="102" text-anchor="middle" class="mono" font-size="8.5" fill="#3fcf8e" letter-spacing="0.05em">DATA RESIDENCY</text>
+            </g>
+          </svg>
+        </div>
+        <div style="padding: 15px 17px 17px; flex: 1; display: flex; flex-direction: column; gap: 6px;">
+          <div style="font-size: 15px; font-weight: 600; line-height: 1.35; letter-spacing: -0.018em;">Runs in your region, keeps nothing</div>
+          <div style="font-size: 12.5px; line-height: 1.5; color: #8a8a95;">Bedrock hosts open weights in the EU and US under your own retention rules.</div>
+        </div>
+      </div>
+
+      <div style="border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; overflow: hidden; display: flex; flex-direction: column;">
+        <div style="background: #000; border-bottom: 1px solid #1e1e23; padding: 18px 16px;">
+          <svg viewBox="0 0 240 118" width="100%" role="img" aria-label="Your app calls your provider and gets an answer; a copy reaches Understudy only afterwards.">
+            <rect x="6" y="24" width="60" height="26" rx="6" fill="#0d0d10" stroke="#2c2c33" stroke-width="1.3" />
+            <text x="36" y="41" text-anchor="middle" class="mono" font-size="9" fill="#f0f0f3">your app</text>
+            <path d="M70,37 L86,37" stroke="#4c8dff" stroke-width="1.6" /><path d="M81,33 L86,37 L81,41" fill="none" stroke="#4c8dff" stroke-width="1.6" />
+            <rect x="90" y="24" width="60" height="26" rx="6" fill="#0d0d10" stroke="#2c2c33" stroke-width="1.3" />
+            <text x="120" y="41" text-anchor="middle" class="mono" font-size="9" fill="#f0f0f3">provider</text>
+            <path d="M154,37 L170,37" stroke="#4c8dff" stroke-width="1.6" /><path d="M165,33 L170,37 L165,41" fill="none" stroke="#4c8dff" stroke-width="1.6" />
+            <rect x="174" y="24" width="60" height="26" rx="6" fill="#0d0d10" stroke="#2c2c33" stroke-width="1.3" />
+            <text x="204" y="41" text-anchor="middle" class="mono" font-size="9" fill="#f0f0f3">answer</text>
+            <path d="M204,50 L204,74 L146,74" fill="none" stroke="#3fcf8e" stroke-width="1.5" stroke-dasharray="4 3" />
+            <path d="M151,70 L146,74 L151,78" fill="none" stroke="#3fcf8e" stroke-width="1.5" />
+            <rect x="60" y="61" width="82" height="26" rx="6" fill="#06180f" stroke="#3fcf8e" stroke-width="1.3" />
+            <text x="101" y="78" text-anchor="middle" class="mono" font-size="9" fill="#3fcf8e">a copy, after</text>
+            <text x="120" y="108" text-anchor="middle" class="mono" font-size="8.5" fill="#8a8a95" letter-spacing="0.05em">NOTHING WAITS ON US</text>
+          </svg>
+        </div>
+        <div style="padding: 15px 17px 17px; flex: 1; display: flex; flex-direction: column; gap: 6px;">
+          <div style="font-size: 15px; font-weight: 600; line-height: 1.35; letter-spacing: -0.018em;">Never in your request path</div>
+          <div style="font-size: 12.5px; line-height: 1.5; color: #8a8a95;">A copy arrives after your provider has already answered.</div>
+        </div>
+      </div>
+
+      <div style="border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; overflow: hidden; display: flex; flex-direction: column;">
+        <div style="background: #000; border-bottom: 1px solid #1e1e23; padding: 18px 16px;">
+          <svg viewBox="0 0 240 118" width="100%" role="img" aria-label="Live traffic keeps being measured; when a promoted model drifts above the floor, traffic returns.">
+            <rect x="8" y="34" width="224" height="48" rx="4" fill="#0c1830" />
+            <line x1="8" y1="34" x2="232" y2="34" stroke="#4c8dff" stroke-width="1.4" stroke-dasharray="4 3" />
+            <text x="232" y="28" text-anchor="end" class="mono" font-size="8.5" fill="#4c8dff" letter-spacing="0.06em">THE FLOOR</text>
+            <polyline points="8,68 32,64 56,70 80,62 104,66 128,20 152,60 176,66 200,62 232,66" fill="none" stroke="#3fcf8e" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+            <circle cx="128" cy="20" r="5" fill="#f2665a" />
+            <text x="128" y="12" text-anchor="middle" class="mono" font-size="8.5" fill="#f2665a" letter-spacing="0.06em">DRIFT</text>
+            <text x="8" y="100" class="mono" font-size="8.5" fill="#8a8a95" letter-spacing="0.05em">MEASURED FOREVER</text>
+            <text x="232" y="100" text-anchor="end" class="mono" font-size="8.5" fill="#3fcf8e" letter-spacing="0.05em">TRAFFIC GOES BACK</text>
+          </svg>
+        </div>
+        <div style="padding: 15px 17px 17px; flex: 1; display: flex; flex-direction: column; gap: 6px;">
+          <div style="font-size: 15px; font-weight: 600; line-height: 1.35; letter-spacing: -0.018em;">Reverts on its own if it drifts</div>
+          <div style="font-size: 12.5px; line-height: 1.5; color: #8a8a95;">A slice of live traffic keeps measuring, forever.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- RECEIPTS -->
+    <div style="padding-top: 78px;">
+      <div style="display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 20px;">
+        <div>
+          <div style="font-size: 30px; font-weight: 600; letter-spacing: -0.03em; margin: 0;">The receipts</div>
+          <div style="font-size: 14px; color: #8a8a95; margin: 6px 0 0; max-width: 62ch;">
+            The lowest cost open weight model that matched, on each dataset. Openly licensed public data,
+            so you can pull the same rows and rerun it.
+          </div>
+        </div>
+        <span style="font-size: 13.5px; white-space: nowrap; color: #4c8dff;">See the whole board &#8594;</span>
+      </div>
+
+      <div style="border: 1px solid #1e1e23; border-radius: 14px; overflow: hidden; background: #0d0d10;">
+        <div style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1.3fr) 76px; gap: 14px; align-items: center; padding: 14px 18px; border-bottom: 1px solid #1e1e23;">
+          <span class="mono" style="font-size: 12.5px; font-weight: 600;">openai/gsm8k</span>
+          <span class="mono" style="font-size: 12.5px; color: #3fcf8e;">ft-gsm8k-v1</span>
+          <span class="mono" style="font-size: 12.5px;">$87 <span style="color: #8a8a95;">from $1,088</span></span>
+          <span class="mono" style="font-size: 19px; font-weight: 700; letter-spacing: -0.03em; color: #3fcf8e; text-align: right;">13x</span>
+        </div>
+        <div style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1.3fr) 76px; gap: 14px; align-items: center; padding: 14px 18px; border-bottom: 1px solid #1e1e23;">
+          <span class="mono" style="font-size: 12.5px; font-weight: 600;">cais/mmlu</span>
+          <span class="mono" style="font-size: 12.5px; color: #8a8a95;">nothing open matched yet</span>
+          <span class="mono" style="font-size: 12.5px; color: #8a8a95;">a four-way multiple choice is a tight bar</span>
+          <span class="mono" style="font-size: 19px; font-weight: 700; color: #8a8a95; text-align: right;">&#8212;</span>
+        </div>
+        <div style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1.3fr) 76px; gap: 14px; align-items: center; padding: 14px 18px; border-bottom: 1px solid #1e1e23;">
+          <span class="mono" style="font-size: 12.5px; font-weight: 600;">mteb/banking77</span>
+          <span class="mono" style="font-size: 12.5px; color: #3fcf8e;">mistral-small-3.2</span>
+          <span class="mono" style="font-size: 12.5px;">$8 <span style="color: #8a8a95;">from $158</span></span>
+          <span class="mono" style="font-size: 19px; font-weight: 700; letter-spacing: -0.03em; color: #3fcf8e; text-align: right;">20x</span>
+        </div>
+        <div style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1.3fr) 76px; gap: 14px; align-items: center; padding: 14px 18px; border-bottom: 1px solid #1e1e23;">
+          <span class="mono" style="font-size: 12.5px; font-weight: 600;">b-mc2/sql-create-context</span>
+          <span class="mono" style="font-size: 12.5px; color: #3fcf8e;">ft-sql-v1</span>
+          <span class="mono" style="font-size: 12.5px;">$57 <span style="color: #8a8a95;">from $713</span></span>
+          <span class="mono" style="font-size: 19px; font-weight: 700; letter-spacing: -0.03em; color: #3fcf8e; text-align: right;">13x</span>
+        </div>
+        <div style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1.3fr) 76px; gap: 14px; align-items: center; padding: 14px 18px; border-bottom: 1px solid #1e1e23;">
+          <span class="mono" style="font-size: 12.5px; font-weight: 600;">abisee/cnn_dailymail</span>
+          <span class="mono" style="font-size: 12.5px; color: #3fcf8e;">deepseek-v3.1</span>
+          <span class="mono" style="font-size: 12.5px;">$710 <span style="color: #8a8a95;">from $1,950</span></span>
+          <span class="mono" style="font-size: 19px; font-weight: 700; letter-spacing: -0.03em; color: #3fcf8e; text-align: right;">2.7x</span>
+        </div>
+        <div style="display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1.3fr) 76px; gap: 14px; align-items: center; padding: 14px 18px;">
+          <span class="mono" style="font-size: 12.5px; font-weight: 600;">glaiveai/glaive-function-calling-v2</span>
+          <span class="mono" style="font-size: 12.5px; color: #3fcf8e;">ft-tools-v1</span>
+          <span class="mono" style="font-size: 12.5px;">$128 <span style="color: #8a8a95;">from $1,600</span></span>
+          <span class="mono" style="font-size: 19px; font-weight: 700; letter-spacing: -0.03em; color: #3fcf8e; text-align: right;">13x</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- OPEN DATA, new section -->
+    <div style="padding-top: 78px;">
+      <div style="display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 20px;">
+        <div>
+          <div style="font-size: 30px; font-weight: 600; letter-spacing: -0.03em; margin: 0;">
+            Measured on open data <span class="new">NEW SECTION</span>
+          </div>
+          <div style="font-size: 14px; color: #8a8a95; margin: 6px 0 0; max-width: 62ch;">
+            Every dataset here is public and openly licensed on Hugging Face. Nothing is a private
+            benchmark you have to take our word for, and eight more are queued.
+          </div>
+        </div>
+        <span style="font-size: 13.5px; white-space: nowrap; color: #4c8dff;">Browse the datasets &#8594;</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px;">
+        <div style="border: 1px solid #1e1e23; border-radius: 11px; background: #0d0d10; padding: 13px 14px;">
+          <div class="mono" style="font-size: 11px; color: #f0f0f3; font-weight: 600; overflow-wrap: anywhere;">openai/gsm8k</div>
+          <div class="mono" style="font-size: 9.5px; color: #3fcf8e; margin-top: 7px; letter-spacing: 0.04em;">MIT</div>
+        </div>
+        <div style="border: 1px solid #1e1e23; border-radius: 11px; background: #0d0d10; padding: 13px 14px;">
+          <div class="mono" style="font-size: 11px; color: #f0f0f3; font-weight: 600; overflow-wrap: anywhere;">cais/mmlu</div>
+          <div class="mono" style="font-size: 9.5px; color: #3fcf8e; margin-top: 7px; letter-spacing: 0.04em;">MIT</div>
+        </div>
+        <div style="border: 1px solid #1e1e23; border-radius: 11px; background: #0d0d10; padding: 13px 14px;">
+          <div class="mono" style="font-size: 11px; color: #f0f0f3; font-weight: 600; overflow-wrap: anywhere;">mteb/banking77</div>
+          <div class="mono" style="font-size: 9.5px; color: #3fcf8e; margin-top: 7px; letter-spacing: 0.04em;">MIT</div>
+        </div>
+        <div style="border: 1px solid #1e1e23; border-radius: 11px; background: #0d0d10; padding: 13px 14px;">
+          <div class="mono" style="font-size: 11px; color: #f0f0f3; font-weight: 600; overflow-wrap: anywhere;">b-mc2/sql-create-context</div>
+          <div class="mono" style="font-size: 9.5px; color: #3fcf8e; margin-top: 7px; letter-spacing: 0.04em;">CC-BY-4.0</div>
+        </div>
+        <div style="border: 1px solid #1e1e23; border-radius: 11px; background: #0d0d10; padding: 13px 14px;">
+          <div class="mono" style="font-size: 11px; color: #f0f0f3; font-weight: 600; overflow-wrap: anywhere;">abisee/cnn_dailymail</div>
+          <div class="mono" style="font-size: 9.5px; color: #3fcf8e; margin-top: 7px; letter-spacing: 0.04em;">APACHE-2.0</div>
+        </div>
+        <div style="border: 1px solid #1e1e23; border-radius: 11px; background: #0d0d10; padding: 13px 14px;">
+          <div class="mono" style="font-size: 11px; color: #f0f0f3; font-weight: 600; overflow-wrap: anywhere;">glaiveai/glaive-function-calling-v2</div>
+          <div class="mono" style="font-size: 9.5px; color: #3fcf8e; margin-top: 7px; letter-spacing: 0.04em;">APACHE-2.0</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEPS -->
+    <div style="padding-top: 78px;">
+      <div style="margin-bottom: 20px;">
+        <div style="font-size: 30px; font-weight: 600; letter-spacing: -0.03em; margin: 0;">Three steps, and the last one is yours</div>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px;">
+
+        <div style="border-top: 2px solid #2c2c33; padding-top: 15px;">
+          <div style="display: flex; align-items: center; gap: 10px; font-size: 15.5px; font-weight: 600; letter-spacing: -0.018em;">
+            <span class="mono" style="width: 24px; height: 24px; border-radius: 50%; background: #0c1830; color: #4c8dff; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none;">1</span>
+            Add one line
+          </div>
+          <div style="font-size: 13.5px; color: #8a8a95; line-height: 1.55; margin-top: 9px;">Your key works the moment you copy it.</div>
+          <div style="margin-top: 16px; border: 1px solid #1e1e23; border-radius: 10px; background: #0d0d10; padding: 12px 13px 8px;">
+            <svg viewBox="0 0 300 110" width="100%" role="img" aria-label="Your existing client code with one added line highlighted.">
+              <text x="0" y="14" class="mono" font-size="10.5" fill="#8a8a95">client = OpenAI()</text>
+              <rect x="0" y="24" width="258" height="20" rx="4" fill="#0c1830" stroke="#24365c" stroke-width="1" />
+              <text x="2" y="38" class="mono" font-size="10.5" fill="#4c8dff">watch(client, key="us_live_...")</text>
+              <text x="0" y="62" class="mono" font-size="10.5" fill="#8a8a95">resp = client.chat.completions</text>
+              <text x="30" y="78" class="mono" font-size="10.5" fill="#8a8a95">.create(...)</text>
+              <text x="0" y="102" class="mono" font-size="9" fill="#3fcf8e" letter-spacing="0.05em">NOTHING ELSE CHANGES</text>
+            </svg>
+          </div>
+        </div>
+
+        <div style="border-top: 2px solid #4c8dff; padding-top: 15px;">
+          <div style="display: flex; align-items: center; gap: 10px; font-size: 15.5px; font-weight: 600; letter-spacing: -0.018em;">
+            <span class="mono" style="width: 24px; height: 24px; border-radius: 50%; background: #0c1830; color: #4c8dff; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none;">2</span>
+            It groups your traffic, then keeps measuring
+          </div>
+          <div style="font-size: 13.5px; color: #8a8a95; line-height: 1.55; margin-top: 9px;">Your calls sort themselves into the jobs they do. You label nothing.</div>
+          <div style="margin-top: 16px; border: 1px solid #1e1e23; border-radius: 10px; background: #0d0d10; padding: 12px 13px 8px;">
+            <svg viewBox="0 0 300 110" width="100%" role="img" aria-label="A stream of mixed calls sorting itself into three named groups of work.">
+              <text x="0" y="10" class="mono" font-size="8.5" fill="#8a8a95" letter-spacing="0.05em">YOUR CALLS</text>
+              <circle cx="10" cy="30" r="3.4" fill="#4c8dff" /><circle cx="24" cy="44" r="3.4" fill="#3fcf8e" />
+              <circle cx="12" cy="58" r="3.4" fill="#d9a441" /><circle cx="28" cy="70" r="3.4" fill="#4c8dff" />
+              <circle cx="14" cy="84" r="3.4" fill="#3fcf8e" /><circle cx="30" cy="20" r="3.4" fill="#d9a441" />
+              <path d="M44,52 C70,52 70,26 96,26" fill="none" stroke="#4c8dff" stroke-width="1.3" opacity="0.75" />
+              <path d="M44,52 L96,52" fill="none" stroke="#3fcf8e" stroke-width="1.3" opacity="0.75" />
+              <path d="M44,52 C70,52 70,78 96,78" fill="none" stroke="#d9a441" stroke-width="1.3" opacity="0.75" />
+              <rect x="100" y="14" width="196" height="24" rx="6" fill="#0c1830" stroke="#24365c" stroke-width="1.2" />
+              <text x="110" y="30" class="mono" font-size="9.5" fill="#4c8dff">invoice-extract</text>
+              <text x="286" y="30" text-anchor="end" class="mono" font-size="9" fill="#8a8a95">41%</text>
+              <rect x="100" y="40" width="196" height="24" rx="6" fill="#06180f" stroke="#1f4a35" stroke-width="1.2" />
+              <text x="110" y="56" class="mono" font-size="9.5" fill="#3fcf8e">support-reply</text>
+              <text x="286" y="56" text-anchor="end" class="mono" font-size="9" fill="#8a8a95">37%</text>
+              <rect x="100" y="66" width="196" height="24" rx="6" fill="#1b1508" stroke="#4a3a14" stroke-width="1.2" />
+              <text x="110" y="82" class="mono" font-size="9.5" fill="#d9a441">doc-classify</text>
+              <text x="286" y="82" text-anchor="end" class="mono" font-size="9" fill="#8a8a95">22%</text>
+              <text x="100" y="104" class="mono" font-size="9" fill="#8a8a95" letter-spacing="0.05em">FOUND, NOT CONFIGURED</text>
+            </svg>
+          </div>
+        </div>
+
+        <div style="border-top: 2px solid #2c2c33; padding-top: 15px;">
+          <div style="display: flex; align-items: center; gap: 10px; font-size: 15.5px; font-weight: 600; letter-spacing: -0.018em;">
+            <span class="mono" style="width: 24px; height: 24px; border-radius: 50%; background: #0c1830; color: #4c8dff; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none;">3</span>
+            It certifies, then you switch
+          </div>
+          <div style="font-size: 13.5px; color: #8a8a95; line-height: 1.55; margin-top: 9px;">The button appears after the evidence, never before it.</div>
+          <div style="margin-top: 16px; border: 1px solid #1e1e23; border-radius: 10px; background: #0d0d10; padding: 12px 13px 8px;">
+            <svg viewBox="0 0 300 110" width="100%" role="img" aria-label="Enough measured calls to pass the threshold, a certificate, and an unpressed promote button.">
+              <text x="0" y="10" class="mono" font-size="8.5" fill="#8a8a95" letter-spacing="0.05em">CALLS MEASURED</text>
+              <rect x="0" y="16" width="300" height="9" rx="4.5" fill="#16161a" />
+              <rect x="0" y="16" width="222" height="9" rx="4.5" fill="#3fcf8e" />
+              <line x1="222" y1="10" x2="222" y2="31" stroke="#f0f0f3" stroke-width="1.4" />
+              <text x="222" y="41" text-anchor="middle" class="mono" font-size="8.5" fill="#f0f0f3">THRESHOLD</text>
+              <rect x="0" y="52" width="168" height="46" rx="8" fill="#06180f" stroke="#3fcf8e" stroke-width="1.4" />
+              <path d="M14,74 l6,7 12,-15" fill="none" stroke="#3fcf8e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+              <text x="42" y="70" class="mono" font-size="9.5" fill="#3fcf8e" letter-spacing="0.06em">CERTIFIED</text>
+              <text x="42" y="86" class="mono" font-size="9" fill="#8a8a95">mistral-small-3.2</text>
+              <rect x="182" y="60" width="90" height="30" rx="8" fill="#4c8dff" />
+              <text x="227" y="79" text-anchor="middle" font-size="11.5" font-weight="700" fill="#03060d" font-family="'Schibsted Grotesk', sans-serif">Promote</text>
+              <path d="M262,86 l0,13 4,-4 3,6 3,-2 -3,-5 5,-1 z" fill="#f0f0f3" stroke="#000" stroke-width="0.8" />
+            </svg>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ROADMAP, new strip -->
+    <div style="padding-top: 78px;">
+      <div style="border: 1px solid #1e1e23; border-radius: 14px; background: #0d0d10; padding: 26px 28px; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 34px; align-items: center;">
+        <div>
+          <div class="mono" style="font-size: 10px; letter-spacing: 0.14em; color: #8a8a95;">WHAT IS COMING <span class="new" style="margin-left: 6px;">NEW SECTION</span></div>
+          <div style="font-size: 24px; font-weight: 600; letter-spacing: -0.028em; margin-top: 10px;">A model trained on your job, not on everything</div>
+          <div style="font-size: 13.5px; color: #8a8a95; line-height: 1.6; margin-top: 9px; max-width: 56ch;">
+            A small model fine-tuned on one task can pass the same bar a frontier model sets, at a
+            fraction of the cost. Four fine-tunes already sit on the board. Bringing that to your own
+            workloads is next.
+          </div>
+        </div>
+        <svg viewBox="0 0 300 132" width="100%" role="img" aria-label="A fine-tuned small model's accuracy climbing past the frontier reference line as training proceeds, at much lower cost.">
+          <line x1="18" y1="34" x2="292" y2="34" stroke="#4c8dff" stroke-width="1.4" stroke-dasharray="4 3" />
+          <text x="292" y="28" text-anchor="end" class="mono" font-size="9" fill="#4c8dff" letter-spacing="0.05em">gpt-5.4 REFERENCE</text>
+          <path d="M18,104 C60,102 76,86 104,72 C132,58 160,42 196,32 C226,25 258,23 292,22" fill="none" stroke="#3fcf8e" stroke-width="2.4" stroke-linecap="round" />
+          <circle cx="196" cy="32" r="4.5" fill="#3fcf8e" />
+          <text x="196" y="20" text-anchor="middle" class="mono" font-size="9" fill="#3fcf8e">passes here</text>
+          <line x1="18" y1="112" x2="292" y2="112" stroke="#1e1e23" stroke-width="1.3" />
+          <text x="18" y="128" class="mono" font-size="9" fill="#8a8a95" letter-spacing="0.05em">TRAINING ON YOUR OWN CALLS</text>
+        </svg>
+      </div>
+    </div>
+
+    <!-- END -->
+    <div style="padding-top: 78px; text-align: center; border-top: 1px solid #1e1e23; margin-top: 84px;">
+      <div style="font-size: 36px; font-weight: 700; letter-spacing: -0.035em; margin: 0;">See what your own traffic says</div>
+      <div style="font-size: 15px; color: #8a8a95; margin: 12px auto 0; max-width: 46ch;">One line, and about a day of your calls.</div>
+      <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 28px;">
+        <span class="btn">Get API key</span>
+        <span class="btn sec">How the measurement works</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+</x-dc>
+</body>
+</html>
