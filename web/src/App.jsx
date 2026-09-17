@@ -10,8 +10,9 @@ import WorkloadDetail from './screens/WorkloadDetail.jsx';
 import Models from './screens/Models.jsx';
 import Settings from './screens/Settings.jsx';
 import ConnectWizard from './screens/ConnectWizard.jsx';
+import ConnectPage from './screens/ConnectPage.jsx';
 
-const APP = new Set(['dash', 'work', 'models', 'settings']);
+const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
 
 /* Every one of these screens is built out of the customer's own traffic, so before any has
    arrived they have nothing in them at all. Settings is deliberately not on the list: your
@@ -69,6 +70,7 @@ export default function App() {
       if (which === 'dash' || which === 'work') setData(await api.overview());
       else if (which === 'models') setData(await api.models());
       else if (which === 'settings') setData(await api.settings());
+      else if (which === 'connect') setData(await api.connect());
     } catch (e) { setErr(e.message); }
   }, []);
 
@@ -134,11 +136,9 @@ export default function App() {
       return <WorkloadDetail id={openId} onBack={() => go('work')}
         onChanged={() => load('work')} />;
     }
-    if (screen === 'connect') {
-      return <ConnectWizard go={go} dark={dark} setDark={setDark} freshKey={freshKey} plain />;
-    }
     if (err) return <div className="errbox">{err}</div>;
     if (!data) return <div className="loading">Loading…</div>;
+    if (screen === 'connect') return <ConnectPage data={data} reload={() => load('connect')} />;
     const open = (id) => go('work', id);
     if (screen === 'dash') return <Dashboard data={data} onOpen={open} />;
     if (screen === 'work') return <Workloads data={data} onOpen={open} />;

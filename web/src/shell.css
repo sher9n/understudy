@@ -154,20 +154,6 @@ aside.side.mini {
 .acctrow.acctsw .sw i { width: 13px; height: 13px; top: 2px; left: 2px; }
 .acctrow.acctsw .sw.swon i { left: 16px; }
 
-/* Connect, once you are connected: the same screen, steps and all, with the app's menu
-   beside it instead of a takeover. The only thing removed is the second top bar, which
-   would otherwise repeat the wordmark and theme switch the menu already carries.
-
-   The panel styling has to come off the board's own wrapper here. `.board` is this
-   component's class AND a bordered panel in the lifted stylesheet, so full screen its
-   border sat off the edges and was never seen, while inside the app's page it drew a box
-   around the whole screen. */
-.board.inapp { border: 0; border-radius: 0; background: transparent; overflow: visible; }
-.board.inapp .top2 { display: none; }
-.board.inapp .wiz { border: 1px solid var(--line); border-radius: 13px; background: var(--raise);
-  overflow: hidden; min-height: 0; }
-.board.inapp .rail { padding: 28px 24px; }
-.board.inapp .wizmain { padding: 30px 32px 38px; }
 
 /* A workload row is now a real link, so it would otherwise inherit the stylesheet's link
    colour and paint the whole row blue. It keeps the text colours it was designed with. */
@@ -187,3 +173,62 @@ a.wm:hover { text-decoration: none; }
 .segb:disabled { cursor: default; }
 .segnote { display: block; margin-top: 7px; font-size: 12.5px; line-height: 1.5;
   color: var(--mut); max-width: 62ch; }
+
+/* Connect, once traffic has arrived. The guide's own layout belongs to the three step
+   wizard; this is the page it becomes, with what you came back for on the left and the
+   proof that it is working on the right. */
+.connectpage .headrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.connectpage .headnote { font-size: 13.5px; color: var(--mut-read); margin: 9px 0 0;
+  max-width: 68ch; line-height: 1.55; }
+.twocol { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px;
+  align-items: start; margin-top: 18px; }
+@media (max-width: 980px) { .twocol { grid-template-columns: minmax(0, 1fr); } }
+.sidecard { position: sticky; top: 24px; }
+.cardpad { padding: 18px 20px 20px; }
+
+/* The endpoint and the key: a label, the value as something you can read and select, and
+   the one action that matters next to it. */
+.rowpair { display: grid; grid-template-columns: 116px minmax(0, 1fr) auto; gap: 14px;
+  align-items: center; padding: 13px 20px; border-top: 1px solid var(--line); }
+.rowpair:first-of-type { border-top: 0; }
+.rowk { font-size: 13px; color: var(--mut-read); }
+.rowv { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12.5px;
+  background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 11px; overflow-x: auto; white-space: nowrap; }
+
+/* The changed lines in a snippet, which are the only ones the customer has to write. */
+.connectpage .code .hl { display: inline-block; background: var(--okq); color: var(--ok);
+  border-radius: 4px; padding: 0 6px; font-weight: 600; }
+
+.dotok { width: 6px; height: 6px; border-radius: 50%; background: var(--ok);
+  display: inline-block; margin-right: 6px; vertical-align: middle; }
+.pill.ok .dotok { background: var(--ok); }
+
+.checkrow { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; font-size: 13px; }
+.tick { width: 16px; height: 16px; border-radius: 50%; background: var(--okq); color: var(--ok);
+  display: inline-flex; align-items: center; justify-content: center; font-size: 10px;
+  font-weight: 700; flex: 0 0 auto; margin-top: 1px; }
+.statrow { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 9px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.statrow:first-of-type { border-top: 0; }
+.statk { color: var(--mut-read); }
+.statv { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12.5px; }
+.sticknote { font-size: 12.5px; color: var(--mut); line-height: 1.55; margin: 0; }
+
+/* What the test call came back with, kept where the button is so the answer is next to
+   the question rather than somewhere else on the page. */
+.testout { margin-top: 12px; border-radius: 10px; padding: 11px 12px; font-size: 13px; }
+.testout.ok { background: var(--okq); }
+.testout.bad { background: var(--badq); }
+.testline1 { font-weight: 600; }
+.testout.ok .testline1 { color: var(--ok); }
+.testout.bad .testline1 { color: var(--bad); }
+.testline2 { font-size: 11.5px; color: var(--mut-read); margin-top: 4px; word-break: break-word; }
+.testline3 { font-size: 12.5px; color: var(--mut-read); margin-top: 4px; line-height: 1.5; }
+
+/* The two "how your calls reach us" tiles are <button> elements, and the lifted rule never
+   sets a colour on them, so their titles fell back to the browser's default button text,
+   which is black. In dark mode that is black on near black: measured at 1.19 and 1.08
+   against their own tiles, which is invisible. It is the first choice a new customer is
+   asked to make, and it shows on the getting started guide as well as on this page. */
+.way { color: var(--ink); }

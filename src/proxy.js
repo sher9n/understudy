@@ -43,66 +43,94 @@ v1.get('/models', (req, res) => {
   });
 });
 
+/* Everything a routed call needs before it is sent, or the reason it cannot be, so the
+   streaming path, the ordinary path and Connect's test call all answer the same way. */
+function prepare(wsId, body, { classify = true } = {}) {
+  const no = (status, message, type) => ({ error: { status, json: { error: { message, type } } } });
+  if (!Array.isArray(body.messages) || !body.messages.length) {
+    return no(400, '"messages" is required.', 'invalid_request_error');
+  }
+  if (!canRoute()) return no(503, 'Routing is not configured on this deployment yet.', 'not_configured');
+  grantStarterCredit(wsId);
+  const gate = gateRouting(wsId);
+  if (!gate.ok) return { error: { status: 402, json: { error: { message: gate.message, type: gate.code } } } };
+  /* A test call is not the customer's traffic, so it is never fingerprinted into a
+     workload: it would leave a one-call workload in their list that nothing produced. */
+  const workload = classify ? workloadFor(wsId, body) : null;
+  const requested = body.model || workload?.reference_model || null;
+  const served = workload?.routed_model || requested;
+  if (!served) return no(400, '"model" is required.', 'invalid_request_error');
+  return { workload, requested, served };
+}
+
+/* One routed call, from the gate to the ledger. The proxy uses this for every ordinary
+   call, and so does Connect's "Send a test call", which is the point: what the test
+   proves is what a real call does, because it is the same path, the same gate, the same
+   charge and the same row. */
+export async function routeOnce(wsId, body, { source = 'routed', classify = true } = {}) {
+  const ready = prepare(wsId, body, { classify });
+  if (ready.error) return { ok: false, status: ready.error.status, json: ready.error.json };
+  const { workload, requested, served } = ready;
+  const started = Date.now();
+  try {
+    const { json, latencyMs } = await chat(body, served);
+    finish({ wsId, workload, requested, served, usage: json?.usage, started, body,
+      response: json, status: 200, latencyMs, source });
+    return { ok: true, status: 200, json, served, requested,
+      latencyMs: latencyMs ?? Date.now() - started, costUsd: Number(json?.usage?.cost ?? 0) };
+  } catch (err) {
+    const status = err instanceof UpstreamError ? err.status : 502;
+    const json = err instanceof UpstreamError ? err.body
+      : { error: { message: 'The provider could not be reached.' } };
+    recordCall({
+      workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
+      servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body,
+    });
+    return { ok: false, status, json, served, requested };
+  }
+}
+
 /* The routed path. The customer's client is unchanged except for the base URL, and
    the model they name is the model we measure against, not necessarily the one we send. */
 v1.post('/chat/completions', async (req, res) => {
   const wsId = req.key.workspace_id;
   const body = req.body || {};
-  if (!Array.isArray(body.messages) || !body.messages.length) {
-    return res.status(400).json({ error: { message: '"messages" is required.', type: 'invalid_request_error' } });
+  if (!body.stream) {
+    const out = await routeOnce(wsId, body);
+    return res.status(out.status).json(out.json);
   }
-  if (!canRoute()) {
-    return res.status(503).json({
-      error: { message: 'Routing is not configured on this deployment yet.', type: 'not_configured' },
-    });
-  }
-  grantStarterCredit(wsId);
-  const gate = gateRouting(wsId);
-  if (!gate.ok) return res.status(402).json({ error: { message: gate.message, type: gate.code } });
-
-  const workload = workloadFor(wsId, body);
-  const requested = body.model || workload.reference_model || null;
-  const served = workload.routed_model || requested;
-  if (!served) {
-    return res.status(400).json({ error: { message: '"model" is required.', type: 'invalid_request_error' } });
-  }
-
+  const ready = prepare(wsId, body);
+  if (ready.error) return res.status(ready.error.status).json(ready.error.json);
+  const { workload, requested, served } = ready;
   const started = Date.now();
   try {
-    if (body.stream) {
-      const upstream = await chatStream(body, served);
-      res.status(200);
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      let usage = null;
-      const reader = upstream.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const text = dec.decode(value, { stream: true });
-        buf += text;
-        // the last chunk carries usage, which is what the customer is charged on
-        for (const line of buf.split('\n')) {
-          const t = line.trim();
-          if (!t.startsWith('data:')) continue;
-          const payload = t.slice(5).trim();
-          if (payload === '[DONE]') continue;
-          try { const j = JSON.parse(payload); if (j.usage) usage = j.usage; } catch { /* partial */ }
-        }
-        buf = buf.slice(buf.lastIndexOf('\n') + 1);
-        res.write(text);
+    const upstream = await chatStream(body, served);
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    let usage = null;
+    const reader = upstream.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = dec.decode(value, { stream: true });
+      buf += text;
+      // the last chunk carries usage, which is what the customer is charged on
+      for (const line of buf.split('\n')) {
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const payload = t.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        try { const j = JSON.parse(payload); if (j.usage) usage = j.usage; } catch { /* partial */ }
       }
-      res.end();
-      finish({ wsId, workload, requested, served, usage, started, body, response: null, status: 200 });
-      return undefined;
+      buf = buf.slice(buf.lastIndexOf('\n') + 1);
+      res.write(text);
     }
-
-    const { json, latencyMs } = await chat(body, served);
-    res.status(200).json(json);
-    finish({ wsId, workload, requested, served, usage: json?.usage, started, body, response: json, status: 200, latencyMs });
+    res.end();
+    finish({ wsId, workload, requested, served, usage, started, body, response: null, status: 200 });
     return undefined;
   } catch (err) {
     const status = err instanceof UpstreamError ? err.status : 502;
@@ -117,17 +145,19 @@ v1.post('/chat/completions', async (req, res) => {
   }
 });
 
-function finish({ wsId, workload, requested, served, usage, started, body, response, status, latencyMs }) {
+function finish({ wsId, workload, requested, served, usage, started, body, response, status,
+  latencyMs, source = 'routed' }) {
   const cost = Number(usage?.cost ?? 0);
-  const charged = cost > 0 ? chargeCall(wsId, cost, `${workload.slug} on ${served}`) : 0;
+  const note = workload ? `${workload.slug} on ${served}` : `Test call on ${served}`;
+  const charged = cost > 0 ? chargeCall(wsId, cost, note) : 0;
   recordCall({
-    workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
+    workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
     servedModel: served, statusCode: status,
     promptTokens: usage?.prompt_tokens ?? 0, completionTokens: usage?.completion_tokens ?? 0,
     costUsd: cost, chargedUsd: charged, latencyMs: latencyMs ?? Date.now() - started,
     request: body, response,
   });
-  considerMeasuring(wsId, workload);
+  if (workload) considerMeasuring(wsId, workload);
 }
 
 /** Once a workload has enough calls to be trusted, it measures itself without being asked. */

@@ -7,6 +7,7 @@ import { workloadStats, dailySpend, recentActivity, addActivity } from './traffi
 import { account, ledger, gateRouting } from './billing.js';
 import { certificate, promote, revert } from './eval/promote.js';
 import { enqueue } from './jobs.js';
+import { routeOnce } from './proxy.js';
 
 export const api = express.Router();
 api.use(express.json({ limit: '2mb' }));
@@ -51,7 +52,7 @@ api.get('/me', (req, res) => {
     canBill: canBill(),
     // somebody whose traffic has never arrived belongs on Connect, not an empty dashboard
     connected: db.prepare(
-      `SELECT 1 FROM calls WHERE workspace_id = ? AND source != 'replay' LIMIT 1`)
+      `SELECT 1 FROM calls WHERE workspace_id = ? AND source NOT IN ('replay', 'test') LIMIT 1`)
       .get(req.workspace.id) !== undefined,
   });
 });
@@ -75,7 +76,7 @@ function overview(workspaceId, days = 30) {
   const rows = workloadStats(workspaceId, days);
   const spend = db.prepare(
     `SELECT COALESCE(SUM(charged_usd), 0) AS s, COUNT(*) AS n FROM calls
-      WHERE workspace_id = ? AND created_at >= ? AND source != 'replay'`).get(workspaceId, since);
+      WHERE workspace_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(workspaceId, since);
   const series = dailySpend(workspaceId, days);
   const saved = round8(series.reduce((a, d) => a + Math.max(0, d.would - d.paid), 0));
   const priced = db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get().n > 0;
@@ -112,7 +113,7 @@ api.get('/workloads/:id', (req, res) => {
   const since = now() - 30 * DAY;
   const t = db.prepare(
     `SELECT COUNT(*) AS calls, COALESCE(SUM(charged_usd), 0) AS cost FROM calls
-      WHERE workload_id = ? AND created_at >= ? AND source != 'replay'`).get(w.id, since);
+      WHERE workload_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(w.id, since);
   const cert = certificate(w.id);
   const best = cert?.results.find((r) => r.verdict === 'cleared' && r.model_id !== w.routed_model);
   const refCost = cert?.referenceCostMonth ?? null;
@@ -300,17 +301,103 @@ api.post('/settings/auto-topup', (req, res) => {
 
 api.get('/connect', (req, res) => {
   const keys = listKeys(req.workspace.id).filter((k) => !k.revoked_at);
-  const calls = db.prepare(
-    `SELECT COUNT(*) AS n FROM calls WHERE workspace_id = ? AND source != 'replay'`).get(req.workspace.id).n;
+  const traffic = db.prepare(
+    `SELECT COUNT(*) AS n, MAX(created_at) AS last FROM calls
+      WHERE workspace_id = ? AND source NOT IN ('replay', 'test')`).get(req.workspace.id);
   const workloads = db.prepare(
     `SELECT w.slug, w.reference_model,
-            (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.source != 'replay') AS calls
+            (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.source NOT IN ('replay', 'test')) AS calls
        FROM workloads w WHERE w.workspace_id = ? ORDER BY calls DESC LIMIT 5`).all(req.workspace.id);
+  const workloadCount = db.prepare(
+    'SELECT COUNT(*) AS n FROM workloads WHERE workspace_id = ?').get(req.workspace.id).n;
   res.json({
     baseUrl: `${config.PUBLIC_URL}/v1`,
     keyPrefix: keys[0]?.prefix ?? null,
-    calls, workloads,
+    calls: traffic.n,
+    lastCallAt: traffic.last ?? null,
+    workloads,
+    workloadCount,
+    lastTest: lastTestCall(req.workspace.id),
     canRoute: canRoute(),
+  });
+});
+
+/** Cut long text where it can be read, and say that it was cut. */
+const clip = (t, n) => (t.length > n ? `${t.slice(0, n).trimEnd()}…` : t);
+
+/** The most recent test call, so the panel still says how it went after a reload. */
+function lastTestCall(workspaceId) {
+  const row = db.prepare(
+    `SELECT served_model, status_code, latency_ms, charged_usd, created_at
+       FROM calls WHERE workspace_id = ? AND source = 'test'
+      ORDER BY created_at DESC LIMIT 1`).get(workspaceId);
+  if (!row) return null;
+  return {
+    ok: row.status_code === 200,
+    model: row.served_model,
+    latencyMs: row.latency_ms,
+    costUsd: round8(row.charged_usd),
+    at: row.created_at,
+  };
+}
+
+/* Sends one real call down the routed path and says what came back. It is the same path a
+   customer's own call takes, which is the only way a test can prove anything: the same
+   gate, the same provider, the same charge. It is recorded as a test rather than as
+   traffic, so it never turns into a workload or moves any of their numbers. */
+/* The cheapest model this workspace is allowed to reach. A test call should cost as close
+   to nothing as possible, and it has to be a model they can actually be served, otherwise
+   the test fails for a reason that has nothing to do with their connection. */
+function testModelFor(workspaceId) {
+  const row = db.prepare(
+    `SELECT c.model_id FROM models_catalog c
+       LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
+      WHERE COALESCE(wm.enabled, 1) = 1
+      ORDER BY (c.price_in + c.price_out) ASC LIMIT 1`).get(workspaceId);
+  if (row) return row.model_id;
+  const own = db.prepare(
+    `SELECT reference_model FROM workloads WHERE workspace_id = ? AND reference_model IS NOT NULL
+      ORDER BY updated_at DESC LIMIT 1`).get(workspaceId);
+  return own?.reference_model ?? null;
+}
+
+api.post('/connect/test', async (req, res) => {
+  const model = testModelFor(req.workspace.id);
+  if (!model) {
+    return res.json({
+      ok: false,
+      reason: 'No models are enabled for this workspace yet, so there is nothing to call.',
+      at: now(),
+    });
+  }
+  const out = await routeOnce(req.workspace.id, {
+    model,
+    messages: [
+      { role: 'system', content: 'Answer with one word and nothing else.' },
+      { role: 'user', content: 'If you can read this, reply: connected' },
+    ],
+    max_tokens: 12,
+  }, { source: 'test', classify: false });
+
+  if (!out.ok) {
+    return res.status(200).json({
+      ok: false,
+      reason: out.json?.error?.message || 'The call did not get through.',
+      at: now(),
+    });
+  }
+  addActivity(req.workspace.id, {
+    kind: 'connect',
+    title: 'Test call went through',
+    detail: `${out.served} answered in ${out.latencyMs} ms.`,
+  });
+  return res.json({
+    ok: true,
+    model: out.served,
+    latencyMs: out.latencyMs,
+    costUsd: round8(out.costUsd),
+    reply: clip(String(out.json?.choices?.[0]?.message?.content ?? '').trim(), 60),
+    at: now(),
   });
 });
 

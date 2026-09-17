@@ -17,7 +17,7 @@ const summary = (d) => {
     + ' by the job they do. Nothing here was labelled by you.';
 };
 
-export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn, plain = false }) {
+export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn }) {
   const [data, setData] = useState(null);
   const [step, setStep] = useState(1);
   const [way, setWay] = useState('route');
@@ -70,7 +70,6 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn, p
 
   return (
     <Board
-      className={plain ? 'inapp' : ''}
       html={html}
       vals={vals}
       on={on}

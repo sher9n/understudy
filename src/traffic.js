@@ -78,9 +78,9 @@ export function workloadStats(workspaceId, days = 30) {
   return db.prepare(
     `SELECT w.*,
             (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.created_at >= ?
-                AND c.source != 'replay') AS calls,
+                AND c.source NOT IN ('replay', 'test')) AS calls,
             (SELECT COALESCE(SUM(c.charged_usd), 0) FROM calls c
-              WHERE c.workload_id = w.id AND c.created_at >= ? AND c.source != 'replay') AS spend
+              WHERE c.workload_id = w.id AND c.created_at >= ? AND c.source NOT IN ('replay', 'test')) AS spend
        FROM workloads w WHERE w.workspace_id = ?
       ORDER BY spend DESC, w.created_at`).all(since, since, workspaceId);
 }
@@ -91,7 +91,7 @@ export function dailySpend(workspaceId, days = 30) {
   const rows = db.prepare(
     `SELECT c.created_at, c.charged_usd, c.cost_usd, c.served_model, c.requested_model,
             c.prompt_tokens, c.completion_tokens
-       FROM calls c WHERE c.workspace_id = ? AND c.created_at >= ? AND c.source != 'replay'`)
+       FROM calls c WHERE c.workspace_id = ? AND c.created_at >= ? AND c.source NOT IN ('replay', 'test')`)
     .all(workspaceId, since);
   const price = new Map(db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all()
     .map((m) => [m.model_id, m]));

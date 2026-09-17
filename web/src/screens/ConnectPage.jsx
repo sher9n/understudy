@@ -1,0 +1,188 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { api, usd, ago } from '../api.js';
+import { LANGS, WAYS, snippet, asText } from './snippets.js';
+
+/* Connect, for a customer whose traffic has already arrived.
+
+   The three step guide is for somebody who has not connected yet, and it lives in
+   ConnectWizard. This is what the same screen becomes afterwards: a page they come back to,
+   to copy the endpoint, wire a second service, or check that the connection is still good.
+   The steps do not disappear, they become a record of what already happened, in the panel
+   on the right, beside the numbers that prove it. */
+
+/* A test call costs a fraction of a cent, and "$0.00" reads as though it were free when it
+   is not. Say which of the two it actually is. */
+const priceOf = (n) => {
+  if (!n) return 'no charge';
+  return n < 0.005 ? 'under a cent' : usd(n);
+};
+
+const Copy = ({ text, label = 'Copy' }) => {
+  const [done, setDone] = useState(false);
+  const timer = useRef(null);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  return (
+    <button className="ghost" onClick={async () => {
+      try { await navigator.clipboard.writeText(text); } catch { return; }
+      setDone(true);
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => setDone(false), 1600);
+    }}>{done ? 'Copied' : label}</button>
+  );
+};
+
+export default function ConnectPage({ data, reload }) {
+  const [way, setWay] = useState('route');
+  const [lang, setLang] = useState('python');
+  const [testing, setTesting] = useState(false);
+  const [test, setTest] = useState(data.lastTest || null);
+
+  const lines = snippet(way, lang, { baseUrl: data.baseUrl, key: data.keyPrefix ? `${data.keyPrefix}…` : null });
+
+  const sendTest = useCallback(async () => {
+    setTesting(true);
+    try {
+      const r = await api.testCall();
+      setTest(r);
+      await reload();
+    } catch (e) {
+      setTest({ ok: false, reason: e.message, at: Date.now() });
+    } finally {
+      setTesting(false);
+    }
+  }, [reload]);
+
+  return (
+    <div className="connectpage">
+      <div className="phead" style={{ display: 'block' }}>
+        <div className="headrow"><h1>Connect</h1></div>
+        <p className="headnote">
+          Route through us, or keep calling your own provider and send us copies. You can
+          wire a second service to the same endpoint whenever you like.
+        </p>
+      </div>
+
+      <div className="twocol">
+        <div>
+          <section className="opt" style={{ marginTop: 0 }}>
+            <div className="opthead"><h2>How your calls reach us</h2>
+              <span className="s">You can change your mind at any time.</span></div>
+            <div className="cardpad">
+              <div className="ways" style={{ marginTop: 0 }}>
+                {WAYS.map((w) => (
+                  <button key={w.key} className={w.key === way ? 'way on' : 'way'}
+                    onClick={() => setWay(w.key)}>
+                    <span className="m tag">{w.tag}</span>
+                    <div className="t">{w.title}</div>
+                    <div className="b">{w.body}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="opt">
+            <div className="opthead"><h2>Code</h2>
+              <span className="s">The changed lines are the only ones that are new.</span></div>
+            <div className="cardpad">
+              <div className="codebox" style={{ marginTop: 0 }}>
+                <div className="tabs">
+                  {LANGS.map((l) => (
+                    <button key={l.key} className={l.key === lang ? 'tab on' : 'tab'}
+                      onClick={() => setLang(l.key)}>{l.label}</button>
+                  ))}
+                  <div style={{ flexGrow: 1 }} />
+                  <Copy text={asText(lines)} />
+                </div>
+                <pre className="m code">
+                  {lines.map((l, i) => (
+                    <span key={i} style={{ display: 'block' }}>
+                      {l.text === '' ? ' ' : (
+                        <span className={l.changed ? 'hl' : undefined}
+                          style={l.changed ? undefined : { color: 'var(--ink)' }}>{l.text}</span>
+                      )}
+                    </span>
+                  ))}
+                </pre>
+              </div>
+            </div>
+          </section>
+
+          <section className="opt">
+            <div className="opthead"><h2>Your endpoint and key</h2>
+              <span className="s">A key is shown in full once, when it is created.</span></div>
+            <div className="rowpair">
+              <span className="rowk">Base URL</span>
+              <code className="rowv">{data.baseUrl}</code>
+              <Copy text={data.baseUrl} />
+            </div>
+            <div className="rowpair">
+              <span className="rowk">API key</span>
+              <code className="rowv">{data.keyPrefix ? `${data.keyPrefix}…` : 'no key yet'}</code>
+              <span className="shp">in use</span>
+            </div>
+          </section>
+        </div>
+
+        <aside className="opt sidecard" style={{ marginTop: 0 }}>
+          <div className="opthead"><h2>Connection</h2></div>
+          <div className="cardpad">
+            <div style={{ marginBottom: 13 }}>
+              <span className="pill ok"><span className="dotok" />Connected</span>
+            </div>
+
+            <div className="checkrow"><span className="tick">✓</span><span>Traffic connected</span></div>
+            <div className="checkrow"><span className="tick">✓</span><span>First call received</span></div>
+            <div className="checkrow">
+              <span className="tick">✓</span>
+              <span>{data.workloadCount > 0 ? 'Measuring on its own' : 'Watching for a pattern'}</span>
+            </div>
+
+            <div style={{ height: 15 }} />
+            <div className="statrow"><span className="statk">Calls received</span>
+              <span className="statv">{data.calls.toLocaleString('en-GB')}</span></div>
+            <div className="statrow"><span className="statk">Last call</span>
+              <span className="statv">{data.lastCallAt ? ago(data.lastCallAt) : 'none yet'}</span></div>
+            <div className="statrow"><span className="statk">Workloads found</span>
+              <span className="statv">{data.workloadCount}</span></div>
+
+            <div style={{ height: 16 }} />
+            <button className="mini" style={{ width: '100%' }} disabled={testing || !data.canRoute}
+              onClick={sendTest}>{testing ? 'Sending…' : 'Send a test call'}</button>
+
+            {!data.canRoute && (
+              <p className="sticknote" style={{ marginTop: 10 }}>
+                Routing is not configured on this deployment, so a test call cannot be sent.
+              </p>
+            )}
+
+            {test && (
+              <div className={test.ok ? 'testout ok' : 'testout bad'}>
+                {test.ok ? (
+                  <>
+                    <div className="testline1">It went through</div>
+                    <div className="m testline2">
+                      {test.model} · {test.latencyMs} ms · {priceOf(test.costUsd)}
+                    </div>
+                    {test.reply && <div className="testline3">It answered “{test.reply}”</div>}
+                  </>
+                ) : (
+                  <>
+                    <div className="testline1">It did not get through</div>
+                    <div className="testline3">{test.reason}</div>
+                  </>
+                )}
+              </div>
+            )}
+
+            <div style={{ height: 14 }} />
+            <p className="sticknote">
+              Routed calls only reach providers that keep nothing. What we store is cleared
+              after the window you chose in Settings.
+            </p>
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}

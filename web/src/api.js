@@ -32,6 +32,7 @@ export const api = {
   autoTopUp: (enabled) => send('POST', '/settings/auto-topup', { enabled }),
   retention: (days) => send('POST', '/settings/retention', { days }),
   connect: () => send('GET', '/connect'),
+  testCall: () => send('POST', '/connect/test'),
 };
 
 export const usd = (n) => `$${(Number(n) || 0).toFixed(2)}`;
