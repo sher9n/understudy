@@ -1,0 +1,34 @@
+{
+  "artboards": [
+    {
+      "file": "Main.dc.html",
+      "x": 0,
+      "y": 0,
+      "w": 1180,
+      "h": 800,
+      "title": "1 \u00b7 Money first, green as a rail",
+      "expand": "fit"
+    },
+    {
+      "file": "Swap.dc.html",
+      "x": 1300,
+      "y": 0,
+      "w": 1180,
+      "h": 800,
+      "title": "2 \u00b7 The swap, shown",
+      "expand": "fit"
+    },
+    {
+      "file": "Strip.dc.html",
+      "x": 2600,
+      "y": 0,
+      "w": 1180,
+      "h": 800,
+      "title": "3 \u00b7 Status strip and a gauge",
+      "expand": "fit"
+    }
+  ],
+  "launch": {
+    "view": "canvas"
+  }
+}
