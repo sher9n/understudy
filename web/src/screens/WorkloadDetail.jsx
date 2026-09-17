@@ -135,7 +135,8 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
             </div>
           </div>
           <div className="cbody">
-            <CandidateChart results={cert.results} floor={cert.floor ?? 0} reference={w.reference} />
+            <CandidateChart results={cert.results} floor={cert.floor ?? 0} reference={w.reference}
+              referenceCostMonth={cert.referenceCostMonth} />
           </div>
         </section>
       )}
@@ -164,7 +165,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
               <div className="mdl">{w.reference}</div>
               <div className="num">{num(cert.sampleSize * 2 * cert.rounds)}</div>
               <div className="num">baseline</div>
-              <div className="num">—</div>
+              <div className="num">{cert.referenceCostMonth === null ? '—' : usd(cert.referenceCostMonth)}</div>
               <div><span className="pill q">{switched ? 'Previous model' : 'Current model'}</span></div>
             </div>
             {cert.results.map((r) => {
@@ -228,7 +229,7 @@ const costLine = (w, cand, switched) => {
   const target = switched
     ? w.certificate?.results.find((r) => r.model === w.model)?.costMonth
     : cand?.costMonth;
-  const base = w.certificate?.results.find((r) => r.model === w.reference)?.costMonth;
+  const base = w.certificate?.referenceCostMonth;
   if (!target || !base || base <= 0) return target ? `${usd(target)} a month` : '—';
   return `${Math.round((1 - target / base) * 100)}% lower`;
 };
@@ -237,7 +238,7 @@ const costSub = (w, cand, switched) => {
   const target = switched
     ? w.certificate?.results.find((r) => r.model === w.model)?.costMonth
     : cand?.costMonth;
-  const base = w.certificate?.results.find((r) => r.model === w.reference)?.costMonth;
+  const base = w.certificate?.referenceCostMonth;
   if (!target) return 'measured once a full month of traffic is in';
   if (!base) return `${usd(target)} a month at your volume`;
   return `${usd(base)} a month ${switched ? 'became' : 'would become'} ${usd(target)}. You keep ${usd(base - target)}.`;

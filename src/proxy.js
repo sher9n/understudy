@@ -152,6 +152,7 @@ v1.post('/traces', (req, res) => {
   if (list.length > 200) {
     return res.status(400).json({ error: { message: 'Send at most 200 traces at a time.', type: 'too_many' } });
   }
+  grantStarterCredit(wsId);
   let accepted = 0;
   for (const t of list) {
     const request = t?.request;

@@ -25,3 +25,12 @@ body { margin: 0; }
 .sw:disabled { opacity: 0.55; cursor: default; }
 .mini:disabled, .minig:disabled, .btn:disabled { opacity: 0.6; cursor: default; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* The homepage comes over from the board with both theme icons; show the right one. */
+[data-when='dark'] { display: none; }
+[data-when='light'] { display: inline-flex; }
+.u[data-mode='dark'] [data-when='dark'] { display: inline-flex; }
+.u[data-mode='dark'] [data-when='light'] { display: none; }
+[data-go] { cursor: pointer; }
+.homewrap { display: flex; flex-direction: column; flex: 1; }
+.homewrap > div { flex: 1; }

@@ -46,6 +46,35 @@ export function SpendChart({ series }) {
   );
 }
 
+/** Each label sits beside its own dot: right if there is room, otherwise left, and only
+    nudged down as a last resort. A label that drifts from its point is worse than none. */
+function placed(points, px, py) {
+  const taken = [];
+  const out = [];
+  const sorted = [...points].sort((a, b) => px(a.costMonth) - px(b.costMonth));
+  for (const r of sorted) {
+    const x = px(r.costMonth);
+    const y0 = py(r.gap) + 3.5;
+    const w = 7.2 * String(r.model.split('/').pop()).length;
+    const hits = (l, y) => taken.some((t) => Math.abs(t.y - y) < 13 && l < t.r && t.l < l + w)
+      || sorted.some((o) => o !== r && Math.abs(py(o.gap) - y) < 9
+        && l - 7 < px(o.costMonth) && px(o.costMonth) < l + w + 7);
+    let best = null;
+    for (let drop = 0; drop <= 30 && !best; drop += 15) {
+      for (const side of [1, -1]) {
+        const l = side === 1 ? x + 12 : x - 12 - w;
+        if (l < 0 || l + w > CW) continue;
+        if (!hits(l, y0 + drop)) { best = { l, y: y0 + drop, right: side === 1 }; break; }
+      }
+    }
+    const put = best || { l: x + 12, y: y0, right: true };
+    taken.push({ l: put.l, r: put.l + w, y: put.y });
+    out.push({ r, lx: put.right ? x + 12 : x - 12, ly: put.y, right: put.right,
+      drop: Math.round(put.y - y0) });
+  }
+  return out;
+}
+
 function niceTop(v) {
   const pow = 10 ** Math.floor(Math.log10(v));
   const n = v / pow;
@@ -74,16 +103,22 @@ const CR = 168;
 const CT = 34;
 const CB = 56;
 
-export function CandidateChart({ results, floor, reference }) {
-  const points = results.filter((r) => r.costMonth !== null && r.gap !== null && r.runs >= 100);
-  if (points.length < 2) return null;
+export function CandidateChart({ results, floor, reference, referenceCostMonth }) {
+  const tried = results.filter((r) => r.costMonth !== null && r.gap !== null && r.runs >= 100);
+  if (tried.length < 2) return null;
+  /* The model the bar came from belongs on the picture: it is the thing every candidate
+     is being compared against, and what it costs is the whole argument. */
+  const points = referenceCostMonth === null || referenceCostMonth === undefined
+    ? tried
+    : [...tried, { model: reference, gap: 0, costMonth: referenceCostMonth, verdict: 'reference' }];
   const xmax = niceTop(Math.max(...points.map((p) => p.costMonth), 0.01));
-  const ymax = niceTop(Math.max(...points.map((p) => p.gap), floor * 2.5, 1));
+  // keep the bar visible without squashing every candidate onto the baseline
+  const ymax = niceTop(Math.max(...points.map((p) => p.gap), floor * 1.6, 1));
   const px = (v) => CL + (v / xmax) * (CW - CL - CR);
   const py = (v) => CH - CB - (v / ymax) * (CH - CB - CT);
   const yticks = [0, ymax / 4, ymax / 2, (ymax * 3) / 4, ymax];
   const xticks = [0, xmax / 4, xmax / 2, (xmax * 3) / 4, xmax];
-  const tone = (r) => (r.model === reference ? 'cur'
+  const tone = (r) => (r.model === reference || r.verdict === 'reference' ? 'cur'
     : r.verdict === 'cleared' ? 'pass' : r.verdict === 'review' ? 'near' : 'fail');
   const colour = { cur: 'var(--mut)', pass: 'var(--brand)', near: 'var(--warn)', fail: 'var(--bad)' };
   const short = (m) => m.split('/').pop();
@@ -105,7 +140,7 @@ export function CandidateChart({ results, floor, reference }) {
       <line x1={CL} y1={py(0)} x2={CW - CR} y2={py(0)} stroke="var(--line-strong)" strokeWidth="1.2" />
       {xticks.map((v) => (
         <text key={v} x={px(v)} y={CH - CB + 20} className="m" fontSize="10" fill="var(--mut)" textAnchor="middle">
-          ${v.toFixed(v < 10 ? 2 : 0)}
+          ${v.toFixed(xmax <= 2 ? 2 : xmax <= 20 ? 1 : 0)}
         </text>
       ))}
       <text x={CL} y={CT - 12} className="m" fontSize="10" fontWeight="700" fill="var(--mut)">
@@ -114,15 +149,19 @@ export function CandidateChart({ results, floor, reference }) {
       <text x={CW - CR} y={CH - CB + 42} className="m" fontSize="10" fontWeight="700" fill="var(--mut)" textAnchor="end">
         COST A MONTH
       </text>
-      {points.map((r, i) => {
+      {placed(points, px, py).map(({ r, lx, ly, right, drop }) => {
         const k = tone(r);
-        const right = px(r.costMonth) < CW - CR - 160;
         return (
           <g key={r.model}>
+            {drop > 4 && (
+              // the label had to move, so say which dot it belongs to
+              <path d={`M${px(r.costMonth)} ${py(r.gap)} L${lx + (right ? -4 : 4)} ${ly - 4}`}
+                stroke="var(--line-strong)" strokeWidth="1" fill="none" />
+            )}
             {k === 'cur'
               ? <circle cx={px(r.costMonth)} cy={py(r.gap)} r="6.5" fill="var(--raise)" stroke={colour[k]} strokeWidth="2.2" />
               : <circle cx={px(r.costMonth)} cy={py(r.gap)} r="6" fill={colour[k]} />}
-            <text x={px(r.costMonth) + (right ? 12 : -12)} y={py(r.gap) + 3.5 + (i % 2 ? 13 : 0)}
+            <text x={lx} y={ly}
               className="m" textAnchor={right ? 'start' : 'end'} fontSize="11"
               fontWeight={k === 'pass' ? 600 : undefined}
               fill={k === 'pass' ? 'var(--ink)' : 'var(--mut-read)'}

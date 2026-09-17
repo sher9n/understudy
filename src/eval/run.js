@@ -73,8 +73,21 @@ export async function runEvaluation(workloadId) {
               @sample_size, @created_at, @started_at)`).run(run);
 
   let spend = 0;
+  let stoppedShort = null;
   const shape = workload.shape_kind;
   const refPairs = [];
+
+  /* Charge what has run so far, and say whether there is anything left. The gate before a
+     run can only work off an estimate, so without this a long run walks past the balance. */
+  const settle = (note) => {
+    if (spend <= 0) return true;
+    chargeEval(workload.workspace_id, spend, note);
+    db.prepare('UPDATE eval_runs SET spend_usd = spend_usd + ? WHERE id = ?').run(round8(spend), run.id);
+    spend = 0;
+    const left = db.prepare('SELECT balance_usd FROM billing_accounts WHERE workspace_id = ?')
+      .get(workload.workspace_id)?.balance_usd ?? 0;
+    return left > 0;
+  };
 
   // the bar first: the reference model against itself, measured fresh
   for (const s of samples) {
@@ -89,7 +102,6 @@ export async function runEvaluation(workloadId) {
     refPairs.push({ body, a: extract(a.json, shape), b: extract(b.json, shape) });
   }
 
-  const usable = refPairs.filter((p) => p.a.ok || p.b.ok);
   const noise = mean(refPairs.map((p) => scoreOf(p.a, p.b, shape)));
   const floor = floorFrom(noise * 100, {
     multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT,
@@ -98,6 +110,17 @@ export async function runEvaluation(workloadId) {
     .run(round8(noise * 100), round8(floor), run.id);
   db.prepare('UPDATE workloads SET floor_pct = ?, updated_at = ? WHERE id = ?')
     .run(round8(floor), now(), workloadId);
+
+  if (!settle(`Measuring ${workload.slug}, setting the bar`)) {
+    db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ? WHERE id = ?`)
+      .run(now(), 'balance ran out after the bar was set', run.id);
+    addActivity(workload.workspace_id, {
+      kind: 'floor', title: `Measuring ${workload.slug} stopped early`,
+      detail: 'Your balance ran out once the bar was set. Add credit and it picks up where it left off.',
+      workloadId,
+    });
+    return { ok: true, runId: run.id, floor, results: 0, spend: 0, partial: true };
+  }
 
   // then each candidate once, against both reference answers
   const results = [];
@@ -134,14 +157,24 @@ export async function runEvaluation(workloadId) {
                 @gate_structure, @gate_accuracy, @gate_coverage, @gate_complete, @failures, @created_at)`)
       .run(row);
     results.push(row);
+    if (!settle(`Measuring ${workload.slug} on ${cand.model_id}`)) {
+      stoppedShort = cand.model_id;
+      break;
+    }
   }
 
-  if (spend > 0) chargeEval(workload.workspace_id, spend, `Measuring ${workload.slug}`);
-  db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, spend_usd = ? WHERE id = ?`)
-    .run(now(), round8(spend), run.id);
+  settle(`Measuring ${workload.slug}`);
+  db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ? WHERE id = ?`)
+    .run(now(), stoppedShort ? `balance ran out after ${stoppedShort}` : null, run.id);
 
   // the cheapest model that cleared, and what we do about it
   const refMonthly = monthlyOn(workloadId, reference);
+  /* the reference is not a candidate, but every screen compares against what it costs,
+     so it is recorded on the run alongside them */
+  db.prepare(`INSERT OR REPLACE INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd,
+              verdict, gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at)
+              VALUES (?, ?, ?, ?, 0, ?, 'reference', 100, 100, 100, 100, 0, ?)`)
+    .run(id('res'), run.id, reference, samples.length * 2, refMonthly, now());
   const cleared = results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd !== null)
     .filter((r) => refMonthly === null || r.cost_month_usd < refMonthly)
     .sort((a, b) => a.cost_month_usd - b.cost_month_usd);
@@ -175,7 +208,7 @@ export async function runEvaluation(workloadId) {
       workloadId,
     });
   }
-  return { ok: true, runId: run.id, floor, results: results.length, spend: round8(spend) };
+  return { ok: true, runId: run.id, floor, results: results.length, partial: !!stoppedShort };
 }
 
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);

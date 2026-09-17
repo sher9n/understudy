@@ -2,20 +2,24 @@
    without a provider key. It only ever uses the public API: nothing is written
    straight into the database, so what you see is what a real customer would see. */
 
+import crypto from 'node:crypto';
 import { db, now } from '../src/db/index.js';
 import config from '../src/config.js';
 
 const BASE = `http://localhost:${config.PORT}`;
 const DAY = 86400000;
 
-const ws = db.prepare('SELECT * FROM workspaces ORDER BY created_at DESC LIMIT 1').get();
-if (!ws) {
-  console.error('No workspace yet. Sign up first, then run this.');
-  process.exit(1);
-}
 const key = process.env.SEED_KEY;
 if (!key) {
-  console.error('Set SEED_KEY to the us_live_ key the sign up showed you, then run this again.');
+  console.error('Set SEED_KEY to a us_live_ key, then run this again.');
+  process.exit(1);
+}
+// the key decides the workspace, exactly as it does for a real caller
+const keyHash = crypto.createHash('sha256').update(key).digest('hex');
+const ws = db.prepare(
+  `SELECT w.* FROM workspaces w JOIN api_keys k ON k.workspace_id = w.id WHERE k.key_hash = ?`).get(keyHash);
+if (!ws) {
+  console.error('That key does not belong to any workspace.');
   process.exit(1);
 }
 

@@ -111,6 +111,7 @@ api.get('/workloads/:id', (req, res) => {
       WHERE workload_id = ? AND created_at >= ? AND source != 'replay'`).get(w.id, since);
   const cert = certificate(w.id);
   const best = cert?.results.find((r) => r.verdict === 'cleared' && r.model_id !== w.routed_model);
+  const refCost = cert?.referenceCostMonth ?? null;
   return res.json({
     id: w.id, name: w.slug, shape: shapeLabel[w.shape_kind] || w.shape_kind,
     tools: JSON.parse(w.tool_names || '[]'),
@@ -123,7 +124,8 @@ api.get('/workloads/:id', (req, res) => {
       rounds: cert.rounds, sampleSize: cert.run.sample_size, floor: cert.run.floor_pct,
       noise: cert.run.noise_pct, reference: cert.run.reference_model,
       finishedAt: cert.run.finished_at,
-      results: cert.results.map((r) => ({
+      referenceCostMonth: refCost,
+      results: cert.results.filter((r) => r.verdict !== 'reference').map((r) => ({
         model: r.model_id, runs: r.runs_total, gap: r.gap_pct,
         costMonth: r.cost_month_usd, verdict: r.verdict,
         gates: { structure: r.gate_structure, accuracy: r.gate_accuracy, coverage: r.gate_coverage, complete: r.gate_complete },

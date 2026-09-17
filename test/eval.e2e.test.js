@@ -119,8 +119,14 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
   assert.equal(run.status, 'done');
   assert.equal(run.sample_size, 100);
 
-  const results = db.prepare('SELECT * FROM eval_results WHERE run_id = ? ORDER BY model_id').all(out.runId);
+  const all = db.prepare('SELECT * FROM eval_results WHERE run_id = ? ORDER BY model_id').all(out.runId);
+  const results = all.filter((r) => r.verdict !== 'reference');
   assert.equal(results.length, 2, 'both candidates should have been tried');
+  // the reference is recorded too, so every screen can compare against what it costs
+  const ref = all.find((r) => r.verdict === 'reference');
+  assert.ok(ref, 'the reference model should be recorded on the run');
+  assert.equal(ref.model_id, 'openai/gpt-5.4');
+  assert.ok(ref.cost_month_usd > 0, 'the reference should carry a monthly cost');
 
   const steady = results.find((r) => r.model_id === 'vendor/steady-small');
   const drifty = results.find((r) => r.model_id === 'vendor/drifty-small');

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { api } from './api.js';
 import Shell from './Shell.jsx';
 import Auth from './screens/Auth.jsx';
+import Home from './screens/Home.jsx';
 import Dashboard from './screens/Dashboard.jsx';
 import Workloads from './screens/Workloads.jsx';
 import WorkloadDetail from './screens/WorkloadDetail.jsx';
@@ -13,7 +14,7 @@ const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
 
 export default function App() {
   const [me, setMe] = useState(null);
-  const [screen, setScreen] = useState('dash');
+  const [screen, setScreen] = useState('home');
   const [openId, setOpenId] = useState(null);
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -38,12 +39,23 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (me?.signedIn && APP.has(screen) && !openId) load(screen);
-  }, [me, screen, openId, load]);
+    if (me?.signedIn && APP.has(screen) && !openId && !data) load(screen);
+  }, [me, screen, openId, data, load]);
 
   const go = (next) => { setOpenId(null); setScreen(next); setData(null); };
 
   if (!me) return <div className="u" data-mode="light"><div className="loading">Loading…</div></div>;
+
+  if (screen === 'home') {
+    return (
+      <div className="u" data-mode={dark ? 'dark' : 'light'}>
+        <Home
+          go={(where) => setScreen(me.signedIn && where !== 'theme' ? 'dash' : where)}
+          toggleTheme={() => setDark(!dark)}
+        />
+      </div>
+    );
+  }
 
   if (!me.signedIn || screen === 'signin' || screen === 'signup') {
     return (
@@ -83,7 +95,7 @@ export default function App() {
         go={go}
         dark={dark}
         setDark={setDark}
-        onSignOut={async () => { await api.signOut(); setMe({ signedIn: false }); setScreen('signin'); }}
+        onSignOut={async () => { await api.signOut(); setMe({ signedIn: false }); setScreen('home'); }}
       >
         {body()}
       </Shell>

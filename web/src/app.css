@@ -1,4 +1,5 @@
-/* Lifted from the finalised design board so the app and the artboards cannot drift. */
+/* Lifted from design/final/Main.dc.html by scripts/lift-design.js.
+   Do not edit here: change the design board and run `node scripts/lift-design.js`. */
 
     [data-mode='light'] {
       --bg: #ffffff; --panel: #f7f7f8; --raise: #ffffff; --line: #e7e7e9; --line-strong: #d5d5da;

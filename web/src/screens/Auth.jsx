@@ -123,7 +123,7 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
               </div>
               <div>
                 <div className="fl"><label htmlFor="password">Password</label></div>
-                <input className="field" id="password" type="password" required minLength={8} value={password}
+                <input className="field" id="password" type="password" required minLength={signUp ? 8 : undefined} value={password}
                   autoComplete={signUp ? 'new-password' : 'current-password'}
                   placeholder={signUp ? 'At least 8 characters' : 'Your password'}
                   onChange={(e) => setPassword(e.target.value)} />

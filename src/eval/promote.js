@@ -73,8 +73,12 @@ export function certificate(workloadId, runId = null) {
       WHERE run_id IN (SELECT id FROM eval_runs WHERE workload_id = ?) GROUP BY model_id`)
     .all(workloadId);
   const totals = new Map(runsTotal.map((r) => [r.model_id, r.runs]));
+  const refCost = db.prepare(
+    `SELECT cost_month_usd FROM eval_results WHERE run_id = ? AND model_id = ?`)
+    .get(run.id, run.reference_model)?.cost_month_usd ?? null;
   return {
     run,
+    referenceCostMonth: refCost,
     rounds: db.prepare(`SELECT COUNT(*) AS n FROM eval_runs WHERE workload_id = ? AND status = 'done'`)
       .get(workloadId).n,
     results: results.map((r) => ({ ...r, runs_total: totals.get(r.model_id) ?? r.runs })),

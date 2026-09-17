@@ -77,9 +77,10 @@ export function workloadStats(workspaceId, days = 30) {
   const since = now() - days * DAY;
   return db.prepare(
     `SELECT w.*,
-            (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.created_at >= ?) AS calls,
+            (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.created_at >= ?
+                AND c.source != 'replay') AS calls,
             (SELECT COALESCE(SUM(c.charged_usd), 0) FROM calls c
-              WHERE c.workload_id = w.id AND c.created_at >= ?) AS spend
+              WHERE c.workload_id = w.id AND c.created_at >= ? AND c.source != 'replay') AS spend
        FROM workloads w WHERE w.workspace_id = ?
       ORDER BY spend DESC, w.created_at`).all(since, since, workspaceId);
 }
