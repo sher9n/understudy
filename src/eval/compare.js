@@ -93,6 +93,9 @@ export function floorFrom(noisePct, { multiple, minPct }) {
   return Math.max(noisePct * multiple, minPct);
 }
 
+/** A bar is only meaningful while the reference agrees with itself most of the time. */
+export const barIsMeaningful = (noisePct, maxPct) => noisePct <= maxPct;
+
 export function verdictFor(gapPct, floorPct, runs, { minRuns, reviewBand }) {
   if (runs < minRuns) return 'insufficient';
   if (gapPct <= floorPct) return 'cleared';

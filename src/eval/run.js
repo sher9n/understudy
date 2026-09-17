@@ -3,7 +3,7 @@ import config, { canRoute } from '../config.js';
 import { chat, priceCall, UpstreamError } from '../openrouter.js';
 import { addActivity, recordCall } from '../traffic.js';
 import { gateEval, chargeEval } from '../billing.js';
-import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls } from './compare.js';
+import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, barIsMeaningful } from './compare.js';
 import { promote } from './promote.js';
 
 const DAY = 86400000;
@@ -110,6 +110,26 @@ export async function runEvaluation(workloadId) {
     .run(round8(noise * 100), round8(floor), run.id);
   db.prepare('UPDATE workloads SET floor_pct = ?, updated_at = ? WHERE id = ?')
     .run(round8(floor), now(), workloadId);
+
+  /* If the reference model cannot answer its own calls consistently, the bar it produces is
+     not a quality standard, it is noise. Certifying against it would let anything through,
+     which is the opposite of what this product promises. Stop here and say so. */
+  if (!barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
+    settle(`Measuring ${workload.slug}, setting the bar`);
+    db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ? WHERE id = ?`)
+      .run(now(), `reference disagreed with itself on ${(noise * 100).toFixed(1)}% of calls`, run.id);
+    db.prepare(`UPDATE workloads SET status = 'no_match', status_note = ?, floor_pct = NULL,
+                updated_at = ? WHERE id = ?`)
+      .run('We could not measure this workload', now(), workloadId);
+    addActivity(workload.workspace_id, {
+      kind: 'floor',
+      title: `We could not measure ${workload.slug}`,
+      detail: `${reference} gave a different answer to the same call ${(noise * 100).toFixed(0)}% of the time, `
+        + 'so there is no steady bar to hold a cheaper model to. Nothing has been switched.',
+      workloadId,
+    });
+    return { ok: true, runId: run.id, floor: null, results: 0, unmeasurable: true };
+  }
 
   if (!settle(`Measuring ${workload.slug}, setting the bar`)) {
     db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ? WHERE id = ?`)

@@ -44,6 +44,9 @@ export const config = {
   EVAL_FIRST_RUN_MIN_CALLS: num('EVAL_FIRST_RUN_MIN_CALLS', 120),
   EVAL_FLOOR_MULTIPLE: num('EVAL_FLOOR_MULTIPLE', 1.25),
   EVAL_FLOOR_MIN_PCT: num('EVAL_FLOOR_MIN_PCT', 3),
+  /* Above this, the customer's own model is not answering consistently enough for a bar to
+     mean anything, so nothing may be certified against it. */
+  EVAL_NOISE_MAX_PCT: num('EVAL_NOISE_MAX_PCT', 40),
   EVAL_REVIEW_BAND: num('EVAL_REVIEW_BAND', 1.25),
   EVAL_MAX_USD_PER_RUN: num('EVAL_MAX_USD_PER_RUN', 2),
   EVAL_JUDGE_MODEL: str('EVAL_JUDGE_MODEL', 'openai/gpt-5.4-mini'),

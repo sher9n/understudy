@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { signatureOf, shapeOf, normalizeSystem, nameFor } from '../src/classify.js';
-import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, canonical } from '../src/eval/compare.js';
+import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, canonical, barIsMeaningful } from '../src/eval/compare.js';
 
 const call = (system, extra = {}) => ({
   model: 'openai/gpt-5.4',
@@ -118,4 +118,12 @@ test('a workload name skips filler words', () => {
   assert.equal(nameFor(sig), 'extract-line-items');
   const sig2 = signatureOf(call('Write a friendly reply to this customer, in our house tone.'));
   assert.equal(nameFor(sig2), 'write-friendly-reply');
+});
+
+test('a bar is only meaningful while the reference agrees with itself', () => {
+  assert.equal(barIsMeaningful(2.8, 40), true);
+  assert.equal(barIsMeaningful(40, 40), true);
+  assert.equal(barIsMeaningful(41, 40), false);
+  // the case that bit: the reference never produced a usable answer, so the bar was 125%
+  assert.equal(barIsMeaningful(100, 40), false);
 });
