@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { href } from '../router.js';
 import { api } from '../api.js';
 import Board from '../Board.jsx';
 import signinHtml from './signin.html?raw';
@@ -35,6 +36,7 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
       html={signUp ? signupHtml : signinHtml}
       vals={{ dark, light: !dark, error }}
       onSubmit={submit}
+      hrefs={{ go_signup: href('signup'), go_signin: href('signin') }}
       on={{
         toggleTheme: () => setDark(!dark),
         go_signup: () => go('signup'),

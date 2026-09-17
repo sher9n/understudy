@@ -1,4 +1,5 @@
 import React from 'react';
+import { href } from '../router.js';
 import Board from '../Board.jsx';
 import html from './home.html?raw';
 
@@ -9,6 +10,7 @@ export default function Home({ go, dark, setDark }) {
     <Board
       html={html}
       vals={{ dark, light: !dark }}
+      hrefs={{ go_signup: href('signup'), go_signin: href('signin') }}
       on={{
         go_signup: () => go('signup'),
         go_signin: () => go('signin'),

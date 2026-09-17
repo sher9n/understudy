@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { href } from '../router.js';
+import { plainClick } from '../nav.jsx';
 import { api, usd, num, dateIST } from '../api.js';
 import { CandidateChart } from '../Charts.jsx';
 
@@ -44,7 +46,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
   return (
     <>
       <div className="phead" style={{ display: 'block' }}>
-        <a className="dback lnk" onClick={onBack}>← Workloads</a>
+        <a className="dback lnk" href={href('work')} onClick={plainClick(onBack)}>← Workloads</a>
         <div className="dhead">
           <h1 style={{ margin: 0 }}>{w.name}</h1>
           <span className={`pill ${w.tone}`}>{w.label}</span>

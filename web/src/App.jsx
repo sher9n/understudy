@@ -13,6 +13,11 @@ import ConnectWizard from './screens/ConnectWizard.jsx';
 
 const APP = new Set(['dash', 'work', 'models', 'settings']);
 
+/* Every one of these screens is built out of the customer's own traffic, so before any has
+   arrived they have nothing in them at all. Settings is deliberately not on the list: your
+   keys, your balance and the way out of the account are worth reaching on day one. */
+const NEEDS_TRAFFIC = new Set(['dash', 'work', 'models']);
+
 export default function App() {
   const [me, setMe] = useState(null);
   const [{ screen, openId }, setWhere] = useState(() => parse());
@@ -39,6 +44,23 @@ export default function App() {
       navigate(home, null, { replace: true });
       setWhere({ screen: home, openId: null });
     }
+  }, [me, screen]);
+
+  /* Somebody who has never sent us a call belongs on Connect, however they reached an empty
+     dashboard: a typed address, an old bookmark, a reopened tab. The check asks the server
+     rather than trusting what was true when the page loaded, so the moment their first call
+     lands the wizard's own way out stops being a bounce. */
+  useEffect(() => {
+    if (!me?.signedIn || me.connected) return undefined;
+    if (!NEEDS_TRAFFIC.has(screen)) return undefined;
+    let live = true;
+    api.me().then((who) => {
+      if (!live) return;
+      if (who.connected) { setMe(who); return; }
+      navigate('connect', null, { replace: true });
+      setWhere({ screen: 'connect', openId: null });
+    }).catch(() => {});
+    return () => { live = false; };
   }, [me, screen]);
 
   const load = useCallback(async (which) => {
@@ -93,7 +115,12 @@ export default function App() {
     );
   }
 
-  if (screen === 'connect') {
+  /* Before any traffic has arrived Connect is the whole app: a three step guide on its own
+     page, with nothing beside it to wander off into. Once a customer is connected the same
+     screen becomes an ordinary page inside the app, showing the endpoint, the key and the
+     snippets, so they can come back to look something up or wire a second service without
+     being walked through getting started all over again. */
+  if (screen === 'connect' && !me.connected) {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
         <ConnectWizard go={go} dark={dark} setDark={setDark} freshKey={freshKey} />
@@ -106,6 +133,9 @@ export default function App() {
     if (openId) {
       return <WorkloadDetail id={openId} onBack={() => go('work')}
         onChanged={() => load('work')} />;
+    }
+    if (screen === 'connect') {
+      return <ConnectWizard go={go} dark={dark} setDark={setDark} freshKey={freshKey} plain />;
     }
     if (err) return <div className="errbox">{err}</div>;
     if (!data) return <div className="loading">Loading…</div>;

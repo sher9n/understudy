@@ -1,4 +1,6 @@
 import React from 'react';
+import { href } from './router.js';
+import { plainClick } from './nav.jsx';
 import { usd, num } from './api.js';
 
 const CHEV = (
@@ -28,7 +30,8 @@ export default function WorkloadTable({ rows, onOpen, priced = true, title = 'Yo
             <span />
           </div>
           {rows.map((r) => (
-            <div className="optrow" key={r.id} onClick={() => onOpen(r.id)}>
+            <a className="optrow" key={r.id} href={href('work', r.id)}
+              onClick={plainClick(() => onOpen(r.id))}>
               <div className="on">{r.name}</div>
               <div className="num">{num(r.calls)}</div>
               <div className="shp">{r.shape}</div>
@@ -36,7 +39,7 @@ export default function WorkloadTable({ rows, onOpen, priced = true, title = 'Yo
               <div className="mdl">{r.model}</div>
               <div><span className={`pill ${r.tone}`}>{r.label}</span></div>
               {CHEV}
-            </div>
+            </a>
           ))}
         </>
       )}

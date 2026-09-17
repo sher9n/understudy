@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { href } from '../router.js';
 import { api } from '../api.js';
 import Board from '../Board.jsx';
 import html from './connect.html?raw';
@@ -16,7 +17,7 @@ const summary = (d) => {
     + ' by the job they do. Nothing here was labelled by you.';
 };
 
-export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn }) {
+export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn, plain = false }) {
   const [data, setData] = useState(null);
   const [step, setStep] = useState(1);
   const [way, setWay] = useState('route');
@@ -38,7 +39,7 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn })
   const calls = data.calls > 0;
   const vals = {
     dark, light: !dark,
-    isStep1: step === 1, isStep2: step === 2,
+    isStep1: plain || step === 1, isStep2: !plain && step === 2,
     s1Cls: step === 1 ? 'st on' : 'st done',
     s2Cls: step === 1 ? 'st' : (calls ? 'st done' : 'st on'),
     s3Cls: (step === 2 && calls) ? 'st on done' : 'st',
@@ -59,16 +60,21 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn })
     pick_route: () => setWay('route'),
     pick_copy: () => setWay('copy'),
     arrive: load,            // the board's "waiting" box: here it just checks again
-    go_dash: () => go('dash'),
-    back: () => (step === 2 ? setStep(1) : go('dash')),
+    /* Until a call has arrived the dashboard is empty and the app sends you straight back
+       here, so the wordmark and Back lead to Connect, which is this customer's home for
+       now. The big "Go to your dashboard" button only appears once a call has landed. */
+    go_dash: () => go(calls ? 'dash' : 'connect'),
+    back: () => (step === 2 ? setStep(1) : go(calls ? 'dash' : 'connect')),
   };
   for (const l of LANGS) on[`pick_${l}`] = () => setLang(l);
 
   return (
     <Board
+      className={plain ? 'plain' : ''}
       html={html}
       vals={vals}
       on={on}
+      hrefs={{ go_dash: href(calls ? 'dash' : 'connect') }}
       subs={{
         [SAMPLE_KEY]: freshKey || (data.keyPrefix ? `${data.keyPrefix}…` : SAMPLE_KEY),
         [SAMPLE_BASE]: data.baseUrl,

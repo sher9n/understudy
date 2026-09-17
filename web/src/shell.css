@@ -76,3 +76,92 @@ body { margin: 0; }
 .split2 > .panel2:last-child { height: 0; min-height: 100%; }
 .split2 > .panel2:last-child .feed { flex: 1; min-height: 0; overflow-y: auto; }
 .p2body { padding-bottom: 14px; }
+
+/* The menu belongs to the window, not to the document. It used to stretch to the height of
+   whatever page it sat beside, so on a long page like Settings your own name and the theme
+   switch ended up at the bottom of the document and you had to scroll to reach them. It now
+   fills the screen and stays there, with its own scrollbar if the menu ever outgrows it. */
+.shell > .side {
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  box-sizing: border-box;
+  /* The menu must NOT be a scroll box. The account menu is positioned to escape the
+     sidebar, and a box that scrolls on one axis clips the other axis too, which sliced
+     the popup off at the sidebar's edge (68px of it when the menu is collapsed). So only
+     the list of links scrolls, which is the one part that can outgrow a short screen,
+     and the name and theme switch below it stay put. */
+  overflow: visible;
+}
+.shell > .side > .sidenav { min-height: 0; overflow-y: auto; }
+
+/* Two class names in the lifted sheet are styled both on their own and as a modifier:
+   .mini is a small blue button AND the collapsed menu, and .on is a workload name AND the
+   active nav item. So collapsing the menu painted it as a button. Buttons keep the button
+   styling; the two places that borrow the name get their own look back. */
+aside.side.mini {
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  line-height: normal;
+  white-space: normal;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  padding: 18px 12px;
+  cursor: default;
+}
+.sidenav a.nv.on { font-size: inherit; font-weight: inherit; letter-spacing: normal; }
+/* the avatar is a flex child, so in the narrow menu it was squashed from 27px to 8px */
+.av { flex: 0 0 auto; }
+
+/* Settings is a long list of small facts, so it reads better dense than roomy. Scoped to
+   this screen: the dashboard and the workload tables keep the airier rhythm they were
+   tuned for. */
+.settingspage .opthead { padding: 13px 18px; }
+.settingspage .opthead h2 { font-size: 14.5px; }
+.settingspage .kvrow { padding: 9px 18px; gap: 14px; }
+.settingspage .kvk { flex-basis: 150px; font-size: 13px; }
+.settingspage .kvv { font-size: 13.5px; }
+.settingspage .gthead, .settingspage .gtrow { padding: 9px 18px; }
+.settingspage .inp { padding: 6px 10px; font-size: 13.5px; min-width: 180px; }
+.settingspage .mini, .settingspage .minig { padding: 7px 12px; font-size: 12.5px; }
+.settingspage .barnote { padding: 11px 18px 13px; font-size: 12.5px; }
+.settingspage .opt { margin-top: 12px; }
+.settingspage .sw { width: 34px; height: 20px; }
+.settingspage .sw i { width: 14px; height: 14px; }
+.settingspage .sw.swon i { left: 16px; }
+
+/* The collapsed menu shows exactly one icon per row, so the footer does too: the avatar
+   alone, centred under the nav icons, instead of the avatar and the moon squeezed into
+   44px side by side. The theme switch does not disappear with it, it is a labelled row
+   inside the account menu, which is where it is now reachable from either state. */
+.side.mini .themebtn, .side.mini .footgrow { display: none; }
+.sidefoot .footgrow { flex-grow: 1; }
+.side.mini .sidefoot .acctwrap { justify-content: center; }
+.side.mini .acctbtn { padding: 5px; margin: -5px; }
+
+/* The appearance row carries a label and a switch, so it reads as a setting rather than
+   as another destination. */
+.acctrow.acctsw { justify-content: space-between; gap: 12px; }
+.acctswl { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.acctrow.acctsw .sw { flex: 0 0 auto; width: 32px; height: 19px; border-radius: 10px; }
+.acctrow.acctsw .sw i { width: 13px; height: 13px; top: 2px; left: 2px; }
+.acctrow.acctsw .sw.swon i { left: 16px; }
+
+/* Connect, once you are connected. The same screen, minus the getting started scaffolding:
+   no three step rail, no "you are three steps from your first measurement", no Next button,
+   and no second top bar, because the app's own menu is already around it. What is left is
+   what someone comes back for: the endpoint, the key and the snippet in their language. */
+.board.plain .top2,
+.board.plain .rail,
+.board.plain .wizcta { display: none; }
+.board.plain .wiz { display: block; }
+.board.plain .wizmain { padding: 0; max-width: none; }
+
+/* A workload row is now a real link, so it would otherwise inherit the stylesheet's link
+   colour and paint the whole row blue. It keeps the text colours it was designed with. */
+a.optrow { color: inherit; }
+a.optrow:hover { text-decoration: none; }
+a.wm:hover { text-decoration: none; }

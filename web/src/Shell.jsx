@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { href } from './router.js';
+import { plainClick } from './nav.jsx';
 
 const S = { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor',
   strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true };
@@ -40,7 +42,7 @@ export default function Shell({ here, me, go, onSignOut, dark, setDark, children
     <div className="shell">
       <aside className={navOpen ? 'side' : 'side mini'}>
         <div className="sidetop">
-          <span className="wm">Understudy</span>
+          <a className="wm" href={href('dash')} onClick={plainClick(() => go('dash'))}>Understudy</a>
           <button className="collapse" onClick={() => setNavOpen((v) => !v)}
             aria-label={navOpen ? 'Collapse the menu' : 'Expand the menu'}>
             {navOpen
@@ -50,7 +52,8 @@ export default function Shell({ here, me, go, onSignOut, dark, setDark, children
         </div>
         <nav className="sidenav">
           {NAV.map((n) => (
-            <a key={n.key} className={at(n.key)} onClick={open(n.key)}>
+            <a key={n.key} className={at(n.key)} href={href(n.key)}
+              onClick={plainClick(open(n.key))}>
               {n.icon}<span className="lbl">{n.label}</span>
             </a>
           ))}
@@ -70,14 +73,26 @@ export default function Shell({ here, me, go, onSignOut, dark, setDark, children
                     <div className="accte">{me?.email}</div>
                   </div>
                 </div>
-                <a className="acctrow lnk" onClick={open('settings')}>
+                <a className="acctrow lnk" href={href('settings')}
+                  onClick={plainClick(open('settings'))}>
                   <svg {...S24}><circle cx="12" cy="8" r="3.4" /><path d="M5 20a7 7 0 0114 0" /></svg>
                   Account settings
                 </a>
-                <a className="acctrow lnk" onClick={open('settings')}>
+                <a className="acctrow lnk" href={href('settings')}
+                  onClick={plainClick(open('settings'))}>
                   <svg {...S24}><rect x="3" y="6" width="18" height="13" rx="2" /><path d="M3 10.5h18" /></svg>
                   Billing and balance
                 </a>
+                <button className="acctrow acctsw" onClick={() => setDark(!dark)}
+                  aria-pressed={dark}>
+                  <span className="acctswl">
+                    {dark
+                      ? <svg {...S24}><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19" /></svg>
+                      : <svg {...S24}><path d="M21 13a8.5 8.5 0 01-10-10 8.5 8.5 0 1010 10z" /></svg>}
+                    Dark mode
+                  </span>
+                  <span className={dark ? 'sw swon' : 'sw'} aria-hidden="true"><i /></span>
+                </button>
                 <div className="acctsep" />
                 <button className="acctrow acctout" onClick={() => { setAcctOpen(false); onSignOut(); }}>
                   <svg {...S24}><path d="M10 4H6a2 2 0 00-2 2v12a2 2 0 002 2h4" /><path d="M16 15l4-3-4-3" /><path d="M20 12H10" /></svg>
@@ -86,8 +101,8 @@ export default function Shell({ here, me, go, onSignOut, dark, setDark, children
               </div>
             )}
           </div>
-          <div style={{ flexGrow: 1 }} />
-          <button className="ni" style={{ width: 'auto' }} onClick={() => setDark(!dark)}
+          <div className="footgrow" />
+          <button className="ni themebtn" style={{ width: 'auto' }} onClick={() => setDark(!dark)}
             aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}>
             {dark
               ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19" /></svg>

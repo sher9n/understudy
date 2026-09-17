@@ -20,7 +20,8 @@ import React, { useEffect, useRef } from 'react';
    work once, and the screen would then be stuck on whatever it first showed.
 
    Real inputs are left alone, so typing is never wiped by a re-render. */
-export default function Board({ html, vals = {}, on = {}, subs, repeat, onSubmit, className = '' }) {
+export default function Board({ html, vals = {}, on = {}, hrefs = {}, subs, repeat, onSubmit,
+  className = '' }) {
   const host = useRef(null);
   const original = useRef(new Map());   // text node -> what the board said
   const rows = useRef(new Map());       // selector -> { template, parent, marker }
@@ -75,11 +76,20 @@ export default function Board({ html, vals = {}, on = {}, subs, repeat, onSubmit
       const next = vals[el.getAttribute('data-text')];
       el.textContent = next === undefined || next === null ? '' : String(next);
     }
+    /* A board control that goes somewhere gets that address put on it, so the browser can
+       offer to open it in a new tab. Controls that only change what this screen is showing
+       (a language tab, the next step) have no address and stay plain. */
+    for (const el of root.querySelectorAll('[data-go]')) {
+      const to = hrefs[el.getAttribute('data-go')];
+      if (to && el.tagName === 'A') el.setAttribute('href', to);
+    }
   });
 
   const click = (e) => {
     const hit = e.target.closest('[data-go]');
     if (!hit || !host.current.contains(hit)) return;
+    // a click asking for a new tab or window belongs to the browser, not to this screen
+    if (hit.hasAttribute('href') && (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)) return;
     const fn = on[hit.getAttribute('data-go')];
     if (!fn) return;
     e.preventDefault();

@@ -19,7 +19,7 @@ export default function Settings({ data, reload }) {
   };
 
   return (
-    <>
+    <div className="settingspage">
       <div className="phead"><h1>Settings</h1></div>
       {err && <div className="errbox">{err}</div>}
 
@@ -130,6 +130,6 @@ export default function Settings({ data, reload }) {
           <span className="kva"><Sw on={data.zdrOnly} busy onClick={() => {}} /></span>
         </div>
       </section>
-    </>
+    </div>
   );
 }
