@@ -20,11 +20,30 @@ const bool = (name, fallback) => {
   return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
 };
 
+/* The address customers are given.
+
+   Connect shows this to them as the base URL to point their client at, so getting it wrong
+   hands them something that resolves to nothing. Set PUBLIC_URL explicitly if the app sits
+   behind your own domain; on a host that hands the app a domain of its own, that domain is
+   the answer and is picked up without configuring anything. */
+const publicUrl = () => {
+  const given = str('PUBLIC_URL');
+  if (given) return given.replace(/\/+$/, '');
+  const host = str('RAILWAY_PUBLIC_DOMAIN');
+  if (host) return `https://${host}`;
+  return `http://localhost:${num('PORT', 4600)}`;
+};
+
 export const config = {
   PORT: num('PORT', 4600),
+  /* Where the database file lives. On a host with an ephemeral filesystem this must point
+     at a mounted volume, or every deploy starts from an empty database. */
   DATA_DIR: str('DATA_DIR', 'data'),
   DB_FILE: str('DB_FILE', 'understudy.db'),
-  PUBLIC_URL: str('PUBLIC_URL', `http://localhost:${num('PORT', 4600)}`),
+  PUBLIC_URL: publicUrl(),
+  /* A session cookie crosses the public internet once this is deployed, so it is marked
+     Secure whenever the app is served over https. */
+  SECURE_COOKIES: bool('SECURE_COOKIES', publicUrl().startsWith('https://')),
 
   // routing
   OPENROUTER_API_KEY: str('OPENROUTER_API_KEY'),

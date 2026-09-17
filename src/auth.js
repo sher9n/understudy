@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { db, id, now } from './db/index.js';
 import { issueKey } from './keys.js';
+import config from './config.js';
 
 const DAY = 86400000;
 const SESSION_DAYS = 30;
@@ -23,13 +24,13 @@ export function createAccount({ email, password, name = '' }) {
   const ws = {
     id: id('ws'), owner_user_id: user.id,
     name: name.trim() ? `${name.trim().split(' ')[0]}'s workspace` : 'Understudy',
-    mode: 'route', created_at: now(),
+    mode: 'route', retention_days: config.RETENTION_DAYS, created_at: now(),
   };
   db.transaction(() => {
     db.prepare(`INSERT INTO users (id, email, name, pw_hash, pw_salt, created_at)
                 VALUES (@id, @email, @name, @pw_hash, @pw_salt, @created_at)`).run(user);
-    db.prepare(`INSERT INTO workspaces (id, owner_user_id, name, mode, created_at)
-                VALUES (@id, @owner_user_id, @name, @mode, @created_at)`).run(ws);
+    db.prepare(`INSERT INTO workspaces (id, owner_user_id, name, mode, retention_days, created_at)
+                VALUES (@id, @owner_user_id, @name, @mode, @retention_days, @created_at)`).run(ws);
     db.prepare(`INSERT INTO billing_accounts (workspace_id, balance_usd, updated_at)
                 VALUES (?, 0, ?)`).run(ws.id, now());
   })();
@@ -78,6 +79,7 @@ export function requireUser(req, res, next) {
   next();
 }
 
+const SECURE = config.SECURE_COOKIES ? '; Secure' : '';
 export const cookieFor = (value) =>
-  `us_session=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`;
-export const clearCookie = () => 'us_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0';
+  `us_session=${value}; Path=/; HttpOnly; SameSite=Lax${SECURE}; Max-Age=${SESSION_DAYS * 86400}`;
+export const clearCookie = () => `us_session=; Path=/; HttpOnly; SameSite=Lax${SECURE}; Max-Age=0`;
