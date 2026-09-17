@@ -5,21 +5,21 @@
       <a href="#">Measurements</a><a href="#">Datasets</a><a href="#">Method</a>
     </nav>
     <div style="flex-grow: 1;"></div>
-    <button class="ni" style="width: auto;" data-go="theme" aria-label="Switch the theme">
-      <span data-when="dark">
+    <button class="ni" style="width: auto;" data-go="toggleTheme" aria-label="Switch the theme">
+      <span data-if="dark">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
           <circle cx="12" cy="12" r="4"></circle>
           <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"></path>
         </svg>
-      
-      <span data-when="light">
+      </span>
+      <span data-if="light">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
           <path d="M21 13a8.5 8.5 0 01-10-10 8.5 8.5 0 1010 10z"></path>
         </svg>
-      
+      </span>
     </button>
-    <a data-go="signin" class="plain" style="font-size: 13.5px;">Sign in</a>
-    <a data-go="signup" class="btn">Get an API key</a>
+    <a data-go="go_signin" class="plain" style="font-size: 13.5px;">Sign in</a>
+    <a data-go="go_signup" class="btn">Get an API key</a>
   </header>
   <div class="lp">
 
@@ -36,8 +36,8 @@
       </div>
 
       <div class="lp-cta">
-        <a data-go="signup" class="btn big">Get an API key</a>
-        <a data-go="signup" class="btn sec big">See how it works</a>
+        <a data-go="go_signup" class="btn big">Get an API key</a>
+        <a data-go="go_signup" class="btn sec big">See how it works</a>
       </div>
     </section>
 
@@ -131,7 +131,7 @@
     <section class="lp-end">
       <h2 style="line-height: 1.14;"><span style="display: block; text-wrap: balance;">Up to 24&#215; lower cost.</span><span style="display: block; text-wrap: balance;">Zero compromise on quality.</span></h2>
       <div class="lp-cta" style="margin-top: 36px;">
-        <a data-go="signup" class="btn big">Get an API key</a>
+        <a data-go="go_signup" class="btn big">Get an API key</a>
         <a href="#" class="btn sec big">Talk to us</a>
       </div>
     </section>

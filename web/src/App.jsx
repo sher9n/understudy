@@ -8,14 +8,15 @@ import Workloads from './screens/Workloads.jsx';
 import WorkloadDetail from './screens/WorkloadDetail.jsx';
 import Models from './screens/Models.jsx';
 import Settings from './screens/Settings.jsx';
-import Connect from './screens/Connect.jsx';
+import ConnectWizard from './screens/ConnectWizard.jsx';
 
-const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
+const APP = new Set(['dash', 'work', 'models', 'settings']);
 
 export default function App() {
   const [me, setMe] = useState(null);
   const [screen, setScreen] = useState('home');
   const [openId, setOpenId] = useState(null);
+  const [freshKey, setFreshKey] = useState(null);
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [dark, setDark] = useState(() => {
@@ -34,7 +35,6 @@ export default function App() {
       if (which === 'dash' || which === 'work') setData(await api.overview());
       else if (which === 'models') setData(await api.models());
       else if (which === 'settings') setData(await api.settings());
-      else if (which === 'connect') setData(await api.connect());
     } catch (e) { setErr(e.message); }
   }, []);
 
@@ -50,8 +50,9 @@ export default function App() {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
         <Home
-          go={(where) => setScreen(me.signedIn && where !== 'theme' ? 'dash' : where)}
-          toggleTheme={() => setDark(!dark)}
+          go={(where) => setScreen(me.signedIn ? 'dash' : where)}
+          dark={dark}
+          setDark={setDark}
         />
       </div>
     );
@@ -65,8 +66,20 @@ export default function App() {
           go={setScreen}
           dark={dark}
           setDark={setDark}
-          onDone={async (fresh) => { setMe(await api.me()); go(fresh ? 'connect' : 'dash'); }}
+          onDone={async (fresh, key) => {
+            if (key) setFreshKey(key);
+            setMe(await api.me());
+            go(fresh ? 'connect' : 'dash');
+          }}
         />
+      </div>
+    );
+  }
+
+  if (screen === 'connect') {
+    return (
+      <div className="u" data-mode={dark ? 'dark' : 'light'}>
+        <ConnectWizard go={go} dark={dark} setDark={setDark} freshKey={freshKey} />
       </div>
     );
   }
@@ -84,7 +97,7 @@ export default function App() {
     if (screen === 'work') return <Workloads data={data} onOpen={open} />;
     if (screen === 'models') return <Models data={data} reload={() => load('models')} />;
     if (screen === 'settings') return <Settings data={data} reload={() => load('settings')} />;
-    return <Connect data={data} reload={() => load('connect')} />;
+    return null;
   };
 
   return (

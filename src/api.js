@@ -263,8 +263,10 @@ api.get('/connect', (req, res) => {
   const keys = listKeys(req.workspace.id).filter((k) => !k.revoked_at);
   const calls = db.prepare(
     `SELECT COUNT(*) AS n FROM calls WHERE workspace_id = ? AND source != 'replay'`).get(req.workspace.id).n;
-  const workloads = db.prepare('SELECT slug, reference_model FROM workloads WHERE workspace_id = ? LIMIT 5')
-    .all(req.workspace.id);
+  const workloads = db.prepare(
+    `SELECT w.slug, w.reference_model,
+            (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.source != 'replay') AS calls
+       FROM workloads w WHERE w.workspace_id = ? ORDER BY calls DESC LIMIT 5`).all(req.workspace.id);
   res.json({
     baseUrl: `${config.PUBLIC_URL}/v1`,
     keyPrefix: keys[0]?.prefix ?? null,

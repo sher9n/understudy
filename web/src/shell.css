@@ -34,3 +34,9 @@ body { margin: 0; }
 [data-go] { cursor: pointer; }
 .homewrap { display: flex; flex-direction: column; flex: 1; }
 .homewrap > div { flex: 1; }
+
+/* A lifted screen's sc-if wrappers must not affect layout. */
+[data-if] { display: contents; }
+[data-if][hidden] { display: none !important; }
+.board { display: flex; flex-direction: column; flex: 1; }
+.board > div { flex: 1; display: flex; flex-direction: column; }
