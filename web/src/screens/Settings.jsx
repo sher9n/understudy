@@ -11,7 +11,7 @@ export default function Settings({ data, reload }) {
   const [fresh, setFresh] = useState(null);
   const [err, setErr] = useState(null);
   const [name, setName] = useState(data.name);
-  const [workspace, setWorkspace] = useState(data.workspace);
+  const [email, setEmail] = useState(data.email);
 
   const run = (fn) => async () => {
     setBusy(true); setErr(null);
@@ -37,16 +37,13 @@ export default function Settings({ data, reload }) {
         </div>
         <div className="kvrow">
           <span className="kvk">Email</span>
-          <span className="kvv kvm">{data.email}</span>
-        </div>
-        <div className="kvrow">
-          <span className="kvk">Workspace</span>
           <span className="kvv">
-            <input className="inp" value={workspace} onChange={(e) => setWorkspace(e.target.value)} />
+            <input className="inp" type="email" value={email}
+              onChange={(e) => setEmail(e.target.value)} />
           </span>
           <span className="kva">
-            <button className="minig" disabled={busy || workspace === data.workspace}
-              onClick={run(() => api.profile({ workspace }))}>Save</button>
+            <button className="minig" disabled={busy || email.trim().toLowerCase() === data.email}
+              onClick={run(() => api.profile({ email }))}>Save</button>
           </span>
         </div>
       </section>
@@ -121,8 +118,20 @@ export default function Settings({ data, reload }) {
         <div className="opthead"><h2>Data</h2></div>
         <div className="kvrow">
           <span className="kvk">Keep call content for</span>
-          <span className="kvv kvm">{data.retentionDays} days</span>
-          <span className="kva"><span className="shp">set by this deployment</span></span>
+          <span className="kvv">
+            <span className="seg">
+              {data.retentionChoices.map((c) => (
+                <button key={c.days} disabled={busy}
+                  className={c.days === data.retentionDays ? 'segb on' : 'segb'}
+                  onClick={run(() => api.retention(c.days))}>{c.label}</button>
+              ))}
+            </span>
+            <span className="segnote">
+              {data.retentionDays
+                ? 'After this, the request and the answer are cleared. What they cost, which model ran them and every measurement are kept, so your charts do not change.'
+                : 'Nothing is cleared on a schedule. Keep this if you want old traffic available to measure a new model against.'}
+            </span>
+          </span>
         </div>
         <div className="kvrow">
           <span className="kvk">Zero data retention</span>

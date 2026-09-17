@@ -13,6 +13,11 @@ const PASSWORD = 'demo';
 const PEOPLE = [
   { email: 'sherancorera@gmail.com', name: 'Sheran Corera' },
   { email: 'sheran.corera@docupath.ai', name: 'Sheran Corera' },
+  /* Deliberately left with no traffic, and never seeded, so there is always an account
+     that still sees the three step getting started guide. The other two have traffic, so
+     they are connected and go straight to the dashboard, which is the intended behaviour
+     and is why onboarding cannot be seen from them. */
+  { email: 'new@understudy.demo', name: 'New Customer' },
 ];
 
 for (const p of PEOPLE) {
@@ -41,4 +46,4 @@ for (const p of PEOPLE) {
   const key = issueKey(ws.id);
   console.log(`${email}: created, key ${key.secret}`);
 }
-console.log(`\nBoth sign in with the password "${PASSWORD}".`);
+console.log(`\nThey all sign in with the password "${PASSWORD}".`);

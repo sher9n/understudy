@@ -30,6 +30,7 @@ export const api = {
   revokeKey: (id) => send('DELETE', `/settings/keys/${id}`),
   profile: (b) => send('POST', '/settings/profile', b),
   autoTopUp: (enabled) => send('POST', '/settings/auto-topup', { enabled }),
+  retention: (days) => send('POST', '/settings/retention', { days }),
   connect: () => send('GET', '/connect'),
 };
 

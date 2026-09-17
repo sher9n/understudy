@@ -215,10 +215,21 @@ api.post('/models/:id(*)/enabled', (req, res) => {
 
 /* Settings ----------------------------------------------------------------------- */
 
+/* The windows a customer can choose, and what each one means in plain words. 0 is a real
+   choice: keep everything, which is what a customer wants when they expect to re-measure a
+   model against old traffic later. */
+const RETENTION_CHOICES = [
+  { days: 30, label: '30 days' },
+  { days: 60, label: '60 days' },
+  { days: 90, label: '90 days' },
+  { days: 0, label: 'Keep indefinitely' },
+];
+
+
 api.get('/settings', (req, res) => {
   const acct = account(req.workspace.id);
   res.json({
-    name: req.user.name, email: req.user.email, workspace: req.workspace.name,
+    name: req.user.name, email: req.user.email,
     mode: req.workspace.mode,
     keys: listKeys(req.workspace.id).filter((k) => !k.revoked_at),
     balance: round8(acct.balance_usd),
@@ -227,7 +238,8 @@ api.get('/settings', (req, res) => {
     topUpThreshold: config.TOPUP_THRESHOLD_USD,
     card: acct.card_last4 ? { brand: acct.card_brand, last4: acct.card_last4 } : null,
     cardNote: acct.topup_failed_note,
-    retentionDays: config.RETENTION_DAYS,
+    retentionDays: req.workspace.retention_days,
+    retentionChoices: RETENTION_CHOICES,
     zdrOnly: config.ZDR_ONLY,
     canBill: canBill(),
     ledger: ledger(req.workspace.id, 10),
@@ -248,10 +260,33 @@ api.delete('/settings/keys/:id', (req, res) => {
 
 api.post('/settings/profile', (req, res) => {
   const name = String(req.body?.name ?? req.user.name).slice(0, 80);
-  const workspace = String(req.body?.workspace ?? req.workspace.name).slice(0, 80);
-  db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, req.user.id);
-  db.prepare('UPDATE workspaces SET name = ? WHERE id = ?').run(workspace, req.workspace.id);
-  res.json({ ok: true, name, workspace });
+  const email = String(req.body?.email ?? req.user.email).trim().toLowerCase().slice(0, 160);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return fail(res, 400, 'That does not look like an email address.');
+  }
+  if (email !== req.user.email) {
+    const taken = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?')
+      .get(email, req.user.id);
+    if (taken) return fail(res, 409, 'That email address is already in use.');
+  }
+  db.prepare('UPDATE users SET name = ?, email = ? WHERE id = ?').run(name, email, req.user.id);
+  return res.json({ ok: true, name, email });
+});
+
+api.post('/settings/retention', (req, res) => {
+  const days = Number(req.body?.days);
+  if (!RETENTION_CHOICES.some((c) => c.days === days)) {
+    return fail(res, 400, 'That is not one of the retention choices.');
+  }
+  db.prepare('UPDATE workspaces SET retention_days = ? WHERE id = ?').run(days, req.workspace.id);
+  addActivity(req.workspace.id, {
+    kind: 'connect',
+    title: days ? `Call content is now kept for ${days} days` : 'Call content is now kept indefinitely',
+    detail: days
+      ? 'Older request and response bodies are cleared. The figures behind the charts are kept.'
+      : 'Nothing is cleared on a schedule any more.',
+  });
+  return res.json({ ok: true, days });
 });
 
 api.post('/settings/auto-topup', (req, res) => {

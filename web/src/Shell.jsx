@@ -101,13 +101,6 @@ export default function Shell({ here, me, go, onSignOut, dark, setDark, children
               </div>
             )}
           </div>
-          <div className="footgrow" />
-          <button className="ni themebtn" style={{ width: 'auto' }} onClick={() => setDark(!dark)}
-            aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}>
-            {dark
-              ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19" /></svg>
-              : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M21 13a8.5 8.5 0 01-10-10 8.5 8.5 0 1010 10z" /></svg>}
-          </button>
         </div>
       </aside>
       <div className="shellmain">

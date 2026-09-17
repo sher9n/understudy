@@ -133,14 +133,18 @@ aside.side.mini {
 .settingspage .sw i { width: 14px; height: 14px; }
 .settingspage .sw.swon i { left: 16px; }
 
-/* The collapsed menu shows exactly one icon per row, so the footer does too: the avatar
-   alone, centred under the nav icons, instead of the avatar and the moon squeezed into
-   44px side by side. The theme switch does not disappear with it, it is a labelled row
-   inside the account menu, which is where it is now reachable from either state. */
-.side.mini .themebtn, .side.mini .footgrow { display: none; }
-.sidefoot .footgrow { flex-grow: 1; }
-.side.mini .sidefoot .acctwrap { justify-content: center; }
-.side.mini .acctbtn { padding: 5px; margin: -5px; }
+/* The menu footer carries one thing, your name, so it can use the whole width. The theme
+   switch used to sit beside it as a bare moon, which crammed two controls into 44px when
+   the menu was collapsed; it is now a labelled row inside the account menu, reachable in
+   either state and easier to read than an icon on its own. */
+/* The account button is the last row of the menu, so its hover highlight lines up with the
+   nav items above it: same left edge, same width, same corner radius. It used to start 2px
+   in and stop 16px short, because the footer's own side padding held it in. */
+.sidefoot { padding-left: 0; padding-right: 0; }
+.sidefoot .acctwrap { flex: 1; min-width: 0; }
+.sidefoot .acctbtn { width: 100%; padding: 6px 10px; margin: 0; border-radius: 9px; }
+.side.mini .sidefoot .acctwrap { flex: 0 0 auto; justify-content: center; }
+.side.mini .sidefoot .acctbtn { width: auto; padding: 5px; }
 
 /* The appearance row carries a label and a switch, so it reads as a setting rather than
    as another destination. */
@@ -150,18 +154,36 @@ aside.side.mini {
 .acctrow.acctsw .sw i { width: 13px; height: 13px; top: 2px; left: 2px; }
 .acctrow.acctsw .sw.swon i { left: 16px; }
 
-/* Connect, once you are connected. The same screen, minus the getting started scaffolding:
-   no three step rail, no "you are three steps from your first measurement", no Next button,
-   and no second top bar, because the app's own menu is already around it. What is left is
-   what someone comes back for: the endpoint, the key and the snippet in their language. */
-.board.plain .top2,
-.board.plain .rail,
-.board.plain .wizcta { display: none; }
-.board.plain .wiz { display: block; }
-.board.plain .wizmain { padding: 0; max-width: none; }
+/* Connect, once you are connected: the same screen, steps and all, with the app's menu
+   beside it instead of a takeover. The only thing removed is the second top bar, which
+   would otherwise repeat the wordmark and theme switch the menu already carries.
+
+   The panel styling has to come off the board's own wrapper here. `.board` is this
+   component's class AND a bordered panel in the lifted stylesheet, so full screen its
+   border sat off the edges and was never seen, while inside the app's page it drew a box
+   around the whole screen. */
+.board.inapp { border: 0; border-radius: 0; background: transparent; overflow: visible; }
+.board.inapp .top2 { display: none; }
+.board.inapp .wiz { border: 1px solid var(--line); border-radius: 13px; background: var(--raise);
+  overflow: hidden; min-height: 0; }
+.board.inapp .rail { padding: 28px 24px; }
+.board.inapp .wizmain { padding: 30px 32px 38px; }
 
 /* A workload row is now a real link, so it would otherwise inherit the stylesheet's link
    colour and paint the whole row blue. It keeps the text colours it was designed with. */
 a.optrow { color: inherit; }
 a.optrow:hover { text-decoration: none; }
 a.wm:hover { text-decoration: none; }
+
+/* The retention window is a choice between a few named options, so it reads as a row of
+   them with the current one marked, rather than a number you have to know to type. */
+.seg { display: inline-flex; flex-wrap: wrap; gap: 0; border: 1px solid var(--line);
+  border-radius: 9px; overflow: hidden; background: var(--raise); }
+.segb { padding: 6px 12px; font-size: 13px; color: var(--mut-read); background: none;
+  border: 0; border-left: 1px solid var(--line); cursor: pointer; white-space: nowrap; }
+.segb:first-child { border-left: 0; }
+.segb:hover:not(.on) { background: var(--grid); color: var(--ink); }
+.segb.on { background: var(--brand); color: var(--onbrand); font-weight: 600; }
+.segb:disabled { cursor: default; }
+.segnote { display: block; margin-top: 7px; font-size: 12.5px; line-height: 1.5;
+  color: var(--mut); max-width: 62ch; }

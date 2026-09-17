@@ -30,14 +30,25 @@ handle('topup', async ({ workspaceId }) => runTopUp(workspaceId));
 
 /** Content ages out; the numbers the charts need do not. */
 handle('purge', async () => {
-  const cutoff = now() - config.RETENTION_DAYS * 86400000;
-  const a = db.prepare(
-    `UPDATE calls SET request_json = NULL, response_json = NULL, content_purged_at = ?
-      WHERE created_at < ? AND content_purged_at IS NULL`).run(now(), cutoff).changes;
-  const b = db.prepare(
-    `UPDATE eval_samples SET ref_a_json = NULL, ref_b_json = NULL, content_purged_at = ?
-      WHERE content_purged_at IS NULL AND run_id IN (SELECT id FROM eval_runs WHERE created_at < ?)`)
-    .run(now(), cutoff).changes;
+  /* Each workspace chooses its own window in Settings, so this runs per workspace rather
+     than against one deployment-wide cutoff. A window of 0 means keep indefinitely, and
+     those workspaces are skipped entirely: nothing of theirs is ever blanked. */
+  let a = 0;
+  let b = 0;
+  const spaces = db.prepare('SELECT id, retention_days FROM workspaces').all();
+  for (const ws of spaces) {
+    if (!ws.retention_days) continue;
+    const cutoff = now() - ws.retention_days * 86400000;
+    a += db.prepare(
+      `UPDATE calls SET request_json = NULL, response_json = NULL, content_purged_at = ?
+        WHERE workspace_id = ? AND created_at < ? AND content_purged_at IS NULL`)
+      .run(now(), ws.id, cutoff).changes;
+    b += db.prepare(
+      `UPDATE eval_samples SET ref_a_json = NULL, ref_b_json = NULL, content_purged_at = ?
+        WHERE content_purged_at IS NULL AND run_id IN (
+          SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`)
+      .run(now(), ws.id, cutoff).changes;
+  }
   enqueue('purge', {}, { runAfter: now() + 6 * 3600000, unique: true });
   return { ok: true, calls: a, samples: b };
 });

@@ -1,0 +1,11 @@
+-- How long a workspace keeps the content of its calls.
+--
+-- A positive number is a number of days. ZERO MEANS KEEP INDEFINITELY, which is a real
+-- choice a customer can make here and not an accident: some want the whole history kept so
+-- a model can be re-measured against old traffic later. Zero is used rather than NULL so
+-- the column is never ambiguous about whether a choice was made.
+--
+-- 30 is the starting value for every workspace that already exists, which is what the
+-- platform was doing for them before this setting existed, so nothing changes for anyone
+-- until they choose otherwise.
+ALTER TABLE workspaces ADD COLUMN retention_days INTEGER NOT NULL DEFAULT 30;

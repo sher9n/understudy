@@ -39,7 +39,7 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn, p
   const calls = data.calls > 0;
   const vals = {
     dark, light: !dark,
-    isStep1: plain || step === 1, isStep2: !plain && step === 2,
+    isStep1: step === 1, isStep2: step === 2,
     s1Cls: step === 1 ? 'st on' : 'st done',
     s2Cls: step === 1 ? 'st' : (calls ? 'st done' : 'st on'),
     s3Cls: (step === 2 && calls) ? 'st on done' : 'st',
@@ -70,7 +70,7 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn, p
 
   return (
     <Board
-      className={plain ? 'plain' : ''}
+      className={plain ? 'inapp' : ''}
       html={html}
       vals={vals}
       on={on}
