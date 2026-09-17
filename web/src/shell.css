@@ -40,3 +40,10 @@ body { margin: 0; }
 [data-if][hidden] { display: none !important; }
 .board { display: flex; flex-direction: column; flex: 1; }
 .board > div { flex: 1; display: flex; flex-direction: column; }
+
+/* App-only overrides. app.css is lifted from the design board; anything here is the app's
+   own decision and survives a re-lift, because this sheet loads after it. */
+
+/* The pitch picture is a wide strip, so it reads best across the whole column rather than
+   capped to a narrow box. It is still far shorter than the cost curve it replaced. */
+.exhibit { max-width: none; padding: 18px 18px; }
