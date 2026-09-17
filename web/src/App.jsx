@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from './api.js';
+import { parse, go as navigate, onPop, href } from './router.js';
 import Shell from './Shell.jsx';
 import Auth from './screens/Auth.jsx';
 import Home from './screens/Home.jsx';
@@ -14,8 +15,7 @@ const APP = new Set(['dash', 'work', 'models', 'settings']);
 
 export default function App() {
   const [me, setMe] = useState(null);
-  const [screen, setScreen] = useState('home');
-  const [openId, setOpenId] = useState(null);
+  const [{ screen, openId }, setWhere] = useState(() => parse());
   const [freshKey, setFreshKey] = useState(null);
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -28,6 +28,18 @@ export default function App() {
   }, [dark]);
 
   useEffect(() => { api.me().then(setMe).catch(() => setMe({ signedIn: false })); }, []);
+
+  // the back and forward buttons walk the app, and a typed URL lands on the right screen
+  useEffect(() => onPop(() => { setWhere(parse()); setData(null); }), []);
+
+  // someone already signed in has no business on the sign in screen
+  useEffect(() => {
+    if (me?.signedIn && (screen === 'signin' || screen === 'signup')) {
+      const home = me.connected ? 'dash' : 'connect';
+      navigate(home, null, { replace: true });
+      setWhere({ screen: home, openId: null });
+    }
+  }, [me, screen]);
 
   const load = useCallback(async (which) => {
     setErr(null);
@@ -42,7 +54,11 @@ export default function App() {
     if (me?.signedIn && APP.has(screen) && !openId && !data) load(screen);
   }, [me, screen, openId, data, load]);
 
-  const go = (next) => { setOpenId(null); setScreen(next); setData(null); };
+  const go = (next, id = null) => {
+    navigate(next, id);
+    setWhere({ screen: next, openId: id });
+    setData(null);
+  };
 
   if (!me) return <div className="u" data-mode="light"><div className="loading">Loading…</div></div>;
 
@@ -50,7 +66,7 @@ export default function App() {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
         <Home
-          go={(where) => setScreen(me.signedIn ? 'dash' : where)}
+          go={(where) => go(me.signedIn ? (me.connected ? 'dash' : 'connect') : where)}
           dark={dark}
           setDark={setDark}
         />
@@ -63,13 +79,14 @@ export default function App() {
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
         <Auth
           mode={screen === 'signup' ? 'signup' : 'signin'}
-          go={setScreen}
+          go={(where) => go(where)}
           dark={dark}
           setDark={setDark}
           onDone={async (fresh, key) => {
             if (key) setFreshKey(key);
-            setMe(await api.me());
-            go(fresh ? 'connect' : 'dash');
+            const who = await api.me();
+            setMe(who);
+            go(fresh || !who.connected ? 'connect' : 'dash');
           }}
         />
       </div>
@@ -87,12 +104,12 @@ export default function App() {
   const here = openId ? 'work' : screen;
   const body = () => {
     if (openId) {
-      return <WorkloadDetail id={openId} onBack={() => { setOpenId(null); load('work'); }}
+      return <WorkloadDetail id={openId} onBack={() => go('work')}
         onChanged={() => load('work')} />;
     }
     if (err) return <div className="errbox">{err}</div>;
     if (!data) return <div className="loading">Loading…</div>;
-    const open = (id) => setOpenId(id);
+    const open = (id) => go('work', id);
     if (screen === 'dash') return <Dashboard data={data} onOpen={open} />;
     if (screen === 'work') return <Workloads data={data} onOpen={open} />;
     if (screen === 'models') return <Models data={data} reload={() => load('models')} />;
@@ -108,7 +125,7 @@ export default function App() {
         go={go}
         dark={dark}
         setDark={setDark}
-        onSignOut={async () => { await api.signOut(); setMe({ signedIn: false }); setScreen('home'); }}
+        onSignOut={async () => { await api.signOut(); setMe({ signedIn: false }); go('home'); }}
       >
         {body()}
       </Shell>

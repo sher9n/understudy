@@ -16,7 +16,7 @@ const summary = (d) => {
     + ' by the job they do. Nothing here was labelled by you.';
 };
 
-export default function ConnectWizard({ go, dark, setDark, freshKey }) {
+export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn }) {
   const [data, setData] = useState(null);
   const [step, setStep] = useState(1);
   const [way, setWay] = useState('route');
@@ -56,11 +56,11 @@ export default function ConnectWizard({ go, dark, setDark, freshKey }) {
   const on = {
     toggleTheme: () => setDark(!dark),
     next: () => { setStep(2); load(); },
-    back: () => setStep(1),
     pick_route: () => setWay('route'),
     pick_copy: () => setWay('copy'),
     arrive: load,            // the board's "waiting" box: here it just checks again
     go_dash: () => go('dash'),
+    back: () => (step === 2 ? setStep(1) : go('dash')),
   };
   for (const l of LANGS) on[`pick_${l}`] = () => setLang(l);
 

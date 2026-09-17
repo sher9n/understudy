@@ -47,3 +47,32 @@ body { margin: 0; }
 /* The pitch picture is a wide strip, so it reads best across the whole column rather than
    capped to a narrow box. It is still far shorter than the cost curve it replaced. */
 .exhibit { max-width: none; padding: 18px 18px; }
+/* an inline svg sits on the text baseline, which leaves a gap under it */
+.exhibit svg { display: block; }
+
+/* The pitch panel stays where it is while the form side scrolls, with the picture at its
+   bottom edge, so the picture is never something you have to scroll to find. */
+.authsplit { min-height: 100vh; }
+.pitch { position: sticky; top: 0; height: 100vh; box-sizing: border-box; overflow: hidden; }
+.pitchmid { margin: auto 0; }  /* centred in the panel, which itself stays pinned */
+.formside { box-sizing: border-box; }
+@media (max-width: 900px) {
+  .pitch { position: static; height: auto; }
+  .pitchmid { margin: 0; }
+}
+
+/* The key is the thing you came for, so give it the room rather than a shrink-wrapped box. */
+.keyval { flex: 1 1 340px; min-width: 0; overflow-x: auto; padding: 9px 12px; }
+
+/* The two dashboard panels read as a pair, so they share a header height and a row height.
+
+   The h3 in the activity header never got its margin reset, which made that header 94px
+   against Daily spend's 58px. And the row was as tall as the feed, which left a large
+   empty area under the chart. The chart now sets the height and the feed scrolls inside
+   it: the right panel is given zero height and told to fill the row, so it never pushes
+   the row taller than the chart needs. */
+.feedhead { padding: 17px 20px; }
+.feedhead h3 { margin: 0; font-size: 15.5px; font-weight: 700; letter-spacing: -0.02em; }
+.split2 > .panel2:last-child { height: 0; min-height: 100%; }
+.split2 > .panel2:last-child .feed { flex: 1; min-height: 0; overflow-y: auto; }
+.p2body { padding-bottom: 14px; }

@@ -7,8 +7,9 @@ const R = 22;
 const T = 26;
 const B = 62;
 
-const dlab = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })
-  .replace('Sep', 'Sept');
+// en-GB already abbreviates September as Sept, so appending one gave "Septt"
+const dlab = (ms) => new Date(ms).toLocaleDateString('en-GB',
+  { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
 
 const money = (v, max) => (max <= 0.05 ? `$${v.toFixed(3)}` : max <= 5 ? `$${v.toFixed(2)}` : `$${Math.round(v)}`);
 

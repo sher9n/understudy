@@ -26,6 +26,9 @@ console.log(`app.css      ${css.length} chars`);
 
 /* The screens ---------------------------------------------------------------- */
 const SCREENS = ['home', 'signin', 'signup', 'connect'];
+/* Screens the app has taken over. The design board is no longer the source for these,
+   so lifting them again would throw away work done here. */
+const APP_OWNED = new Set(['signin', 'signup']);
 // where each screen ends: the next sc-if on the board, not the end of the file
 const ENDS = { home: 'signin', signin: 'signup', signup: 'connect', connect: 'dash' };
 
@@ -75,6 +78,10 @@ const asForm = (h) => h
     '<div class="errbox" data-if="error" data-text="error"></div><button type="submit" class="btn full">');
 
 SCREENS.forEach((name, i) => {
+  if (APP_OWNED.has(name)) {
+    console.log(`${name.padEnd(12)} skipped, the app owns this screen now`);
+    return;
+  }
   let html = convert(blockFor(name, ENDS[name]));
   if (name === 'signin' || name === 'signup') {
     html = asForm(html);

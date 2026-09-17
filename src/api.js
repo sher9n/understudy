@@ -49,6 +49,10 @@ api.get('/me', (req, res) => {
     mode: req.workspace.mode,
     canRoute: canRoute(),
     canBill: canBill(),
+    // somebody whose traffic has never arrived belongs on Connect, not an empty dashboard
+    connected: db.prepare(
+      `SELECT 1 FROM calls WHERE workspace_id = ? AND source != 'replay' LIMIT 1`)
+      .get(req.workspace.id) !== undefined,
   });
 });
 
