@@ -17,13 +17,17 @@ const summary = (d) => {
     + ' by the job they do. Nothing here was labelled by you.';
 };
 
+/* How long the button says "Copied". The in-app Connect page waits the same, because the
+   two screens show the same row and a different pause reads as a different product. */
+export const COPIED_MS = 1600;
+
 /** Put text on the clipboard and say so on the button that asked for it. */
 async function flash(button, text) {
   if (!text) return;
   try { await navigator.clipboard.writeText(text); } catch { return; }
   const was = button.textContent;
   button.textContent = 'Copied';
-  setTimeout(() => { button.textContent = was; }, 1500);
+  setTimeout(() => { button.textContent = was; }, COPIED_MS);
 }
 
 export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey, signedIn }) {
@@ -67,9 +71,11 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
     is_route: way === 'route', is_copy: way === 'copy',
     noCalls: !calls, hasCalls: calls,
     regenLabel: rotating ? 'working…' : (shownKey ? 'Replace' : 'Regenerate'),
-    keyState: shownKey
-      ? (calls ? 'in use' : 'not used yet')
-      : 'made before keys were kept recoverable, replace it to see one in full',
+    /* Nothing beside the key. The row is the key, a way to copy it and a way to replace it,
+       and a line of commentary next to all three only competed with them. The one case that
+       still needs words is a key from before they were kept recoverable, where the button
+       alone would not explain why it cannot be shown. */
+    keyState: shownKey ? '' : 'made before keys were kept recoverable, replace it to see one in full',
   };
   for (const l of LANGS) {
     vals[`tab_${l}`] = lang === l ? 'tab on' : 'tab';

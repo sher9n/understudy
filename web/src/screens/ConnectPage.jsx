@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, usd, ago } from '../api.js';
 import { LANGS, WAYS, snippet, asText } from './snippets.js';
+import { COPIED_MS } from './ConnectWizard.jsx';
 
 /* Connect, for a customer whose traffic has already arrived.
 
@@ -26,7 +27,7 @@ const Copy = ({ text, label = 'Copy' }) => {
       try { await navigator.clipboard.writeText(text); } catch { return; }
       setDone(true);
       clearTimeout(timer.current);
-      timer.current = setTimeout(() => setDone(false), 1600);
+      timer.current = setTimeout(() => setDone(false), COPIED_MS);
     }}>{done ? 'Copied' : label}</button>
   );
 };
@@ -136,9 +137,7 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
             </div>
             <div className="rowpair">
               <span className="rowk">API key</span>
-              <code className={usable ? 'rowv keyfull' : 'rowv'}>
-                {shown || 'no key yet'}
-              </code>
+              <code className="rowv keyfull">{shown || 'no key yet'}</code>
               <span className="keyacts2">
                 {usable && <Copy text={usable} />}
                 <button className="ghost" disabled={rotating}

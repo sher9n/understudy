@@ -240,8 +240,10 @@ a.wm:hover { text-decoration: none; }
 
 /* The key row. A whole key is long, so it gets room to be read and selected rather than
    being cut off, which is what made the page hand over something that could not work. */
-.rowv.keyfull { white-space: normal; word-break: break-all; background: var(--okq);
-  border-color: var(--ok); color: var(--ok); font-weight: 600; }
+/* A whole key is long, so it gets room to be read and selected rather than being cut off.
+   It used to be green as well, to mark it as just created; now that a key is always shown
+   in full that meant nothing, and it made this row look unlike the same row on the guide. */
+.rowv.keyfull { white-space: normal; word-break: break-all; }
 .keynote { grid-column: 1 / -1; padding: 11px 20px 14px; font-size: 12.5px; line-height: 1.55;
   color: var(--mut-read); border-top: 1px solid var(--line); }
 .keynote.ok { background: var(--okq); color: var(--ok); border-top-color: var(--ok); }
@@ -262,3 +264,8 @@ a.wm:hover { text-decoration: none; }
 /* a chip that only reports a number should not look pressable */
 .chip.chipflat { cursor: default; border-style: dashed; color: var(--mut-read); }
 .keyacts2 { display: inline-flex; gap: 8px; }
+
+/* A Copy that sits inside a tab strip is smaller than one on a row of its own. That was an
+   inline style on the wizard only, so the same button was 52x30 there and 57x35 on the
+   in-app page. One rule, both screens. */
+.tabs .ghost { padding: 5px 10px; font-size: 12px; }
