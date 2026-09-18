@@ -57,8 +57,19 @@ measurement engine without spending anything.
 
 ## Deploying
 
-The repo carries `railway.json`, so the build command, the start command and the health
-check at `/health` are already set. Two things are not optional.
+It is deployed on Railway, built by Railpack, which needs no build configuration in the
+repo: it finds `package.json`, runs `npm install` and `npm run build`, and starts it with
+`npm start`.
+
+There is deliberately no `railway.json` here. One was added and it broke the build: every
+deployment failed about twenty seconds in with a single line of build log and no
+diagnosis, and removing the file was what made the build succeed, even though the file
+validated against Railway's own schema. The settings it was carrying (start command,
+health check path and timeout, one replica, restart policy) are set on the service itself
+instead, where they can be read back and checked. If you reintroduce the file, watch the
+first build rather than assuming.
+
+Two things are not optional.
 
 **Mount a volume, and point `DATA_DIR` at it.** Everything lives in one SQLite file:
 accounts, keys, traffic, measurements, the ledger. A host with an ephemeral filesystem
@@ -66,8 +77,8 @@ throws that away on every deploy. Mount a volume at `/data` and set `DATA_DIR=/d
 do it before the first sign-up rather than after.
 
 **Keep it to one instance.** A SQLite file on one volume cannot be shared between
-replicas. `railway.json` pins `numReplicas` to 1; scale past that and two instances will
-write over each other.
+replicas. The service is pinned to one; scale past that and two instances will write over
+each other.
 
 Variables worth setting:
 
