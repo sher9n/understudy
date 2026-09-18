@@ -14,8 +14,12 @@ import { revert } from './eval/promote.js';
 import api from './api.js';
 import v1 from './proxy.js';
 
-migrate();
-requeueStale();
+/* The schema has to exist before anything touches it, and both of these are asynchronous
+   now that the database is over a network. Unawaited, the first queue write races the
+   migrations: on a database that already has its tables nothing is noticed, and on a fresh
+   one, which is every first deploy, the process dies on "relation does not exist". */
+await migrate();
+await requeueStale();
 
 /* What the background does ------------------------------------------------------ */
 
@@ -203,10 +207,10 @@ if (fs.existsSync(dist)) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  enqueue('backfill_shapes', {}, { unique: true });
-  enqueue('catalog_sync', {}, { unique: true });
-  enqueue('purge', {}, { unique: true });
-  enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
+  await enqueue('backfill_shapes', {}, { unique: true });
+  await enqueue('catalog_sync', {}, { unique: true });
+  await enqueue('purge', {}, { unique: true });
+  await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
   startJobs();
   const server = app.listen(config.PORT, () => {
     console.log(`Understudy on http://localhost:${config.PORT}`);
