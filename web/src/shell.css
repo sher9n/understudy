@@ -232,3 +232,8 @@ a.wm:hover { text-decoration: none; }
    against their own tiles, which is invisible. It is the first choice a new customer is
    asked to make, and it shows on the getting started guide as well as on this page. */
 .way { color: var(--ink); }
+
+/* The sign-in code. Spaced out and monospaced so four digits read as four digits, and
+   wide enough that a pasted code from a phone does not land in a cramped box. */
+.codefield { letter-spacing: 0.42em; font-size: 22px; text-align: center; padding: 14px 12px; }
+.codefield::placeholder { letter-spacing: 0.42em; color: var(--line-strong); }

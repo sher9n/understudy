@@ -74,6 +74,18 @@ export const config = {
   EVAL_JUDGE_MODEL: str('EVAL_JUDGE_MODEL', 'openai/gpt-5.4-mini'),
   EVAL_RECHECK_HOURS: num('EVAL_RECHECK_HOURS', 24),
 
+  /* Email. Without a key nothing is sent, and the code is written to the log instead so
+     the flow can still be walked locally. The FROM address has to be on a domain the
+     provider has verified, or every message is silently rejected. */
+  RESEND_API_KEY: str('RESEND_API_KEY'),
+  EMAIL_FROM: str('EMAIL_FROM', 'Understudy <noreply@docupath.tech>'),
+  LOGIN_CODE_TTL_MIN: num('LOGIN_CODE_TTL_MIN', 10),
+  LOGIN_CODE_DIGITS: num('LOGIN_CODE_DIGITS', 4),
+  /* Four digits is ten thousand combinations, so the cap is what makes it safe, not the
+     length. Five wrong guesses spends the code and it cannot be retried. */
+  LOGIN_CODE_MAX_ATTEMPTS: num('LOGIN_CODE_MAX_ATTEMPTS', 5),
+  LOGIN_CODE_MAX_PER_HOUR: num('LOGIN_CODE_MAX_PER_HOUR', 5),
+
   // money
   STRIPE_SECRET_KEY: str('STRIPE_SECRET_KEY'),
   STRIPE_WEBHOOK_SECRET: str('STRIPE_WEBHOOK_SECRET'),
@@ -93,5 +105,7 @@ export const config = {
 export const canRoute = () => config.OPENROUTER_API_KEY !== '';
 /** True when the platform can actually take a payment. */
 export const canBill = () => config.STRIPE_SECRET_KEY !== '';
+/** True when a message can actually leave the building. */
+export const canEmail = () => config.RESEND_API_KEY !== '';
 
 export default config;

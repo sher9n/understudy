@@ -83,3 +83,88 @@ const SECURE = config.SECURE_COOKIES ? '; Secure' : '';
 export const cookieFor = (value) =>
   `us_session=${value}; Path=/; HttpOnly; SameSite=Lax${SECURE}; Max-Age=${SESSION_DAYS * 86400}`;
 export const clearCookie = () => `us_session=; Path=/; HttpOnly; SameSite=Lax${SECURE}; Max-Age=0`;
+
+/* Signing in without a password ---------------------------------------------------
+
+   One row backs both the emailed link and the four-digit code, so spending either spends
+   the other. Neither is stored in the clear.
+
+   Two things are deliberate and worth not undoing. Every request answers identically
+   whether or not the address has an account, because an endpoint that says "no such user"
+   is a way to find out who has one. And the code is compared in constant time, because a
+   comparison that returns early leaks, one character at a time, how much of it was right. */
+
+const codeHash = (rowId, code) => sha(`${rowId}:${code}`);
+
+const sameString = (a, b) => {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  if (x.length !== y.length) return false;
+  return crypto.timingSafeEqual(x, y);
+};
+
+/** Ask for a way in. Returns what to send, or null when there is nothing to send. */
+export async function requestLoginCode(email, { ip = null } = {}) {
+  const addr = String(email || '').trim().toLowerCase();
+  const since = now() - 3600000;
+  const recent = (await db.prepare(
+    'SELECT COUNT(*) AS n FROM login_codes WHERE email = ? AND created_at > ?').get(addr, since))?.n ?? 0;
+  if (recent >= config.LOGIN_CODE_MAX_PER_HOUR) return { ok: false, reason: 'too_many' };
+
+  const user = await db.prepare('SELECT id FROM users WHERE email = ?').get(addr);
+  if (!user) return { ok: true, send: null };   // answered the same as success, on purpose
+
+  const rowId = id('lgn');
+  const digits = config.LOGIN_CODE_DIGITS;
+  const code = String(crypto.randomInt(0, 10 ** digits)).padStart(digits, '0');
+  const token = crypto.randomBytes(32).toString('base64url');
+  const ttl = config.LOGIN_CODE_TTL_MIN * 60000;
+
+  await db.prepare(`INSERT INTO login_codes (id, email, code_hash, link_hash, purpose, attempts,
+                      consumed_at, requested_ip, expires_at, created_at)
+                    VALUES (?, ?, ?, ?, 'sign_in', 0, NULL, ?, ?, ?)`)
+    .run(rowId, addr, codeHash(rowId, code), sha(token), ip, now() + ttl, now());
+
+  return { ok: true, send: { code, token, minutes: config.LOGIN_CODE_TTL_MIN } };
+}
+
+/** The newest live row for an address, if there is one. */
+const liveCode = (addr) => db.prepare(
+  `SELECT * FROM login_codes WHERE email = ? AND consumed_at IS NULL AND expires_at > ?
+    ORDER BY created_at DESC LIMIT 1`).get(addr, now());
+
+async function signInUser(addr) {
+  const user = await db.prepare('SELECT * FROM users WHERE email = ?').get(addr);
+  if (!user) return null;
+  return { user, token: await startSession(user.id) };
+}
+
+/** Type the code in. */
+export async function verifyLoginCode(email, code) {
+  const addr = String(email || '').trim().toLowerCase();
+  const row = await liveCode(addr);
+  if (!row) return { ok: false, reason: 'expired' };
+  if (row.attempts >= config.LOGIN_CODE_MAX_ATTEMPTS) {
+    await db.prepare('UPDATE login_codes SET consumed_at = ? WHERE id = ?').run(now(), row.id);
+    return { ok: false, reason: 'too_many_attempts' };
+  }
+  if (!sameString(row.code_hash, codeHash(row.id, String(code || '').trim()))) {
+    await db.prepare('UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?').run(row.id);
+    const left = config.LOGIN_CODE_MAX_ATTEMPTS - (row.attempts + 1);
+    return { ok: false, reason: 'wrong', triesLeft: Math.max(0, left) };
+  }
+  await db.prepare('UPDATE login_codes SET consumed_at = ? WHERE id = ?').run(now(), row.id);
+  const signed = await signInUser(addr);
+  return signed ? { ok: true, ...signed } : { ok: false, reason: 'expired' };
+}
+
+/** Or click the link, which spends the same row. */
+export async function verifyLoginLink(token) {
+  const row = await db.prepare(
+    `SELECT * FROM login_codes WHERE link_hash = ? AND consumed_at IS NULL AND expires_at > ?`)
+    .get(sha(String(token || '')), now());
+  if (!row) return { ok: false, reason: 'expired' };
+  await db.prepare('UPDATE login_codes SET consumed_at = ? WHERE id = ?').run(now(), row.id);
+  const signed = await signInUser(row.email);
+  return signed ? { ok: true, ...signed } : { ok: false, reason: 'expired' };
+}

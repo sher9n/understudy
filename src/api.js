@@ -1,7 +1,9 @@
 import express from 'express';
 import { db, now, round8, usd } from './db/index.js';
 import config, { canRoute, canBill } from './config.js';
-import { createAccount, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie } from './auth.js';
+import { createAccount, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
+  requestLoginCode, verifyLoginCode, verifyLoginLink } from './auth.js';
+import send, { signInEmail } from './email.js';
 import { issueKey, listKeys, revokeKey } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, addActivity } from './traffic.js';
 import { account, ledger, gateRouting } from './billing.js';
@@ -31,6 +33,55 @@ api.post('/auth/sign-in', async (req, res) => {
   if (!u) return fail(res, 401, 'That email and password do not match.');
   res.setHeader('Set-Cookie', cookieFor(await startSession(u.id)));
   return res.json({ ok: true });
+});
+
+/* Signing in without a password.
+
+   Every answer here is the same whether or not the address has an account. An endpoint
+   that says "no such user" is a way to find out who has one, and this one is reachable by
+   anybody. What differs is only whether an email actually goes out. */
+api.post('/auth/code/request', async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return fail(res, 400, 'That does not look like an email address.');
+  }
+  const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
+  const asked = await requestLoginCode(email, { ip });
+  if (!asked.ok && asked.reason === 'too_many') {
+    return fail(res, 429, 'Too many codes asked for. Wait an hour, or sign in with your password.');
+  }
+  if (asked.send) {
+    const link = `${config.PUBLIC_URL}/api/auth/link?token=${encodeURIComponent(asked.send.token)}`;
+    const mail = signInEmail({ code: asked.send.code, link, minutes: asked.send.minutes });
+    await send({ to: email, ...mail });
+  }
+  return res.json({ ok: true, minutes: config.LOGIN_CODE_TTL_MIN, digits: config.LOGIN_CODE_DIGITS });
+});
+
+api.post('/auth/code/verify', async (req, res) => {
+  const out = await verifyLoginCode(req.body?.email, req.body?.code);
+  if (!out.ok) {
+    if (out.reason === 'wrong') {
+      return fail(res, 401, out.triesLeft > 0
+        ? `That code is not right. ${out.triesLeft} ${out.triesLeft === 1 ? 'try' : 'tries'} left.`
+        : 'That code is not right, and it has now been used up. Ask for another.');
+    }
+    if (out.reason === 'too_many_attempts') {
+      return fail(res, 429, 'That code has been used up. Ask for another.');
+    }
+    return fail(res, 401, 'That code has expired. Ask for another.');
+  }
+  res.setHeader('Set-Cookie', cookieFor(out.token));
+  return res.json({ ok: true });
+});
+
+/* The link from the same email. A browser follows it, so this answers with a redirect
+   rather than JSON, and lands the person inside the app already signed in. */
+api.get('/auth/link', async (req, res) => {
+  const out = await verifyLoginLink(req.query?.token);
+  if (!out.ok) return res.redirect(302, '/signin?link=expired');
+  res.setHeader('Set-Cookie', cookieFor(out.token));
+  return res.redirect(302, '/');
 });
 
 api.post('/auth/sign-out', async (req, res) => {
