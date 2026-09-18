@@ -1,4 +1,5 @@
 import React from 'react';
+import PeriodChip from '../PeriodChip.jsx';
 import { usd, num } from '../api.js';
 import WorkloadTable from '../WorkloadTable.jsx';
 
@@ -6,11 +7,12 @@ const Tile = ({ k, v, s }) => (
   <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
 );
 
-export default function Workloads({ data, onOpen }) {
+export default function Workloads({ data, onOpen, onPeriod, busy }) {
   const runRate = data.days ? (data.spend / data.days) * 30 : 0;
   return (
     <>
-      <div className="phead"><h1>Workloads</h1><button className="chip">Last {data.days} days</button></div>
+      <div className="phead"><h1>Workloads</h1>
+        <PeriodChip days={data.days} periods={data.periods} onPick={onPeriod} busy={busy} /></div>
       <div className="tiles">
         <Tile k="Workloads" v={num(data.workloads)} s="found automatically" />
         <Tile k="Optimized" v={num(data.optimized)}

@@ -31,13 +31,32 @@ const Copy = ({ text, label = 'Copy' }) => {
   );
 };
 
-export default function ConnectPage({ data, reload }) {
+export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
   const [way, setWay] = useState('route');
   const [lang, setLang] = useState('python');
   const [testing, setTesting] = useState(false);
   const [test, setTest] = useState(data.lastTest || null);
+  const [confirming, setConfirming] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  const [keyError, setKeyError] = useState('');
 
-  const lines = snippet(way, lang, { baseUrl: data.baseUrl, key: data.keyPrefix ? `${data.keyPrefix}…` : null });
+  /* A key is only ever stored as a hash, so the whole one exists on this screen only just
+     after it was made. While we have it, everything shows it in full and the snippet is
+     something that will actually run; otherwise the prefix stands in for it and the page
+     says how to get one that works rather than handing over a key with a gap in it. */
+  const usable = freshKey || null;
+  const shown = usable || (data.keyPrefix ? `${data.keyPrefix}…` : null);
+  const lines = snippet(way, lang, { baseUrl: data.baseUrl, key: shown });
+
+  const regenerate = async () => {
+    setRotating(true); setKeyError('');
+    try {
+      const r = await api.regenerateKey();
+      onFreshKey(r.key);
+      setConfirming(false);
+      await reload();
+    } catch (e) { setKeyError(e.message); } finally { setRotating(false); }
+  };
 
   const sendTest = useCallback(async () => {
     setTesting(true);
@@ -109,8 +128,7 @@ export default function ConnectPage({ data, reload }) {
           </section>
 
           <section className="opt">
-            <div className="opthead"><h2>Your endpoint and key</h2>
-              <span className="s">A key is shown in full once, when it is created.</span></div>
+            <div className="opthead"><h2>Your endpoint and key</h2></div>
             <div className="rowpair">
               <span className="rowk">Base URL</span>
               <code className="rowv">{data.baseUrl}</code>
@@ -118,9 +136,41 @@ export default function ConnectPage({ data, reload }) {
             </div>
             <div className="rowpair">
               <span className="rowk">API key</span>
-              <code className="rowv">{data.keyPrefix ? `${data.keyPrefix}…` : 'no key yet'}</code>
-              <span className="shp">in use</span>
+              <code className={usable ? 'rowv keyfull' : 'rowv'}>
+                {shown || 'no key yet'}
+              </code>
+              {usable
+                ? <Copy text={usable} />
+                : <button className="ghost" disabled={rotating}
+                    onClick={() => setConfirming(true)}>Regenerate</button>}
             </div>
+            {usable && (
+              <div className="keynote ok">
+                This is the whole key, and this is the only time it is shown. Copy it into
+                your client now. The one before it has stopped working.
+              </div>
+            )}
+            {!usable && !confirming && (
+              <div className="keynote">
+                Only part of your key is kept, so a key that has been lost cannot be shown
+                again. Regenerating gives you a whole one you can copy.
+              </div>
+            )}
+            {confirming && (
+              <div className="keynote warn">
+                <div><b>Anything already using your current key stops working.</b> Whatever
+                  you have deployed will need the new key pasted in before it can send
+                  another call.</div>
+                <div className="keyacts">
+                  <button className="mini" disabled={rotating} onClick={regenerate}>
+                    {rotating ? 'Regenerating…' : 'Yes, regenerate it'}
+                  </button>
+                  <button className="minig" disabled={rotating}
+                    onClick={() => setConfirming(false)}>Keep the one I have</button>
+                </div>
+              </div>
+            )}
+            {keyError && <div className="errbox">{keyError}</div>}
           </section>
         </div>
 
@@ -145,6 +195,13 @@ export default function ConnectPage({ data, reload }) {
               <span className="statv">{data.lastCallAt ? ago(data.lastCallAt) : 'none yet'}</span></div>
             <div className="statrow"><span className="statk">Workloads found</span>
               <span className="statv">{data.workloadCount}</span></div>
+            {data.workloadCount === 0 && data.candidates > 0 && (
+              <p className="sticknote" style={{ marginTop: 9 }}>
+                {data.candidates === 1 ? 'One shape so far' : `${data.candidates} shapes so far`},
+                {' '}none seen {data.minCalls} times yet. A workload appears once one has been,
+                so a handful of calls is too few to group anything by.
+              </p>
+            )}
 
             <div style={{ height: 16 }} />
             <button className="mini" style={{ width: '100%' }} disabled={testing || !data.canRoute}

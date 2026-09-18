@@ -133,6 +133,7 @@ async function overview(workspaceId, days = 30) {
   const priced = (await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get()).n > 0;
   return {
     days,
+    periods: PERIODS,
     priced,
     spend: round8(spend.s),
     saved,
@@ -153,9 +154,20 @@ async function overview(workspaceId, days = 30) {
   };
 }
 
-api.get('/overview', async (req, res) => res.json(await overview(req.workspace.id)));
+/* The window the screens are read over. Only these three, because the number goes straight
+   into a date range and an arbitrary one from a query string is an easy way to ask the
+   database for a decade of rows. */
+export const PERIODS = [7, 30, 90];
+const periodFrom = (q) => {
+  const n = Number(q);
+  return PERIODS.includes(n) ? n : 30;
+};
 
-api.get('/workloads', async (req, res) => res.json(await overview(req.workspace.id)));
+api.get('/overview', async (req, res) =>
+  res.json(await overview(req.workspace.id, periodFrom(req.query?.days))));
+
+api.get('/workloads', async (req, res) =>
+  res.json(await overview(req.workspace.id, periodFrom(req.query?.days))));
 
 api.get('/workloads/:id', async (req, res) => {
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
@@ -366,6 +378,12 @@ api.get('/connect', async (req, res) => {
   const workloadCount = (await db.prepare(
     `SELECT COUNT(*) AS n FROM workloads WHERE workspace_id = ? AND state = 'live'
        AND merged_into IS NULL`).get(req.workspace.id)).n;
+  /* Shapes we have recognised but not yet shown, because they have not been seen often
+     enough to be worth a row. Without this the first hour of a customer's traffic reads as
+     "no workloads found", which looks like nothing is working when in fact it is. */
+  const candidates = (await db.prepare(
+    `SELECT COUNT(*) AS n FROM workloads WHERE workspace_id = ? AND state = 'candidate'
+       AND merged_into IS NULL`).get(req.workspace.id)).n;
   res.json({
     baseUrl: `${config.PUBLIC_URL}/v1`,
     keyPrefix: keys[0]?.prefix ?? null,
@@ -373,6 +391,8 @@ api.get('/connect', async (req, res) => {
     lastCallAt: traffic.last ?? null,
     workloads,
     workloadCount,
+    candidates,
+    minCalls: config.WORKLOAD_MIN_CALLS,
     lastTest: await lastTestCall(req.workspace.id),
     canRoute: canRoute(),
   });
@@ -396,6 +416,26 @@ async function lastTestCall(workspaceId) {
     at: row.created_at,
   };
 }
+
+/* Replace the key.
+ *
+ * Only a hash of a key is ever stored, so a key that has been lost cannot be shown again;
+ * it can only be replaced. That is the whole reason this exists. The new one is returned in
+ * full, once, right here, and everything still using the old one stops working, which the
+ * screen says before it is pressed rather than after. */
+api.post('/connect/regenerate-key', async (req, res) => {
+  const live = (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at);
+  const fresh = await issueKey(req.workspace.id, 'production');
+  for (const old of live) await revokeKey(req.workspace.id, old.id);
+  await addActivity(req.workspace.id, {
+    kind: 'connect',
+    title: `New key ${fresh.prefix}`,
+    detail: live.length
+      ? `${live.length} older ${live.length === 1 ? 'key' : 'keys'} stopped working.`
+      : 'Nothing was using a key before this one.',
+  });
+  return res.json({ ok: true, key: fresh.secret, prefix: fresh.prefix, replaced: live.length });
+});
 
 /* Sends one real call down the routed path and says what came back. It is the same path a
    customer's own call takes, which is the only way a test can prove anything: the same

@@ -25,6 +25,10 @@ export default function App() {
   const [freshKey, setFreshKey] = useState(null);
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
+  /* The window the dashboard and the workload list are read over. Kept here so switching
+     between the two screens does not silently put it back to thirty days. */
+  const [days, setDays] = useState(30);
+  const [busy, setBusy] = useState(false);
   const [dark, setDark] = useState(() => {
     try { return localStorage.getItem('us_dark') === '1'; } catch { return false; }
   });
@@ -64,15 +68,15 @@ export default function App() {
     return () => { live = false; };
   }, [me, screen]);
 
-  const load = useCallback(async (which) => {
+  const load = useCallback(async (which, over = days) => {
     setErr(null);
     try {
-      if (which === 'dash' || which === 'work') setData(await api.overview());
+      if (which === 'dash' || which === 'work') setData(await api.overview(over));
       else if (which === 'models') setData(await api.models());
       else if (which === 'settings') setData(await api.settings());
       else if (which === 'connect') setData(await api.connect());
     } catch (e) { setErr(e.message); }
-  }, []);
+  }, [days]);
 
   useEffect(() => {
     if (me?.signedIn && APP.has(screen) && !openId && !data) load(screen);
@@ -138,10 +142,14 @@ export default function App() {
     }
     if (err) return <div className="errbox">{err}</div>;
     if (!data) return <div className="loading">Loading…</div>;
-    if (screen === 'connect') return <ConnectPage data={data} reload={() => load('connect')} />;
+    if (screen === 'connect') {
+      return <ConnectPage data={data} reload={() => load('connect')}
+        freshKey={freshKey} onFreshKey={setFreshKey} />;
+    }
     const open = (id) => go('work', id);
-    if (screen === 'dash') return <Dashboard data={data} onOpen={open} />;
-    if (screen === 'work') return <Workloads data={data} onOpen={open} />;
+    const pick = async (d) => { setDays(d); setBusy(true); await load(screen, d); setBusy(false); };
+    if (screen === 'dash') return <Dashboard data={data} onOpen={open} onPeriod={pick} busy={busy} />;
+    if (screen === 'work') return <Workloads data={data} onOpen={open} onPeriod={pick} busy={busy} />;
     if (screen === 'models') return <Models data={data} reload={() => load('models')} />;
     if (screen === 'settings') return <Settings data={data} reload={() => load('settings')} />;
     return null;

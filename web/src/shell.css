@@ -237,3 +237,27 @@ a.wm:hover { text-decoration: none; }
    wide enough that a pasted code from a phone does not land in a cramped box. */
 .codefield { letter-spacing: 0.42em; font-size: 22px; text-align: center; padding: 14px 12px; }
 .codefield::placeholder { letter-spacing: 0.42em; color: var(--line-strong); }
+
+/* The key row. A whole key is long, so it gets room to be read and selected rather than
+   being cut off, which is what made the page hand over something that could not work. */
+.rowv.keyfull { white-space: normal; word-break: break-all; background: var(--okq);
+  border-color: var(--ok); color: var(--ok); font-weight: 600; }
+.keynote { grid-column: 1 / -1; padding: 11px 20px 14px; font-size: 12.5px; line-height: 1.55;
+  color: var(--mut-read); border-top: 1px solid var(--line); }
+.keynote.ok { background: var(--okq); color: var(--ok); border-top-color: var(--ok); }
+.keynote.warn { background: var(--warnq); color: var(--warn); border-top-color: var(--warn); }
+.keynote.warn b { color: var(--warn); }
+.keyacts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 11px; }
+
+/* The period picker. The chip was a button that did nothing before this, which is worse
+   than no chip: it says the window is yours to choose and then ignores you. */
+.periodwrap { position: relative; display: inline-flex; }
+.periodpop { position: absolute; top: calc(100% + 7px); right: 0; z-index: 50; min-width: 148px;
+  display: flex; flex-direction: column; padding: 5px; border: 1px solid var(--line);
+  border-radius: 11px; background: var(--raise); box-shadow: 0 14px 36px rgba(0, 0, 0, 0.16); }
+.periodopt { text-align: left; padding: 8px 11px; border-radius: 7px; font-size: 13.5px;
+  color: var(--ink); background: none; border: 0; cursor: pointer; white-space: nowrap; }
+.periodopt:hover { background: var(--grid); }
+.periodopt.on { background: var(--brandq); color: var(--brand); font-weight: 600; }
+/* a chip that only reports a number should not look pressable */
+.chip.chipflat { cursor: default; border-style: dashed; color: var(--mut-read); }

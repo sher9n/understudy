@@ -51,7 +51,7 @@ export default function Settings({ data, reload }) {
       <section className="opt">
         <div className="opthead">
           <h2>API keys</h2>
-          <span className="s">A key is shown once, when it is created.</span>
+          <span className="s">Only part of a key is kept, so a lost one is replaced rather than shown again.</span>
         </div>
         <div className="gthead" style={{ gridTemplateColumns: 'minmax(0, 1fr) 148px 138px 138px 92px' }}>
           <span>Name</span><span>Prefix</span><span>Created</span><span>Last used</span><span />
@@ -73,7 +73,7 @@ export default function Settings({ data, reload }) {
             onClick={run(async () => { const r = await api.newKey('production'); setFresh(r.key); })}>
             Create a key
           </button>
-          <span>It is shown once, right here, and never again.</span>
+          <span>The whole key appears here, once. Lose it and make another.</span>
         </div>
         {fresh && <div className="okbox">{fresh}</div>}
       </section>

@@ -24,7 +24,7 @@ export default function Models({ data, reload }) {
 
   return (
     <>
-      <div className="phead"><h1>Models</h1><button className="chip">{data.models.length} available</button></div>
+      <div className="phead"><h1>Models</h1><span className="chip chipflat">{data.models.length} available</span></div>
       <div className="tiles">
         <Tile k="Enabled" v={num(enabled.length)} s={`of ${data.models.length} available`} />
         <Tile k="Serving your traffic" v={num(serving.length)}

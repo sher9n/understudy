@@ -18,7 +18,7 @@ export const api = {
   signOut: () => send('POST', '/auth/sign-out'),
   requestCode: (email) => send('POST', '/auth/code/request', { email }),
   verifyCode: (email, code) => send('POST', '/auth/code/verify', { email, code }),
-  overview: () => send('GET', '/overview'),
+  overview: (days) => send('GET', days ? `/overview?days=${days}` : '/overview'),
   workloads: () => send('GET', '/workloads'),
   workload: (id) => send('GET', `/workloads/${id}`),
   setMode: (id, mode) => send('POST', `/workloads/${id}/mode`, { mode }),
@@ -35,6 +35,7 @@ export const api = {
   retention: (days) => send('POST', '/settings/retention', { days }),
   connect: () => send('GET', '/connect'),
   testCall: () => send('POST', '/connect/test'),
+  regenerateKey: () => send('POST', '/connect/regenerate-key'),
 };
 
 export const usd = (n) => `$${(Number(n) || 0).toFixed(2)}`;
