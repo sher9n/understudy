@@ -40,7 +40,7 @@ export default function App() {
 
   // someone already signed in has no business on the sign in screen
   useEffect(() => {
-    if (me?.signedIn && (screen === 'signin' || screen === 'signup')) {
+    if (me?.signedIn && (screen === 'signin' || screen === 'signup' || screen === 'signincode')) {
       const home = me.connected ? 'dash' : 'connect';
       navigate(home, null, { replace: true });
       setWhere({ screen: home, openId: null });
@@ -98,11 +98,11 @@ export default function App() {
     );
   }
 
-  if (!me.signedIn || screen === 'signin' || screen === 'signup') {
+  if (!me.signedIn || screen === 'signin' || screen === 'signup' || screen === 'signincode') {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
         <Auth
-          mode={screen === 'signup' ? 'signup' : 'signin'}
+          mode={screen === 'signup' ? 'signup' : (screen === 'signincode' ? 'code' : 'signin')}
           go={(where) => go(where)}
           dark={dark}
           setDark={setDark}

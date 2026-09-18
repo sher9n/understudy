@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { db, now } from '../src/db/index.js';
 import config from '../src/config.js';
 
-const BASE = `http://localhost:${config.PORT}`;
+const BASE = process.env.SEED_BASE || `http://localhost:${config.PORT}`;
 const DAY = 86400000;
 
 const key = process.env.SEED_KEY;

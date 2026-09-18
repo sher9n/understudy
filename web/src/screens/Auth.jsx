@@ -23,9 +23,9 @@ const PITCH = (() => {
    it says why it was refused, and it knows where to go next. */
 export default function Auth({ mode, go, onDone, dark, setDark }) {
   const signUp = mode === 'signup';
+  const codeMode = mode === 'code';
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [codeMode, setCodeMode] = useState(false);
 
   const submit = async (fields) => {
     if (busy) return;
@@ -46,12 +46,12 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
     }
   };
 
-  if (codeMode && !signUp) {
+  if (codeMode) {
     return (
       <CodeSignIn
         pitchHtml={PITCH}
         onDone={() => onDone(false)}
-        onBack={() => setCodeMode(false)}
+        onBack={() => go('signin')}
       />
     );
   }
@@ -61,12 +61,12 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
       html={signUp ? signupHtml : signinHtml}
       vals={{ dark, light: !dark, error }}
       onSubmit={submit}
-      hrefs={{ go_signup: href('signup'), go_signin: href('signin') }}
+      hrefs={{ go_signup: href('signup'), go_signin: href('signin'), want_code: href('signincode') }}
       on={{
         toggleTheme: () => setDark(!dark),
         go_signup: () => go('signup'),
         go_signin: () => go('signin'),
-        want_code: () => { setError(''); setCodeMode(true); },
+        want_code: () => { setError(''); go('signincode'); },
       }}
     />
   );

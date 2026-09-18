@@ -237,7 +237,8 @@ api.get('/models', async (req, res) => {
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
       ORDER BY (c.price_in + c.price_out)`).all(req.workspace.id);
   const serving = await db.prepare(
-    `SELECT slug, COALESCE(routed_model, reference_model) AS m FROM workloads WHERE workspace_id = ?`)
+    `SELECT slug, COALESCE(routed_model, reference_model) AS m FROM workloads
+      WHERE workspace_id = ? AND state = 'live' AND merged_into IS NULL`)
     .all(req.workspace.id);
   const where = new Map();
   for (const s of serving) {
@@ -358,9 +359,13 @@ api.get('/connect', async (req, res) => {
   const workloads = await db.prepare(
     `SELECT w.slug, w.reference_model,
             (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.source NOT IN ('replay', 'test')) AS calls
-       FROM workloads w WHERE w.workspace_id = ? ORDER BY calls DESC LIMIT 5`).all(req.workspace.id);
+       FROM workloads w WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
+       ORDER BY calls DESC LIMIT 5`).all(req.workspace.id);
+  /* What the customer is shown, not everything that has ever been grouped. Shapes seen a
+     handful of times are real and counted, but a list of them helps nobody. */
   const workloadCount = (await db.prepare(
-    'SELECT COUNT(*) AS n FROM workloads WHERE workspace_id = ?').get(req.workspace.id)).n;
+    `SELECT COUNT(*) AS n FROM workloads WHERE workspace_id = ? AND state = 'live'
+       AND merged_into IS NULL`).get(req.workspace.id)).n;
   res.json({
     baseUrl: `${config.PUBLIC_URL}/v1`,
     keyPrefix: keys[0]?.prefix ?? null,

@@ -1,4 +1,6 @@
 import { db, id, now, round8 } from './db/index.js';
+import { matchWorkload } from './workloads.js';
+import { enqueue } from './jobs.js';
 import { signatureOf, nameFor } from './classify.js';
 import config from './config.js';
 
@@ -10,40 +12,20 @@ export async function addActivity(workspaceId, { kind, title, detail = null, wor
 
 /** Find the workload this call belongs to, creating it the first time we see the shape. */
 export async function workloadFor(workspaceId, body) {
-  const sig = signatureOf(body);
-  const found = await db.prepare('SELECT * FROM workloads WHERE workspace_id = ? AND fingerprint = ?')
-    .get(workspaceId, sig.fingerprint);
-  if (found) return found;
-
-  /* A prepared statement now answers with a promise, and a promise is always truthy, so
-     this loop has to await each check. Without the await it never ends. */
-  const taken = db.prepare('SELECT 1 FROM workloads WHERE workspace_id = ? AND slug = ?');
-  let slug = nameFor(sig);
-  for (let n = 2; await taken.get(workspaceId, slug); n += 1) slug = `${nameFor(sig)}-${n}`;
-
-  const row = {
-    id: id('wl'), workspace_id: workspaceId, slug, fingerprint: sig.fingerprint,
-    shape_kind: sig.shapeKind, reference_model: body?.model || null, routed_model: null,
-    optimize_mode: 'auto', status: 'new', status_note: null, floor_pct: null,
-    promoted_at: null, promoted_run_id: null,
-    sample_prompt: sig.systemSample, tool_names: JSON.stringify(sig.toolNames),
-    created_at: now(), updated_at: now(),
-  };
-  await db.prepare(`INSERT INTO workloads
-      (id, workspace_id, slug, fingerprint, shape_kind, reference_model, routed_model, optimize_mode,
-       status, status_note, floor_pct, promoted_at, promoted_run_id, sample_prompt, tool_names,
-       created_at, updated_at)
-      VALUES (@id, @workspace_id, @slug, @fingerprint, @shape_kind, @reference_model, @routed_model,
-       @optimize_mode, @status, @status_note, @floor_pct, @promoted_at, @promoted_run_id,
-       @sample_prompt, @tool_names, @created_at, @updated_at)`).run(row);
-
-  await addActivity(workspaceId, {
-    kind: 'connect',
-    title: `Found a new workload: ${slug}`,
-    detail: `${sig.shapeKind.replace('_', ' ')} requests${body?.model ? `, currently on ${body.model}` : ''}`,
-    workloadId: row.id,
-  });
-  return row;
+  const workload = await matchWorkload(workspaceId, body);
+  /* A workload is only worth telling somebody about once it has been seen enough times to
+     be a real part of their traffic. Announcing every one-off call would fill the feed with
+     things that never happen again. */
+  if (workload.becameLive) {
+    await addActivity(workspaceId, {
+      kind: 'connect',
+      title: `Found a new workload: ${workload.slug}`,
+      detail: `${String(workload.shape_kind).replace('_', ' ')} requests${workload.reference_model ? `, currently on ${workload.reference_model}` : ''}`,
+      workloadId: workload.id,
+    });
+    await enqueue('name_workload', { workloadId: workload.id }, { unique: true });
+  }
+  return workload;
 }
 
 /** One call, recorded. Everything the screens and the measurement need comes from here. */
@@ -82,7 +64,7 @@ export async function workloadStats(workspaceId, days = 30) {
                 AND c.source NOT IN ('replay', 'test')) AS calls,
             (SELECT COALESCE(SUM(c.charged_usd), 0) FROM calls c
               WHERE c.workload_id = w.id AND c.created_at >= ? AND c.source NOT IN ('replay', 'test')) AS spend
-       FROM workloads w WHERE w.workspace_id = ?
+       FROM workloads w WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
       ORDER BY spend DESC, w.created_at`).all(since, since, workspaceId);
 }
 

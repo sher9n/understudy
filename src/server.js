@@ -6,6 +6,8 @@ import { db, now } from './db/index.js';
 import migrate from './db/migrate.js';
 import { handle, startJobs, stopJobs, requeueStale, enqueue } from './jobs.js';
 import { fetchModels, saveCatalog } from './openrouter.js';
+import { slug, shapeSignals } from './classify.js';
+import { routeOnce } from './proxy.js';
 import { runEvaluation } from './eval/run.js';
 import { runTopUp } from './billing.js';
 import { revert } from './eval/promote.js';
@@ -27,6 +29,111 @@ handle('catalog_sync', async () => {
 });
 
 handle('topup', async ({ workspaceId }) => await runTopUp(workspaceId));
+
+/* Workloads that existed before calls were grouped by shape.
+ *
+ * They carry no structure and no instruction signature, so nothing new could ever match
+ * them and a customer's screens would empty out on deploy while a parallel set of
+ * workloads built up beside them. This recomputes both from a call the workload already
+ * holds, which is the same computation a live call goes through, and marks the ones with
+ * enough traffic as live so they stay where their owner left them.
+ *
+ * It only ever touches rows that have no structure yet, so running it twice does nothing. */
+handle('backfill_shapes', async () => {
+  const rows = await db.prepare(
+    `SELECT id, workspace_id FROM workloads WHERE struct_key IS NULL LIMIT 500`).all();
+  let done = 0;
+  for (const w of rows) {
+    const call = await db.prepare(
+      `SELECT request_json FROM calls WHERE workload_id = ? AND request_json IS NOT NULL
+        ORDER BY created_at DESC LIMIT 1`).get(w.id);
+    const seen = (await db.prepare(
+      `SELECT COUNT(*) AS n FROM calls WHERE workload_id = ?`).get(w.id))?.n ?? 0;
+    let body = null;
+    try { body = call?.request_json ? JSON.parse(call.request_json) : null; } catch { body = null; }
+    if (!body) {
+      /* Nothing left to recompute from, usually because the content aged out. Mark it so
+         this does not come back to it, and leave it where it is. */
+      await db.prepare(`UPDATE workloads SET struct_key = 'unknown', calls_seen = ?,
+                          state = ? WHERE id = ?`)
+        .run(seen, seen >= config.WORKLOAD_MIN_CALLS ? 'live' : 'candidate', w.id);
+      done += 1;
+      continue;
+    }
+    const sig = shapeSignals(body);
+    /* The comparison happens here rather than in SQL on purpose. Two bare parameters in a
+       CASE give Postgres nothing to infer a type from, so it compares them as text, and
+       '190' >= '20' is false. Every workload whose count began with a 1 stayed hidden. */
+    const live = seen >= config.WORKLOAD_MIN_CALLS ? 'live' : 'candidate';
+    await db.prepare(`UPDATE workloads SET struct_key = ?, simhash = ?, fingerprint = ?,
+                        calls_seen = ?, state = ?, updated_at = ? WHERE id = ?`)
+      .run(sig.structKey, sig.simhash, sig.cacheKey, seen, live, now(), w.id);
+    await db.prepare(
+      `INSERT INTO workload_signatures (workspace_id, fingerprint, workload_id, simhash, struct_key, created_at)
+       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, fingerprint) DO NOTHING`)
+      .run(w.workspace_id, sig.cacheKey, w.id, sig.simhash, sig.structKey, now());
+    done += 1;
+  }
+  if (rows.length === 500) await enqueue('backfill_shapes', {}, { unique: true });
+  return { ok: true, backfilled: done };
+});
+
+/* Give a workload a name a person would recognise.
+ *
+ * This is the only place a model is involved in classification, and it is not classifying:
+ * the grouping is already decided, deterministically and for free. All this does is turn a
+ * shape into words. It runs ONCE per workload, off the request path, on the cheapest model
+ * the workspace can reach, and if anything about it fails the heuristic name it already has
+ * simply stays. A workload is never left without a name because a model was unavailable. */
+handle('name_workload', async ({ workloadId }) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
+  if (!w || w.named_at) return { ok: true, skipped: true };
+  if (!canRoute()) return { ok: true, skipped: 'no provider' };
+
+  const model = config.WORKLOAD_NAME_MODEL || (await db.prepare(
+    `SELECT c.model_id FROM models_catalog c
+       LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
+      WHERE COALESCE(wm.enabled, 1) = 1 ORDER BY (c.price_in + c.price_out) ASC LIMIT 1`)
+    .get(w.workspace_id))?.model_id;
+  if (!model) return { ok: true, skipped: 'no model' };
+
+  const tools = (() => { try { return JSON.parse(w.tool_names || '[]'); } catch { return []; } })();
+  const ask = [
+    'Name this kind of request in two to four words, as a short kebab-case slug.',
+    'Describe the JOB it does, the way an engineer would name the function that sends it.',
+    'Answer with the slug only, nothing else.',
+    '',
+    `Answer shape: ${w.shape_kind}`,
+    tools.length ? `Tools offered: ${tools.join(', ')}` : '',
+    `Instruction: ${String(w.sample_prompt || '').slice(0, 400)}`,
+  ].filter(Boolean).join('\n');
+
+  const out = await routeOnce(w.workspace_id, {
+    model,
+    messages: [{ role: 'user', content: ask }],
+    max_tokens: 24,
+  }, { source: 'test', classify: false });
+  if (!out.ok) return { ok: true, skipped: out.json?.error?.message || 'call failed' };
+
+  const raw = String(out.json?.choices?.[0]?.message?.content ?? '').trim();
+  const named = slug(raw.split(/\s+/)[0] || '');
+  /* A model that answers with a sentence, an empty string or something absurd leaves the
+     name it already had. Nothing here is allowed to make the list worse. */
+  /* We asked for two to four words as a slug, so a single word means the model answered
+     with prose, or with a pleasantry, and the heuristic name it already has is better than
+     whatever the first word of that happened to be. */
+  if (!named || named.length < 3 || named.length > 40 || !named.includes('-')) {
+    return { ok: true, skipped: 'unusable answer' };
+  }
+
+  const taken = await db.prepare(
+    'SELECT 1 FROM workloads WHERE workspace_id = ? AND slug = ? AND id != ?')
+    .get(w.workspace_id, named, w.id);
+  const finalSlug = taken ? `${named}-${w.id.slice(-4)}` : named;
+  await db.prepare('UPDATE workloads SET slug = ?, named_at = ?, name_source = ?, updated_at = ? WHERE id = ?')
+    .run(finalSlug, now(), 'model', now(), w.id);
+  return { ok: true, was: w.slug, now: finalSlug, model };
+});
 
 /** Content ages out; the numbers the charts need do not. */
 handle('purge', async () => {
@@ -96,6 +203,7 @@ if (fs.existsSync(dist)) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  enqueue('backfill_shapes', {}, { unique: true });
   enqueue('catalog_sync', {}, { unique: true });
   enqueue('purge', {}, { unique: true });
   enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });

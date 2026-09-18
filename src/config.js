@@ -60,6 +60,20 @@ export const config = {
   // what we keep, and for how long
   RETENTION_DAYS: num('RETENTION_DAYS', 30),
 
+  /* Grouping calls into workloads, as a distance over a 64 bit SimHash of the instruction.
+     Measured across 17 same-job pairs and 4 different-job pairs, the worst same-job pair
+     sits at 22 and the closest different-job pair at 28, so 24 is in the middle of the gap
+     with room either side. Raising it merges jobs that are not the same; lowering it splits
+     one job into several. */
+  WORKLOAD_MATCH_MAX_DISTANCE: num('WORKLOAD_MATCH_MAX_DISTANCE', 24),
+  /* A shape has to be seen this often before it is worth a row on anybody's screen. Below
+     it the workload exists and counts, but stays out of the way. */
+  WORKLOAD_MIN_CALLS: num('WORKLOAD_MIN_CALLS', 20),
+  /* Past this many live workloads the matcher stops making new ones and widens instead, so
+     unusual traffic cannot turn into an unreadable list of hundreds. */
+  WORKLOAD_MAX_LIVE: num('WORKLOAD_MAX_LIVE', 200),
+  WORKLOAD_NAME_MODEL: str('WORKLOAD_NAME_MODEL', ''),
+
   // measurement
   EVAL_SAMPLE_SIZE: num('EVAL_SAMPLE_SIZE', 120),
   EVAL_MIN_RUNS: num('EVAL_MIN_RUNS', 100),
