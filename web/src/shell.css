@@ -260,7 +260,7 @@ a.wm:hover { text-decoration: none; }
 .periodopt { text-align: left; padding: 8px 11px; border-radius: 7px; font-size: 13.5px;
   color: var(--ink); background: none; border: 0; cursor: pointer; white-space: nowrap; }
 .periodopt:hover { background: var(--grid); }
-.periodopt.on { background: var(--brandq); color: var(--brand); font-weight: 600; }
+.periodopt.on { background: var(--brandq); color: var(--brand-read); font-weight: 600; }
 /* a chip that only reports a number should not look pressable */
 .chip.chipflat { cursor: default; border-style: dashed; color: var(--mut-read); }
 .keyacts2 { display: inline-flex; gap: 8px; }

@@ -5,12 +5,14 @@
       --bg: #ffffff; --panel: #f7f7f8; --raise: #ffffff; --line: #e7e7e9; --line-strong: #d5d5da;
       --grid: #f0f0f2; --ink: #0d0d12; --mut: #6b6b7b; --mut-read: #55555f; --code: #f7f7f8;
       --brand: #0f62fe; --brandq: #e9f0fe; --brand-hover: #0b52d6; --onbrand: #ffffff;
-      --ok: #0e8a5f; --okq: #e4f4ed; --warn: #a9721b; --warnq: #faf0dd; --bad: #be3a2b; --badq: #fbe9e7;
+      --brand-read: #0b52d6;
+      --ok: #0c7450; --okq: #e4f4ed; --warn: #a9721b; --warnq: #faf0dd; --bad: #be3a2b; --badq: #fbe9e7;
     }
     [data-mode='dark'] {
       --bg: #000000; --panel: #08080a; --raise: #0d0d10; --line: #1e1e23; --line-strong: #2c2c33;
       --grid: #16161a; --ink: #f0f0f3; --mut: #8a8a95; --mut-read: #a5a5b0; --code: #08080a;
       --brand: #4c8dff; --brandq: #0c1830; --brand-hover: #6a9fff; --onbrand: #03060d;
+      --brand-read: #4c8dff;
       --ok: #3fcf8e; --okq: #06180f; --warn: #d9a441; --warnq: #1b1508; --bad: #f2665a; --badq: #200b09;
     }
     body { margin: 0; }
@@ -55,7 +57,7 @@
     .lp-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
     .lp-step { border-top: 2px solid var(--line-strong); padding-top: 15px; display: flex; flex-direction: column; }
     .lp-step .h { display: flex; align-items: center; gap: 10px; font-size: 15.5px; font-weight: 600; letter-spacing: -0.018em; }
-    .lp-step .n { width: 24px; height: 24px; border-radius: 50%; background: var(--brandq); color: var(--brand);
+    .lp-step .n { width: 24px; height: 24px; border-radius: 50%; background: var(--brandq); color: var(--brand-read);
                   display: flex; align-items: center; justify-content: center;
                   font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; font-weight: 700; flex: none; }
     .lp-step .b { font-size: 14px; color: var(--mut-read); line-height: 1.6; margin: 9px 0 auto; }
@@ -120,14 +122,14 @@
     .wcard .hd .t { font-size: 14.5px; font-weight: 600; letter-spacing: -0.018em; }
     .wcard .ft { border-top: 1px solid var(--line); padding: 14px 18px; font-size: 13.5px; color: var(--mut-read); line-height: 1.55; }
     .pill { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em;
-            padding: 3px 8px; border-radius: 6px; background: var(--brandq); color: var(--brand); }
+            padding: 3px 8px; border-radius: 6px; background: var(--brandq); color: var(--brand-read); }
     .pill.q { background: var(--panel); color: var(--mut); }
     .code { margin: 0; padding: 20px 18px; font-size: 12.5px; line-height: 1.9; color: var(--mut-read); background: var(--code); overflow-x: auto; flex: 1; }
     @media (max-width: 760px) { .two { grid-template-columns: minmax(0, 1fr); }
                                 .fact { grid-template-columns: minmax(0, 1fr); gap: 6px; } }
     .lp-card .t { display: flex; align-items: center; gap: 9px; }
     .lp-card .n { flex: 0 0 auto; width: 21px; height: 21px; border-radius: 50%; background: var(--brandq);
-                  color: var(--brand); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px;
+                  color: var(--brand-read); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px;
                   font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
     .authsplit { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 900px; }
     .pitch { background: var(--panel); border-right: 1px solid var(--line); padding: 34px 56px 40px; display: flex; flex-direction: column; }
@@ -167,7 +169,7 @@
     .top2 { border-bottom: 1px solid var(--line); background: var(--raise); display: flex; align-items: center;
             gap: 14px; padding: 0 30px; height: 58px; }
     .top2 .wm { font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink); }
-    .av { width: 27px; height: 27px; border-radius: 50%; background: var(--brandq); color: var(--brand);
+    .av { width: 27px; height: 27px; border-radius: 50%; background: var(--brandq); color: var(--brand-read);
           font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
     .page { max-width: 940px; margin: 0 auto; padding: 50px 28px 86px; }
     .page h1 { font-size: 32px; font-weight: 700; letter-spacing: -0.035em; margin: 0; }
@@ -313,7 +315,7 @@
     .app nav { display: flex; gap: 20px; font-size: 13.5px; }
     .app nav a { color: var(--mut); }
     .app nav a.on { color: var(--ink); font-weight: 600; }
-    .av { width: 27px; height: 27px; border-radius: 50%; background: var(--brandq); color: var(--brand);
+    .av { width: 27px; height: 27px; border-radius: 50%; background: var(--brandq); color: var(--brand-read);
           font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
     .page { max-width: 1160px; margin: 0 auto; padding: 38px 30px 80px; }
     .phead { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
@@ -353,7 +355,7 @@
     .pill { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 700;
             letter-spacing: 0.05em; padding: 4px 9px; border-radius: 7px; display: inline-block; }
     .pill.ok { background: var(--okq); color: var(--ok); }
-    .pill.go { background: var(--brandq); color: var(--brand); }
+    .pill.go { background: var(--brandq); color: var(--brand-read); }
     .pill.wait { background: var(--panel); color: var(--mut); }
     .act { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 13px; overflow: hidden; }
     .actrow { display: flex; align-items: center; gap: 13px; padding: 13px 18px; background: var(--raise); }
@@ -452,7 +454,7 @@
     .chev { color: var(--mut); display: flex; }
     .optrow .pill, .cdrow .pill { white-space: nowrap; }
     .mini { font: inherit; font-size: 13px; font-weight: 600; line-height: 1; padding: 11px 15px; border-radius: 9px;
-            border: 1px solid var(--brand); background: var(--brand); color: #fff; cursor: pointer; white-space: nowrap; }
+            border: 1px solid var(--brand); background: var(--brand); color: var(--onbrand); cursor: pointer; white-space: nowrap; }
     .minig { font: inherit; font-size: 13px; font-weight: 600; line-height: 1; padding: 11px 15px; border-radius: 9px;
              border: 1px solid var(--line-strong); background: transparent; color: var(--mut-read); cursor: pointer; white-space: nowrap; }
     .facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 20px; }
@@ -531,7 +533,7 @@
     .barlead { padding: 20px 22px 0; font-size: 14.5px; line-height: 1.6; color: var(--mut-read); max-width: 74ch; }
     .steps { display: grid; gap: 16px; padding: 18px 22px 22px; }
     .stp { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 14px; align-items: start; }
-    .stpn { width: 26px; height: 26px; border-radius: 50%; background: var(--brandq); color: var(--brand);
+    .stpn { width: 26px; height: 26px; border-radius: 50%; background: var(--brandq); color: var(--brand-read);
             font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; font-weight: 700;
             display: flex; align-items: center; justify-content: center; }
     .stpt { font-size: 14.5px; line-height: 1.6; color: var(--mut-read); max-width: 72ch; }
@@ -595,3 +597,11 @@
                                  .cdrow > :nth-child(n+2):not(:last-child) { display: none; } }
     [data-clickable] { cursor: pointer; }
   
+    /* One line under the code box. The snippet has to name SOME model, and naming OpenAI's
+       reads as a requirement to be on OpenAI. This says it is not, without turning the
+       screen into a chooser: the provider is simply the first half of the model id. */
+    .codenote { font-size: 12.5px; color: var(--mut-read); line-height: 1.55; margin: 11px 0 0; }
+    .codenote b { color: var(--ink); font-weight: 600; }
+    .codenote code { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px;
+                     color: var(--ink); background: var(--code); border: 1px solid var(--line);
+                     border-radius: 5px; padding: 1px 5px; }

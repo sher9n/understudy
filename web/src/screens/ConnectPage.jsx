@@ -125,6 +125,11 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
                   ))}
                 </pre>
               </div>
+              <p className="codenote">
+                <b>Any provider works.</b> The model id is what names it, so{' '}
+                <code>anthropic/claude-haiku-4.5</code> or{' '}
+                <code>google/gemini-2.5-flash-lite</code> need nothing else changed.
+              </p>
             </div>
           </section>
 
