@@ -129,7 +129,8 @@ export default function App() {
   if (screen === 'connect' && !me.connected) {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
-        <ConnectWizard go={go} dark={dark} setDark={setDark} freshKey={freshKey} />
+        <ConnectWizard go={go} dark={dark} setDark={setDark}
+          freshKey={freshKey} onFreshKey={setFreshKey} />
       </div>
     );
   }

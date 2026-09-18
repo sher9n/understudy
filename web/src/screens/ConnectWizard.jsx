@@ -17,7 +17,23 @@ const summary = (d) => {
     + ' by the job they do. Nothing here was labelled by you.';
 };
 
-export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn }) {
+/** Put text on the clipboard and say so on the button that asked for it. */
+async function flash(button, text) {
+  if (!text) return;
+  try { await navigator.clipboard.writeText(text); } catch { return; }
+  const was = button.textContent;
+  button.textContent = 'Copied';
+  setTimeout(() => { button.textContent = was; }, 1500);
+}
+
+export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey, signedIn }) {
+  /* The key exists in full only while we are holding it. Regenerating is the way to get
+     one back, because only a hash of it is stored, so a key that has been lost cannot be
+     shown again. Without this the screen offered a truncated key and a Copy button that
+     handed over something which could never authenticate. */
+  const [ownKey, setOwnKey] = useState(null);
+  const [rotating, setRotating] = useState(false);
+  const key = freshKey || ownKey;
   const [data, setData] = useState(null);
   const [step, setStep] = useState(1);
   const [way, setWay] = useState('route');
@@ -47,7 +63,10 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn })
     copyCls: way === 'copy' ? 'way on' : 'way',
     is_route: way === 'route', is_copy: way === 'copy',
     noCalls: !calls, hasCalls: calls,
-    keyState: calls ? 'in use' : freshKey ? 'not used yet' : 'shown once, when it was created',
+    regenLabel: rotating ? 'working…' : (key ? 'Replace it' : 'Regenerate'),
+    keyState: key
+      ? 'the whole key, copy it now'
+      : (calls ? 'in use, regenerate to see it in full' : 'regenerate to get one you can copy'),
   };
   for (const l of LANGS) {
     vals[`tab_${l}`] = lang === l ? 'tab on' : 'tab';
@@ -60,6 +79,28 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, signedIn })
     pick_route: () => setWay('route'),
     pick_copy: () => setWay('copy'),
     arrive: load,            // the board's "waiting" box: here it just checks again
+    /* Copy whatever box the button sits in, so what lands on the clipboard is exactly what
+       is on the screen rather than a second copy of it that can drift. */
+    copy_code: async (e) => {
+      const box = e.target.closest('.codebox');
+      const text = box?.querySelector('.code')?.textContent ?? '';
+      await flash(e.target, text);
+    },
+    copy_key: async (e) => {
+      const text = e.target.closest('.keyrow')?.querySelector('.keyval')?.textContent ?? '';
+      await flash(e.target, text);
+    },
+    regen_key: async () => {
+      if (rotating) return;
+      setRotating(true);
+      try {
+        const r = await api.regenerateKey();
+        setOwnKey(r.key);
+        if (onFreshKey) onFreshKey(r.key);
+        await load();
+      } catch { /* the label goes back and the old key is still on screen */ }
+      setRotating(false);
+    },
     /* Until a call has arrived the dashboard is empty and the app sends you straight back
        here, so the wordmark and Back lead to Connect, which is this customer's home for
        now. The big "Go to your dashboard" button only appears once a call has landed. */
