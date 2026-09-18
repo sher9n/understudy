@@ -102,21 +102,25 @@ export async function fetchModels() {
     }));
 }
 
-export function saveCatalog(models) {
-  const stmt = db.prepare(
-    `INSERT INTO models_catalog (model_id, name, context_len, price_in, price_out, open_weights, zdr, synced_at)
-     VALUES (@model_id, @name, @context_len, @price_in, @price_out, @open_weights, @zdr, @synced_at)
-     ON CONFLICT(model_id) DO UPDATE SET name = excluded.name, context_len = excluded.context_len,
-       price_in = excluded.price_in, price_out = excluded.price_out,
-       open_weights = excluded.open_weights, synced_at = excluded.synced_at`);
+export async function saveCatalog(models) {
   const at = now();
-  db.transaction(() => { for (const m of models) stmt.run({ ...m, synced_at: at }); })();
+  /* The whole catalogue lands at once. A half-written catalogue would price some models
+     and not others, and every cost figure on every screen reads from this table. */
+  await db.tx(async (tx) => {
+    const stmt = tx.prepare(
+      `INSERT INTO models_catalog (model_id, name, context_len, price_in, price_out, open_weights, zdr, synced_at)
+       VALUES (@model_id, @name, @context_len, @price_in, @price_out, @open_weights, @zdr, @synced_at)
+       ON CONFLICT(model_id) DO UPDATE SET name = excluded.name, context_len = excluded.context_len,
+         price_in = excluded.price_in, price_out = excluded.price_out,
+         open_weights = excluded.open_weights, synced_at = excluded.synced_at`);
+    for (const m of models) await stmt.run({ ...m, synced_at: at });
+  });
   return models.length;
 }
 
 /** What one call's tokens cost on a given model, from the synced catalogue only. */
-export function priceCall(modelId, promptTokens, completionTokens) {
-  const m = db.prepare('SELECT price_in, price_out FROM models_catalog WHERE model_id = ?').get(modelId);
+export async function priceCall(modelId, promptTokens, completionTokens) {
+  const m = await db.prepare('SELECT price_in, price_out FROM models_catalog WHERE model_id = ?').get(modelId);
   if (!m) return null;
   return m.price_in * promptTokens + m.price_out * completionTokens;
 }

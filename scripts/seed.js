@@ -16,7 +16,7 @@ if (!key) {
 }
 // the key decides the workspace, exactly as it does for a real caller
 const keyHash = crypto.createHash('sha256').update(key).digest('hex');
-const ws = db.prepare(
+const ws = await db.prepare(
   `SELECT w.* FROM workspaces w JOIN api_keys k ON k.workspace_id = w.id WHERE k.key_hash = ?`).get(keyHash);
 if (!ws) {
   console.error('That key does not belong to any workspace.');
@@ -152,15 +152,17 @@ for (const job of jobs) {
 
 /* The traces all land now, which would leave the daily chart as one spike. Spread them
    over the retention window so the screens show what a month of traffic looks like. */
-const calls = only.length ? [] : db.prepare('SELECT id FROM calls WHERE workspace_id = ? ORDER BY rowid').all(ws.id);
-const spread = db.prepare('UPDATE calls SET created_at = ? WHERE id = ?');
+const calls = only.length ? [] : await db.prepare('SELECT id FROM calls WHERE workspace_id = ? ORDER BY created_at, id').all(ws.id);
 const start = now() - 21 * DAY;
-db.transaction(() => {
-  calls.forEach((c, i) => spread.run(Math.round(start + (i / calls.length) * 21 * DAY), c.id));
-})();
+await db.tx(async (tx) => {
+  const spread = tx.prepare('UPDATE calls SET created_at = ? WHERE id = ?');
+  for (const [i, c] of calls.entries()) {
+    await spread.run(Math.round(start + (i / calls.length) * 21 * DAY), c.id);
+  }
+});
 
 console.log(`\n${sent} calls through /v1/traces, spread over 21 days.`);
 console.log('Workloads found:');
-for (const w of db.prepare('SELECT slug, shape_kind, status FROM workloads WHERE workspace_id = ?').all(ws.id)) {
+for (const w of await db.prepare('SELECT slug, shape_kind, status FROM workloads WHERE workspace_id = ?').all(ws.id)) {
   console.log(`  ${w.slug} (${w.shape_kind}) ${w.status}`);
 }

@@ -2,23 +2,24 @@ import { db, id, now, round8 } from './db/index.js';
 import { signatureOf, nameFor } from './classify.js';
 import config from './config.js';
 
-export function addActivity(workspaceId, { kind, title, detail = null, workloadId = null, at = now() }) {
-  db.prepare(`INSERT INTO activity (id, workspace_id, workload_id, kind, title, detail, created_at)
+export async function addActivity(workspaceId, { kind, title, detail = null, workloadId = null, at = now() }) {
+  await db.prepare(`INSERT INTO activity (id, workspace_id, workload_id, kind, title, detail, created_at)
               VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .run(id('act'), workspaceId, workloadId, kind, title, detail, at);
 }
 
 /** Find the workload this call belongs to, creating it the first time we see the shape. */
-export function workloadFor(workspaceId, body) {
+export async function workloadFor(workspaceId, body) {
   const sig = signatureOf(body);
-  const found = db.prepare('SELECT * FROM workloads WHERE workspace_id = ? AND fingerprint = ?')
+  const found = await db.prepare('SELECT * FROM workloads WHERE workspace_id = ? AND fingerprint = ?')
     .get(workspaceId, sig.fingerprint);
   if (found) return found;
 
-  let slug = nameFor(sig);
+  /* A prepared statement now answers with a promise, and a promise is always truthy, so
+     this loop has to await each check. Without the await it never ends. */
   const taken = db.prepare('SELECT 1 FROM workloads WHERE workspace_id = ? AND slug = ?');
-  let n = 2;
-  while (taken.get(workspaceId, slug)) slug = `${nameFor(sig)}-${n++}`;
+  let slug = nameFor(sig);
+  for (let n = 2; await taken.get(workspaceId, slug); n += 1) slug = `${nameFor(sig)}-${n}`;
 
   const row = {
     id: id('wl'), workspace_id: workspaceId, slug, fingerprint: sig.fingerprint,
@@ -28,7 +29,7 @@ export function workloadFor(workspaceId, body) {
     sample_prompt: sig.systemSample, tool_names: JSON.stringify(sig.toolNames),
     created_at: now(), updated_at: now(),
   };
-  db.prepare(`INSERT INTO workloads
+  await db.prepare(`INSERT INTO workloads
       (id, workspace_id, slug, fingerprint, shape_kind, reference_model, routed_model, optimize_mode,
        status, status_note, floor_pct, promoted_at, promoted_run_id, sample_prompt, tool_names,
        created_at, updated_at)
@@ -36,7 +37,7 @@ export function workloadFor(workspaceId, body) {
        @optimize_mode, @status, @status_note, @floor_pct, @promoted_at, @promoted_run_id,
        @sample_prompt, @tool_names, @created_at, @updated_at)`).run(row);
 
-  addActivity(workspaceId, {
+  await addActivity(workspaceId, {
     kind: 'connect',
     title: `Found a new workload: ${slug}`,
     detail: `${sig.shapeKind.replace('_', ' ')} requests${body?.model ? `, currently on ${body.model}` : ''}`,
@@ -46,7 +47,7 @@ export function workloadFor(workspaceId, body) {
 }
 
 /** One call, recorded. Everything the screens and the measurement need comes from here. */
-export function recordCall({
+export async function recordCall({
   workspaceId, workloadId = null, source, requestedModel = null, servedModel = null,
   statusCode = null, promptTokens = 0, completionTokens = 0, costUsd = 0, chargedUsd = 0,
   latencyMs = null, request = null, response = null,
@@ -60,22 +61,22 @@ export function recordCall({
     response_json: response ? JSON.stringify(response) : null,
     created_at: now(),
   };
-  db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model,
+  await db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model,
       status_code, prompt_tokens, completion_tokens, cost_usd, charged_usd, latency_ms,
       request_json, response_json, created_at)
       VALUES (@id, @workspace_id, @workload_id, @source, @requested_model, @served_model,
       @status_code, @prompt_tokens, @completion_tokens, @cost_usd, @charged_usd, @latency_ms,
       @request_json, @response_json, @created_at)`).run(row);
-  if (workloadId) db.prepare('UPDATE workloads SET updated_at = ? WHERE id = ?').run(now(), workloadId);
+  if (workloadId) await db.prepare('UPDATE workloads SET updated_at = ? WHERE id = ?').run(now(), workloadId);
   return row.id;
 }
 
 const DAY = 86400000;
 
 /** Calls and spend per workload over a window, which is what every screen is built from. */
-export function workloadStats(workspaceId, days = 30) {
+export async function workloadStats(workspaceId, days = 30) {
   const since = now() - days * DAY;
-  return db.prepare(
+  return await db.prepare(
     `SELECT w.*,
             (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.created_at >= ?
                 AND c.source NOT IN ('replay', 'test')) AS calls,
@@ -86,14 +87,14 @@ export function workloadStats(workspaceId, days = 30) {
 }
 
 /** Daily spend, and what the same traffic would have cost on the customer's own models. */
-export function dailySpend(workspaceId, days = 30) {
+export async function dailySpend(workspaceId, days = 30) {
   const since = now() - days * DAY;
-  const rows = db.prepare(
+  const rows = await db.prepare(
     `SELECT c.created_at, c.charged_usd, c.cost_usd, c.served_model, c.requested_model,
             c.prompt_tokens, c.completion_tokens
        FROM calls c WHERE c.workspace_id = ? AND c.created_at >= ? AND c.source NOT IN ('replay', 'test')`)
     .all(workspaceId, since);
-  const price = new Map(db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all()
+  const price = new Map(await (await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all())
     .map((m) => [m.model_id, m]));
   const out = [];
   for (let i = days - 1; i >= 0; i -= 1) {
@@ -116,8 +117,8 @@ export function dailySpend(workspaceId, days = 30) {
   return out;
 }
 
-export function recentActivity(workspaceId, limit = 8) {
-  return db.prepare(
+export async function recentActivity(workspaceId, limit = 8) {
+  return await db.prepare(
     `SELECT kind, title, detail, created_at FROM activity
       WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?`).all(workspaceId, limit);
 }

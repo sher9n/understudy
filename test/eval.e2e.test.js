@@ -8,11 +8,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import fs from 'node:fs';
-import path from 'node:path';
+import pg from 'pg';
 
 const PORT = 4791;
-process.env.DB_FILE = `test-eval-${process.pid}.db`;
+
+/* A database of its own, created here and dropped at the end, so a test run never reads or
+   writes the database anybody is developing against. */
+const ADMIN = process.env.DATABASE_URL || `postgresql://${process.env.USER}@localhost:5432/postgres`;
+const TEST_DB = `understudy_test_${process.pid}`;
+const adminUrl = new URL(ADMIN);
+adminUrl.pathname = '/postgres';
+{
+  const c = new pg.Client({ connectionString: adminUrl.toString() });
+  await c.connect();
+  await c.query(`DROP DATABASE IF EXISTS ${TEST_DB}`);
+  await c.query(`CREATE DATABASE ${TEST_DB}`);
+  await c.end();
+}
+const testUrl = new URL(ADMIN);
+testUrl.pathname = `/${TEST_DB}`;
+process.env.DATABASE_URL = testUrl.toString();
 process.env.OPENROUTER_API_KEY = 'test-key';
 process.env.OPENROUTER_BASE = `http://127.0.0.1:${PORT}/api/v1`;
 process.env.MODEL_MIN_GAP_MS = '0';
@@ -29,7 +44,7 @@ const { saveCatalog } = await import('../src/openrouter.js');
 const { runEvaluation } = await import('../src/eval/run.js');
 const { move } = await import('../src/billing.js');
 
-migrate({ quiet: true });
+await migrate({ quiet: true });
 
 /* How each model behaves. The reference is slightly unstable with itself, which is what
    creates the bar; one candidate is steadier and cheaper, one drifts badly. */
@@ -68,19 +83,20 @@ test.before(async () => {
 
 test.after(async () => {
   await new Promise((r) => server.close(r));
-  const f = path.resolve(process.cwd(), 'data', process.env.DB_FILE);
-  for (const suffix of ['', '-wal', '-shm']) {
-    try { fs.unlinkSync(f + suffix); } catch { /* already gone */ }
-  }
+  await db.close();
+  const c = new pg.Client({ connectionString: adminUrl.toString() });
+  await c.connect();
+  await c.query(`DROP DATABASE IF EXISTS ${TEST_DB}`);
+  await c.end();
 });
 
 test('a full measurement run sets a bar, scores every candidate, and switches', async () => {
-  const { workspace } = createAccount({
+  const { workspace } = await createAccount({
     email: `e2e-${process.pid}@understudy.dev`, password: 'correct-horse', name: 'E2E',
   });
-  move(workspace.id, { kind: 'credit', amountUsd: 50, note: 'test' });
+  await move(workspace.id, { kind: 'credit', amountUsd: 50, note: 'test' });
 
-  saveCatalog([
+  await saveCatalog([
     { model_id: 'openai/gpt-5.4', name: 'gpt-5.4', context_len: 200000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1 },
     { model_id: 'vendor/steady-small', name: 'steady', context_len: 128000, price_in: 0.2e-6, price_out: 0.6e-6, open_weights: 1, zdr: 1 },
     { model_id: 'vendor/drifty-small', name: 'drifty', context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 1, zdr: 1 },
@@ -98,15 +114,15 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
       ],
       response_format: { type: 'json_object' },
     };
-    workload = workload || workloadFor(workspace.id, request);
-    recordCall({
+    workload = workload || await workloadFor(workspace.id, request);
+    await recordCall({
       workspaceId: workspace.id, workloadId: workload.id, source: 'trace',
       requestedModel: 'openai/gpt-5.4', servedModel: 'openai/gpt-5.4', statusCode: 200,
       promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0.002,
       request, response: { choices: [{ message: { content: '{}' } }] },
     });
   }
-  db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ?')
+  await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ?')
     .run(now() - 14 * DAY, workload.id);
 
   const out = await runEvaluation(workload.id);
@@ -115,11 +131,11 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
   // the bar comes from the reference disagreeing with itself, and never drops below 3%
   assert.ok(out.floor >= 3, `bar should be at least the 3% minimum, got ${out.floor}`);
 
-  const run = db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(out.runId);
+  const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(out.runId);
   assert.equal(run.status, 'done');
   assert.equal(run.sample_size, 100);
 
-  const all = db.prepare('SELECT * FROM eval_results WHERE run_id = ? ORDER BY model_id').all(out.runId);
+  const all = await db.prepare('SELECT * FROM eval_results WHERE run_id = ? ORDER BY model_id').all(out.runId);
   const results = all.filter((r) => r.verdict !== 'reference');
   assert.equal(results.length, 2, 'both candidates should have been tried');
   // the reference is recorded too, so every screen can compare against what it costs
@@ -138,16 +154,16 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
   assert.ok(steady.cost_month_usd < (drifty.cost_month_usd ?? Infinity) * 100, 'a monthly cost should be projected');
 
   // auto is the default, so the cheapest model that cleared is already serving
-  const after = db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id);
+  const after = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id);
   assert.equal(after.routed_model, 'vendor/steady-small', 'the workload should have switched on its own');
   assert.equal(after.status, 'promoted');
 
-  const promo = db.prepare('SELECT * FROM promotions WHERE workload_id = ?').get(workload.id);
+  const promo = await db.prepare('SELECT * FROM promotions WHERE workload_id = ?').get(workload.id);
   assert.equal(promo.action, 'promote');
   assert.equal(promo.to_model, 'vendor/steady-small');
 
   // the replays were paid for out of the balance, the same way real traffic is
-  const charged = db.prepare(`SELECT COALESCE(SUM(amount_usd), 0) AS s FROM ledger
-                               WHERE workspace_id = ? AND kind = 'eval'`).get(workspace.id).s;
+  const charged = (await db.prepare(`SELECT COALESCE(SUM(amount_usd), 0) AS s FROM ledger
+                               WHERE workspace_id = ? AND kind = 'eval'`).get(workspace.id)).s;
   assert.ok(charged < 0, 'measuring should have been charged');
 });

@@ -10,8 +10,8 @@ import { enqueue } from './jobs.js';
 export const v1 = express.Router();
 
 /** Every /v1 route is authenticated by the customer's own key, never by a session. */
-function auth(req, res, next) {
-  const key = verifyKey(bearerOf(req));
+async function auth(req, res, next) {
+  const key = await verifyKey(bearerOf(req));
   if (!key) {
     return res.status(401).json({
       error: { message: 'Send your Understudy key as "Authorization: Bearer us_live_...".', type: 'invalid_api_key' },
@@ -25,8 +25,8 @@ v1.use(express.json({ limit: '8mb' }));
 v1.use(auth);
 
 /** What this workspace can ask for. The customer's own model ids keep working. */
-v1.get('/models', (req, res) => {
-  const rows = db.prepare(
+v1.get('/models', async (req, res) => {
+  const rows = await db.prepare(
     `SELECT c.model_id, c.name, c.context_len, c.price_in, c.price_out, c.open_weights
        FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
@@ -45,18 +45,18 @@ v1.get('/models', (req, res) => {
 
 /* Everything a routed call needs before it is sent, or the reason it cannot be, so the
    streaming path, the ordinary path and Connect's test call all answer the same way. */
-function prepare(wsId, body, { classify = true } = {}) {
+async function prepare(wsId, body, { classify = true } = {}) {
   const no = (status, message, type) => ({ error: { status, json: { error: { message, type } } } });
   if (!Array.isArray(body.messages) || !body.messages.length) {
     return no(400, '"messages" is required.', 'invalid_request_error');
   }
   if (!canRoute()) return no(503, 'Routing is not configured on this deployment yet.', 'not_configured');
-  grantStarterCredit(wsId);
-  const gate = gateRouting(wsId);
+  await grantStarterCredit(wsId);
+  const gate = await gateRouting(wsId);
   if (!gate.ok) return { error: { status: 402, json: { error: { message: gate.message, type: gate.code } } } };
   /* A test call is not the customer's traffic, so it is never fingerprinted into a
      workload: it would leave a one-call workload in their list that nothing produced. */
-  const workload = classify ? workloadFor(wsId, body) : null;
+  const workload = classify ? await workloadFor(wsId, body) : null;
   const requested = body.model || workload?.reference_model || null;
   const served = workload?.routed_model || requested;
   if (!served) return no(400, '"model" is required.', 'invalid_request_error');
@@ -68,13 +68,13 @@ function prepare(wsId, body, { classify = true } = {}) {
    proves is what a real call does, because it is the same path, the same gate, the same
    charge and the same row. */
 export async function routeOnce(wsId, body, { source = 'routed', classify = true } = {}) {
-  const ready = prepare(wsId, body, { classify });
+  const ready = await prepare(wsId, body, { classify });
   if (ready.error) return { ok: false, status: ready.error.status, json: ready.error.json };
   const { workload, requested, served } = ready;
   const started = Date.now();
   try {
     const { json, latencyMs } = await chat(body, served);
-    finish({ wsId, workload, requested, served, usage: json?.usage, started, body,
+    await finish({ wsId, workload, requested, served, usage: json?.usage, started, body,
       response: json, status: 200, latencyMs, source });
     return { ok: true, status: 200, json, served, requested,
       latencyMs: latencyMs ?? Date.now() - started, costUsd: Number(json?.usage?.cost ?? 0) };
@@ -82,7 +82,7 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     const status = err instanceof UpstreamError ? err.status : 502;
     const json = err instanceof UpstreamError ? err.body
       : { error: { message: 'The provider could not be reached.' } };
-    recordCall({
+    await recordCall({
       workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
       servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body,
     });
@@ -99,7 +99,7 @@ v1.post('/chat/completions', async (req, res) => {
     const out = await routeOnce(wsId, body);
     return res.status(out.status).json(out.json);
   }
-  const ready = prepare(wsId, body);
+  const ready = await prepare(wsId, body);
   if (ready.error) return res.status(ready.error.status).json(ready.error.json);
   const { workload, requested, served } = ready;
   const started = Date.now();
@@ -130,12 +130,12 @@ v1.post('/chat/completions', async (req, res) => {
       res.write(text);
     }
     res.end();
-    finish({ wsId, workload, requested, served, usage, started, body, response: null, status: 200 });
+    await finish({ wsId, workload, requested, served, usage, started, body, response: null, status: 200 });
     return undefined;
   } catch (err) {
     const status = err instanceof UpstreamError ? err.status : 502;
     const payload = err instanceof UpstreamError ? err.body : { error: { message: 'The provider could not be reached.' } };
-    recordCall({
+    await recordCall({
       workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
       servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body,
     });
@@ -145,54 +145,54 @@ v1.post('/chat/completions', async (req, res) => {
   }
 });
 
-function finish({ wsId, workload, requested, served, usage, started, body, response, status,
+async function finish({ wsId, workload, requested, served, usage, started, body, response, status,
   latencyMs, source = 'routed' }) {
   const cost = Number(usage?.cost ?? 0);
   const note = workload ? `${workload.slug} on ${served}` : `Test call on ${served}`;
-  const charged = cost > 0 ? chargeCall(wsId, cost, note) : 0;
-  recordCall({
+  const charged = cost > 0 ? await chargeCall(wsId, cost, note) : 0;
+  await recordCall({
     workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
     servedModel: served, statusCode: status,
     promptTokens: usage?.prompt_tokens ?? 0, completionTokens: usage?.completion_tokens ?? 0,
     costUsd: cost, chargedUsd: charged, latencyMs: latencyMs ?? Date.now() - started,
     request: body, response,
   });
-  if (workload) considerMeasuring(wsId, workload);
+  if (workload) await considerMeasuring(wsId, workload);
 }
 
 /** Once a workload has enough calls to be trusted, it measures itself without being asked. */
-export function considerMeasuring(wsId, workload) {
+export async function considerMeasuring(wsId, workload) {
   if (workload.status !== 'new') return;
-  const n = db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workload_id = ?').get(workload.id).n;
+  const n = (await db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workload_id = ?').get(workload.id)).n;
   if (n < config.EVAL_FIRST_RUN_MIN_CALLS) return;
-  db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), workload.id);
-  addActivity(wsId, {
+  await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), workload.id);
+  await addActivity(wsId, {
     kind: 'run', title: `Measuring ${workload.slug}`,
     detail: `${config.EVAL_FIRST_RUN_MIN_CALLS} calls in, which is enough for a bar to mean something.`,
     workloadId: workload.id,
   });
-  enqueue('eval_run', { workloadId: workload.id }, { unique: true });
+  await enqueue('eval_run', { workloadId: workload.id }, { unique: true });
 }
 
 /* The observe path. Their provider answered; we get a copy afterwards. */
-v1.post('/traces', (req, res) => {
+v1.post('/traces', async (req, res) => {
   const wsId = req.key.workspace_id;
   const body = req.body || {};
   const list = Array.isArray(body.traces) ? body.traces : [body];
   if (list.length > 200) {
     return res.status(400).json({ error: { message: 'Send at most 200 traces at a time.', type: 'too_many' } });
   }
-  grantStarterCredit(wsId);
+  await grantStarterCredit(wsId);
   let accepted = 0;
   for (const t of list) {
     const request = t?.request;
     if (!request || !Array.isArray(request.messages)) continue;
-    const workload = workloadFor(wsId, request);
+    const workload = await workloadFor(wsId, request);
     const usage = t?.response?.usage || {};
     const served = t?.response?.model || request.model || null;
     // we do not bill a traced call, but we do price it, because it is what their traffic costs today
-    const own = served ? priceCall(served, usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0) : null;
-    recordCall({
+    const own = served ? await priceCall(served, usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0) : null;
+    await recordCall({
       workspaceId: wsId, workloadId: workload.id, source: 'trace',
       requestedModel: request.model || null, servedModel: served,
       statusCode: 200,
@@ -201,7 +201,7 @@ v1.post('/traces', (req, res) => {
       latencyMs: Number.isFinite(t?.latency_ms) ? t.latency_ms : null,
       request, response: t?.response ?? null,
     });
-    considerMeasuring(wsId, workload);
+    await considerMeasuring(wsId, workload);
     accepted += 1;
   }
   res.json({ accepted, rejected: list.length - accepted });

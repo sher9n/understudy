@@ -17,16 +17,16 @@ requeueStale();
 
 /* What the background does ------------------------------------------------------ */
 
-handle('eval_run', async ({ workloadId }) => runEvaluation(workloadId));
+handle('eval_run', async ({ workloadId }) => await runEvaluation(workloadId));
 
 handle('catalog_sync', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
-  const n = saveCatalog(await fetchModels());
-  enqueue('catalog_sync', {}, { runAfter: now() + config.CATALOG_SYNC_HOURS * 3600000, unique: true });
+  const n = await saveCatalog(await fetchModels());
+  await enqueue('catalog_sync', {}, { runAfter: now() + config.CATALOG_SYNC_HOURS * 3600000, unique: true });
   return { ok: true, models: n };
 });
 
-handle('topup', async ({ workspaceId }) => runTopUp(workspaceId));
+handle('topup', async ({ workspaceId }) => await runTopUp(workspaceId));
 
 /** Content ages out; the numbers the charts need do not. */
 handle('purge', async () => {
@@ -35,31 +35,31 @@ handle('purge', async () => {
      those workspaces are skipped entirely: nothing of theirs is ever blanked. */
   let a = 0;
   let b = 0;
-  const spaces = db.prepare('SELECT id, retention_days FROM workspaces').all();
+  const spaces = await db.prepare('SELECT id, retention_days FROM workspaces').all();
   for (const ws of spaces) {
     if (!ws.retention_days) continue;
     const cutoff = now() - ws.retention_days * 86400000;
-    a += db.prepare(
+    a += (await db.prepare(
       `UPDATE calls SET request_json = NULL, response_json = NULL, content_purged_at = ?
         WHERE workspace_id = ? AND created_at < ? AND content_purged_at IS NULL`)
-      .run(now(), ws.id, cutoff).changes;
-    b += db.prepare(
+      .run(now(), ws.id, cutoff)).changes;
+    b += (await db.prepare(
       `UPDATE eval_samples SET ref_a_json = NULL, ref_b_json = NULL, content_purged_at = ?
         WHERE content_purged_at IS NULL AND run_id IN (
           SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`)
-      .run(now(), ws.id, cutoff).changes;
+      .run(now(), ws.id, cutoff)).changes;
   }
-  enqueue('purge', {}, { runAfter: now() + 6 * 3600000, unique: true });
+  await enqueue('purge', {}, { runAfter: now() + 6 * 3600000, unique: true });
   return { ok: true, calls: a, samples: b };
 });
 
 /** A promoted model is re-tested on fresh calls, and goes back the moment it stops clearing. */
 handle('recheck', async () => {
-  const due = db.prepare(
+  const due = await db.prepare(
     `SELECT * FROM workloads WHERE routed_model IS NOT NULL AND updated_at < ?`)
     .all(now() - config.EVAL_RECHECK_HOURS * 3600000);
-  for (const w of due) enqueue('eval_run', { workloadId: w.id }, { unique: true });
-  enqueue('recheck', {}, { runAfter: now() + config.EVAL_RECHECK_HOURS * 3600000, unique: true });
+  for (const w of due) await enqueue('eval_run', { workloadId: w.id }, { unique: true });
+  await enqueue('recheck', {}, { runAfter: now() + config.EVAL_RECHECK_HOURS * 3600000, unique: true });
   return { ok: true, queued: due.length };
 });
 
@@ -73,11 +73,11 @@ app.disable('x-powered-by');
 // Stripe needs the raw body, so it is mounted before the global json parser
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const { handleWebhook } = await import('./stripe-webhook.js');
-  return handleWebhook(req, res);
+  return await handleWebhook(req, res);
 });
 
-app.get('/health', (_req, res) => res.json({
-  ok: true, routing: canRoute(), models: db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get().n,
+app.get('/health', async (_req, res) => res.json({
+  ok: true, routing: canRoute(), models: (await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get()).n,
 }));
 
 // the customer's own traffic, authenticated by their key

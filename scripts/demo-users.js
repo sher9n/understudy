@@ -8,7 +8,7 @@ import { issueKey } from '../src/keys.js';
 import migrate from '../src/db/migrate.js';
 import config from '../src/config.js';
 
-migrate({ quiet: true });
+await migrate({ quiet: true });
 
 const PASSWORD = 'demo';
 const PEOPLE = [
@@ -25,10 +25,10 @@ for (const p of PEOPLE) {
   const email = p.email.toLowerCase();
   const salt = crypto.randomBytes(16).toString('hex');
   const pw_hash = crypto.scryptSync(PASSWORD, salt, 64).toString('hex');
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+  const existing = await db.prepare('SELECT id FROM users WHERE email = ?').get(email);
 
   if (existing) {
-    db.prepare('UPDATE users SET pw_hash = ?, pw_salt = ?, name = ? WHERE id = ?')
+    await db.prepare('UPDATE users SET pw_hash = ?, pw_salt = ?, name = ? WHERE id = ?')
       .run(pw_hash, salt, p.name, existing.id);
     console.log(`${email}: password reset`);
     continue;
@@ -36,15 +36,15 @@ for (const p of PEOPLE) {
 
   const user = { id: id('usr'), email, name: p.name, pw_hash, pw_salt: salt, created_at: now() };
   const ws = { id: id('ws'), owner_user_id: user.id, name: 'Understudy', mode: 'route', retention_days: config.RETENTION_DAYS, created_at: now() };
-  db.transaction(() => {
-    db.prepare(`INSERT INTO users (id, email, name, pw_hash, pw_salt, created_at)
+  await db.tx(async (tx) => {
+    await tx.prepare(`INSERT INTO users (id, email, name, pw_hash, pw_salt, created_at)
                 VALUES (@id, @email, @name, @pw_hash, @pw_salt, @created_at)`).run(user);
-    db.prepare(`INSERT INTO workspaces (id, owner_user_id, name, mode, retention_days, created_at)
+    await tx.prepare(`INSERT INTO workspaces (id, owner_user_id, name, mode, retention_days, created_at)
                 VALUES (@id, @owner_user_id, @name, @mode, @retention_days, @created_at)`).run(ws);
-    db.prepare('INSERT INTO billing_accounts (workspace_id, balance_usd, updated_at) VALUES (?, 0, ?)')
+    await tx.prepare('INSERT INTO billing_accounts (workspace_id, balance_usd, updated_at) VALUES (?, 0, ?)')
       .run(ws.id, now());
-  })();
-  const key = issueKey(ws.id);
+  });
+  const key = await issueKey(ws.id);
   console.log(`${email}: created, key ${key.secret}`);
 }
 console.log(`\nThey all sign in with the password "${PASSWORD}".`);

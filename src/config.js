@@ -36,10 +36,13 @@ const publicUrl = () => {
 
 export const config = {
   PORT: num('PORT', 4600),
-  /* Where the database file lives. On a host with an ephemeral filesystem this must point
-     at a mounted volume, or every deploy starts from an empty database. */
-  DATA_DIR: str('DATA_DIR', 'data'),
-  DB_FILE: str('DB_FILE', 'understudy.db'),
+  /* Postgres. One database, one connection string. Locally this points at a database on
+     your own machine; in production the platform supplies it. */
+  DATABASE_URL: str('DATABASE_URL', 'postgresql://localhost:5432/understudy'),
+  PG_POOL_MAX: num('PG_POOL_MAX', 10),
+  /* Managed Postgres usually presents a certificate the app has no root for, and the
+     connection is inside a private network. Off locally, on when a URL says so. */
+  PG_SSL: bool('PG_SSL', /[?&]sslmode=require/.test(str('DATABASE_URL'))),
   PUBLIC_URL: publicUrl(),
   /* A session cookie crosses the public internet once this is deployed, so it is marked
      Secure whenever the app is served over https. */

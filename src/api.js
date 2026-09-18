@@ -18,29 +18,29 @@ const fail = (res, code, message) => res.status(code).json({ error: message });
 
 /* Accounts -------------------------------------------------------------------- */
 
-api.post('/auth/sign-up', (req, res) => {
+api.post('/auth/sign-up', async (req, res) => {
   try {
-    const { user, workspace, key } = createAccount(req.body || {});
-    res.setHeader('Set-Cookie', cookieFor(startSession(user.id)));
+    const { user, workspace, key } = await createAccount(req.body || {});
+    res.setHeader('Set-Cookie', cookieFor(await startSession(user.id)));
     res.json({ ok: true, workspace: workspace.name, key: key.secret });
   } catch (err) { fail(res, 400, err.message); }
 });
 
-api.post('/auth/sign-in', (req, res) => {
-  const u = checkPassword(req.body?.email, req.body?.password);
+api.post('/auth/sign-in', async (req, res) => {
+  const u = await checkPassword(req.body?.email, req.body?.password);
   if (!u) return fail(res, 401, 'That email and password do not match.');
-  res.setHeader('Set-Cookie', cookieFor(startSession(u.id)));
+  res.setHeader('Set-Cookie', cookieFor(await startSession(u.id)));
   return res.json({ ok: true });
 });
 
-api.post('/auth/sign-out', (req, res) => {
+api.post('/auth/sign-out', async (req, res) => {
   const m = (req.headers.cookie || '').match(/(?:^|;\s*)us_session=([^;]+)/);
-  endSession(m ? m[1] : null);
+  await endSession(m ? m[1] : null);
   res.setHeader('Set-Cookie', clearCookie());
   res.json({ ok: true });
 });
 
-api.get('/me', (req, res) => {
+api.get('/me', async (req, res) => {
   if (!req.user) return res.json({ signedIn: false });
   return res.json({
     signedIn: true,
@@ -51,7 +51,7 @@ api.get('/me', (req, res) => {
     canRoute: canRoute(),
     canBill: canBill(),
     // somebody whose traffic has never arrived belongs on Connect, not an empty dashboard
-    connected: db.prepare(
+    connected: await db.prepare(
       `SELECT 1 FROM calls WHERE workspace_id = ? AND source NOT IN ('replay', 'test') LIMIT 1`)
       .get(req.workspace.id) !== undefined,
   });
@@ -71,15 +71,15 @@ const statusLabel = (w) => {
   return { label: 'Not optimized yet', tone: 'q' };
 };
 
-function overview(workspaceId, days = 30) {
+async function overview(workspaceId, days = 30) {
   const since = now() - days * DAY;
-  const rows = workloadStats(workspaceId, days);
-  const spend = db.prepare(
+  const rows = await workloadStats(workspaceId, days);
+  const spend = await db.prepare(
     `SELECT COALESCE(SUM(charged_usd), 0) AS s, COUNT(*) AS n FROM calls
       WHERE workspace_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(workspaceId, since);
-  const series = dailySpend(workspaceId, days);
+  const series = await dailySpend(workspaceId, days);
   const saved = round8(series.reduce((a, d) => a + Math.max(0, d.would - d.paid), 0));
-  const priced = db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get().n > 0;
+  const priced = (await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get()).n > 0;
   return {
     days,
     priced,
@@ -98,23 +98,23 @@ function overview(workspaceId, days = 30) {
       model: w.routed_model || w.reference_model || 'not set',
       ...statusLabel(w),
     })),
-    activity: recentActivity(workspaceId, 5),
+    activity: await recentActivity(workspaceId, 5),
   };
 }
 
-api.get('/overview', (req, res) => res.json(overview(req.workspace.id)));
+api.get('/overview', async (req, res) => res.json(await overview(req.workspace.id)));
 
-api.get('/workloads', (req, res) => res.json(overview(req.workspace.id)));
+api.get('/workloads', async (req, res) => res.json(await overview(req.workspace.id)));
 
-api.get('/workloads/:id', (req, res) => {
-  const w = db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+api.get('/workloads/:id', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
   const since = now() - 30 * DAY;
-  const t = db.prepare(
+  const t = await db.prepare(
     `SELECT COUNT(*) AS calls, COALESCE(SUM(charged_usd), 0) AS cost FROM calls
       WHERE workload_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(w.id, since);
-  const cert = certificate(w.id);
+  const cert = await certificate(w.id);
   const best = cert?.results.find((r) => r.verdict === 'cleared' && r.model_id !== w.routed_model);
   const refCost = cert?.referenceCostMonth ?? null;
   return res.json({
@@ -143,49 +143,49 @@ api.get('/workloads/:id', (req, res) => {
   });
 });
 
-api.post('/workloads/:id/mode', (req, res) => {
+api.post('/workloads/:id/mode', async (req, res) => {
   const mode = req.body?.mode === 'ask' ? 'ask' : 'auto';
-  const changed = db.prepare('UPDATE workloads SET optimize_mode = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
-    .run(mode, now(), req.params.id, req.workspace.id).changes;
+  const changed = (await db.prepare('UPDATE workloads SET optimize_mode = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
+    .run(mode, now(), req.params.id, req.workspace.id)).changes;
   if (!changed) return fail(res, 404, 'No such workload.');
   return res.json({ ok: true, mode });
 });
 
-api.post('/workloads/:id/promote', (req, res) => {
-  const w = db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+api.post('/workloads/:id/promote', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
-  const cert = certificate(w.id);
+  const cert = await certificate(w.id);
   const pick = req.body?.model
     || cert?.results.find((r) => r.verdict === 'cleared')?.model_id;
   if (!pick) return fail(res, 400, 'Nothing has cleared your bar on this workload yet.');
-  return res.json(promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it' }));
+  return res.json(await promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it' }));
 });
 
-api.post('/workloads/:id/revert', (req, res) => {
-  const w = db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+api.post('/workloads/:id/revert', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
-  return res.json(revert(w, { actorUserId: req.user.id }));
+  return res.json(await revert(w, { actorUserId: req.user.id }));
 });
 
-api.post('/workloads/:id/measure', (req, res) => {
-  const w = db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+api.post('/workloads/:id/measure', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
-  enqueue('eval_run', { workloadId: w.id }, { unique: true });
-  db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), w.id);
+  await enqueue('eval_run', { workloadId: w.id }, { unique: true });
+  await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), w.id);
   return res.json({ ok: true });
 });
 
 /* Models ------------------------------------------------------------------------ */
 
-api.get('/models', (req, res) => {
-  const rows = db.prepare(
+api.get('/models', async (req, res) => {
+  const rows = await db.prepare(
     `SELECT c.*, COALESCE(wm.enabled, 1) AS enabled FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
       ORDER BY (c.price_in + c.price_out)`).all(req.workspace.id);
-  const serving = db.prepare(
+  const serving = await db.prepare(
     `SELECT slug, COALESCE(routed_model, reference_model) AS m FROM workloads WHERE workspace_id = ?`)
     .all(req.workspace.id);
   const where = new Map();
@@ -204,9 +204,9 @@ api.get('/models', (req, res) => {
   });
 });
 
-api.post('/models/:id(*)/enabled', (req, res) => {
+api.post('/models/:id(*)/enabled', async (req, res) => {
   const enabled = req.body?.enabled ? 1 : 0;
-  db.prepare(`INSERT INTO workspace_models (workspace_id, model_id, enabled, updated_at)
+  await db.prepare(`INSERT INTO workspace_models (workspace_id, model_id, enabled, updated_at)
               VALUES (?, ?, ?, ?)
               ON CONFLICT(workspace_id, model_id) DO UPDATE SET enabled = excluded.enabled,
                 updated_at = excluded.updated_at`)
@@ -227,12 +227,12 @@ const RETENTION_CHOICES = [
 ];
 
 
-api.get('/settings', (req, res) => {
-  const acct = account(req.workspace.id);
+api.get('/settings', async (req, res) => {
+  const acct = await account(req.workspace.id);
   res.json({
     name: req.user.name, email: req.user.email,
     mode: req.workspace.mode,
-    keys: listKeys(req.workspace.id).filter((k) => !k.revoked_at),
+    keys: (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at),
     balance: round8(acct.balance_usd),
     autoTopUp: !!acct.auto_topup,
     topUpAmount: config.TOPUP_AMOUNT_USD,
@@ -243,44 +243,44 @@ api.get('/settings', (req, res) => {
     retentionChoices: RETENTION_CHOICES,
     zdrOnly: config.ZDR_ONLY,
     canBill: canBill(),
-    ledger: ledger(req.workspace.id, 10),
-    routing: gateRouting(req.workspace.id),
+    ledger: await ledger(req.workspace.id, 10),
+    routing: await gateRouting(req.workspace.id),
   });
 });
 
-api.post('/settings/keys', (req, res) => {
-  const k = issueKey(req.workspace.id, String(req.body?.name || 'production').slice(0, 40));
-  addActivity(req.workspace.id, { kind: 'connect', title: `New key ${k.prefix}`, detail: 'Shown once, right now.' });
+api.post('/settings/keys', async (req, res) => {
+  const k = await issueKey(req.workspace.id, String(req.body?.name || 'production').slice(0, 40));
+  await addActivity(req.workspace.id, { kind: 'connect', title: `New key ${k.prefix}`, detail: 'Shown once, right now.' });
   res.json({ ok: true, key: k.secret, prefix: k.prefix });
 });
 
-api.delete('/settings/keys/:id', (req, res) => {
-  if (!revokeKey(req.workspace.id, req.params.id)) return fail(res, 404, 'No such key.');
+api.delete('/settings/keys/:id', async (req, res) => {
+  if (!await revokeKey(req.workspace.id, req.params.id)) return fail(res, 404, 'No such key.');
   return res.json({ ok: true });
 });
 
-api.post('/settings/profile', (req, res) => {
+api.post('/settings/profile', async (req, res) => {
   const name = String(req.body?.name ?? req.user.name).slice(0, 80);
   const email = String(req.body?.email ?? req.user.email).trim().toLowerCase().slice(0, 160);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return fail(res, 400, 'That does not look like an email address.');
   }
   if (email !== req.user.email) {
-    const taken = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?')
+    const taken = await db.prepare('SELECT id FROM users WHERE email = ? AND id != ?')
       .get(email, req.user.id);
     if (taken) return fail(res, 409, 'That email address is already in use.');
   }
-  db.prepare('UPDATE users SET name = ?, email = ? WHERE id = ?').run(name, email, req.user.id);
+  await db.prepare('UPDATE users SET name = ?, email = ? WHERE id = ?').run(name, email, req.user.id);
   return res.json({ ok: true, name, email });
 });
 
-api.post('/settings/retention', (req, res) => {
+api.post('/settings/retention', async (req, res) => {
   const days = Number(req.body?.days);
   if (!RETENTION_CHOICES.some((c) => c.days === days)) {
     return fail(res, 400, 'That is not one of the retention choices.');
   }
-  db.prepare('UPDATE workspaces SET retention_days = ? WHERE id = ?').run(days, req.workspace.id);
-  addActivity(req.workspace.id, {
+  await db.prepare('UPDATE workspaces SET retention_days = ? WHERE id = ?').run(days, req.workspace.id);
+  await addActivity(req.workspace.id, {
     kind: 'connect',
     title: days ? `Call content is now kept for ${days} days` : 'Call content is now kept indefinitely',
     detail: days
@@ -290,8 +290,8 @@ api.post('/settings/retention', (req, res) => {
   return res.json({ ok: true, days });
 });
 
-api.post('/settings/auto-topup', (req, res) => {
-  db.prepare(`UPDATE billing_accounts SET auto_topup = ?, topup_failed_note = NULL, updated_at = ?
+api.post('/settings/auto-topup', async (req, res) => {
+  await db.prepare(`UPDATE billing_accounts SET auto_topup = ?, topup_failed_note = NULL, updated_at = ?
                WHERE workspace_id = ?`)
     .run(req.body?.enabled ? 1 : 0, now(), req.workspace.id);
   res.json({ ok: true });
@@ -299,17 +299,17 @@ api.post('/settings/auto-topup', (req, res) => {
 
 /* Connect ------------------------------------------------------------------------ */
 
-api.get('/connect', (req, res) => {
-  const keys = listKeys(req.workspace.id).filter((k) => !k.revoked_at);
-  const traffic = db.prepare(
+api.get('/connect', async (req, res) => {
+  const keys = (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at);
+  const traffic = await db.prepare(
     `SELECT COUNT(*) AS n, MAX(created_at) AS last FROM calls
       WHERE workspace_id = ? AND source NOT IN ('replay', 'test')`).get(req.workspace.id);
-  const workloads = db.prepare(
+  const workloads = await db.prepare(
     `SELECT w.slug, w.reference_model,
             (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.source NOT IN ('replay', 'test')) AS calls
        FROM workloads w WHERE w.workspace_id = ? ORDER BY calls DESC LIMIT 5`).all(req.workspace.id);
-  const workloadCount = db.prepare(
-    'SELECT COUNT(*) AS n FROM workloads WHERE workspace_id = ?').get(req.workspace.id).n;
+  const workloadCount = (await db.prepare(
+    'SELECT COUNT(*) AS n FROM workloads WHERE workspace_id = ?').get(req.workspace.id)).n;
   res.json({
     baseUrl: `${config.PUBLIC_URL}/v1`,
     keyPrefix: keys[0]?.prefix ?? null,
@@ -317,7 +317,7 @@ api.get('/connect', (req, res) => {
     lastCallAt: traffic.last ?? null,
     workloads,
     workloadCount,
-    lastTest: lastTestCall(req.workspace.id),
+    lastTest: await lastTestCall(req.workspace.id),
     canRoute: canRoute(),
   });
 });
@@ -326,8 +326,8 @@ api.get('/connect', (req, res) => {
 const clip = (t, n) => (t.length > n ? `${t.slice(0, n).trimEnd()}…` : t);
 
 /** The most recent test call, so the panel still says how it went after a reload. */
-function lastTestCall(workspaceId) {
-  const row = db.prepare(
+async function lastTestCall(workspaceId) {
+  const row = await db.prepare(
     `SELECT served_model, status_code, latency_ms, charged_usd, created_at
        FROM calls WHERE workspace_id = ? AND source = 'test'
       ORDER BY created_at DESC LIMIT 1`).get(workspaceId);
@@ -348,21 +348,21 @@ function lastTestCall(workspaceId) {
 /* The cheapest model this workspace is allowed to reach. A test call should cost as close
    to nothing as possible, and it has to be a model they can actually be served, otherwise
    the test fails for a reason that has nothing to do with their connection. */
-function testModelFor(workspaceId) {
-  const row = db.prepare(
+async function testModelFor(workspaceId) {
+  const row = await db.prepare(
     `SELECT c.model_id FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
       WHERE COALESCE(wm.enabled, 1) = 1
       ORDER BY (c.price_in + c.price_out) ASC LIMIT 1`).get(workspaceId);
   if (row) return row.model_id;
-  const own = db.prepare(
+  const own = await db.prepare(
     `SELECT reference_model FROM workloads WHERE workspace_id = ? AND reference_model IS NOT NULL
       ORDER BY updated_at DESC LIMIT 1`).get(workspaceId);
   return own?.reference_model ?? null;
 }
 
 api.post('/connect/test', async (req, res) => {
-  const model = testModelFor(req.workspace.id);
+  const model = await testModelFor(req.workspace.id);
   if (!model) {
     return res.json({
       ok: false,
@@ -386,7 +386,7 @@ api.post('/connect/test', async (req, res) => {
       at: now(),
     });
   }
-  addActivity(req.workspace.id, {
+  await addActivity(req.workspace.id, {
     kind: 'connect',
     title: 'Test call went through',
     detail: `${out.served} answered in ${out.latencyMs} ms.`,
