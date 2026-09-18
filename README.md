@@ -57,6 +57,8 @@ measurement engine without spending anything.
 
 ## Deploying
 
+Live at **https://understudy.up.railway.app**
+
 It is deployed on Railway, built by Railpack, which needs no build configuration in the
 repo: it finds `package.json`, runs `npm install` and `npm run build`, and starts it with
 `npm start`.
@@ -69,24 +71,30 @@ health check path and timeout, one replica, restart policy) are set on the servi
 instead, where they can be read back and checked. If you reintroduce the file, watch the
 first build rather than assuming.
 
-Two things are not optional.
+**Give Postgres a volume.** Everything lives in it: accounts, keys, traffic,
+measurements, the ledger. The database runs as its own service in the same project, with a
+volume at `/var/lib/postgresql/data`, and the app reaches it over the private network
+through a reference variable so no password is ever copied between services.
 
-**Mount a volume, and point `DATA_DIR` at it.** Everything lives in one SQLite file:
-accounts, keys, traffic, measurements, the ledger. A host with an ephemeral filesystem
-throws that away on every deploy. Mount a volume at `/data` and set `DATA_DIR=/data`, and
-do it before the first sign-up rather than after.
-
-**Keep it to one instance.** A SQLite file on one volume cannot be shared between
-replicas. The service is pinned to one; scale past that and two instances will write over
-each other.
+More than one instance is fine now. It was not when this ran on SQLite, where a single
+file on a single volume could not be shared, and the service is still pinned to one
+replica; that is now a choice rather than a constraint.
 
 Variables worth setting:
 
 - `OPENROUTER_API_KEY`, or `/v1/chat/completions` answers 503 and no price is known
-- `DATA_DIR=/data`, as above
-- `PUBLIC_URL`, only if the app sits behind your own domain. On a host that hands the app
-  its own domain this is worked out from that, and it matters: Connect shows this address
-  to customers as the base URL to point their client at
+- `DATABASE_URL`, which on Railway is a reference to the Postgres service rather than a
+  literal
+- `PUBLIC_URL`. On a host that hands the app its own domain this is worked out from that,
+  so it can be left unset, but setting it explicitly is safer and this deployment does.
+  It matters more than it looks: Connect shows this address to customers as the base URL
+  to point their client at, and the sign-in emails build their magic link from it.
+
+  **Changing the domain needs a redeploy.** The platform's domain arrives as an environment
+  variable, which a running container keeps until it restarts, so renaming the service
+  leaves the app quietly handing customers an endpoint that no longer answers. It is not
+  visible from the outside: health is fine, the screens load, and only the one line a
+  customer is meant to copy is wrong
 - `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`, if the wallet should be more than read
   only. The webhook endpoint is `POST /stripe/webhook`
 - anything else in `.env.example`. Every number the product reasons about comes from the
