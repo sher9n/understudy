@@ -26,6 +26,14 @@ v1.use(auth);
 
 /** What this workspace can ask for. The customer's own model ids keep working. */
 v1.get('/models', async (req, res) => {
+  /* An empty list is a lie here. It reads as "there are no models", when what is true is
+     that this deployment cannot reach a provider, so nothing has been priced or synced.
+     Say that, in the same words /chat/completions uses. */
+  if (!canRoute()) {
+    return res.status(503).json({
+      error: { message: 'Routing is not configured on this deployment yet.', type: 'not_configured' },
+    });
+  }
   const rows = await db.prepare(
     `SELECT c.model_id, c.name, c.context_len, c.price_in, c.price_out, c.open_weights
        FROM models_catalog c
