@@ -33,7 +33,7 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
      handed over something which could never authenticate. */
   const [ownKey, setOwnKey] = useState(null);
   const [rotating, setRotating] = useState(false);
-  const key = freshKey || ownKey;
+  const key = freshKey || ownKey || null;
   const [data, setData] = useState(null);
   const [step, setStep] = useState(1);
   const [way, setWay] = useState('route');
@@ -53,6 +53,9 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
   if (!data) return <div className="loading">Loading…</div>;
 
   const calls = data.calls > 0;
+  /* The whole key: the one just made, or the one the server could decrypt. Only a key from
+     before they were kept recoverable comes back empty, and then the screen says so. */
+  const shownKey = key || data.key || null;
   const vals = {
     dark, light: !dark,
     isStep1: step === 1, isStep2: step === 2,
@@ -63,10 +66,10 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
     copyCls: way === 'copy' ? 'way on' : 'way',
     is_route: way === 'route', is_copy: way === 'copy',
     noCalls: !calls, hasCalls: calls,
-    regenLabel: rotating ? 'working…' : (key ? 'Replace it' : 'Regenerate'),
-    keyState: key
-      ? 'the whole key, copy it now'
-      : (calls ? 'in use, regenerate to see it in full' : 'regenerate to get one you can copy'),
+    regenLabel: rotating ? 'working…' : (shownKey ? 'Replace' : 'Regenerate'),
+    keyState: shownKey
+      ? (calls ? 'in use' : 'not used yet')
+      : 'made before keys were kept recoverable, replace it to see one in full',
   };
   for (const l of LANGS) {
     vals[`tab_${l}`] = lang === l ? 'tab on' : 'tab';
@@ -116,7 +119,7 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
       on={on}
       hrefs={{ go_dash: href(calls ? 'dash' : 'connect') }}
       subs={{
-        [SAMPLE_KEY]: freshKey || (data.keyPrefix ? `${data.keyPrefix}…` : SAMPLE_KEY),
+        [SAMPLE_KEY]: shownKey || (data.keyPrefix ? `${data.keyPrefix}…` : SAMPLE_KEY),
         [SAMPLE_BASE]: data.baseUrl,
         [SAMPLE_SUMMARY]: summary(data),
       }}

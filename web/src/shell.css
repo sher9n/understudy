@@ -261,3 +261,4 @@ a.wm:hover { text-decoration: none; }
 .periodopt.on { background: var(--brandq); color: var(--brand); font-weight: 600; }
 /* a chip that only reports a number should not look pressable */
 .chip.chipflat { cursor: default; border-style: dashed; color: var(--mut-read); }
+.keyacts2 { display: inline-flex; gap: 8px; }

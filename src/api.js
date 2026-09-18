@@ -4,7 +4,7 @@ import config, { canRoute, canBill } from './config.js';
 import { createAccount, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
   requestLoginCode, verifyLoginCode, verifyLoginLink } from './auth.js';
 import send, { signInEmail } from './email.js';
-import { issueKey, listKeys, revokeKey } from './keys.js';
+import { issueKey, listKeys, revokeKey, revealKey } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, addActivity } from './traffic.js';
 import { account, ledger, gateRouting } from './billing.js';
 import { certificate, promote, revert } from './eval/promote.js';
@@ -384,9 +384,15 @@ api.get('/connect', async (req, res) => {
   const candidates = (await db.prepare(
     `SELECT COUNT(*) AS n FROM workloads WHERE workspace_id = ? AND state = 'candidate'
        AND merged_into IS NULL`).get(req.workspace.id)).n;
+  /* The customer's own key, in full. It is the one thing they need off this screen, and
+     showing eight characters of it beside a Copy button hands over something that cannot
+     authenticate. Keys made before they were kept encrypted come back as null here, and the
+     screen offers to replace them, because those really are unrecoverable. */
+  const live = await revealKey(req.workspace.id);
   res.json({
     baseUrl: `${config.PUBLIC_URL}/v1`,
-    keyPrefix: keys[0]?.prefix ?? null,
+    key: live?.secret ?? null,
+    keyPrefix: live?.prefix ?? keys[0]?.prefix ?? null,
     calls: traffic.n,
     lastCallAt: traffic.last ?? null,
     workloads,

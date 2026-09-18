@@ -91,6 +91,13 @@ export const config = {
   /* Email. Without a key nothing is sent, and the code is written to the log instead so
      the flow can still be walked locally. The FROM address has to be on a domain the
      provider has verified, or every message is silently rejected. */
+  /* Encrypts API keys at rest so a customer can be shown their own again. Without it the
+     app falls back to showing a prefix, rather than storing keys in the clear: a deployment
+     that forgot to set this should be less useful, never less safe. Generate one with
+     `openssl rand -hex 32`, and keep it: change it and existing keys can no longer be
+     shown, only replaced. */
+  KEY_SECRET: str('KEY_SECRET'),
+
   RESEND_API_KEY: str('RESEND_API_KEY'),
   EMAIL_FROM: str('EMAIL_FROM', 'Understudy <noreply@docupath.tech>'),
   LOGIN_CODE_TTL_MIN: num('LOGIN_CODE_TTL_MIN', 10),
@@ -121,5 +128,7 @@ export const canRoute = () => config.OPENROUTER_API_KEY !== '';
 export const canBill = () => config.STRIPE_SECRET_KEY !== '';
 /** True when a message can actually leave the building. */
 export const canEmail = () => config.RESEND_API_KEY !== '';
+/** True when a key can be shown again after it was made. */
+export const canRevealKeys = () => config.KEY_SECRET !== '';
 
 export default config;

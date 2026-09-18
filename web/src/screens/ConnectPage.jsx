@@ -44,7 +44,7 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
      after it was made. While we have it, everything shows it in full and the snippet is
      something that will actually run; otherwise the prefix stands in for it and the page
      says how to get one that works rather than handing over a key with a gap in it. */
-  const usable = freshKey || null;
+  const usable = freshKey || data.key || null;
   const shown = usable || (data.keyPrefix ? `${data.keyPrefix}…` : null);
   const lines = snippet(way, lang, { baseUrl: data.baseUrl, key: shown });
 
@@ -139,21 +139,24 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
               <code className={usable ? 'rowv keyfull' : 'rowv'}>
                 {shown || 'no key yet'}
               </code>
-              {usable
-                ? <Copy text={usable} />
-                : <button className="ghost" disabled={rotating}
-                    onClick={() => setConfirming(true)}>Regenerate</button>}
+              <span className="keyacts2">
+                {usable && <Copy text={usable} />}
+                <button className="ghost" disabled={rotating}
+                  onClick={() => setConfirming(true)}>
+                  {usable ? 'Replace' : 'Regenerate'}
+                </button>
+              </span>
             </div>
-            {usable && (
+            {freshKey && (
               <div className="keynote ok">
-                This is the whole key, and this is the only time it is shown. Copy it into
-                your client now. The one before it has stopped working.
+                This is your new key. The one before it has stopped working, so anything
+                still using it needs this pasted in.
               </div>
             )}
             {!usable && !confirming && (
               <div className="keynote">
-                Only part of your key is kept, so a key that has been lost cannot be shown
-                again. Regenerating gives you a whole one you can copy.
+                This key was made before keys were kept recoverable, so it cannot be shown
+                again. Replacing it gives you one that always can be.
               </div>
             )}
             {confirming && (
