@@ -120,7 +120,10 @@ export async function stripe() {
   if (!canBill()) return null;
   if (!stripeClient) {
     const { default: Stripe } = await import('stripe');
-    stripeClient = new Stripe(config.STRIPE_SECRET_KEY);
+    /* Pinned on purpose. Without this the SDK uses whatever was current when the PACKAGE was
+       released, so a routine dependency bump would silently move us to a different API and
+       change how money behaves. Moving this is a decision, made by editing this line. */
+    stripeClient = new Stripe(config.STRIPE_SECRET_KEY, { apiVersion: config.STRIPE_API_VERSION });
   }
   return stripeClient;
 }
@@ -148,16 +151,30 @@ export async function runTopUp(workspaceId) {
       /* The webhook credits on this. Without it an automatic top up is charged to the card
          and never appears as balance, which is the worst possible half of the two. */
       metadata: { topup: '1', workspace_id: workspaceId },
+    }, {
+      /* The top up runs from the job queue, which retries. Without a key a retry is a SECOND
+         charge on somebody's card. The key is the workspace and the hour it ran in, so a
+         retry inside that hour replays the first charge instead of making a new one, while a
+         genuine second top up later still goes through. */
+      idempotencyKey: `topup:${workspaceId}:${Math.floor(Date.now() / 3600000)}`,
     });
     // the credit itself is written by the webhook, keyed on the intent, so it lands once
     return { ok: true, intent: pi.id };
   } catch (err) {
     const code = err?.code || err?.raw?.decline_code || 'card_declined';
+    /* Stripe distinguishes "the bank wants the customer present" from "this card is no
+       good". The recovery is the same screen either way, but the sentence is not, and
+       telling somebody their card failed when their bank simply wanted them to confirm is
+       both wrong and alarming. */
+    const why = code === 'authentication_required'
+      ? 'Your bank asked for you to confirm this one in person. Adding credit again takes care of it, and calls resume.'
+      : 'Automatic top up is off until a card is added. Update it in Settings and calls resume.';
     await db.prepare(`UPDATE billing_accounts SET auto_topup = 0, topup_failed_note = ?, updated_at = ?
                  WHERE workspace_id = ?`).run(code, now(), workspaceId);
     await addActivity(workspaceId, {
-      kind: 'bill', title: 'A top up was declined',
-      detail: 'Automatic top up is off until a card is added. Update it in Settings and calls resume.',
+      kind: 'bill',
+      title: code === 'authentication_required' ? 'A top up needs your confirmation' : 'A top up was declined',
+      detail: why,
     });
     return { ok: false, code };
   }

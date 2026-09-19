@@ -118,6 +118,9 @@ export const config = {
 
   // money
   STRIPE_SECRET_KEY: str('STRIPE_SECRET_KEY'),
+  /* The Stripe API version every call is made against. Pinned rather than inherited from the
+     installed package, so upgrading the package is not the same act as changing the API. */
+  STRIPE_API_VERSION: str('STRIPE_API_VERSION', '2026-08-26.dahlia'),
   STRIPE_WEBHOOK_SECRET: str('STRIPE_WEBHOOK_SECRET'),
   /* Nobody is given money they did not pay for. A new account starts at zero and adds
      credit before its first routed call; "send us copies" needs no balance at all. */

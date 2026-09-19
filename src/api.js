@@ -432,7 +432,7 @@ api.post('/billing/checkout', async (req, res) => {
       email: req.user.email,
       name: req.user.name || undefined,
       metadata: { workspace_id: req.workspace.id },
-    });
+    }, { idempotencyKey: `customer:${req.workspace.id}` });
     customer = made.id;
     await db.prepare('UPDATE billing_accounts SET stripe_customer = ?, updated_at = ? WHERE workspace_id = ?')
       .run(customer, now(), req.workspace.id);
@@ -468,6 +468,11 @@ api.post('/billing/checkout', async (req, res) => {
     success_url: `${config.PUBLIC_URL}/settings?credit=${dollars}`,
     cancel_url: `${config.PUBLIC_URL}/settings?credit=cancelled`,
     metadata: { workspace_id: req.workspace.id },
+  }, {
+    /* A double click, or a retried request, should land on the same payment page rather than
+       opening a second one. Scoped to the minute so choosing the same amount again later is
+       still a new top up. */
+    idempotencyKey: `checkout:${req.workspace.id}:${dollars}:${Math.floor(Date.now() / 60000)}`,
   });
   res.json({ url: session.url });
 });

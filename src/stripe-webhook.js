@@ -15,9 +15,16 @@ export async function handleWebhook(req, res) {
   } catch (err) {
     return res.status(400).send(`signature: ${err.message}`);
   }
-  if (await db.prepare('SELECT 1 FROM stripe_events WHERE id = ?').get(event.id)) return res.json({ ok: true, dedup: true });
-  await db.prepare('INSERT INTO stripe_events (id, type, created_at) VALUES (?, ?, ?)')
-    .run(event.id, event.type, now());
+  /* Seen is not the same as done. Recording the id up front and answering 500 on a failure
+     meant Stripe's retry was thrown away as a duplicate, so one transient blip lost the
+     payment for good. The row is claimed now and stamped handled only once the work below
+     has succeeded, which is what makes a retry useful rather than wasted. */
+  const seen = await db.prepare('SELECT handled_at FROM stripe_events WHERE id = ?').get(event.id);
+  if (seen?.handled_at != null) return res.json({ ok: true, dedup: true });
+  if (!seen) {
+    await db.prepare('INSERT INTO stripe_events (id, type, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING')
+      .run(event.id, event.type, now());
+  }
 
   const o = event.data.object;
   const wsId = o?.metadata?.workspace_id
@@ -53,8 +60,13 @@ export async function handleWebhook(req, res) {
       await addActivity(wsId, { kind: 'bill', title: 'Monthly plan cancelled', detail: 'Measurement draws on your balance now.' });
     }
   } catch (err) {
+    /* Left unstamped on purpose, so Stripe's retry runs it again. Money cannot be written
+       twice by that retry: every credit carries the Stripe object id as its ledger ref under
+       a unique index, so a second run of the same event is a no-op rather than a duplicate. */
+    console.error(`stripe ${event.type} ${event.id} failed: ${err.message}`);
     return res.status(500).send(String(err.message).slice(0, 200));
   }
+  await db.prepare('UPDATE stripe_events SET handled_at = ? WHERE id = ?').run(now(), event.id);
   return res.json({ ok: true });
 }
 
