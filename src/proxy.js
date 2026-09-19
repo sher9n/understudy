@@ -1,4 +1,5 @@
 import express from 'express';
+import { safeRouter } from './safe.js';
 import { db, now } from './db/index.js';
 import { reportCallFailure } from './alerts.js';
 import config, { canRoute } from './config.js';
@@ -8,7 +9,7 @@ import { chat, chatStream, priceCall, UpstreamError } from './openrouter.js';
 import { gateRouting, chargeCall, grantStarterCredit } from './billing.js';
 import { enqueue } from './jobs.js';
 
-export const v1 = express.Router();
+export const v1 = safeRouter();
 
 /** Every /v1 route is authenticated by the customer's own key, never by a session. */
 async function auth(req, res, next) {

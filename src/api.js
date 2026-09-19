@@ -1,4 +1,5 @@
 import express from 'express';
+import { safeRouter } from './safe.js';
 import { db, now, round8, usd } from './db/index.js';
 import config, { canRoute, canBill } from './config.js';
 import { createAccount, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
@@ -11,7 +12,7 @@ import { certificate, promote, revert } from './eval/promote.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
 
-export const api = express.Router();
+export const api = safeRouter();
 api.use(express.json({ limit: '2mb' }));
 api.use(session);
 

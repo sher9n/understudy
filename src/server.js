@@ -6,7 +6,7 @@ import { db, now } from './db/index.js';
 import migrate from './db/migrate.js';
 import { handle, startJobs, stopJobs, requeueStale, enqueue } from './jobs.js';
 import { fetchModels, saveCatalog } from './openrouter.js';
-import { reportCallFailure, canAlert, flushAllAlerts } from './alerts.js';
+import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './alerts.js';
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation } from './eval/run.js';
@@ -219,7 +219,33 @@ if (fs.existsSync(dist)) {
     'Understudy is running. The web build is missing: run `npm run build`.'));
 }
 
+/* Anything that threw on the way through. It is last on purpose: Express only reaches an
+   error handler after every route has declined, and only a handler with four arguments
+   counts as one. Without this a thrown error is an unhandled rejection, which ends the
+   process, so a single bad request would take the service down for everybody. */
+app.use((err, req, res, _next) => {
+  reportCrash({ where: `${req.method} ${req.path}`, err });
+  if (res.headersSent) { res.end(); return; }
+  const machine = req.path.startsWith('/api') || req.path.startsWith('/v1');
+  if (machine) res.status(500).json({ error: { message: 'Something went wrong on our side.' } });
+  else res.status(500).type('text/plain').send('Something went wrong on our side.');
+});
+
 if (import.meta.url === `file://${process.argv[1]}`) {
+  /* The last line of defence, for anything that threw outside a request: a background job, a
+     timer, a stray promise. A web server that dies because one of those went wrong takes
+     every healthy request with it, so a rejection is reported and the server keeps serving.
+     An uncaught exception is different: the process may be in an unknown state, so it is
+     reported and then handed back to the platform to restart cleanly. */
+  process.on('unhandledRejection', (err) => {
+    reportCrash({ where: 'a background promise', err: err instanceof Error ? err : new Error(String(err)) });
+  });
+  process.on('uncaughtException', async (err) => {
+    reportCrash({ where: 'the process', err, fatal: true });
+    try { await flushAllAlerts(); } catch { /* going down either way */ }
+    setTimeout(() => process.exit(1), 400).unref();
+  });
+
   await enqueue('backfill_shapes', {}, { unique: true });
   await enqueue('catalog_sync', {}, { unique: true });
   await enqueue('purge', {}, { unique: true });

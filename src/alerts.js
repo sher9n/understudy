@@ -117,6 +117,17 @@ export function reportCallFailure({ kind = 'routed call', model, status = 0, mes
   if (typeof t.unref === 'function') t.unref();
 }
 
+/* Something threw where nothing was meant to. Same window as a failed call, because the
+   shape of the problem is the same: it happens once or it happens on every request, and the
+   second must not become a thousand emails. */
+export function reportCrash({ where = 'the server', err, fatal = false } = {}) {
+  const message = `${fatal ? 'FATAL ' : ''}${where}: ${err?.message || String(err)}`;
+  console.error(message);
+  if (err?.stack) console.error(err.stack.split('\n').slice(0, 5).join('\n'));
+  reportCallFailure({ kind: fatal ? 'the server stopped' : 'an error on the server',
+    model: where, status: fatal ? 500 : 0, message: err?.message || String(err) });
+}
+
 /** True when a failure would actually reach somebody. */
 export const canAlert = () => config.ALERTS_ENABLED && !!config.ALERT_EMAIL && canEmail();
 

@@ -4,6 +4,11 @@
  * measurements, activity and the ledger. The account, its password and its keys stay, so it
  * signs in exactly as before and lands on the getting started guide again.
  *
+ * Three things beyond the traffic have to go with it or the reset is only half a reset: the
+ * mark that says the guide was finished, which otherwise sends them straight to an empty
+ * dashboard; the balance, so they meet the same empty wallet a new customer meets; and the
+ * saved card, because a card on file is a different first run entirely.
+ *
  * This exists because a demo account is easy to spoil by accident: one call sent while
  * testing is enough to mark it connected, and then it goes to the dashboard for ever after.
  *
@@ -41,10 +46,17 @@ await db.tx(async (tx) => {
     'DELETE FROM ledger WHERE workspace_id = ?',
   ]) await tx.prepare(sql).run(ws.id);
   await tx.prepare(
-    `UPDATE billing_accounts SET balance_usd = 0, eval_used_usd = 0, updated_at = ?
+    `UPDATE billing_accounts SET balance_usd = 0, eval_used_usd = 0, auto_topup = 0,
+            payment_method = NULL, stripe_customer = NULL, topup_failed_note = NULL,
+            plan = NULL, plan_status = NULL, updated_at = ?
       WHERE workspace_id = ?`).run(now(), ws.id);
+  await tx.prepare('UPDATE workspaces SET onboarded_at = NULL WHERE id = ?').run(ws.id);
 });
 
 const after = (await db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workspace_id = ?').get(ws.id)).n;
-console.log(`${email}: ${before} calls cleared, ${after} left. It will land on the getting started guide again.`);
+const w = await db.prepare('SELECT onboarded_at FROM workspaces WHERE id = ?').get(ws.id);
+const bal = await db.prepare('SELECT balance_usd, payment_method FROM billing_accounts WHERE workspace_id = ?').get(ws.id);
+console.log(`${email}: ${before} calls cleared, ${after} left.`);
+console.log(`  guide finished: ${w.onboarded_at == null ? 'no, it will run again' : 'STILL MARKED DONE'}`);
+console.log(`  balance: $${Number(bal?.balance_usd ?? 0).toFixed(2)}   saved card: ${bal?.payment_method ? 'STILL THERE' : 'none'}`);
 await db.close();
