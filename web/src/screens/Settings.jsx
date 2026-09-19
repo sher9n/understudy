@@ -6,7 +6,23 @@ const Sw = ({ on, onClick, busy }) => (
     aria-label={on ? 'Turn off' : 'Turn on'}><i /></button>
 );
 
+const AMOUNTS = [10, 25, 50, 100];
+
 export default function Settings({ data, reload }) {
+  /* Adding credit leaves the app, so the button's job is to get to Stripe and nothing else.
+     The money and the saved card both come back through the webhook, which is the only
+     thing that writes a balance, so there is nothing to do on return but reload. */
+  const [picking, setPicking] = useState(false);
+  const [paying, setPaying] = useState(null);
+  const [payError, setPayError] = useState('');
+  const buy = async (amountUsd) => {
+    setPaying(amountUsd); setPayError('');
+    try {
+      const { url } = await api.addCredit(amountUsd);
+      window.location.assign(url);
+    } catch (e) { setPayError(e.message); setPaying(null); }
+  };
+
   const [busy, setBusy] = useState(false);
   const [fresh, setFresh] = useState(null);
   const [err, setErr] = useState(null);
@@ -87,9 +103,31 @@ export default function Settings({ data, reload }) {
           <span className="kvk">Balance</span>
           <span className="kvv kvm">{usd(data.balance)}</span>
           <span className="kva">
-            <button className="mini" disabled={!data.canBill || busy}>Add credit</button>
+            <button className="mini" disabled={!data.canBill || busy || paying}
+              onClick={() => setPicking((v) => !v)}>
+              {data.balance > 0 ? 'Add credit' : 'Add credit to start'}
+            </button>
           </span>
         </div>
+        {picking && (
+          <div className="kvrow amountrow">
+            <span className="kvk">How much</span>
+            <span className="kvv">
+              <span className="amounts">
+                {AMOUNTS.map((a) => (
+                  <button key={a} className="minig" disabled={paying}
+                    onClick={() => buy(a)}>{paying === a ? 'Opening…' : `$${a}`}</button>
+                ))}
+              </span>
+              <span className="s amountnote">
+                Your card is saved at the same time, so we can top you up automatically
+                later. You can turn that off below.
+              </span>
+            </span>
+            <span className="kva" />
+          </div>
+        )}
+        {payError && <div className="errbox">{payError}</div>}
         <div className="kvrow">
           <span className="kvk">Automatic top up</span>
           <span className="kvv">

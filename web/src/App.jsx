@@ -14,9 +14,11 @@ import ConnectPage from './screens/ConnectPage.jsx';
 
 const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
 
-/* Every one of these screens is built out of the customer's own traffic, so before any has
-   arrived they have nothing in them at all. Settings is deliberately not on the list: your
-   keys, your balance and the way out of the account are worth reaching on day one. */
+/* Every one of these screens is built out of the customer's own traffic, so before the guide
+   is finished they are either empty or half a story. Settings is deliberately not on the
+   list: your keys, your balance and the way out of the account are worth reaching on day
+   one. The gate is finishing the GUIDE, not the first call arriving: a call landing while
+   somebody is reading step two used to move the app out from under them. */
 const NEEDS_TRAFFIC = new Set(['dash', 'work', 'models']);
 
 export default function App() {
@@ -45,7 +47,7 @@ export default function App() {
   // someone already signed in has no business on the sign in screen
   useEffect(() => {
     if (me?.signedIn && (screen === 'signin' || screen === 'signup' || screen === 'signincode')) {
-      const home = me.connected ? 'dash' : 'connect';
+      const home = me.onboarded ? 'dash' : 'connect';
       navigate(home, null, { replace: true });
       setWhere({ screen: home, openId: null });
     }
@@ -56,12 +58,12 @@ export default function App() {
      rather than trusting what was true when the page loaded, so the moment their first call
      lands the wizard's own way out stops being a bounce. */
   useEffect(() => {
-    if (!me?.signedIn || me.connected) return undefined;
+    if (!me?.signedIn || me.onboarded) return undefined;
     if (!NEEDS_TRAFFIC.has(screen)) return undefined;
     let live = true;
     api.me().then((who) => {
       if (!live) return;
-      if (who.connected) { setMe(who); return; }
+      if (who.onboarded) { setMe(who); return; }
       navigate('connect', null, { replace: true });
       setWhere({ screen: 'connect', openId: null });
     }).catch(() => {});
@@ -114,7 +116,7 @@ export default function App() {
             if (key) setFreshKey(key);
             const who = await api.me();
             setMe(who);
-            go(fresh || !who.connected ? 'connect' : 'dash');
+            go(fresh || !who.onboarded ? 'connect' : 'dash');
           }}
         />
       </div>
@@ -126,11 +128,12 @@ export default function App() {
      screen becomes an ordinary page inside the app, showing the endpoint, the key and the
      snippets, so they can come back to look something up or wire a second service without
      being walked through getting started all over again. */
-  if (screen === 'connect' && !me.connected) {
+  if (screen === 'connect' && !me.onboarded) {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
         <ConnectWizard go={go} dark={dark} setDark={setDark}
-          freshKey={freshKey} onFreshKey={setFreshKey} />
+          freshKey={freshKey} onFreshKey={setFreshKey}
+          onDone={async () => { await api.finishOnboarding(); setMe(await api.me()); }} />
       </div>
     );
   }
@@ -149,7 +152,10 @@ export default function App() {
     }
     const open = (id) => go('work', id);
     const pick = async (d) => { setDays(d); setBusy(true); await load(screen, d); setBusy(false); };
-    if (screen === 'dash') return <Dashboard data={data} onOpen={open} onPeriod={pick} busy={busy} />;
+    if (screen === 'dash') {
+      return <Dashboard data={data} onOpen={open} onPeriod={pick} busy={busy}
+        onTick={() => load('dash')} />;
+    }
     if (screen === 'work') return <Workloads data={data} onOpen={open} onPeriod={pick} busy={busy} />;
     if (screen === 'models') return <Models data={data} reload={() => load('models')} />;
     if (screen === 'settings') return <Settings data={data} reload={() => load('settings')} />;

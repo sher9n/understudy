@@ -30,7 +30,7 @@ async function flash(button, text) {
   setTimeout(() => { button.textContent = was; }, COPIED_MS);
 }
 
-export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey, signedIn }) {
+export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey, signedIn, onDone }) {
   /* The key exists in full only while we are holding it. Regenerating is the way to get
      one back, because only a hash of it is stored, so a key that has been lost cannot be
      shown again. Without this the screen offered a truncated key and a Copy button that
@@ -58,7 +58,7 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
 
   const calls = data.calls > 0;
   /* The whole key: the one just made, or the one the server could decrypt. Only a key from
-     before they were kept recoverable comes back empty, and then the screen says so. */
+     before they were kept recoverable comes back empty, and the prefix stands in for it. */
   const shownKey = key || data.key || null;
   const vals = {
     dark, light: !dark,
@@ -72,10 +72,7 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
     noCalls: !calls, hasCalls: calls,
     regenLabel: rotating ? 'working…' : (shownKey ? 'Replace' : 'Regenerate'),
     /* Nothing beside the key. The row is the key, a way to copy it and a way to replace it,
-       and a line of commentary next to all three only competed with them. The one case that
-       still needs words is a key from before they were kept recoverable, where the button
-       alone would not explain why it cannot be shown. */
-    keyState: shownKey ? '' : 'made before keys were kept recoverable, replace it to see one in full',
+       and any line of commentary next to all three only competed with them. */
   };
   for (const l of LANGS) {
     vals[`tab_${l}`] = lang === l ? 'tab on' : 'tab';
@@ -110,11 +107,17 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
       } catch { /* the label goes back and the old key is still on screen */ }
       setRotating(false);
     },
-    /* Until a call has arrived the dashboard is empty and the app sends you straight back
-       here, so the wordmark and Back lead to Connect, which is this customer's home for
-       now. The big "Go to your dashboard" button only appears once a call has landed. */
-    go_dash: () => go(calls ? 'dash' : 'connect'),
-    back: () => (step === 2 ? setStep(1) : go(calls ? 'dash' : 'connect')),
+    /* The guide is this customer's home until they say they are done with it, so the
+       wordmark and Back stay inside it. Only the button on the last step leaves, and that
+       button is what MARKS the guide finished: a call arriving no longer ends it, because
+       somebody reading step two should not have the app move under them. */
+    go_home: () => go('connect'),
+    finish: async () => {
+      if (!calls) { go('connect'); return; }
+      if (onDone) await onDone();
+      go('dash');
+    },
+    back: () => (step === 2 ? setStep(1) : go('connect')),
   };
   for (const l of LANGS) on[`pick_${l}`] = () => setLang(l);
 
@@ -123,7 +126,7 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
       html={html}
       vals={vals}
       on={on}
-      hrefs={{ go_dash: href(calls ? 'dash' : 'connect') }}
+      hrefs={{ go_home: href('connect'), finish: href(calls ? 'dash' : 'connect') }}
       subs={{
         [SAMPLE_KEY]: shownKey || (data.keyPrefix ? `${data.keyPrefix}…` : SAMPLE_KEY),
         [SAMPLE_BASE]: data.baseUrl,

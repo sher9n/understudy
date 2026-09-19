@@ -425,12 +425,18 @@
     .lgd .ln { width: 22px; height: 0; border-top: 2.4px solid var(--brand); border-radius: 2px; }
     .lgd .ln.dash { border-top: 2px dashed var(--line-strong); }
     .feedhead { display: flex; align-items: center; gap: 12px; padding: 17px 18px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-    .feed { display: grid; }
+    /* align-content matters here: a grid whose container is taller than its rows stretches
+       them to fill it, so two events sat at the top and the bottom of an empty panel with a
+       gap between them. The rows keep their own height and the panel scrolls instead. */
+    .feed { display: grid; align-content: start; }
     .fr { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 11px; align-items: start;
           padding: 13px 18px; border-top: 1px solid var(--line); }
     .fr:first-child { border-top: 0; }
     .fd { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--line-strong); }
     .fd.ok { background: var(--ok); } .fd.on { background: var(--brand); } .fd.bad { background: var(--bad); }
+    /* A call is the thing being watched for, so it gets the brand colour rather than a grey */
+    .fd.call { background: var(--brand); } .fd.copy { background: var(--brand-read); }
+    .fd.test { background: var(--ok); }
     .ft { font-size: 13px; line-height: 1.5; }
     .fw { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--mut);
           white-space: nowrap; padding-top: 2px; }
@@ -605,3 +611,16 @@
     .codenote code { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px;
                      color: var(--ink); background: var(--code); border: 1px solid var(--line);
                      border-radius: 5px; padding: 1px 5px; }
+
+    /* A quiet pulse beside "Live activity", so the word is a promise the screen keeps. */
+    .livedot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-left: auto;
+               box-shadow: 0 0 0 0 var(--ok); animation: livepulse 2.4s ease-out infinite; }
+    @keyframes livepulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); }
+                           70% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--ok) 0%, transparent); }
+                           100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 0%, transparent); } }
+    @media (prefers-reduced-motion: reduce) { .livedot { animation: none; } }
+
+    /* The amount row under Add credit. The amounts are the control, so they read as buttons
+       in a line rather than as a form somebody has to fill in. */
+    .amounts { display: flex; gap: 8px; flex-wrap: wrap; }
+    .amountnote { display: block; margin-top: 9px; line-height: 1.5; }

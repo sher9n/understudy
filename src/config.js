@@ -99,6 +99,15 @@ export const config = {
   KEY_SECRET: str('KEY_SECRET'),
 
   RESEND_API_KEY: str('RESEND_API_KEY'),
+
+  /* Who hears about a call that did not get through, and how often. The first failure is
+     sent at once; everything in the window after it is counted and reported in one message
+     when the window closes, because an outage fails every call for as long as it lasts and
+     a message per call would be thousands of them. */
+  ALERT_EMAIL: str('ALERT_EMAIL', 'sherancorera@gmail.com'),
+  ALERTS_ENABLED: bool('ALERTS_ENABLED', true),
+  ALERT_WINDOW_MIN: num('ALERT_WINDOW_MIN', 10),
+
   EMAIL_FROM: str('EMAIL_FROM', 'Understudy <noreply@docupath.tech>'),
   LOGIN_CODE_TTL_MIN: num('LOGIN_CODE_TTL_MIN', 10),
   LOGIN_CODE_DIGITS: num('LOGIN_CODE_DIGITS', 4),
@@ -110,7 +119,12 @@ export const config = {
   // money
   STRIPE_SECRET_KEY: str('STRIPE_SECRET_KEY'),
   STRIPE_WEBHOOK_SECRET: str('STRIPE_WEBHOOK_SECRET'),
-  STARTER_CREDIT_USD: num('STARTER_CREDIT_USD', 1),
+  /* Nobody is given money they did not pay for. A new account starts at zero and adds
+     credit before its first routed call; "send us copies" needs no balance at all. */
+  STARTER_CREDIT_USD: num('STARTER_CREDIT_USD', 0),
+  /* What somebody may put on at once, so a typo cannot charge a card four figures. */
+  TOPUP_MIN_USD: num('TOPUP_MIN_USD', 5),
+  TOPUP_MAX_USD: num('TOPUP_MAX_USD', 500),
   TOPUP_AMOUNT_USD: num('TOPUP_AMOUNT_USD', 20),
   TOPUP_THRESHOLD_USD: num('TOPUP_THRESHOLD_USD', 5),
   OBSERVE_PLAN_USD: num('OBSERVE_PLAN_USD', 49),

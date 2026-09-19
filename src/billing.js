@@ -145,6 +145,9 @@ export async function runTopUp(workspaceId) {
       payment_method: acct.payment_method,
       off_session: true,
       confirm: true,
+      /* The webhook credits on this. Without it an automatic top up is charged to the card
+         and never appears as balance, which is the worst possible half of the two. */
+      metadata: { topup: '1', workspace_id: workspaceId },
     });
     // the credit itself is written by the webhook, keyed on the intent, so it lands once
     return { ok: true, intent: pi.id };

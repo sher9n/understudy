@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import PeriodChip from '../PeriodChip.jsx';
 import { usd, num, ago, feedDot } from '../api.js';
 import { SpendChart, WaitingChart } from '../Charts.jsx';
@@ -8,7 +8,16 @@ const Tile = ({ k, v, s }) => (
   <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
 );
 
-export default function Dashboard({ data, onOpen, onPeriod, busy }) {
+export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
+  /* "Live" has to mean it. A developer who has just wired us up sits on this screen and
+     sends a call from another window, and the whole point is that it shows up without them
+     reloading. Polling stops while the tab is hidden, so a forgotten tab costs nothing. */
+  useEffect(() => {
+    if (!onTick) return undefined;
+    const t = setInterval(() => { if (!document.hidden) onTick(); }, 5000);
+    return () => clearInterval(t);
+  }, [onTick]);
+
   const hasDay = data.priced && data.series.some((d) => d.paid > 0);
   const runRate = data.days ? (data.spend / data.days) * 30 : 0;
 
@@ -51,16 +60,20 @@ export default function Dashboard({ data, onOpen, onPeriod, busy }) {
         </section>
 
         <section className="panel2">
-          <div className="feedhead"><h3>Live activity</h3></div>
+          <div className="feedhead">
+            <h3>Live activity</h3>
+            <span className="livedot" title="updating" />
+          </div>
           <div className="feed">
             {data.activity.length === 0 && (
               <div className="fr"><span className="fd mut" />
-                <div className="ft">Nothing yet. This fills in as calls arrive.</div><div className="fw" /></div>
+                <div className="ft">Nothing yet. Every call you send us appears here, as it arrives.</div>
+                <div className="fw" /></div>
             )}
             {data.activity.map((a, i) => (
-              <div className="fr" key={i}>
+              <div className="fr" key={`${a.created_at}-${i}`}>
                 <span className={`fd ${feedDot[a.kind] || 'mut'}`} />
-                <div className="ft">{a.detail ? `${a.title}, ${clip(lower(a.detail))}` : a.title}</div>
+                <div className="ft">{clip(a.title)}</div>
                 <div className="fw">{ago(a.created_at)}</div>
               </div>
             ))}
@@ -74,4 +87,3 @@ export default function Dashboard({ data, onOpen, onPeriod, busy }) {
 }
 
 const clip = (s) => (s && s.length > 78 ? `${s.slice(0, 76).replace(/[ ,.]+$/, '')}…` : s);
-const lower = (s) => (s && /^[A-Z][a-z]/.test(s) ? s[0].toLowerCase() + s.slice(1) : s);

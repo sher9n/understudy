@@ -6,6 +6,7 @@ import { db, now } from './db/index.js';
 import migrate from './db/migrate.js';
 import { handle, startJobs, stopJobs, requeueStale, enqueue } from './jobs.js';
 import { fetchModels, saveCatalog } from './openrouter.js';
+import { reportCallFailure, canAlert, flushAllAlerts } from './alerts.js';
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation } from './eval/run.js';
@@ -27,7 +28,19 @@ handle('eval_run', async ({ workloadId }) => await runEvaluation(workloadId));
 
 handle('catalog_sync', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
-  const n = await saveCatalog(await fetchModels());
+  /* This is the earliest thing that breaks when the key is wrong or the credit is gone, and
+     it breaks silently: the prices simply stop moving. Worth hearing about on its own. */
+  let list;
+  try {
+    list = await fetchModels();
+  } catch (err) {
+    reportCallFailure({
+      kind: 'model catalogue', status: err?.status ?? 0,
+      message: err?.body?.error?.message || err.message,
+    });
+    throw err;
+  }
+  const n = await saveCatalog(list);
   await enqueue('catalog_sync', {}, { runAfter: now() + config.CATALOG_SYNC_HOURS * 3600000, unique: true });
   return { ok: true, models: n };
 });
@@ -215,8 +228,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const server = app.listen(config.PORT, () => {
     console.log(`Understudy on http://localhost:${config.PORT}`);
     console.log(`  routing: ${canRoute() ? 'ready' : 'no OPENROUTER_API_KEY, /v1 will answer 503'}`);
+    console.log(`  alerts:  ${canAlert() ? `a failed call emails ${config.ALERT_EMAIL}`
+      : 'nowhere to send (set RESEND_API_KEY and ALERT_EMAIL)'}`);
   });
-  const bye = async () => { await stopJobs(); server.close(() => process.exit(0)); };
+  const bye = async () => { await stopJobs(); await flushAllAlerts(); server.close(() => process.exit(0)); };
   process.on('SIGINT', bye);
   process.on('SIGTERM', bye);
 }

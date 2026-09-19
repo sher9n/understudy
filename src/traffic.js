@@ -99,6 +99,25 @@ export async function dailySpend(workspaceId, days = 30) {
   return out;
 }
 
+/* The calls themselves, for the live feed.
+ *
+ * A developer who has just pointed their app at us has exactly one question, and it is not
+ * "what is my spend": it is "is it working". The feed answered that with key changes and
+ * plan events, which is everything EXCEPT the thing they are watching for. So the feed reads
+ * the calls, and a call that arrives shows up as a line with the model, the job it was
+ * grouped into and how long it took. Nothing extra is written to produce this: the rows are
+ * already there, because every call is recorded anyway. */
+export async function recentCalls(workspaceId, limit = 40) {
+  return await db.prepare(
+    `SELECT c.id, c.source, c.requested_model, c.served_model, c.status_code,
+            c.latency_ms, c.cost_usd, c.charged_usd, c.created_at,
+            w.slug AS workload
+       FROM calls c
+       LEFT JOIN workloads w ON w.id = c.workload_id
+      WHERE c.workspace_id = ?
+      ORDER BY c.created_at DESC LIMIT ?`).all(workspaceId, limit);
+}
+
 export async function recentActivity(workspaceId, limit = 8) {
   return await db.prepare(
     `SELECT kind, title, detail, created_at FROM activity

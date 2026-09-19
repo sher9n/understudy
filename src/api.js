@@ -5,8 +5,8 @@ import { createAccount, checkPassword, startSession, endSession, session, requir
   requestLoginCode, verifyLoginCode, verifyLoginLink } from './auth.js';
 import send, { signInEmail } from './email.js';
 import { issueKey, listKeys, revokeKey, revealKey } from './keys.js';
-import { workloadStats, dailySpend, recentActivity, addActivity } from './traffic.js';
-import { account, ledger, gateRouting } from './billing.js';
+import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity } from './traffic.js';
+import { account, ledger, gateRouting, stripe } from './billing.js';
 import { certificate, promote, revert } from './eval/promote.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
@@ -105,7 +105,20 @@ api.get('/me', async (req, res) => {
     connected: await db.prepare(
       `SELECT 1 FROM calls WHERE workspace_id = ? AND source NOT IN ('replay', 'test') LIMIT 1`)
       .get(req.workspace.id) !== undefined,
+    /* And somebody who has not finished the guide belongs there too, even once their traffic
+       HAS arrived. The two are different events: a call landing is what makes the last step
+       possible, and pressing the button on it is what ends the guide. Ending it on the call
+       moved the app out from under somebody who was still reading. */
+    onboarded: req.workspace.onboarded_at != null,
   });
+});
+
+/* The guide is finished. Said by the person, not inferred from their traffic. */
+api.post('/connect/done', requireUser, async (req, res) => {
+  if (req.workspace.onboarded_at == null) {
+    await db.prepare('UPDATE workspaces SET onboarded_at = ? WHERE id = ?').run(now(), req.workspace.id);
+  }
+  res.json({ ok: true });
 });
 
 api.use(requireUser);
@@ -150,8 +163,51 @@ async function overview(workspaceId, days = 30) {
       model: w.routed_model || w.reference_model || 'not set',
       ...statusLabel(w),
     })),
-    activity: await recentActivity(workspaceId, 5),
+    activity: await liveFeed(workspaceId, 40),
   };
+}
+
+/* What the live feed says about one call.
+ *
+ * It has to read as an event, in a glance, to somebody who is watching the screen to find
+ * out whether their integration works. So it leads with the thing they recognise: the job it
+ * was grouped into if we know it yet, and otherwise plainly that a call arrived. */
+function callLine(c) {
+  const ms = c.latency_ms ? `${c.latency_ms} ms` : null;
+  const model = c.served_model || c.requested_model || 'no model named';
+  const failed = c.status_code && c.status_code >= 400;
+  const job = c.workload || null;
+
+  if (c.source === 'trace') {
+    return { kind: 'copy',
+      text: job ? `Copy received for ${job}, on ${model}` : `Copy received, on ${model}` };
+  }
+  if (c.source === 'test') {
+    return { kind: failed ? 'bad' : 'test',
+      text: failed ? `Test call did not get through, on ${model}` : `Test call went through, on ${model}` };
+  }
+  if (failed) {
+    return { kind: 'bad', text: `A call did not get through, on ${model} (${c.status_code})` };
+  }
+  const head = job ? `${job} ran on ${model}` : `A call arrived, on ${model}`;
+  return { kind: 'call', text: ms ? `${head}, ${ms}` : head };
+}
+
+/* One feed, from two sources: the calls, which are what somebody watches for, and the events
+   worth knowing about between them. Merged and cut once, so the list reads in time order
+   rather than as two lists stapled together. */
+async function liveFeed(workspaceId, limit) {
+  const [calls, events] = await Promise.all([
+    recentCalls(workspaceId, limit),
+    recentActivity(workspaceId, 12),
+  ]);
+  const items = [
+    ...calls.map((c) => ({ at: c.created_at, ...callLine(c) })),
+    ...events.map((a) => ({ at: a.created_at, kind: a.kind,
+      text: a.detail ? `${a.title}, ${a.detail}` : a.title })),
+  ];
+  items.sort((a, b) => b.at - a.at);
+  return items.slice(0, limit).map((i) => ({ kind: i.kind, title: i.text, created_at: i.at }));
 }
 
 /* The window the screens are read over. Only these three, because the number goes straight
@@ -352,6 +408,68 @@ api.post('/settings/retention', async (req, res) => {
       : 'Nothing is cleared on a schedule any more.',
   });
   return res.json({ ok: true, days });
+});
+
+/* Adding credit.
+ *
+ * One hosted Checkout does both halves at once: it takes this top up, and it saves the card
+ * so the automatic one can be charged later without the customer present. Stripe asks for
+ * the consent to that in words WE supply, which is why custom_text is not optional here: an
+ * off-session charge the customer never agreed to is a dispute waiting to happen. */
+api.post('/billing/checkout', async (req, res) => {
+  const s = await stripe();
+  if (!s) {
+    return res.status(503).json({ error: 'Payments are not set up on this deployment yet.' });
+  }
+  const asked = Number(req.body?.amountUsd);
+  const amount = Math.min(config.TOPUP_MAX_USD,
+    Math.max(config.TOPUP_MIN_USD, Number.isFinite(asked) ? asked : config.TOPUP_AMOUNT_USD));
+
+  const acct = await account(req.workspace.id);
+  let customer = acct.stripe_customer;
+  if (!customer) {
+    const made = await s.customers.create({
+      email: req.user.email,
+      name: req.user.name || undefined,
+      metadata: { workspace_id: req.workspace.id },
+    });
+    customer = made.id;
+    await db.prepare('UPDATE billing_accounts SET stripe_customer = ?, updated_at = ? WHERE workspace_id = ?')
+      .run(customer, now(), req.workspace.id);
+  }
+
+  const dollars = amount.toFixed(2);
+  const session = await s.checkout.sessions.create({
+    mode: 'payment',
+    customer,
+    line_items: [{
+      quantity: 1,
+      price_data: {
+        currency: 'usd',
+        unit_amount: Math.round(amount * 100),
+        product_data: {
+          name: 'Understudy credit',
+          description: 'Spent on the model calls we route for you, at cost plus '
+            + `${config.ROUTING_FEE_PCT}%. Unused credit stays on your balance.`,
+        },
+      },
+    }],
+    payment_intent_data: {
+      setup_future_usage: 'off_session',
+      metadata: { workspace_id: req.workspace.id },
+    },
+    custom_text: {
+      submit: {
+        message: `We will save this card and charge it $${config.TOPUP_AMOUNT_USD.toFixed(2)} `
+          + `automatically whenever your balance falls below $${config.TOPUP_THRESHOLD_USD.toFixed(2)}, `
+          + 'so your calls do not stop. You can turn that off in Settings at any time.',
+      },
+    },
+    success_url: `${config.PUBLIC_URL}/settings?credit=${dollars}`,
+    cancel_url: `${config.PUBLIC_URL}/settings?credit=cancelled`,
+    metadata: { workspace_id: req.workspace.id },
+  });
+  res.json({ url: session.url });
 });
 
 api.post('/settings/auto-topup', async (req, res) => {

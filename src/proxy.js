@@ -1,5 +1,6 @@
 import express from 'express';
 import { db, now } from './db/index.js';
+import { reportCallFailure } from './alerts.js';
 import config, { canRoute } from './config.js';
 import { verifyKey, bearerOf } from './keys.js';
 import { workloadFor, recordCall, addActivity } from './traffic.js';
@@ -90,6 +91,11 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     const status = err instanceof UpstreamError ? err.status : 502;
     const json = err instanceof UpstreamError ? err.body
       : { error: { message: 'The provider could not be reached.' } };
+    reportCallFailure({
+      kind: source === 'test' ? 'test call' : 'routed call',
+      model: served, status, workspaceId: wsId,
+      message: json?.error?.message || err.message,
+    });
     await recordCall({
       workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
       servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body,
@@ -143,6 +149,10 @@ v1.post('/chat/completions', async (req, res) => {
   } catch (err) {
     const status = err instanceof UpstreamError ? err.status : 502;
     const payload = err instanceof UpstreamError ? err.body : { error: { message: 'The provider could not be reached.' } };
+    reportCallFailure({
+      kind: 'streamed call', model: served, status, workspaceId: wsId,
+      message: payload?.error?.message || err.message,
+    });
     await recordCall({
       workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
       servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body,

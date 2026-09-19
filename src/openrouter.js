@@ -83,7 +83,13 @@ export async function chatStream(body, model, { signal } = {}) {
   return res;
 }
 
-/** The live model list, priced. Aliases and batch-only and rate-capped ids are left out. */
+/* OpenRouter's own routing products. They are not models: they choose one for you at call
+   time, and they are listed at a price of zero, so they sort to the front of every "cheapest"
+   query and would quietly become the default. A certificate has to name the exact model it
+   measured, and a thing that picks a different model each call can never be that. */
+const isRouter = (id) => id.startsWith('openrouter/');
+
+/** The live model list, priced. Routers, aliases, batch-only and rate-capped ids are left out. */
 export async function fetchModels() {
   const res = await fetch(`${config.OPENROUTER_BASE}/models`);
   if (!res.ok) throw new UpstreamError(res.status, { error: { message: 'model list unavailable' } });
@@ -91,6 +97,9 @@ export async function fetchModels() {
   return (data || [])
     .filter((m) => typeof m.id === 'string')
     .filter((m) => !m.id.startsWith('~') && !m.id.endsWith(':batch') && !m.id.endsWith(':free'))
+    .filter((m) => !isRouter(m.id))
+    /* A model with no price cannot be compared on cost, which is the whole product. */
+    .filter((m) => Number(m.pricing?.prompt || 0) > 0 || Number(m.pricing?.completion || 0) > 0)
     .map((m) => ({
       model_id: m.id,
       name: m.name || m.id,

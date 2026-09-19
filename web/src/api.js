@@ -35,6 +35,8 @@ export const api = {
   retention: (days) => send('POST', '/settings/retention', { days }),
   connect: () => send('GET', '/connect'),
   testCall: () => send('POST', '/connect/test'),
+  finishOnboarding: () => send('POST', '/connect/done'),
+  addCredit: (amountUsd) => send('POST', '/billing/checkout', { amountUsd }),
   regenerateKey: () => send('POST', '/connect/regenerate-key'),
 };
 
@@ -60,4 +62,5 @@ export const dateIST = (ms) => new Date(ms).toLocaleDateString('en-GB', {
   day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata',
 });
 
-export const feedDot = { ok: 'ok', bad: 'bad', run: 'on', connect: 'ok', floor: 'mut', revert: 'bad', bill: 'mut' };
+export const feedDot = { ok: 'ok', bad: 'bad', run: 'on', connect: 'ok', floor: 'mut', revert: 'bad',
+  bill: 'mut', call: 'call', copy: 'copy', test: 'test' };

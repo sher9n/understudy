@@ -157,12 +157,6 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
                 still using it needs this pasted in.
               </div>
             )}
-            {!usable && !confirming && (
-              <div className="keynote">
-                This key was made before keys were kept recoverable, so it cannot be shown
-                again. Replacing it gives you one that always can be.
-              </div>
-            )}
             {confirming && (
               <div className="keynote warn">
                 <div><b>Anything already using your current key stops working.</b> Whatever
