@@ -684,3 +684,30 @@
     .tipdot { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
     .tipdot.paid { background: var(--brand); }
     .tipdot.would { background: var(--line-strong); }
+
+    /* The calls in a workload. Same shape as the candidates table above it, so the page
+       reads as one thing, with the asked-for text given the room because that column is the
+       only one somebody scans rather than compares. */
+    .clhrow, .clrow { display: grid; grid-template-columns: 104px minmax(0, 1fr) 132px 96px 78px 84px;
+                      gap: 14px; align-items: baseline; padding: 11px 18px;
+                      border-top: 1px solid var(--line); }
+    .clhrow { border-top: 1px solid var(--line); font-size: 10.5px; font-weight: 700;
+              letter-spacing: 0.055em; text-transform: uppercase; color: var(--mut);
+              font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .clrow { font-size: 13px; }
+    .clrow:hover { background: var(--panel); }
+    .cwhen { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px;
+             color: var(--mut-read); white-space: nowrap; }
+    .casked { color: var(--ink); line-height: 1.5; min-width: 0; overflow-wrap: anywhere; }
+    .cmodel { font-size: 11.5px; color: var(--mut-read); overflow-wrap: anywhere; }
+    .clrow .num { font-size: 11.5px; color: var(--mut-read); text-align: right; white-space: nowrap; }
+    .cgone { color: var(--mut); font-style: italic; }
+    .ctag { display: inline-block; margin-left: 8px; font-size: 10px; font-weight: 700;
+            letter-spacing: 0.04em; text-transform: uppercase; color: var(--mut);
+            background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+            padding: 1px 6px; white-space: nowrap; }
+    .ctag.bad { color: var(--bad); border-color: var(--bad); background: var(--badq); }
+    @media (max-width: 1020px) {
+      .clhrow, .clrow { grid-template-columns: 92px minmax(0, 1fr) 84px; }
+      .clhrow span:nth-child(n+4), .clrow > :nth-child(n+4) { display: none; }
+    }

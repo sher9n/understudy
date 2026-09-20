@@ -129,6 +129,24 @@ api.use(requireUser);
 
 const shapeLabel = { tool_call: 'tool call', json: 'json', enum: 'enum', free_text: 'free text' };
 
+/* What this call actually asked, in one line. The last user turn is the part that differs
+   from one call to the next: the instruction is what they all share, and is already shown
+   at the top of the page as the shape. Content is cleared after the retention window, so
+   this is often legitimately absent and says so rather than showing an empty cell. */
+function askedOf(c) {
+  if (c.content_purged_at) return null;
+  try {
+    const req = JSON.parse(c.request_json || 'null');
+    const msgs = Array.isArray(req?.messages) ? req.messages : [];
+    const last = [...msgs].reverse().find((m) => m.role === 'user') || msgs[msgs.length - 1];
+    const text = typeof last?.content === 'string'
+      ? last.content
+      : (Array.isArray(last?.content) ? last.content.map((p) => p?.text || '').join(' ') : '');
+    const one = String(text).replace(/\s+/g, ' ').trim();
+    return one ? clip(one, 120) : null;
+  } catch { return null; }
+}
+
 const statusLabel = (w) => {
   if (w.routed_model) return { label: 'Optimized', tone: 'ok' };
   if (w.status === 'certified') return { label: 'Ready to optimize', tone: 'go' };
@@ -246,6 +264,17 @@ api.get('/workloads/:id', async (req, res) => {
   const t = await db.prepare(
     `SELECT COUNT(*) AS calls, COALESCE(SUM(charged_usd), 0) AS cost FROM calls
       WHERE workload_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(w.id, since);
+  /* The calls themselves. A workload is a claim about a group of requests, and until now the
+     only way to check that claim was to believe it: the page said "420 calls" and showed
+     none of them. The first line of each request is carried along because that, not an id,
+     is how somebody recognises which of their own calls they are looking at. */
+  const recent = await db.prepare(
+    `SELECT id, source, requested_model, served_model, status_code, prompt_tokens,
+            completion_tokens, charged_usd, cost_usd, latency_ms, created_at, request_json,
+            content_purged_at
+       FROM calls WHERE workload_id = ? AND source NOT IN ('replay', 'test')
+      ORDER BY created_at DESC LIMIT 25`).all(w.id);
+
   const cert = await certificate(w.id);
   const best = cert?.results.find((r) => r.verdict === 'cleared' && r.model_id !== w.routed_model);
   const refCost = cert?.referenceCostMonth ?? null;
@@ -268,6 +297,18 @@ api.get('/workloads/:id', async (req, res) => {
         gates: { structure: r.gate_structure, accuracy: r.gate_accuracy, coverage: r.gate_coverage, complete: r.gate_complete },
       })),
     },
+    calls_recent: recent.map((c) => ({
+      id: c.id,
+      at: c.created_at,
+      source: c.source,
+      model: c.served_model || c.requested_model,
+      status: c.status_code,
+      promptTokens: c.prompt_tokens,
+      completionTokens: c.completion_tokens,
+      cost: round8(c.charged_usd || c.cost_usd || 0),
+      latencyMs: c.latency_ms,
+      asked: askedOf(c),
+    })),
     candidate: best && {
       model: best.model_id, gap: best.gap_pct, costMonth: best.cost_month_usd,
       accuracy: round8(100 - best.gap_pct),

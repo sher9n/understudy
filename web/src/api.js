@@ -106,5 +106,12 @@ export const dateIST = (ms) => new Date(ms).toLocaleDateString('en-GB', {
   day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata',
 });
 
+/* A moment, to the minute, in IST. The calls in a workload arrive minutes apart, so a date
+   alone would print the same string down the whole table. */
+export const timeIST = (ms) => new Date(ms).toLocaleString('en-GB', {
+  day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  hour12: false, timeZone: 'Asia/Kolkata',
+});
+
 export const feedDot = { ok: 'ok', bad: 'bad', run: 'on', connect: 'ok', floor: 'mut', revert: 'bad',
   bill: 'mut', call: 'call', copy: 'copy', test: 'test' };
