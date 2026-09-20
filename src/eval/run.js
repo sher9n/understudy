@@ -15,6 +15,7 @@ export async function candidatesFor(workspaceId, referenceModel) {
        FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
       WHERE COALESCE(wm.enabled, 1) = 1 AND c.model_id != ?
+        AND c.price_in > 0 AND c.price_out > 0
       ORDER BY (c.price_in + c.price_out)`).all(workspaceId, referenceModel)).slice(0, 6);
 }
 

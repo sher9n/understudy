@@ -80,7 +80,10 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
                     stops being recent and the stillness is information too. */}
                 <span className={`fd ${feedDot[a.kind] || 'mut'}`
                   + (Date.now() - a.created_at < RECENT_MS ? ' beat' : '')} />
-                <div className="ft">{clip(a.title)}</div>
+                {/* Not clipped. These lines say what happened, and cutting one mid-word
+                    ("currently on open…") withholds the only part somebody was reading it
+                    for. The row wraps; the panel scrolls. */}
+                <div className="ft">{a.title}</div>
                 <div className="fw">{ago(a.created_at)}</div>
               </div>
             ))}
@@ -96,4 +99,3 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
 /* How long an entry counts as just-happened, and keeps its pulse. */
 const RECENT_MS = 60 * 60 * 1000;
 
-const clip = (s) => (s && s.length > 78 ? `${s.slice(0, 76).replace(/[ ,.]+$/, '')}…` : s);

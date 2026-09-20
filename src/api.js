@@ -195,6 +195,14 @@ function callLine(c) {
   return { kind: 'call', text: ms ? `${head}, ${ms}` : head };
 }
 
+/* An event, with any workload name in it brought up to date. */
+function eventText(a) {
+  const title = a.workload && /^Found a new workload: /.test(a.title)
+    ? `Found a new workload: ${a.workload}`
+    : a.title;
+  return a.detail ? `${title}, ${a.detail}` : title;
+}
+
 /* One feed, from two sources: the calls, which are what somebody watches for, and the events
    worth knowing about between them. Merged and cut once, so the list reads in time order
    rather than as two lists stapled together. */
@@ -206,7 +214,10 @@ async function liveFeed(workspaceId, limit) {
   const items = [
     ...calls.map((c) => ({ at: c.created_at, ...callLine(c) })),
     ...events.map((a) => ({ at: a.created_at, kind: a.kind,
-      text: a.detail ? `${a.title}, ${a.detail}` : a.title })),
+      /* Rewritten from the workload's CURRENT name, not the one it had when this was
+         written. Announcing a workload and then renaming it left the feed disagreeing with
+         the list it sits beside, which reads as two different things having happened. */
+      text: eventText(a) })),
   ];
   items.sort((a, b) => b.at - a.at);
   return items.slice(0, limit).map((i) => ({ kind: i.kind, title: i.text, created_at: i.at }));
@@ -600,7 +611,7 @@ async function testModelFor(workspaceId) {
   const row = await db.prepare(
     `SELECT c.model_id FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
-      WHERE COALESCE(wm.enabled, 1) = 1
+      WHERE COALESCE(wm.enabled, 1) = 1 AND c.price_in > 0 AND c.price_out > 0
       ORDER BY (c.price_in + c.price_out) ASC LIMIT 1`).get(workspaceId);
   if (row) return row.model_id;
   const own = await db.prepare(

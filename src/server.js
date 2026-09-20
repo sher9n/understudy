@@ -110,7 +110,8 @@ handle('name_workload', async ({ workloadId }) => {
   const model = config.WORKLOAD_NAME_MODEL || (await db.prepare(
     `SELECT c.model_id FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
-      WHERE COALESCE(wm.enabled, 1) = 1 ORDER BY (c.price_in + c.price_out) ASC LIMIT 1`)
+      WHERE COALESCE(wm.enabled, 1) = 1 AND c.price_in > 0 AND c.price_out > 0
+      ORDER BY (c.price_in + c.price_out) ASC LIMIT 1`)
     .get(w.workspace_id))?.model_id;
   if (!model) return { ok: true, skipped: 'no model' };
 

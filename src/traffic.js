@@ -124,7 +124,13 @@ export async function recentCalls(workspaceId, limit = 40) {
 }
 
 export async function recentActivity(workspaceId, limit = 8) {
+  /* The workload's name comes along, because an announcement froze whatever the workload
+     was called at the moment it was written. A workload is named twice: on sight, from the
+     words of its own instruction, and again once a model has read it properly. So the feed
+     said "Found a new workload: poet-who-writes" above a list where that same workload was
+     called something else entirely. */
   return await db.prepare(
-    `SELECT kind, title, detail, created_at FROM activity
-      WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?`).all(workspaceId, limit);
+    `SELECT a.kind, a.title, a.detail, a.created_at, w.slug AS workload
+       FROM activity a LEFT JOIN workloads w ON w.id = a.workload_id
+      WHERE a.workspace_id = ? ORDER BY a.created_at DESC LIMIT ?`).all(workspaceId, limit);
 }

@@ -113,6 +113,7 @@ export async function fetchModels() {
 
 export async function saveCatalog(models) {
   const at = now();
+  const keep = new Set(models.map((m) => m.model_id));
   /* The whole catalogue lands at once. A half-written catalogue would price some models
      and not others, and every cost figure on every screen reads from this table. */
   await db.tx(async (tx) => {
@@ -123,6 +124,14 @@ export async function saveCatalog(models) {
          price_in = excluded.price_in, price_out = excluded.price_out,
          open_weights = excluded.open_weights, synced_at = excluded.synced_at`);
     for (const m of models) await stmt.run({ ...m, synced_at: at });
+    /* And take out what is no longer offered. Inserting and updating without ever removing
+       meant a model that stopped being sold, or that we deliberately stopped stocking, sat
+       in the catalogue for ever at its last known price. The routers were exactly that: we
+       excluded them from the fetch and they stayed anyway, still winning every cheapest
+       query. A catalogue that only grows is not a catalogue. */
+    const gone = (await tx.prepare('SELECT model_id FROM models_catalog').all())
+      .map((r) => r.model_id).filter((x) => !keep.has(x));
+    for (const x of gone) await tx.prepare('DELETE FROM models_catalog WHERE model_id = ?').run(x);
   });
   return models.length;
 }
