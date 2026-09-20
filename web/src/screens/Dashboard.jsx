@@ -73,11 +73,13 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
             )}
             {data.activity.map((a, i) => (
               <div className="fr" key={`${a.created_at}-${i}`}>
-                {/* Only the newest one, and only while it is actually new. A dot that beats
-                    for ever says "live" whether or not anything is happening, which is the
-                    one thing it must not do; this way the stillness is information too. */}
+                {/* Anything from the last hour beats, so a glance at the feed shows how much
+                    of it just happened rather than only marking the top line. A dot that
+                    beats for ever would say "live" whether or not anything was going on,
+                    which is the one thing it must not do, so the pulse stops when the entry
+                    stops being recent and the stillness is information too. */}
                 <span className={`fd ${feedDot[a.kind] || 'mut'}`
-                  + (i === 0 && Date.now() - a.created_at < FRESH_MS ? ' beat' : '')} />
+                  + (Date.now() - a.created_at < RECENT_MS ? ' beat' : '')} />
                 <div className="ft">{clip(a.title)}</div>
                 <div className="fw">{ago(a.created_at)}</div>
               </div>
@@ -91,7 +93,7 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
   );
 }
 
-/* How long the newest entry counts as just-happened, and keeps its pulse. */
-const FRESH_MS = 2 * 60 * 1000;
+/* How long an entry counts as just-happened, and keeps its pulse. */
+const RECENT_MS = 60 * 60 * 1000;
 
 const clip = (s) => (s && s.length > 78 ? `${s.slice(0, 76).replace(/[ ,.]+$/, '')}…` : s);
