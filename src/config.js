@@ -72,7 +72,17 @@ export const config = {
   /* Past this many live workloads the matcher stops making new ones and widens instead, so
      unusual traffic cannot turn into an unreadable list of hundreds. */
   WORKLOAD_MAX_LIVE: num('WORKLOAD_MAX_LIVE', 200),
-  WORKLOAD_NAME_MODEL: str('WORKLOAD_NAME_MODEL', ''),
+  /* Naming a workload is a small job that needs a model to FOLLOW AN INSTRUCTION, and
+     "whichever is cheapest in the catalogue" is the wrong way to choose one for that: the
+     cheapest model changes every time the catalogue does, which is how a router with a
+     price of minus two million ended up naming everybody's traffic. Named explicitly, with
+     the cheapest as a fallback only if this one is not stocked.
+
+     Chosen by asking four candidates to name the same poetry workload: gpt-4.1-mini said
+     poetry-request, mistral-nemo poem-request, claude-haiku generate-creative-poem, and
+     gemini-2.5-flash-lite said user-query-interpretation, which is a description of reading
+     rather than of the job. Cheapness is not the quality that matters here. */
+  WORKLOAD_NAME_MODEL: str('WORKLOAD_NAME_MODEL', 'openai/gpt-4.1-mini'),
 
   // measurement
   EVAL_SAMPLE_SIZE: num('EVAL_SAMPLE_SIZE', 120),

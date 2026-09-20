@@ -107,7 +107,12 @@ handle('name_workload', async ({ workloadId }) => {
   if (!w || w.named_at) return { ok: true, skipped: true };
   if (!canRoute()) return { ok: true, skipped: 'no provider' };
 
-  const model = config.WORKLOAD_NAME_MODEL || (await db.prepare(
+  /* The model we chose for this, if we stock it, and otherwise the cheapest real one. A
+     name set in config that is not in the catalogue would fail every call silently. */
+  const stocked = config.WORKLOAD_NAME_MODEL
+    ? await db.prepare('SELECT 1 FROM models_catalog WHERE model_id = ?').get(config.WORKLOAD_NAME_MODEL)
+    : null;
+  const model = (stocked && config.WORKLOAD_NAME_MODEL) || (await db.prepare(
     `SELECT c.model_id FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
       WHERE COALESCE(wm.enabled, 1) = 1 AND c.price_in > 0 AND c.price_out > 0
@@ -133,15 +138,21 @@ handle('name_workload', async ({ workloadId }) => {
   }, { source: 'test', classify: false });
   if (!out.ok) return { ok: true, skipped: out.json?.error?.message || 'call failed' };
 
-  const raw = String(out.json?.choices?.[0]?.message?.content ?? '').trim();
-  const named = slug(raw.split(/\s+/)[0] || '');
-  /* A model that answers with a sentence, an empty string or something absurd leaves the
-     name it already had. Nothing here is allowed to make the list worse. */
-  /* We asked for two to four words as a slug, so a single word means the model answered
-     with prose, or with a pleasantry, and the heuristic name it already has is better than
-     whatever the first word of that happened to be. */
+  /* The model's answer, turned into a slug however it chose to write one.
+     This used to take only the FIRST WORD and then reject anything without a hyphen, which
+     between them meant a plain-English answer could never pass: "poetry request" became
+     "poetry", which has no hyphen, which was thrown away. Small models answer in prose more
+     often than not, so in practice the rename almost never happened and whatever the
+     workload was called first stood for ever. */
+  const raw = String(out.json?.choices?.[0]?.message?.content ?? '')
+    .split('\n')[0]
+    .replace(/[`"'*.]/g, ' ')
+    .trim();
+  const named = slug(raw.split(/[\s_-]+/).filter(Boolean).slice(0, 4).join('-'));
+  /* An empty answer, a single bare word or something absurd leaves the name it already had.
+     Nothing here is allowed to make the list worse. */
   if (!named || named.length < 3 || named.length > 40 || !named.includes('-')) {
-    return { ok: true, skipped: 'unusable answer' };
+    return { ok: true, skipped: `unusable answer: ${raw.slice(0, 60)}` };
   }
 
   const taken = await db.prepare(
