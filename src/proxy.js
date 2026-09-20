@@ -240,7 +240,11 @@ v1.post('/traces', async (req, res) => {
       requestedModel: request.model || null, servedModel: served,
       statusCode: 200,
       promptTokens: usage.prompt_tokens ?? 0, completionTokens: usage.completion_tokens ?? 0,
-      costUsd: own ?? 0, chargedUsd: own ?? 0,
+      /* Priced, not charged. A copy is a call the customer already paid their own provider
+         for; we take nothing for it. Recording it as charged put their provider's bill into
+         "what you paid us", so a customer who only sends copies appeared to be paying us and
+         the two lines on the spend chart were the same line drawn twice. */
+      costUsd: own ?? 0, chargedUsd: 0,
       latencyMs: Number.isFinite(t?.latency_ms) ? t.latency_ms : null,
       request, response: t?.response ?? null,
     });

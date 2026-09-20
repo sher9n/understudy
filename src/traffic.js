@@ -78,14 +78,19 @@ export async function dailySpend(workspaceId, days = 30) {
     .all(workspaceId, since);
   const price = new Map(await (await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all())
     .map((m) => [m.model_id, m]));
+  /* One clock for the whole calculation. now() was being read again for every bucket and
+     once more for the anchor, so the anchor was always a fraction of a second later than the
+     buckets it was supposed to line up with. */
+  const t0 = now();
   const out = [];
-  for (let i = days - 1; i >= 0; i -= 1) {
-    const end = now() - i * DAY;
-    out.push({ at: end, paid: 0, would: 0 });
-  }
-  const first = now() - (days - 1) * DAY;
+  for (let i = days - 1; i >= 0; i -= 1) out.push({ at: t0 - i * DAY, paid: 0, would: 0 });
+  const first = t0 - (days - 1) * DAY;
   for (const c of rows) {
-    const bucket = Math.min(days - 1, Math.max(0, Math.floor((c.created_at - first) / DAY) + 0));
+    /* Each bucket is labelled by the moment it ENDS, so a call belongs to the first bucket
+       that ends at or after it: ceil, not floor. With floor, a call made seconds ago fell
+       just short of the last bucket and was drawn on yesterday, which left today reading
+       zero on every dashboard and every number one day out of place. */
+    const bucket = Math.min(days - 1, Math.max(0, Math.ceil((c.created_at - first) / DAY)));
     const slot = out[bucket];
     if (!slot) continue;
     slot.paid = round8(slot.paid + c.charged_usd);

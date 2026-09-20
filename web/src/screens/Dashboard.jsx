@@ -18,7 +18,11 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
     return () => clearInterval(t);
   }, [onTick]);
 
-  const hasDay = data.priced && data.series.some((d) => d.paid > 0);
+  /* Either line is worth a chart, not just the one we charged for. A customer who sends us
+     copies rather than routing pays us nothing, so "what you paid" is flat zero for ever,
+     and checking only that told them to come back tomorrow while sitting on a month of real
+     numbers about what their own models cost. */
+  const hasDay = data.priced && data.series.some((d) => d.paid > 0 || d.would > 0);
   const runRate = data.days ? (data.spend / data.days) * 30 : 0;
 
   return (
