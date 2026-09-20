@@ -633,3 +633,9 @@
     .creditbox > span:first-child { margin-top: 5px; }
     .creditbox .b { margin-top: 5px; }
     .creditacts { display: flex; align-items: center; gap: 14px; margin-top: 12px; flex-wrap: wrap; }
+
+    /* Identity at the foot of the guide's rail, in the same corner the app keeps it, so it
+       does not move when the guide is finished. margin-top:auto on the note already pushes
+       the pair down, so this only needs the rule above it. */
+    .railacct { margin-top: auto; padding-top: 22px; }
+    .railacct + .railfoot { margin-top: 18px; }

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { href } from '../router.js';
 import { api } from '../api.js';
 import Board from '../Board.jsx';
+import Account from '../Account.jsx';
 import html from './connect.html?raw';
 
 /* The board's own placeholders, swapped for this workspace's real ones. */
@@ -30,7 +31,7 @@ async function flash(button, text) {
   setTimeout(() => { button.textContent = was; }, COPIED_MS);
 }
 
-export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey, signedIn, onDone }) {
+export default function ConnectWizard({ go, me, dark, setDark, freshKey, onFreshKey, signedIn, onDone, onSignOut }) {
   /* The key exists in full only while we are holding it. Regenerating is the way to get
      one back, because only a hash of it is stored, so a key that has been lost cannot be
      shown again. Without this the screen offered a truncated key and a Copy button that
@@ -62,7 +63,6 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
      before they were kept recoverable comes back empty, and the prefix stands in for it. */
   const shownKey = key || data.key || null;
   const vals = {
-    dark, light: !dark,
     isStep1: step === 1, isStep2: step === 2,
     s1Cls: step === 1 ? 'st on' : 'st done',
     s2Cls: step === 1 ? 'st' : (calls ? 'st done' : 'st on'),
@@ -87,7 +87,6 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
   }
 
   const on = {
-    toggleTheme: () => setDark(!dark),
     next: () => { setStep(2); load(); },
     pick_route: () => setWay('route'),
     pick_copy_here: () => { setWay('copy'); setStep(1); },
@@ -143,6 +142,13 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
       vals={vals}
       on={on}
       hrefs={{ go_home: href('connect'), finish: href(calls ? 'dash' : 'connect') }}
+      slots={{
+        /* The same menu the app keeps at the foot of its sidebar, in the same corner, so
+           finishing the guide does not move it. Before this the guide's top right held a
+           plain letter with nothing behind it and no way to sign out at all. */
+        account: <Account me={me} dark={dark} setDark={setDark} onSignOut={onSignOut}
+          go={(k) => go(k)} />,
+      }}
       subs={{
         [SAMPLE_KEY]: shownKey || (data.keyPrefix ? `${data.keyPrefix}…` : SAMPLE_KEY),
         [SAMPLE_BASE]: data.baseUrl,

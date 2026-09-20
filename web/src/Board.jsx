@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 /* Renders a screen lifted from the design board and fills in its holes from live state.
 
@@ -20,9 +21,13 @@ import React, { useEffect, useRef } from 'react';
    work once, and the screen would then be stuck on whatever it first showed.
 
    Real inputs are left alone, so typing is never wiped by a re-render. */
-export default function Board({ html, vals = {}, on = {}, hrefs = {}, subs, repeat, onSubmit,
+export default function Board({ html, vals = {}, on = {}, hrefs = {}, subs, repeat, slots, onSubmit,
   className = '' }) {
   const host = useRef(null);
+  /* The board's markup is written in one go, so its slot elements do not exist until after
+     the first paint. This re-renders once they do, and the portals go in then. */
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
   const original = useRef(new Map());   // text node -> what the board said
   const rows = useRef(new Map());       // selector -> { template, parent, marker }
 
@@ -102,13 +107,25 @@ export default function Board({ html, vals = {}, on = {}, hrefs = {}, subs, repe
     onSubmit(Object.fromEntries(new FormData(e.target).entries()), e.target);
   };
 
+  const portals = [];
+  if (mounted && slots && host.current) {
+    for (const [name, node] of Object.entries(slots)) {
+      if (!node) continue;
+      const into = host.current.querySelector(`[data-slot="${name}"]`);
+      if (into) portals.push(<React.Fragment key={name}>{createPortal(node, into)}</React.Fragment>);
+    }
+  }
+
   return (
-    <div
-      ref={host}
-      className={`board ${className}`.trim()}
-      onClick={click}
-      onSubmit={submit}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <>
+      <div
+        ref={host}
+        className={`board ${className}`.trim()}
+        onClick={click}
+        onSubmit={submit}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+      {portals}
+    </>
   );
 }

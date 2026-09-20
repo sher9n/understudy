@@ -131,8 +131,9 @@ export default function App() {
   if (screen === 'connect' && !me.onboarded) {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
-        <ConnectWizard go={go} dark={dark} setDark={setDark}
+        <ConnectWizard go={go} me={me} dark={dark} setDark={setDark}
           freshKey={freshKey} onFreshKey={setFreshKey}
+          onSignOut={async () => { await api.signOut(); setMe({ signedIn: false }); go('home'); }}
           onDone={async () => { await api.finishOnboarding(); setMe(await api.me()); }} />
       </div>
     );
