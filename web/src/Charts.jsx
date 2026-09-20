@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useCallback, useRef, useState } from 'react';
+import { usd } from './api.js';
 
 const W = 980;
 const H = 408;
@@ -13,9 +14,37 @@ const dlab = (ms) => new Date(ms).toLocaleDateString('en-GB',
 
 const money = (v, max) => (max <= 0.05 ? `$${v.toFixed(3)}` : max <= 5 ? `$${v.toFixed(2)}` : `$${Math.round(v)}`);
 
+/* The day the pointer is over, as a whole date. The axis only labels four days, so the
+   tooltip has to say which one this is rather than leaving somebody counting gridlines.
+   Named in IST, because which day a call lands on depends on the clock you read it by. */
+const dfull = (ms) => new Date(ms).toLocaleDateString('en-GB',
+  { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+
 /** Daily spend, with what the same traffic would have cost on the customer's own models. */
 export function SpendChart({ series }) {
   const n = series.length;
+  const box = useRef(null);
+  const [at, setAt] = useState(null);
+
+  /* Which day is under the pointer. The drawing is a viewBox scaled to whatever width the
+     panel happens to be, so the pointer's position on the screen has to be put back into
+     the drawing's own coordinates before it means anything. */
+  const pick = useCallback((clientX) => {
+    const el = box.current;
+    if (!el || !n) return;
+    const r = el.getBoundingClientRect();
+    if (!r.width) return;
+    const x = ((clientX - r.left) / r.width) * W;
+    const span = (W - L - R) / Math.max(1, n - 1);
+    const i = Math.round((x - L) / span);
+    setAt(Math.max(0, Math.min(n - 1, i)));
+  }, [n]);
+
+  const step = (by) => setAt((cur) => {
+    const next = (cur === null ? n - 1 : cur) + by;
+    return Math.max(0, Math.min(n - 1, next));
+  });
+
   if (!n) return null;
   const top = Math.max(...series.map((d) => Math.max(d.paid, d.would)), 0.02);
   const max = niceTop(top);
@@ -25,7 +54,22 @@ export function SpendChart({ series }) {
   const path = (key) => series.map((d, i) => `${px(i).toFixed(1)} ${py(d[key]).toFixed(1)}`).join(' L');
   const marks = n < 12 ? [0, n >> 1, n - 1] : [0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1];
 
+  const day = at === null ? null : series[at];
+
   return (
+    <div className="chartwrap" ref={box}
+      onPointerMove={(e) => pick(e.clientX)}
+      onPointerLeave={() => setAt(null)}
+      onKeyDown={(e) => {
+        if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
+        else if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
+        else if (e.key === 'Escape') setAt(null);
+      }}
+      onFocus={() => setAt((cur) => (cur === null ? n - 1 : cur))}
+      onBlur={() => setAt(null)}
+      tabIndex={0}
+      role="group"
+      aria-label="Daily spend. Use the left and right arrow keys to read each day.">
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img"
       aria-label="Daily spend over the window, as a solid line, against what the same traffic would have cost on your own models, dashed.">
       {ticks.map((v) => (
@@ -43,7 +87,28 @@ export function SpendChart({ series }) {
         <text key={i} x={px(i)} y={H - B + 22} className="m" fontSize="10.5" fill="var(--mut)"
           textAnchor={k === 0 ? 'start' : k === marks.length - 1 ? 'end' : 'middle'}>{dlab(series[i].at)}</text>
       ))}
+      {day && (
+        <g pointerEvents="none">
+          <line x1={px(at)} y1={T - 6} x2={px(at)} y2={py(0)} stroke="var(--line-strong)" strokeWidth="1" />
+          {/* the ring is the panel colour, so the dot reads on top of the line it sits on */}
+          <circle cx={px(at)} cy={py(day.would)} r="4.5" fill="var(--line-strong)"
+            stroke="var(--raise)" strokeWidth="2" />
+          <circle cx={px(at)} cy={py(day.paid)} r="5" fill="var(--brand)"
+            stroke="var(--raise)" strokeWidth="2" />
+        </g>
+      )}
     </svg>
+    {day && (
+      <div className={`charttip${px(at) > W * 0.62 ? ' left' : ''}`}
+        style={{ left: `${(px(at) / W) * 100}%` }} aria-live="polite">
+        <div className="tipday">{dfull(day.at)}</div>
+        <div className="tiprow"><span className="tipkey"><i className="tipdot paid" />What you paid</span>
+          <span className="tipval">{usd(day.paid)}</span></div>
+        <div className="tiprow"><span className="tipkey"><i className="tipdot would" />On your own models</span>
+          <span className="tipval">{usd(day.would)}</span></div>
+      </div>
+    )}
+    </div>
   );
 }
 

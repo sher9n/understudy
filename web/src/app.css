@@ -661,3 +661,26 @@
       .steprow .st .t { display: none; }
       .steprow .st.on .t { display: inline; }
     }
+
+    /* Reading a value off the spend chart. The drawing is untouched: this is a guide line,
+       two dots and a card that follows the pointer, and it disappears the moment it leaves.
+       The card is HTML rather than SVG text so it wraps, aligns and themes like everything
+       else, and so the numbers it shows go through the same money formatting as the rest. */
+    .chartwrap { position: relative; }
+    .chartwrap:focus { outline: none; }
+    .chartwrap:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; border-radius: 10px; }
+    .charttip { position: absolute; top: 14px; transform: translateX(14px); pointer-events: none;
+                background: var(--raise); border: 1px solid var(--line-strong); border-radius: 10px;
+                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08); padding: 10px 12px; min-width: 196px;
+                z-index: 2; }
+    .charttip.left { transform: translateX(calc(-100% - 14px)); }
+    .tipday { font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 7px;
+              letter-spacing: -0.01em; }
+    .tiprow { display: flex; align-items: center; gap: 14px; justify-content: space-between;
+              font-size: 12px; line-height: 1.7; }
+    .tipkey { display: inline-flex; align-items: center; gap: 7px; color: var(--mut-read); }
+    .tipval { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px;
+              color: var(--ink); white-space: nowrap; }
+    .tipdot { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
+    .tipdot.paid { background: var(--brand); }
+    .tipdot.would { background: var(--line-strong); }
