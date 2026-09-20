@@ -359,7 +359,11 @@ api.get('/settings', async (req, res) => {
     autoTopUp: !!acct.auto_topup,
     topUpAmount: config.TOPUP_AMOUNT_USD,
     topUpThreshold: config.TOPUP_THRESHOLD_USD,
-    card: acct.card_last4 ? { brand: acct.card_brand, last4: acct.card_last4 } : null,
+    /* Both, not just the digits. The brand and last four are only there to be READ; the
+       thing that can actually be charged is the payment method, and anything that clears
+       that while leaving the digits behind leaves a card on screen that does not exist. */
+    card: (acct.payment_method && acct.card_last4)
+      ? { brand: acct.card_brand, last4: acct.card_last4 } : null,
     cardNote: acct.topup_failed_note,
     retentionDays: req.workspace.retention_days,
     retentionChoices: RETENTION_CHOICES,

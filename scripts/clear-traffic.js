@@ -47,7 +47,8 @@ await db.tx(async (tx) => {
   ]) await tx.prepare(sql).run(ws.id);
   await tx.prepare(
     `UPDATE billing_accounts SET balance_usd = 0, eval_used_usd = 0, auto_topup = 0,
-            payment_method = NULL, stripe_customer = NULL, topup_failed_note = NULL,
+            payment_method = NULL, card_brand = NULL, card_last4 = NULL,
+            stripe_customer = NULL, topup_failed_note = NULL,
             plan = NULL, plan_status = NULL, updated_at = ?
       WHERE workspace_id = ?`).run(now(), ws.id);
   await tx.prepare('UPDATE workspaces SET onboarded_at = NULL WHERE id = ?').run(ws.id);
@@ -55,8 +56,8 @@ await db.tx(async (tx) => {
 
 const after = (await db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workspace_id = ?').get(ws.id)).n;
 const w = await db.prepare('SELECT onboarded_at FROM workspaces WHERE id = ?').get(ws.id);
-const bal = await db.prepare('SELECT balance_usd, payment_method FROM billing_accounts WHERE workspace_id = ?').get(ws.id);
+const bal = await db.prepare('SELECT balance_usd, payment_method, card_last4 FROM billing_accounts WHERE workspace_id = ?').get(ws.id);
 console.log(`${email}: ${before} calls cleared, ${after} left.`);
 console.log(`  guide finished: ${w.onboarded_at == null ? 'no, it will run again' : 'STILL MARKED DONE'}`);
-console.log(`  balance: $${Number(bal?.balance_usd ?? 0).toFixed(2)}   saved card: ${bal?.payment_method ? 'STILL THERE' : 'none'}`);
+console.log(`  balance: $${Number(bal?.balance_usd ?? 0).toFixed(2)}   saved card: ${bal?.payment_method || bal?.card_last4 ? 'STILL THERE' : 'none'}`);
 await db.close();
