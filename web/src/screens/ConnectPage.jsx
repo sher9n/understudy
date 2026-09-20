@@ -11,12 +11,9 @@ import { COPIED_MS } from './ConnectWizard.jsx';
    The steps do not disappear, they become a record of what already happened, in the panel
    on the right, beside the numbers that prove it. */
 
-/* A test call costs a fraction of a cent, and "$0.00" reads as though it were free when it
-   is not. Say which of the two it actually is. */
-const priceOf = (n) => {
-  if (!n) return 'no charge';
-  return n < 0.005 ? 'under a cent' : usd(n);
-};
+/* "under a cent" was a way around a formatter that could not print one. It can now, so the
+   test call says what it actually cost. */
+const priceOf = (n) => (n ? usd(n) : 'no charge');
 
 const Copy = ({ text, label = 'Copy' }) => {
   const [done, setDone] = useState(false);

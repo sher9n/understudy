@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { api, usd, dateIST, ago } from '../api.js';
+import { api, usd, usdHeld, dateIST, ago } from '../api.js';
 
 const Sw = ({ on, onClick, busy }) => (
   <button className={`sw${on ? ' swon' : ''}`} disabled={busy} onClick={onClick}
@@ -101,7 +101,7 @@ export default function Settings({ data, reload }) {
         </div>
         <div className="kvrow">
           <span className="kvk">Balance</span>
-          <span className="kvv kvm">{usd(data.balance)}</span>
+          <span className="kvv kvm">{usdHeld(data.balance)}</span>
           <span className="kva">
             <button className="mini" disabled={!data.canBill || busy || paying}
               onClick={() => setPicking((v) => !v)}>
