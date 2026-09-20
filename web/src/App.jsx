@@ -123,18 +123,21 @@ export default function App() {
     );
   }
 
-  /* Before any traffic has arrived Connect is the whole app: a three step guide on its own
-     page, with nothing beside it to wander off into. Once a customer is connected the same
-     screen becomes an ordinary page inside the app, showing the endpoint, the key and the
-     snippets, so they can come back to look something up or wire a second service without
-     being walked through getting started all over again. */
+  const signOut = async () => { await api.signOut(); setMe({ signedIn: false }); go('home'); };
+
+  /* The guide lives INSIDE the app, in the same frame the customer will use afterwards. The
+     screens they cannot use yet are shown but not live, so they can see what they are
+     setting up, and so that nothing moves the moment they finish: the navigation, the
+     wordmark and their own account are in the same places before and after. Only the middle
+     of the screen changes, from a three step guide to the ordinary Connect page. */
   if (screen === 'connect' && !me.onboarded) {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
-        <ConnectWizard go={go} me={me} dark={dark} setDark={setDark}
-          freshKey={freshKey} onFreshKey={setFreshKey}
-          onSignOut={async () => { await api.signOut(); setMe({ signedIn: false }); go('home'); }}
-          onDone={async () => { await api.finishOnboarding(); setMe(await api.me()); }} />
+        <Shell here="connect" me={me} go={go} dark={dark} setDark={setDark}
+          locked onSignOut={signOut}>
+          <ConnectWizard go={go} freshKey={freshKey} onFreshKey={setFreshKey}
+            onDone={async () => { await api.finishOnboarding(); setMe(await api.me()); }} />
+        </Shell>
       </div>
     );
   }
@@ -171,7 +174,7 @@ export default function App() {
         go={go}
         dark={dark}
         setDark={setDark}
-        onSignOut={async () => { await api.signOut(); setMe({ signedIn: false }); go('home'); }}
+        onSignOut={signOut}
       >
         {body()}
       </Shell>

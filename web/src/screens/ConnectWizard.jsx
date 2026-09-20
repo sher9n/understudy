@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { href } from '../router.js';
 import { api } from '../api.js';
 import Board from '../Board.jsx';
-import Account from '../Account.jsx';
 import html from './connect.html?raw';
 
 /* The board's own placeholders, swapped for this workspace's real ones. */
@@ -12,10 +11,21 @@ const SAMPLE_SUMMARY = '17 calls in, grouped into 2 workloads by the job they do
 
 const LANGS = ['python', 'node', 'curl', 'claude'];
 
+/* The line under "You are connected".
+ *
+ * It used to read "1 call in, grouped into 0 workloads", which is a strange thing to say at
+ * the moment somebody succeeds: it names a zero, and the zero is not a problem. A shape has
+ * to be seen a number of times before it becomes a workload, so on the first call there is
+ * nothing to group yet and the honest thing is to say what happens next. */
 const summary = (d) => {
   const n = d.workloads.length;
-  return `${d.calls} call${d.calls === 1 ? '' : 's'} in, grouped into ${n} workload${n === 1 ? '' : 's'}`
-    + ' by the job they do. Nothing here was labelled by you.';
+  const calls = `${d.calls} call${d.calls === 1 ? '' : 's'} in`;
+  if (n === 0) {
+    return `${calls}. We group calls by the job they do, with nothing for you to label, and`
+      + ' the first jobs appear as more arrive.';
+  }
+  return `${calls}, grouped into ${n} workload${n === 1 ? '' : 's'} by the job they do.`
+    + ' Nothing here was labelled by you.';
 };
 
 /* How long the button says "Copied". The in-app Connect page waits the same, because the
@@ -31,7 +41,7 @@ async function flash(button, text) {
   setTimeout(() => { button.textContent = was; }, COPIED_MS);
 }
 
-export default function ConnectWizard({ go, me, dark, setDark, freshKey, onFreshKey, signedIn, onDone, onSignOut }) {
+export default function ConnectWizard({ go, freshKey, onFreshKey, signedIn, onDone }) {
   /* The key exists in full only while we are holding it. Regenerating is the way to get
      one back, because only a hash of it is stored, so a key that has been lost cannot be
      shown again. Without this the screen offered a truncated key and a Copy button that
@@ -126,7 +136,6 @@ export default function ConnectWizard({ go, me, dark, setDark, freshKey, onFresh
        wordmark and Back stay inside it. Only the button on the last step leaves, and that
        button is what MARKS the guide finished: a call arriving no longer ends it, because
        somebody reading step two should not have the app move under them. */
-    go_home: () => go('connect'),
     finish: async () => {
       if (!calls) { go('connect'); return; }
       if (onDone) await onDone();
@@ -141,14 +150,7 @@ export default function ConnectWizard({ go, me, dark, setDark, freshKey, onFresh
       html={html}
       vals={vals}
       on={on}
-      hrefs={{ go_home: href('connect'), finish: href(calls ? 'dash' : 'connect') }}
-      slots={{
-        /* The same menu the app keeps at the foot of its sidebar, in the same corner, so
-           finishing the guide does not move it. Before this the guide's top right held a
-           plain letter with nothing behind it and no way to sign out at all. */
-        account: <Account me={me} dark={dark} setDark={setDark} onSignOut={onSignOut}
-          go={(k) => go(k)} />,
-      }}
+      hrefs={{ finish: href(calls ? 'dash' : 'connect') }}
       subs={{
         [SAMPLE_KEY]: shownKey || (data.keyPrefix ? `${data.keyPrefix}…` : SAMPLE_KEY),
         [SAMPLE_BASE]: data.baseUrl,

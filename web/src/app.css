@@ -634,8 +634,27 @@
     .creditbox .b { margin-top: 5px; }
     .creditacts { display: flex; align-items: center; gap: 14px; margin-top: 12px; flex-wrap: wrap; }
 
-    /* Identity at the foot of the guide's rail, in the same corner the app keeps it, so it
-       does not move when the guide is finished. margin-top:auto on the note already pushes
-       the pair down, so this only needs the rule above it. */
-    .railacct { margin-top: auto; padding-top: 22px; }
-    .railacct + .railfoot { margin-top: 18px; }
+    /* The guide, inside the app frame. The three steps run across the top of the content
+       rather than down a rail of their own, because the rail's place is now taken by the
+       app's real sidebar, which is the whole point: nothing moves when the guide finishes. */
+    .wizpage { display: flex; flex-direction: column; min-height: 0; }
+    .steprow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+               padding: 0 0 4px; margin: 0 0 8px; }
+    .steprow .st { padding: 7px 13px 7px 9px; gap: 9px; align-items: center; }
+    .steprow .st .t { font-size: 13.5px; }
+    .steprow .st .n { width: 22px; height: 22px; font-size: 11px; }
+    .steplink { flex: 1 1 22px; min-width: 16px; max-width: 54px; height: 1px;
+                background: var(--line-strong); }
+    .wizpage .wizmain { padding: 4px 0 8px; max-width: 900px; }
+    .wizfoot { font-size: 12.5px; color: var(--mut); line-height: 1.55; margin: 26px 0 0;
+               padding-top: 20px; border-top: 1px solid var(--line); max-width: 900px; }
+
+    /* A screen that is not ready yet. Shown so the customer can see what they are setting
+       up, plainly not available, and not a link, so there is nothing to click into. */
+    .nv.off { opacity: 0.42; cursor: default; }
+    .nv.off:hover { background: none; }
+
+    @media (max-width: 720px) {
+      .steprow .st .t { display: none; }
+      .steprow .st.on .t { display: inline; }
+    }

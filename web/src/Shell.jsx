@@ -6,6 +6,8 @@ import Account from './Account.jsx';
 const S = { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor',
   strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true };
 
+const EMPTY_UNTIL_TRAFFIC = new Set(['dash', 'work', 'models']);
+
 const NAV = [
   { key: 'dash', label: 'Dashboard', icon: (
     <svg {...S}><rect x="2.2" y="2.2" width="5.2" height="5.2" rx="1.4" /><rect x="8.6" y="2.2" width="5.2" height="5.2" rx="1.4" /><rect x="2.2" y="8.6" width="5.2" height="5.2" rx="1.4" /><rect x="8.6" y="8.6" width="5.2" height="5.2" rx="1.4" /></svg>) },
@@ -19,7 +21,7 @@ const NAV = [
     <svg {...S}><path d="M2.6 4.6 h10.8 M2.6 11.4 h10.8" /><circle cx="6" cy="4.6" r="1.9" /><circle cx="10" cy="11.4" r="1.9" /></svg>) },
 ];
 
-export default function Shell({ here, me, go, onSignOut, dark, setDark, children }) {
+export default function Shell({ here, me, go, onSignOut, dark, setDark, locked = false, children }) {
   const [navOpen, setNavOpen] = useState(true);
   const at = (key) => (key === here ? 'nv on' : 'nv');
   const open = (key) => () => go(key);
@@ -28,7 +30,8 @@ export default function Shell({ here, me, go, onSignOut, dark, setDark, children
     <div className="shell">
       <aside className={navOpen ? 'side' : 'side mini'}>
         <div className="sidetop">
-          <a className="wm" href={href('dash')} onClick={plainClick(() => go('dash'))}>Understudy</a>
+          <a className="wm" href={href(locked ? 'connect' : 'dash')}
+            onClick={plainClick(() => go(locked ? 'connect' : 'dash'))}>Understudy</a>
           <button className="collapse" onClick={() => setNavOpen((v) => !v)}
             aria-label={navOpen ? 'Collapse the menu' : 'Expand the menu'}>
             {navOpen
@@ -37,11 +40,25 @@ export default function Shell({ here, me, go, onSignOut, dark, setDark, children
           </button>
         </div>
         <nav className="sidenav">
+          {/* Dashboard, Workloads and Models are built entirely from traffic that has not
+              arrived, so while the guide is unfinished they are shown rather than hidden:
+              the customer sees the shape of the app they are setting up, and the furniture
+              does not move under them when they finish. They are not links, so there is
+              nothing to click into and bounce back from, and each says why when you hover
+              it. Settings is NOT one of them: your key, your balance and the way out of the
+              account are worth reaching on day one, and the account menu links straight to
+              it, so locking it would offer something that works and call it unavailable. */}
           {NAV.map((n) => (
+            locked && EMPTY_UNTIL_TRAFFIC.has(n.key) ? (
+              <span key={n.key} className="nv off" aria-disabled="true"
+                title="Available once your first call has arrived">
+                {n.icon}<span className="lbl">{n.label}</span>
+              </span>
+            ) : (
             <a key={n.key} className={at(n.key)} href={href(n.key)}
               onClick={plainClick(open(n.key))}>
               {n.icon}<span className="lbl">{n.label}</span>
-            </a>
+            </a>)
           ))}
         </nav>
         <div className="sidefoot">

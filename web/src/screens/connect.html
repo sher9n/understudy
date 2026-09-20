@@ -1,16 +1,12 @@
-<div style="display: flex; flex-direction: column;">
-  <header class="top2"><span class="wm lnk" data-go="go_home">Understudy</span></header>
-  <div class="wiz">
-    <aside class="rail">
-      <div class="m eyeb">Get started</div>
-      <div class="railsub">You are three steps from your first measurement.</div>
-      <div data-cls="s1Cls"><span class="n">1</span><div><div class="t">Connect your traffic</div><div class="b">Route through us, or send copies</div></div></div>
-      <div data-cls="s2Cls"><span class="n">2</span><div><div class="t">Send us a call</div><div class="b">One is enough to start</div></div></div>
-      <div data-cls="s3Cls"><span class="n">3</span><div><div class="t">You are connected</div><div class="b">We take it from here</div></div></div>
-      <div class="railacct" data-slot="account"></div>
-      <div class="railfoot">Routed calls only reach providers with zero data retention. Stored calls are deleted after 30 days.</div>
-    </aside>
-    <main class="wizmain">
+<div class="wizpage">
+  <div class="steprow">
+    <div data-cls="s1Cls"><span class="n">1</span><span class="t">Connect your traffic</span></div>
+    <span class="steplink"></span>
+    <div data-cls="s2Cls"><span class="n">2</span><span class="t">Send us a call</span></div>
+    <span class="steplink"></span>
+    <div data-cls="s3Cls"><span class="n">3</span><span class="t">You are connected</span></div>
+  </div>
+<main class="wizmain">
     <span data-if="isStep1">
       <h1>Connect your traffic</h1>
       <p class="lead">Change one line in the client you already use. You can change your mind later.</p>
@@ -88,5 +84,6 @@
       <div class="wizcta"><span class="plainb" data-go="back">Back</span></div>
     </span>
     </main>
-  </div>
+  <p class="wizfoot">Routed calls only reach providers with zero data retention. Stored calls
+    are deleted after 30 days.</p>
 </div>

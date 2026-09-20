@@ -38,8 +38,8 @@ body { margin: 0; }
 /* A lifted screen's sc-if wrappers must not affect layout. */
 [data-if] { display: contents; }
 [data-if][hidden] { display: none !important; }
-.board { display: flex; flex-direction: column; flex: 1; }
-.board > div { flex: 1; display: flex; flex-direction: column; }
+.lifted { display: flex; flex-direction: column; flex: 1; }
+.lifted > div { flex: 1; display: flex; flex-direction: column; }
 
 /* App-only overrides. app.css is lifted from the design board; anything here is the app's
    own decision and survives a re-lift, because this sheet loads after it. */
