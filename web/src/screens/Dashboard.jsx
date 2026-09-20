@@ -60,10 +60,7 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
         </section>
 
         <section className="panel2">
-          <div className="feedhead">
-            <h3>Live activity</h3>
-            <span className="livedot" title="updating" />
-          </div>
+          <div className="feedhead"><h3>Live activity</h3></div>
           <div className="feed">
             {data.activity.length === 0 && (
               <div className="fr"><span className="fd mut" />
@@ -72,7 +69,11 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
             )}
             {data.activity.map((a, i) => (
               <div className="fr" key={`${a.created_at}-${i}`}>
-                <span className={`fd ${feedDot[a.kind] || 'mut'}`} />
+                {/* Only the newest one, and only while it is actually new. A dot that beats
+                    for ever says "live" whether or not anything is happening, which is the
+                    one thing it must not do; this way the stillness is information too. */}
+                <span className={`fd ${feedDot[a.kind] || 'mut'}`
+                  + (i === 0 && Date.now() - a.created_at < FRESH_MS ? ' beat' : '')} />
                 <div className="ft">{clip(a.title)}</div>
                 <div className="fw">{ago(a.created_at)}</div>
               </div>
@@ -85,5 +86,8 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
     </>
   );
 }
+
+/* How long the newest entry counts as just-happened, and keeps its pulse. */
+const FRESH_MS = 2 * 60 * 1000;
 
 const clip = (s) => (s && s.length > 78 ? `${s.slice(0, 76).replace(/[ ,.]+$/, '')}…` : s);

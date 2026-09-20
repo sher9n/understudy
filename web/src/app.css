@@ -432,11 +432,15 @@
     .fr { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 11px; align-items: start;
           padding: 13px 18px; border-top: 1px solid var(--line); }
     .fr:first-child { border-top: 0; }
-    .fd { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--line-strong); }
-    .fd.ok { background: var(--ok); } .fd.on { background: var(--brand); } .fd.bad { background: var(--bad); }
+    /* color as well as background, and the background takes it: the pulse below is drawn
+       with currentColor, so the ring is always the dot's own colour rather than whatever the
+       surrounding text happens to be. */
+    .fd { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px;
+          color: var(--line-strong); background: currentColor; }
+    .fd.ok { color: var(--ok); } .fd.on { color: var(--brand); } .fd.bad { color: var(--bad); }
     /* A call is the thing being watched for, so it gets the brand colour rather than a grey */
-    .fd.call { background: var(--brand); } .fd.copy { background: var(--brand-read); }
-    .fd.test { background: var(--ok); }
+    .fd.call { color: var(--brand); } .fd.copy { color: var(--brand-read); }
+    .fd.test { color: var(--ok); }
     .ft { font-size: 13px; line-height: 1.5; }
     .fw { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--mut);
           white-space: nowrap; padding-top: 2px; }
@@ -612,13 +616,14 @@
                      color: var(--ink); background: var(--code); border: 1px solid var(--line);
                      border-radius: 5px; padding: 1px 5px; }
 
-    /* A quiet pulse beside "Live activity", so the word is a promise the screen keeps. */
-    .livedot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-left: auto;
-               box-shadow: 0 0 0 0 var(--ok); animation: livepulse 2.4s ease-out infinite; }
-    @keyframes livepulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); }
-                           70% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--ok) 0%, transparent); }
-                           100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 0%, transparent); } }
-    @media (prefers-reduced-motion: reduce) { .livedot { animation: none; } }
+    /* The newest entry breathes, slowly, and only while it is still new. The pulse is on the
+       entry itself rather than on a separate indicator in the corner, so the motion is
+       attached to the thing that actually just happened. currentColor keeps it whatever
+       colour that kind of entry is, so a call beats in blue and a charge in grey. */
+    .fd.beat { animation: fdbeat 3.2s ease-in-out infinite; }
+    @keyframes fdbeat { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent); }
+                        50%      { box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 0%, transparent); } }
+    @media (prefers-reduced-motion: reduce) { .fd.beat { animation: none; } }
 
     /* The amount row under Add credit. The amounts are the control, so they read as buttons
        in a line rather than as a form somebody has to fill in. */
