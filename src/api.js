@@ -104,7 +104,8 @@ api.get('/me', async (req, res) => {
     canBill: canBill(),
     // somebody whose traffic has never arrived belongs on Connect, not an empty dashboard
     connected: await db.prepare(
-      `SELECT 1 FROM calls WHERE workspace_id = ? AND source NOT IN ('replay', 'test') LIMIT 1`)
+      `SELECT 1 FROM calls WHERE workspace_id = ? AND source NOT IN ('replay', 'test')
+          AND (status_code IS NULL OR status_code < 400) LIMIT 1`)
       .get(req.workspace.id) !== undefined,
     /* And somebody who has not finished the guide belongs there too, even once their traffic
        HAS arrived. The two are different events: a call landing is what makes the last step
@@ -489,9 +490,13 @@ api.post('/settings/auto-topup', async (req, res) => {
 
 api.get('/connect', async (req, res) => {
   const keys = (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at);
+  /* Only calls that actually worked. A call we turned away for an empty balance is recorded
+     so the customer can see it arrived, but counting it here would tell the guide the job is
+     done when nothing has been measured. */
   const traffic = await db.prepare(
     `SELECT COUNT(*) AS n, MAX(created_at) AS last FROM calls
-      WHERE workspace_id = ? AND source NOT IN ('replay', 'test')`).get(req.workspace.id);
+      WHERE workspace_id = ? AND source NOT IN ('replay', 'test')
+        AND (status_code IS NULL OR status_code < 400)`).get(req.workspace.id);
   const workloads = await db.prepare(
     `SELECT w.slug, w.reference_model,
             (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.source NOT IN ('replay', 'test')) AS calls
@@ -513,9 +518,22 @@ api.get('/connect', async (req, res) => {
      authenticate. Keys made before they were kept encrypted come back as null here, and the
      screen offers to replace them, because those really are unrecoverable. */
   const live = await revealKey(req.workspace.id);
+  /* Calls that reached us and were turned away for an empty balance. This matters most on
+     the very first run: the customer's wiring is CORRECT, and without this the guide would
+     sit on "waiting for your first call" while their calls arrived and bounced, which reads
+     as "your integration is broken" when the truth is "your wallet is empty". */
+  const refused = (await db.prepare(
+    `SELECT COUNT(*) AS n FROM calls WHERE workspace_id = ? AND status_code = 402`)
+    .get(req.workspace.id)).n;
+  const acct = await account(req.workspace.id);
   res.json({
     baseUrl: `${config.PUBLIC_URL}/v1`,
     key: live?.secret ?? null,
+    balance: round8(acct.balance_usd),
+    refused,
+    /* Routed calls need credit; copies never do. Saying so only when it is actually in the
+       way keeps it out of the face of somebody who is on the copies path. */
+    needsCredit: refused > 0 && acct.balance_usd <= 0,
     keyPrefix: live?.prefix ?? keys[0]?.prefix ?? null,
     calls: traffic.n,
     lastCallAt: traffic.last ?? null,

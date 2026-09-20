@@ -37,6 +37,7 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
      handed over something which could never authenticate. */
   const [ownKey, setOwnKey] = useState(null);
   const [rotating, setRotating] = useState(false);
+  const [buying, setBuying] = useState(false);
   const key = freshKey || ownKey || null;
   const [data, setData] = useState(null);
   const [step, setStep] = useState(1);
@@ -70,6 +71,12 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
     copyCls: way === 'copy' ? 'way on' : 'way',
     is_route: way === 'route', is_copy: way === 'copy',
     noCalls: !calls, hasCalls: calls,
+    /* Three states on step two, not two. Waiting is only honest while nothing has arrived;
+       once calls are arriving and bouncing off an empty balance, saying "waiting" tells
+       somebody their integration is broken when it is working perfectly. */
+    needsCredit: !calls && !!data.needsCredit,
+    waiting: !calls && !data.needsCredit,
+    creditLabel: buying ? 'Opening…' : 'Add credit',
     regenLabel: rotating ? 'working…' : (shownKey ? 'Replace' : 'Regenerate'),
     /* Nothing beside the key. The row is the key, a way to copy it and a way to replace it,
        and any line of commentary next to all three only competed with them. */
@@ -83,6 +90,15 @@ export default function ConnectWizard({ go, dark, setDark, freshKey, onFreshKey,
     toggleTheme: () => setDark(!dark),
     next: () => { setStep(2); load(); },
     pick_route: () => setWay('route'),
+    pick_copy_here: () => { setWay('copy'); setStep(1); },
+    add_credit: async () => {
+      if (buying) return;
+      setBuying(true);
+      try {
+        const { url } = await api.addCredit(20);
+        window.location.assign(url);
+      } catch { setBuying(false); }
+    },
     pick_copy: () => setWay('copy'),
     arrive: load,            // the board's "waiting" box: here it just checks again
     /* Copy whatever box the button sits in, so what lands on the clipboard is exactly what

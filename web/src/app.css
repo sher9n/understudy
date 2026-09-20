@@ -624,3 +624,12 @@
        in a line rather than as a form somebody has to fill in. */
     .amounts { display: flex; gap: 8px; flex-wrap: wrap; }
     .amountnote { display: block; margin-top: 9px; line-height: 1.5; }
+
+    /* The "add credit" state on step two of the guide. It is a waiting box that has learned
+       something, so it keeps that shape rather than becoming an error: nothing is broken,
+       the customer's calls are arriving exactly as intended. */
+    .creditbox { border-style: solid; border-color: var(--warn); background: var(--warnq);
+                 cursor: default; align-items: flex-start; }
+    .creditbox > span:first-child { margin-top: 5px; }
+    .creditbox .b { margin-top: 5px; }
+    .creditacts { display: flex; align-items: center; gap: 14px; margin-top: 12px; flex-wrap: wrap; }

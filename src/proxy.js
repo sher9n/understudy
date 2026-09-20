@@ -77,9 +77,30 @@ async function prepare(wsId, body, { classify = true } = {}) {
    call, and so does Connect's "Send a test call", which is the point: what the test
    proves is what a real call does, because it is the same path, the same gate, the same
    charge and the same row. */
+/* A call we refused is still a call that arrived, and it is the only evidence the customer
+   has that their wiring works. Refusing it silently was the worst of both: their integration
+   was correct, nothing appeared anywhere, and the getting started guide sat waiting for a
+   call that could never come. Recorded at most once a minute per workspace, so a client
+   retrying in a loop leaves one line rather than ten thousand. */
+const lastRefusal = new Map();
+async function recordRefusal(wsId, body, status, json) {
+  const last = lastRefusal.get(wsId) || 0;
+  if (Date.now() - last < 60000) return;
+  lastRefusal.set(wsId, Date.now());
+  await recordCall({
+    workspaceId: wsId, workloadId: null, source: 'routed',
+    requestedModel: body?.model ?? null, servedModel: null,
+    statusCode: status, latencyMs: 0, request: body,
+    response: json ?? null,
+  }).catch(() => { /* never let bookkeeping break the answer */ });
+}
+
 export async function routeOnce(wsId, body, { source = 'routed', classify = true } = {}) {
   const ready = await prepare(wsId, body, { classify });
-  if (ready.error) return { ok: false, status: ready.error.status, json: ready.error.json };
+  if (ready.error) {
+    if (source === 'routed') await recordRefusal(wsId, body, ready.error.status, ready.error.json);
+    return { ok: false, status: ready.error.status, json: ready.error.json };
+  }
   const { workload, requested, served } = ready;
   const started = Date.now();
   try {
@@ -115,7 +136,10 @@ v1.post('/chat/completions', async (req, res) => {
     return res.status(out.status).json(out.json);
   }
   const ready = await prepare(wsId, body);
-  if (ready.error) return res.status(ready.error.status).json(ready.error.json);
+  if (ready.error) {
+    await recordRefusal(wsId, body, ready.error.status, ready.error.json);
+    return res.status(ready.error.status).json(ready.error.json);
+  }
   const { workload, requested, served } = ready;
   const started = Date.now();
   try {
