@@ -646,8 +646,6 @@
     .steplink { flex: 1 1 22px; min-width: 16px; max-width: 54px; height: 1px;
                 background: var(--line-strong); }
     .wizpage .wizmain { padding: 4px 0 8px; max-width: 900px; }
-    .wizfoot { font-size: 12.5px; color: var(--mut); line-height: 1.55; margin: 26px 0 0;
-               padding-top: 20px; border-top: 1px solid var(--line); max-width: 900px; }
 
     /* A screen that is not ready yet. Shown so the customer can see what they are setting
        up, plainly not available, and not a link, so there is nothing to click into. */
