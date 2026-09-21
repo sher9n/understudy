@@ -133,39 +133,81 @@ const shapeLabel = { tool_call: 'tool call', json: 'json', enum: 'enum', free_te
    from one call to the next: the instruction is what they all share, and is already shown
    at the top of the page as the shape. Content is cleared after the retention window, so
    this is often legitimately absent and says so rather than showing an empty cell. */
-function askedOf(c) {
+const CELL = 160;
+
+/** The text of a message, whether it came as a string or as parts. */
+function contentText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((p) => (typeof p?.text === 'string' ? p.text
+      : (p?.type ? `[${String(p.type).replace('_', ' ')}]` : ''))).join('\n');
+  }
+  return '';
+}
+
+/** The whole of what was asked: every message in the request, in the order it was sent. */
+function askedFull(c) {
   if (c.content_purged_at) return null;
   try {
     const req = JSON.parse(c.request_json || 'null');
     const msgs = Array.isArray(req?.messages) ? req.messages : [];
-    const last = [...msgs].reverse().find((m) => m.role === 'user') || msgs[msgs.length - 1];
-    const text = typeof last?.content === 'string'
-      ? last.content
-      : (Array.isArray(last?.content) ? last.content.map((p) => p?.text || '').join(' ') : '');
-    const one = String(text).replace(/\s+/g, ' ').trim();
-    return one ? clip(one, 160) : null;
+    if (!msgs.length) return null;
+    return msgs.map((m) => {
+      const body = contentText(m.content)
+        || (m.tool_calls ? JSON.stringify(m.tool_calls, null, 2) : '');
+      return `${String(m.role || 'message').toUpperCase()}\n${body}`;
+    }).join('\n\n');
   } catch { return null; }
 }
 
-/* What the model answered, in one line: the text, or the tools it chose to call. */
-function answeredOf(c) {
+/** The whole of what came back. */
+function answeredFull(c) {
   if (c.content_purged_at) return null;
   try {
     const res = JSON.parse(c.response_json || 'null');
+    if (res?.error?.message) return String(res.error.message);
     const msg = res?.choices?.[0]?.message;
     if (!msg) return null;
-    const text = typeof msg.content === 'string'
-      ? msg.content
-      : (Array.isArray(msg.content) ? msg.content.map((p) => p?.text || '').join(' ') : '');
-    const one = String(text).replace(/\s+/g, ' ').trim();
-    if (one) return clip(one, 160);
-    const tools = (msg.tool_calls || []).map((t) => t?.function?.name).filter(Boolean);
-    return tools.length ? `called ${tools.join(', ')}` : null;
+    const text = contentText(msg.content);
+    if (text.trim()) return text;
+    const tools = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+    if (!tools.length) return null;
+    return tools.map((t) => `CALLED ${t?.function?.name || 'a tool'}\n${t?.function?.arguments ?? ''}`).join('\n\n');
   } catch { return null; }
 }
 
-/* One call as a row. Shared by the list and the single call so the two never disagree. */
-const callRow = (c) => ({
+/* One line for the table, plus whether there is more of it than fits. A cell that already
+   shows everything has nothing to open, so it is left alone rather than given a hover that
+   repeats what is on the screen. */
+function cellOf(full) {
+  if (!full) return { text: null, more: false };
+  const one = String(full).replace(/\s+/g, ' ').trim();
+  if (!one) return { text: null, more: false };
+  return { text: clip(one, CELL), more: one.length > CELL || /\n/.test(String(full).trim()) };
+}
+
+function askedOf(c) {
+  const full = askedFull(c);
+  if (!full) return { text: null, more: false };
+  /* The last thing the customer said is the part that differs from call to call; the
+     instruction above it is the same for every call in the workload. */
+  try {
+    const msgs = JSON.parse(c.request_json).messages || [];
+    const last = [...msgs].reverse().find((m) => m.role === 'user') || msgs[msgs.length - 1];
+    const one = String(contentText(last?.content)).replace(/\s+/g, ' ').trim();
+    const cell = one ? clip(one, CELL) : null;
+    return { text: cell, more: !!cell && (one.length > CELL || msgs.length > 1) };
+  } catch { return cellOf(full); }
+}
+
+/* What the model answered, in one line, and whether there is more of it. */
+const answeredOf = (c) => cellOf(answeredFull(c));
+
+/* One call as a row. */
+const callRow = (c) => {
+  const asked = askedOf(c);
+  const answered = answeredOf(c);
+  return ({
   id: c.id,
   at: c.created_at,
   source: c.source,
@@ -175,10 +217,13 @@ const callRow = (c) => ({
   completionTokens: c.completion_tokens,
   cost: round8(c.charged_usd || c.cost_usd || 0),
   latencyMs: c.latency_ms,
-  asked: askedOf(c),
-  answered: answeredOf(c),
+  asked: asked.text,
+  askedMore: asked.more,
+  answered: answered.text,
+  answeredMore: answered.more,
   purged: !!c.content_purged_at,
-});
+  });
+};
 
 const CALLS_PER_PAGE = 25;
 const CALL_COLUMNS = `id, source, requested_model, served_model, status_code, prompt_tokens,
@@ -367,17 +412,33 @@ api.get('/workloads/:id/calls', async (req, res) => {
   return res.json({ total, page, pages, per: CALLS_PER_PAGE, q, rows: rows.map(callRow) });
 });
 
-/* One call, whole: every message that went in and everything that came back. Fetched when
-   somebody asks to see it rather than sent with the page, because a real request can run to
-   thousands of tokens and twenty-five of them would be most of a megabyte nobody reads. */
-api.get('/workloads/:id/calls/:callId', async (req, res) => {
+/* The whole of ONE field of one call, for reading a cell the table had to cut short.
+ *
+ * One field, not the whole call: a request and its answer together can run to tens of
+ * thousands of characters, and somebody who rested the pointer on what was asked wants what
+ * was asked. Fetched when they ask for it rather than sent with the page, because
+ * twenty-five whole calls would be most of a megabyte that nobody reads. */
+const FIELD_MAX = 20000;
+
+api.get('/workloads/:id/calls/:callId/text', async (req, res) => {
+  const which = req.query.field === 'answered' ? 'answered' : 'asked';
   const c = await db.prepare(
     `SELECT ${CALL_COLUMNS} FROM calls
       WHERE id = ? AND workload_id = ? AND workspace_id = ?`)
     .get(req.params.callId, req.params.id, req.workspace.id);
   if (!c) return fail(res, 404, 'No such call.');
-  const parse = (t) => { try { return JSON.parse(t || 'null'); } catch { return null; } };
-  return res.json({ ...callRow(c), request: parse(c.request_json), response: parse(c.response_json) });
+
+  const whole = which === 'answered' ? answeredFull(c) : askedFull(c);
+  const text = whole === null ? null : String(whole).slice(0, FIELD_MAX);
+  return res.json({
+    field: which,
+    text,
+    truncated: whole !== null && String(whole).length > FIELD_MAX,
+    purged: !!c.content_purged_at,
+    at: c.created_at,
+    model: c.served_model || c.requested_model,
+    status: c.status_code,
+  });
 });
 
 api.post('/workloads/:id/mode', async (req, res) => {

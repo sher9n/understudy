@@ -23,7 +23,7 @@ export const api = {
   workload: (id) => send('GET', `/workloads/${id}`),
   workloadCalls: (id, { page = 1, q = '' } = {}) =>
     send('GET', `/workloads/${id}/calls?page=${page}&q=${encodeURIComponent(q)}`),
-  workloadCall: (id, callId) => send('GET', `/workloads/${id}/calls/${callId}`),
+  callText: (id, callId, field) => send('GET', `/workloads/${id}/calls/${callId}/text?field=${field}`),
   setMode: (id, mode) => send('POST', `/workloads/${id}/mode`, { mode }),
   promote: (id, model) => send('POST', `/workloads/${id}/promote`, { model }),
   revert: (id) => send('POST', `/workloads/${id}/revert`),
