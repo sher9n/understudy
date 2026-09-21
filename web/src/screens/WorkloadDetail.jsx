@@ -4,6 +4,7 @@ import { plainClick } from '../nav.jsx';
 import { api, usd, num, dateIST } from '../api.js';
 import { CandidateChart } from '../Charts.jsx';
 import WorkloadCalls from './WorkloadCalls.jsx';
+import Measurement from './Measurement.jsx';
 
 const Tile = ({ k, v, s }) => (
   <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
@@ -19,10 +20,18 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [barOpen, setBarOpen] = useState(false);
+  const [openRun, setOpenRun] = useState(null);
+  const [runData, setRunData] = useState(null);
   const barRef = useRef(null);
 
   const load = () => api.workload(id).then(setW).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, [id]);
+  useEffect(() => {
+    if (!openRun) { setRunData(null); return undefined; }
+    let live = true;
+    api.workloadRun(id, openRun).then((d) => { if (live) setRunData(d); }).catch(() => {});
+    return () => { live = false; };
+  }, [id, openRun]);
 
   useEffect(() => {
     if (!barOpen) return undefined;
@@ -39,7 +48,14 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
     try { await fn(); await load(); onChanged?.(); } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
 
-  const cert = w.certificate;
+  /* Either the newest measurement, or the older one somebody opened from the history. The
+     table below reads from whichever it is, so the page shows one run at a time rather than
+     two sets of numbers that look alike. */
+  const cert = openRun && runData ? {
+    rounds: 1, sampleSize: runData.sample, floor: runData.floor, noise: runData.noise,
+    reference: runData.reference, finishedAt: runData.finishedAt,
+    referenceCostMonth: runData.referenceCostMonth, results: runData.results,
+  } : w.certificate;
   const cand = w.candidate;
   const switched = !!w.promotedAt;
   const hot = !switched && !!cand;
@@ -92,11 +108,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
             <>
               <button className="mini" disabled={busy}
                 onClick={act(() => api.promote(w.id, cand.model))}>Approve switch</button>
-              <button className="minig" disabled={busy} onClick={act(() => api.measure(w.id))}>Keep testing</button>
             </>
-          )}
-          {!switched && !cand && (
-            <button className="minig" disabled={busy} onClick={act(() => api.measure(w.id))}>Measure now</button>
           )}
         </div>
 
@@ -110,6 +122,9 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           ))}
         </div>
       </section>
+
+      <Measurement w={w} busy={busy} onRan={load}
+        openRunId={openRun} onOpenRun={setOpenRun} />
 
       {cert && cert.results.length > 1 && (
         <section className="opt ovis">
@@ -149,8 +164,14 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           <h2>Candidates tested</h2>
           <span className="s">
             {cert
-              ? `${cert.rounds} ${cert.rounds === 1 ? 'round' : 'rounds'}, ${cert.sampleSize} of your own calls replayed on every model.`
+              ? `${cert.sampleSize} of your own calls replayed on every model.`
               : 'Nothing has been tried yet.'}
+            {openRun && runData ? (
+              <>
+                {' '}Showing the measurement from {dateIST(runData.at)} IST.{' '}
+                <button className="plainb" onClick={() => setOpenRun(null)}>Back to the latest</button>
+              </>
+            ) : null}
           </span>
         </div>
         {!cert ? (
@@ -185,8 +206,8 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
               );
             })}
             <div className="barnote">
-              No model is judged on fewer than 100 runs, and a model we switch to is re-tested on fresh calls.
-              If it stops clearing, it goes back.
+              Every model answered the same {num(cert.sampleSize)} calls, and a model we switch to is
+              re-tested on fresh ones. If it stops clearing, it goes back.
               {cert.finishedAt ? ` Last run ${dateIST(cert.finishedAt)} IST.` : ''}
             </div>
           </>

@@ -24,7 +24,7 @@ await requeueStale();
 
 /* What the background does ------------------------------------------------------ */
 
-handle('eval_run', async ({ workloadId }) => await runEvaluation(workloadId));
+handle('eval_run', async ({ workloadId, trigger }) => await runEvaluation(workloadId, { trigger }));
 
 handle('catalog_sync', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
@@ -206,14 +206,31 @@ handle('purge', async () => {
   return { ok: true, calls: a, samples: b };
 });
 
-/** A promoted model is re-tested on fresh calls, and goes back the moment it stops clearing. */
+/* Measuring again, on the workspace's own schedule.
+ *
+ * Two jobs in one, because they are the same act: a promoted model is re-tested so it can be
+ * taken back if it slips, and a workload that has never cleared is tried again in case the
+ * catalogue has moved. A workspace that chose "only when I ask" is skipped entirely: zero
+ * days means never, and it is the one setting that must not be quietly overridden by a
+ * default somewhere. */
 handle('recheck', async () => {
-  const due = await db.prepare(
-    `SELECT * FROM workloads WHERE routed_model IS NOT NULL AND updated_at < ?`)
-    .all(now() - config.EVAL_RECHECK_HOURS * 3600000);
-  for (const w of due) await enqueue('eval_run', { workloadId: w.id }, { unique: true });
-  await enqueue('recheck', {}, { runAfter: now() + config.EVAL_RECHECK_HOURS * 3600000, unique: true });
-  return { ok: true, queued: due.length };
+  const spaces = await db.prepare('SELECT id, measure_every_days FROM workspaces').all();
+  let queued = 0;
+  for (const ws of spaces) {
+    const days = ws.measure_every_days == null ? config.MEASURE_EVERY_DAYS : ws.measure_every_days;
+    if (!days || days <= 0) continue;
+    const due = await db.prepare(
+      `SELECT w.id FROM workloads w
+        WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
+          AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?`)
+      .all(ws.id, now() - days * 86400000);
+    for (const w of due) {
+      await enqueue('eval_run', { workloadId: w.id, trigger: 'automatic' }, { unique: true });
+      queued += 1;
+    }
+  }
+  await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
+  return { ok: true, queued };
 });
 
 export { revert };

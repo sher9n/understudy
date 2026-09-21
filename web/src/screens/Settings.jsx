@@ -8,6 +8,20 @@ const Sw = ({ on, onClick, busy }) => (
 
 const AMOUNTS = [10, 25, 50, 100];
 
+/* How often measuring happens by itself. "Only when I ask" is a real choice rather than an
+   off switch: everything else keeps working, and nothing is spent unasked. */
+const MEASURE_EVERY = [
+  { days: 0, label: 'Only when I ask' },
+  { days: 1, label: 'Every day' },
+  { days: 5, label: 'Every 5 days' },
+  { days: 10, label: 'Every 10 days' },
+  { days: 30, label: 'Every 30 days' },
+  { days: 90, label: 'Every 90 days' },
+];
+
+/* A few round numbers up to the ceiling, rather than every integer to twenty. */
+const modelChoices = (max) => [3, 5, 10, 15, 20].filter((n) => n <= max);
+
 export default function Settings({ data, reload }) {
   /* Adding credit leaves the app, so the button's job is to get to Stripe and nothing else.
      The money and the saved card both come back through the webhook, which is the only
@@ -154,6 +168,42 @@ export default function Settings({ data, reload }) {
 
       <section className="opt">
         <div className="opthead"><h2>Data</h2></div>
+        <div className="kvrow">
+          <span className="kvk">Measure</span>
+          <span className="kvv">
+            <span className="seg">
+              {MEASURE_EVERY.map((c) => (
+                <button key={c.days} disabled={busy}
+                  className={c.days === data.measureEveryDays ? 'segb on' : 'segb'}
+                  onClick={run(() => api.setMeasureEvery(c.days))}>{c.label}</button>
+              ))}
+            </span>
+            <span className="segnote">
+              {data.measureEveryDays
+                ? `Every workload is measured again on this cadence, and you are charged for the calls it replays. `
+                  + 'A model we switched you to is re-tested the same way, and goes back if it stops clearing your bar.'
+                : 'Nothing is measured, and nothing is spent on measuring, until you press Measure now on a workload. '
+                  + 'A model we already switched you to stays where it is.'}
+            </span>
+          </span>
+        </div>
+        <div className="kvrow">
+          <span className="kvk">Models tried each time</span>
+          <span className="kvv">
+            <span className="seg">
+              {modelChoices(data.evalModelsMax).map((n) => (
+                <button key={n} disabled={busy}
+                  className={n === data.evalModels ? 'segb on' : 'segb'}
+                  onClick={run(() => api.setModelsTested(n))}>{n}</button>
+              ))}
+            </span>
+            <span className="segnote">
+              How many cheaper models a measurement tries. More of them is a fuller picture of
+              where quality falls away, and costs proportionally more, since each one answers
+              every sampled call. {data.evalModelsMax} is the most we will run.
+            </span>
+          </span>
+        </div>
         <div className="kvrow">
           <span className="kvk">Keep call content for</span>
           <span className="kvv">

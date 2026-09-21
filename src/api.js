@@ -8,6 +8,7 @@ import send, { signInEmail } from './email.js';
 import { issueKey, listKeys, revokeKey, revealKey } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity } from './traffic.js';
 import { account, ledger, gateRouting, stripe } from './billing.js';
+import { planFor } from './eval/plan.js';
 import { certificate, promote, revert } from './eval/promote.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
@@ -225,7 +226,23 @@ const callRow = (c) => {
   });
 };
 
-const CALLS_PER_PAGE = 25;
+/* One measurement as a row, so the list and the open one never disagree. */
+const runRow = (r) => ({
+  id: r.id,
+  status: r.status,
+  trigger: r.trigger,
+  sample: r.sample_size,
+  models: r.models_planned,
+  floor: r.floor_pct,
+  noise: r.noise_pct,
+  spend: round8(r.spend_usd || 0),
+  error: r.error,
+  at: r.finished_at || r.started_at || r.created_at,
+  startedAt: r.started_at,
+  finishedAt: r.finished_at,
+});
+
+const CALLS_PER_PAGE = 10;
 const CALL_COLUMNS = `id, source, requested_model, served_model, status_code, prompt_tokens,
   completion_tokens, charged_usd, cost_usd, latency_ms, created_at, request_json, response_json,
   content_purged_at`;
@@ -347,6 +364,40 @@ api.get('/workloads/:id', async (req, res) => {
   const t = await db.prepare(
     `SELECT COUNT(*) AS calls, COALESCE(SUM(charged_usd), 0) AS cost FROM calls
       WHERE workload_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(w.id, since);
+  const plan = await planFor(w, { canRoute: canRoute() });
+  const running = await db.prepare(
+    `SELECT id, steps_total, steps_done, phase, spend_usd, started_at, models_planned, sample_size
+       FROM eval_runs WHERE workload_id = ? AND status = 'running'
+      ORDER BY created_at DESC LIMIT 1`).get(w.id);
+  const last = await db.prepare(
+    `SELECT id, status, trigger, sample_size, models_planned, floor_pct, noise_pct, spend_usd,
+            error, started_at, finished_at, created_at
+       FROM eval_runs WHERE workload_id = ? AND status != 'running'
+      ORDER BY created_at DESC LIMIT 1`).get(w.id);
+  const runCount = (await db.prepare('SELECT COUNT(*) AS n FROM eval_runs WHERE workload_id = ?').get(w.id)).n;
+  const measure = {
+    canRun: plan.canRun && !running,
+    reason: running ? 'A measurement is running now.' : plan.reason,
+    pool: plan.pool,
+    sample: plan.sample,
+    models: plan.candidates.length,
+    modelsWanted: plan.models,
+    estimateUsd: plan.estimateUsd,
+    picked: plan.candidates.map((c) => c.model_id),
+    runs: runCount,
+    last: last ? runRow(last) : null,
+    running: running ? {
+      id: running.id,
+      total: running.steps_total,
+      done: running.steps_done,
+      phase: running.phase,
+      spend: round8(running.spend_usd || 0),
+      startedAt: running.started_at,
+      models: running.models_planned,
+      sample: running.sample_size,
+    } : null,
+  };
+
   const cert = await certificate(w.id);
   const best = cert?.results.find((r) => r.verdict === 'cleared' && r.model_id !== w.routed_model);
   const refCost = cert?.referenceCostMonth ?? null;
@@ -357,6 +408,9 @@ api.get('/workloads/:id', async (req, res) => {
     optimizeMode: w.optimize_mode, floor: w.floor_pct,
     calls: t.calls, cost: round8(t.cost),
     promotedAt: w.promoted_at,
+    /* What a measurement would do, and whether it can. The button reads this rather than
+       finding out the hard way after somebody presses it. */
+    measure,
     ...statusLabel(w),
     certificate: cert && {
       rounds: cert.rounds, sampleSize: cert.run.sample_size, floor: cert.run.floor_pct,
@@ -467,13 +521,66 @@ api.post('/workloads/:id/revert', async (req, res) => {
   return res.json(await revert(w, { actorUserId: req.user.id }));
 });
 
+/* Start a measurement, or say why it cannot start.
+ *
+ * It used to mark the workload "Measuring" and queue a job that quietly declined a moment
+ * later, so a workload with too few calls sat saying "Measuring" for ever and nobody was
+ * ever told why. The same plan the button was shown decides here. */
 api.post('/workloads/:id/measure', async (req, res) => {
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
-  await enqueue('eval_run', { workloadId: w.id }, { unique: true });
+
+  const running = await db.prepare(
+    `SELECT id FROM eval_runs WHERE workload_id = ? AND status = 'running'`).get(w.id);
+  if (running) return res.json({ ok: true, already: true });
+
+  const plan = await planFor(w, { canRoute: canRoute() });
+  if (!plan.canRun) return fail(res, 400, plan.reason);
+
+  await enqueue('eval_run', { workloadId: w.id, trigger: 'manual' }, { unique: true });
   await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), w.id);
-  return res.json({ ok: true });
+  return res.json({ ok: true, sample: plan.sample, models: plan.candidates.length, estimateUsd: plan.estimateUsd });
+});
+
+/* Every measurement this workload has had, newest first. The results of each one are already
+   kept; nothing ever showed them, so a switch made in October could not be looked up in
+   November. */
+api.get('/workloads/:id/runs', async (req, res) => {
+  const w = await db.prepare('SELECT id FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  const runs = await db.prepare(
+    `SELECT id, status, trigger, sample_size, models_planned, floor_pct, noise_pct, spend_usd,
+            error, started_at, finished_at, created_at
+       FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 30`).all(w.id);
+  return res.json({ runs: runs.map(runRow) });
+});
+
+/* One measurement, with what every model scored in it. */
+api.get('/workloads/:id/runs/:runId', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ? AND workload_id = ?')
+    .get(req.params.runId, w.id);
+  if (!run) return fail(res, 404, 'No such measurement.');
+  const rows = await db.prepare(
+    `SELECT model_id, runs, gap_pct, cost_month_usd, verdict, failures,
+            gate_structure, gate_accuracy, gate_coverage, gate_complete
+       FROM eval_results WHERE run_id = ? ORDER BY cost_month_usd NULLS LAST`).all(run.id);
+  const ref = rows.find((r) => r.verdict === 'reference');
+  return res.json({
+    ...runRow(run),
+    reference: run.reference_model,
+    referenceCostMonth: ref?.cost_month_usd ?? null,
+    results: rows.filter((r) => r.verdict !== 'reference').map((r) => ({
+      model: r.model_id, runs: r.runs, gap: r.gap_pct, costMonth: r.cost_month_usd,
+      verdict: r.verdict, failures: r.failures,
+      gates: { structure: r.gate_structure, accuracy: r.gate_accuracy,
+               coverage: r.gate_coverage, complete: r.gate_complete },
+    })),
+  });
 });
 
 /* Models ------------------------------------------------------------------------ */
@@ -543,6 +650,9 @@ api.get('/settings', async (req, res) => {
       ? { brand: acct.card_brand, last4: acct.card_last4 } : null,
     cardNote: acct.topup_failed_note,
     retentionDays: req.workspace.retention_days,
+    evalModels: req.workspace.eval_models ?? config.EVAL_MODELS_DEFAULT,
+    evalModelsMax: config.EVAL_MODELS_MAX,
+    measureEveryDays: req.workspace.measure_every_days ?? config.MEASURE_EVERY_DAYS,
     retentionChoices: RETENTION_CHOICES,
     zdrOnly: config.ZDR_ONLY,
     canBill: canBill(),
@@ -575,6 +685,35 @@ api.post('/settings/profile', async (req, res) => {
   }
   await db.prepare('UPDATE users SET name = ?, email = ? WHERE id = ?').run(name, email, req.user.id);
   return res.json({ ok: true, name, email });
+});
+
+/* How many models a measurement tries. More is a better picture of where quality falls off,
+   and costs proportionally more, which is why there is a ceiling everyone shares. */
+api.post('/settings/models-tested', async (req, res) => {
+  const n = Math.round(Number(req.body?.count));
+  if (!Number.isFinite(n) || n < 1 || n > config.EVAL_MODELS_MAX) {
+    return fail(res, 400, `Pick between 1 and ${config.EVAL_MODELS_MAX} models.`);
+  }
+  await db.prepare('UPDATE workspaces SET eval_models = ? WHERE id = ?').run(n, req.workspace.id);
+  return res.json({ ok: true, count: n });
+});
+
+/* How often measuring happens by itself. Zero is "only when I ask", and it is a real choice
+   rather than an off switch: everything else still works, nothing is spent unasked. */
+const MEASURE_CHOICES = [0, 1, 5, 10, 30, 90];
+
+api.post('/settings/measure-every', async (req, res) => {
+  const days = Math.round(Number(req.body?.days));
+  if (!MEASURE_CHOICES.includes(days)) return fail(res, 400, 'That is not one of the choices.');
+  await db.prepare('UPDATE workspaces SET measure_every_days = ? WHERE id = ?').run(days, req.workspace.id);
+  await addActivity(req.workspace.id, {
+    kind: 'connect',
+    title: days ? `Measuring every ${days} ${days === 1 ? 'day' : 'days'}` : 'Measuring only when you ask',
+    detail: days
+      ? 'Each workload is measured again on that cadence, and you are charged for the calls it replays.'
+      : 'Nothing is measured, and nothing is spent, until you press Measure now on a workload.',
+  });
+  return res.json({ ok: true, days });
 });
 
 api.post('/settings/retention', async (req, res) => {

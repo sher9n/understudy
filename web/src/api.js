@@ -21,6 +21,10 @@ export const api = {
   overview: (days) => send('GET', days ? `/overview?days=${days}` : '/overview'),
   workloads: () => send('GET', '/workloads'),
   workload: (id) => send('GET', `/workloads/${id}`),
+  workloadRuns: (id) => send('GET', `/workloads/${id}/runs`),
+  workloadRun: (id, runId) => send('GET', `/workloads/${id}/runs/${runId}`),
+  setModelsTested: (count) => send('POST', '/settings/models-tested', { count }),
+  setMeasureEvery: (days) => send('POST', '/settings/measure-every', { days }),
   workloadCalls: (id, { page = 1, q = '' } = {}) =>
     send('GET', `/workloads/${id}/calls?page=${page}&q=${encodeURIComponent(q)}`),
   callText: (id, callId, field) => send('GET', `/workloads/${id}/calls/${callId}/text?field=${field}`),

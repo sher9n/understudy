@@ -85,9 +85,22 @@ export const config = {
   WORKLOAD_NAME_MODEL: str('WORKLOAD_NAME_MODEL', 'openai/gpt-4.1-mini'),
 
   // measurement
-  EVAL_SAMPLE_SIZE: num('EVAL_SAMPLE_SIZE', 120),
+  /* How many of a workload's own calls a run replays.
+     Never fewer than ten, because a handful of calls cannot tell a real difference from
+     luck. Never more than a hundred, because every one is paid for. And never more than half
+     of what the workload has, so a measurement is always made on a sample and there is
+     always untouched traffic left to check a promoted model against later. */
+  EVAL_SAMPLE_MIN: num('EVAL_SAMPLE_MIN', 10),
+  EVAL_SAMPLE_MAX: num('EVAL_SAMPLE_MAX', 100),
+  EVAL_SAMPLE_SHARE: num('EVAL_SAMPLE_SHARE', 0.5),
+  /* So the smallest measurable workload is twice the smallest sample. */
+  EVAL_MIN_CALLS: num('EVAL_MIN_CALLS', 20),
+  /* How many models a run tries, and the most anybody may ask for. Set per workspace in
+     Settings; this is the default and the ceiling. */
+  EVAL_MODELS_DEFAULT: num('EVAL_MODELS_DEFAULT', 10),
+  EVAL_MODELS_MAX: num('EVAL_MODELS_MAX', 20),
   EVAL_MIN_RUNS: num('EVAL_MIN_RUNS', 100),
-  EVAL_FIRST_RUN_MIN_CALLS: num('EVAL_FIRST_RUN_MIN_CALLS', 120),
+  EVAL_FIRST_RUN_MIN_CALLS: num('EVAL_FIRST_RUN_MIN_CALLS', 40),
   EVAL_FLOOR_MULTIPLE: num('EVAL_FLOOR_MULTIPLE', 1.25),
   EVAL_FLOOR_MIN_PCT: num('EVAL_FLOOR_MIN_PCT', 3),
   /* Above this, the customer's own model is not answering consistently enough for a bar to
@@ -97,6 +110,9 @@ export const config = {
   EVAL_MAX_USD_PER_RUN: num('EVAL_MAX_USD_PER_RUN', 2),
   EVAL_JUDGE_MODEL: str('EVAL_JUDGE_MODEL', 'openai/gpt-5.4-mini'),
   EVAL_RECHECK_HOURS: num('EVAL_RECHECK_HOURS', 24),
+  /* How often a workspace re-measures by itself, in days. Zero means never: measuring is
+     then something a person asks for. Set in Settings; this is the default for a new one. */
+  MEASURE_EVERY_DAYS: num('MEASURE_EVERY_DAYS', 7),
 
   /* Email. Without a key nothing is sent, and the code is written to the log instead so
      the flow can still be walked locally. The FROM address has to be on a domain the

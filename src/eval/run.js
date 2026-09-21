@@ -3,22 +3,14 @@ import config, { canRoute } from '../config.js';
 import { chat, priceCall, UpstreamError } from '../openrouter.js';
 import { addActivity, recordCall } from '../traffic.js';
 import { gateEval, chargeEval } from '../billing.js';
+import { planFor } from './plan.js';
+import { judgePair, judgementsFor } from './judge.js';
 import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, barIsMeaningful } from './compare.js';
 import { promote } from './promote.js';
 
 const DAY = 86400000;
 
 /** Models this workspace is willing to try, cheapest first, never the reference itself. */
-export async function candidatesFor(workspaceId, referenceModel) {
-  return await (await db.prepare(
-    `SELECT c.model_id, c.price_in, c.price_out
-       FROM models_catalog c
-       LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
-      WHERE COALESCE(wm.enabled, 1) = 1 AND c.model_id != ?
-        AND c.price_in > 0 AND c.price_out > 0
-      ORDER BY (c.price_in + c.price_out)`).all(workspaceId, referenceModel)).slice(0, 6);
-}
-
 /** What a month of this workload would cost on a given model, from its own observed tokens. */
 async function monthlyOn(workloadId, modelId) {
   const t = await db.prepare(
@@ -33,7 +25,7 @@ async function monthlyOn(workloadId, modelId) {
   return round8((per / days) * 30);
 }
 
-export async function runEvaluation(workloadId) {
+export async function runEvaluation(workloadId, { trigger = 'manual' } = {}) {
   const workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
   if (!workload) return { ok: false, reason: 'gone' };
   if (!canRoute()) return { snoozeMs: 15 * 60000, note: 'no OPENROUTER_API_KEY' };
@@ -41,20 +33,24 @@ export async function runEvaluation(workloadId) {
   const reference = workload.reference_model;
   if (!reference) return { ok: false, reason: 'no reference model' };
 
+  /* The same plan the button showed. Working it out twice, in two places, is how a screen
+     comes to promise something the run then refuses. */
+  const plan = await planFor(workload, { canRoute: canRoute() });
+  if (!plan.canRun) {
+    await db.prepare(`UPDATE workloads SET status = CASE WHEN status = 'measuring' THEN 'new' ELSE status END,
+                updated_at = ? WHERE id = ?`).run(now(), workloadId);
+    return { ok: false, reason: plan.reason };
+  }
+
   const pool = await db.prepare(
     `SELECT id, request_json, response_json FROM calls
       WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
+        AND source NOT IN ('replay', 'test')
       ORDER BY created_at DESC LIMIT 600`).all(workloadId, now() - 30 * DAY);
-  if (pool.length < config.EVAL_MIN_RUNS) {
-    return { ok: false, reason: `only ${pool.length} calls, ${config.EVAL_MIN_RUNS} needed` };
-  }
 
-  const samples = sampleCalls(pool, config.EVAL_SAMPLE_SIZE);
-  const candidates = await candidatesFor(workload.workspace_id, reference);
-  const estimate = await estimateCost(workloadId, reference, candidates);
-  if (estimate > config.EVAL_MAX_USD_PER_RUN) {
-    return { ok: false, reason: `estimated $${estimate.toFixed(2)} over the $${config.EVAL_MAX_USD_PER_RUN} cap` };
-  }
+  const samples = sampleCalls(pool, plan.sample);
+  const candidates = plan.candidates;
+  const estimate = plan.estimateUsd;
   const gate = await gateEval(workload.workspace_id, { estimatedUsd: estimate });
   if (!gate.ok) {
     await addActivity(workload.workspace_id, {
@@ -63,15 +59,33 @@ export async function runEvaluation(workloadId) {
     return { snoozeMs: 30 * 60000, note: gate.code };
   }
 
+  /* Every replay this run will make, counted up front, so the screen can say how far along
+     it is rather than spinning. Two passes of the sample to set the bar, then one pass per
+     model being tried. */
+  const judgements = judgementsFor(workload.shape_kind, samples.length, candidates.length);
+  const stepsTotal = samples.length * 2 + samples.length * candidates.length + judgements;
   const run = {
     id: id('run'), workspace_id: workload.workspace_id, workload_id: workloadId,
     status: 'running', shape_kind: workload.shape_kind, reference_model: reference,
     sample_size: samples.length, created_at: now(), started_at: now(),
+    steps_total: stepsTotal, steps_done: 0, phase: `Setting your bar on ${reference}`,
+    trigger: trigger === 'automatic' ? 'automatic' : 'manual',
+    models_planned: candidates.length,
   };
   await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
-              sample_size, created_at, started_at)
+              sample_size, created_at, started_at, steps_total, steps_done, phase, trigger, models_planned)
               VALUES (@id, @workspace_id, @workload_id, @status, @shape_kind, @reference_model,
-              @sample_size, @created_at, @started_at)`).run(run);
+              @sample_size, @created_at, @started_at, @steps_total, @steps_done, @phase, @trigger,
+              @models_planned)`).run(run);
+
+  /* Written as the run goes, not at the end: a screen watching this is the only way somebody
+     knows the thing they paid for is happening. */
+  let done = 0;
+  const step = async (by, phase) => {
+    done += by;
+    await db.prepare('UPDATE eval_runs SET steps_done = ?, phase = ? WHERE id = ?')
+      .run(done, phase, run.id);
+  };
 
   let spend = 0;
   let stoppedShort = null;
@@ -101,9 +115,17 @@ export async function runEvaluation(workloadId) {
       .run(id('smp'), run.id, s.id, s.quartile ?? 0,
            a.json ? JSON.stringify(a.json) : null, b.json ? JSON.stringify(b.json) : null);
     refPairs.push({ body, a: extract(a.json, shape), b: extract(b.json, shape) });
+    await step(2, `Setting your bar on ${reference}, ${refPairs.length} of ${samples.length} calls`);
   }
 
-  const noise = mean(refPairs.map((p) => scoreOf(p.a, p.b, shape)));
+  const noiseScores = [];
+  for (const p of refPairs) {
+    noiseScores.push(await scoreOf(p.a, p.b, shape, askOf(p.body), (c) => { spend += c; }));
+    if (judgements) {
+      await step(1, `Comparing answers on ${reference}, ${noiseScores.length} of ${refPairs.length}`);
+    }
+  }
+  const noise = mean(noiseScores);
   const floor = floorFrom(noise * 100, {
     multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT,
   });
@@ -117,7 +139,7 @@ export async function runEvaluation(workloadId) {
      which is the opposite of what this product promises. Stop here and say so. */
   if (!barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
     await settle(`Measuring ${workload.slug}, setting the bar`);
-    await db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ? WHERE id = ?`)
+    await db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ?, phase = NULL WHERE id = ?`)
       .run(now(), `reference disagreed with itself on ${(noise * 100).toFixed(1)}% of calls`, run.id);
     await db.prepare(`UPDATE workloads SET status = 'no_match', status_note = ?, floor_pct = NULL,
                 updated_at = ? WHERE id = ?`)
@@ -133,7 +155,7 @@ export async function runEvaluation(workloadId) {
   }
 
   if (!await settle(`Measuring ${workload.slug}, setting the bar`)) {
-    await db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ? WHERE id = ?`)
+    await db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ?, phase = NULL WHERE id = ?`)
       .run(now(), 'balance ran out after the bar was set', run.id);
     await addActivity(workload.workspace_id, {
       kind: 'floor', title: `Measuring ${workload.slug} stopped early`,
@@ -145,7 +167,7 @@ export async function runEvaluation(workloadId) {
 
   // then each candidate once, against both reference answers
   const results = [];
-  for (const cand of candidates) {
+  for (const [ci, cand] of candidates.entries()) {
     let runs = 0;
     let failures = 0;
     const pairs = [];
@@ -155,8 +177,18 @@ export async function runEvaluation(workloadId) {
       runs += 1;
       const got = extract(c.json, shape);
       if (!got.ok) failures += 1;
-      const score = Math.min(scoreOf(got, p.a, shape), scoreOf(got, p.b, shape));
+      const ask = askOf(p.body);
+      const add = (x) => { spend += x; };
+      const score = Math.min(
+        await scoreOf(got, p.a, shape, ask, add),
+        await scoreOf(got, p.b, shape, ask, add),
+      );
       pairs.push({ cand: got, ref: p.a.ok ? p.a : p.b, score });
+      /* Counted here rather than every five calls, so the bar moves while a slow model is
+         answering rather than jumping in blocks. One replay, plus its two comparisons when
+         free text has to be judged. */
+      await step(1 + (judgements ? 2 : 0),
+        `Trying ${cand.model_id}, model ${ci + 1} of ${candidates.length}, ${runs} of ${refPairs.length} calls`);
     }
     const gap = mean(pairs.map((x) => x.score)) * 100;
     const g = gates(pairs, shape);
@@ -185,7 +217,7 @@ export async function runEvaluation(workloadId) {
   }
 
   await settle(`Measuring ${workload.slug}`);
-  await db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ? WHERE id = ?`)
+  await db.prepare(`UPDATE eval_runs SET status = 'done', finished_at = ?, error = ?, phase = NULL WHERE id = ?`)
     .run(now(), stoppedShort ? `balance ran out after ${stoppedShort}` : null, run.id);
 
   // the cheapest model that cleared, and what we do about it
@@ -236,11 +268,29 @@ export async function runEvaluation(workloadId) {
 
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 
-/** free text with no judge available falls back to "different", which is the safe direction. */
-const scoreOf = (a, b, shape) => {
+/* How far apart two answers are, 0 to 1.
+ *
+ * Structured answers are settled by comparing fields and cost nothing. Free text comes back
+ * as null, meaning "identical strings would have been easy, this needs an opinion", and a
+ * judge is asked. Without a judge it counts as different, which is the safe direction: a
+ * model is never promoted because nobody could tell whether it was any good. */
+async function scoreOf(a, b, shape, request, charge) {
   const d = disagreement(a, b, shape);
-  return d === null ? 1 : d;
-};
+  if (d !== null) return d;
+  const { score, cost } = await judgePair(request, a.value ?? '', b.value ?? '');
+  if (cost && charge) charge(cost);
+  return score;
+}
+
+/* What the call asked, for the judge to weigh both answers against. */
+function askOf(body) {
+  const msgs = Array.isArray(body?.messages) ? body.messages : [];
+  return msgs.map((m) => {
+    const c = typeof m.content === 'string' ? m.content
+      : (Array.isArray(m.content) ? m.content.map((x) => x?.text || '').join(' ') : '');
+    return `${m.role}: ${c}`;
+  }).join('\n').slice(0, 4000);
+}
 
 async function replay(body, model, workload, runId) {
   try {
@@ -263,13 +313,3 @@ async function replay(body, model, workload, runId) {
   }
 }
 
-async function estimateCost(workloadId, reference, candidates) {
-  const t = await db.prepare(
-    `SELECT COALESCE(AVG(prompt_tokens), 0) AS pin, COALESCE(AVG(completion_tokens), 0) AS pout
-       FROM calls WHERE workload_id = ?`).get(workloadId);
-  const n = config.EVAL_SAMPLE_SIZE;
-  const refPer = await priceCall(reference, t.pin, t.pout) ?? 0;
-  let total = refPer * n * 2;
-  for (const c of candidates) total += (await priceCall(c.model_id, t.pin, t.pout) ?? 0) * n;
-  return round8(total);
-}
