@@ -398,6 +398,22 @@ api.get('/workloads/:id', async (req, res) => {
     } : null,
   };
 
+  /* A workload only says "Measuring" while something is measuring it. The status is stored,
+     so a run that ended without clearing it, or a restart in the middle of one, would leave
+     the word on the screen for ever. Correcting it here rather than only in a migration
+     means it can never get stuck again, whatever ends a run. */
+  if (w.status === 'measuring' && !running) {
+    const queued = await db.prepare(
+      `SELECT 1 FROM jobs WHERE kind = 'eval_run' AND status IN ('queued', 'claimed')
+          AND payload LIKE ?`).get(`%${w.id}%`);
+    if (!queued) {
+      const back = w.floor_pct == null ? 'new' : 'certified';
+      await db.prepare('UPDATE workloads SET status = ?, updated_at = ? WHERE id = ?')
+        .run(back, now(), w.id);
+      w.status = back;
+    }
+  }
+
   const cert = await certificate(w.id);
   const best = cert?.results.find((r) => r.verdict === 'cleared' && r.model_id !== w.routed_model);
   const refCost = cert?.referenceCostMonth ?? null;
