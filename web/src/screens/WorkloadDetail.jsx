@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { href } from '../router.js';
 import { plainClick } from '../nav.jsx';
-import { api, usd, num, dateIST, timeIST } from '../api.js';
+import { api, usd, num, dateIST } from '../api.js';
 import { CandidateChart } from '../Charts.jsx';
+import WorkloadCalls from './WorkloadCalls.jsx';
 
 const Tile = ({ k, v, s }) => (
   <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
@@ -39,9 +40,6 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
   };
 
   const cert = w.certificate;
-  const calls = w.calls_recent || [];
-  const allCopies = calls.length > 0 && calls.every((c) => c.source === 'trace');
-  const allRouted = calls.length > 0 && calls.every((c) => c.source !== 'trace');
   const cand = w.candidate;
   const switched = !!w.promotedAt;
   const hot = !switched && !!cand;
@@ -195,54 +193,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         )}
       </section>
 
-      {/* The calls themselves. A workload is a claim that these requests are all the same
-          job, and the only way to check a claim like that is to read some of them. */}
-      <section className="opt">
-        <div className="opthead">
-          <h2>The calls in this workload</h2>
-          <span className="s">
-            {calls.length
-              ? `The ${calls.length} most recent of ${num(w.calls)}. Times are IST. `
-                + (allCopies
-                  ? 'These are copies, so the cost is what your own provider charged.'
-                  : allRouted
-                    ? 'Cost is what you paid us.'
-                    : 'Cost is what you paid us, or what your provider charged on a copy.')
-              : 'None in the last thirty days.'}
-          </span>
-        </div>
-        {!calls.length ? (
-          <div className="optempty">Calls appear here as they arrive.</div>
-        ) : (
-          <>
-            <div className="clhrow">
-              <span>When</span>
-              <span>What it asked</span>
-              <span>Model</span>
-              <span style={{ textAlign: 'right' }}>Tokens</span>
-              <span style={{ textAlign: 'right' }}>Took</span>
-              <span style={{ textAlign: 'right' }}>Cost</span>
-            </div>
-            {calls.map((c) => (
-              <div className="clrow" key={c.id}>
-                <div className="cwhen">{timeIST(c.at)}</div>
-                <div className="casked">
-                  {c.asked || <span className="cgone">cleared after the retention window</span>}
-                  {/* Only worth marking when the workload has both. A tag on every row of
-                      a workload that is entirely copies is a word repeated twenty-five
-                      times; the header says it once instead. */}
-                  {c.source === 'trace' && !allCopies && <span className="ctag">copy</span>}
-                  {c.status && c.status >= 400 && <span className="ctag bad">did not get through</span>}
-                </div>
-                <div className="cmodel m">{short(c.model)}</div>
-                <div className="num m">{num(c.promptTokens)} / {num(c.completionTokens)}</div>
-                <div className="num m">{c.latencyMs === null ? '—' : `${num(c.latencyMs)} ms`}</div>
-                <div className="num m">{c.cost ? usd(c.cost) : '—'}</div>
-              </div>
-            ))}
-          </>
-        )}
-      </section>
+      <WorkloadCalls workloadId={w.id} />
     </>
   );
 }

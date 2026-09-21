@@ -21,6 +21,9 @@ export const api = {
   overview: (days) => send('GET', days ? `/overview?days=${days}` : '/overview'),
   workloads: () => send('GET', '/workloads'),
   workload: (id) => send('GET', `/workloads/${id}`),
+  workloadCalls: (id, { page = 1, q = '' } = {}) =>
+    send('GET', `/workloads/${id}/calls?page=${page}&q=${encodeURIComponent(q)}`),
+  workloadCall: (id, callId) => send('GET', `/workloads/${id}/calls/${callId}`),
   setMode: (id, mode) => send('POST', `/workloads/${id}/mode`, { mode }),
   promote: (id, model) => send('POST', `/workloads/${id}/promote`, { model }),
   revert: (id) => send('POST', `/workloads/${id}/revert`),

@@ -149,27 +149,50 @@ v1.post('/chat/completions', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     let usage = null;
+    /* The answer, put back together from the pieces it streamed in. It used to be thrown
+       away, so a streamed call could be counted and charged but never read: the workload
+       page could show what was asked and nothing of what came back. */
+    let answer = '';
+    let finish_reason = null;
+    let model = null;
     const reader = upstream.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
+    const read = (line) => {
+      const t = line.trim();
+      if (!t.startsWith('data:')) return;
+      const payload = t.slice(5).trim();
+      if (payload === '[DONE]') return;
+      try {
+        const j = JSON.parse(payload);
+        // the last chunk carries usage, which is what the customer is charged on
+        if (j.usage) usage = j.usage;
+        if (j.model) model = j.model;
+        const ch = j.choices?.[0];
+        if (typeof ch?.delta?.content === 'string') answer += ch.delta.content;
+        if (ch?.finish_reason) finish_reason = ch.finish_reason;
+      } catch { /* not a JSON line, which SSE comments and keep-alives are allowed to be */ }
+    };
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       const text = dec.decode(value, { stream: true });
       buf += text;
-      // the last chunk carries usage, which is what the customer is charged on
-      for (const line of buf.split('\n')) {
-        const t = line.trim();
-        if (!t.startsWith('data:')) continue;
-        const payload = t.slice(5).trim();
-        if (payload === '[DONE]') continue;
-        try { const j = JSON.parse(payload); if (j.usage) usage = j.usage; } catch { /* partial */ }
-      }
-      buf = buf.slice(buf.lastIndexOf('\n') + 1);
+      /* Only lines that have ENDED are read. The last piece of a chunk may be half a line,
+         and a half line that happens to be valid JSON on its own would otherwise be read
+         now and again when it completes, doubling that part of the answer. */
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) read(line);
       res.write(text);
     }
+    if (buf) read(buf);
     res.end();
-    await finish({ wsId, workload, requested, served, usage, started, body, response: null, status: 200 });
+    const response = {
+      model, streamed: true, usage,
+      choices: [{ index: 0, message: { role: 'assistant', content: answer }, finish_reason }],
+    };
+    await finish({ wsId, workload, requested, served, usage, started, body, response, status: 200 });
     return undefined;
   } catch (err) {
     const status = err instanceof UpstreamError ? err.status : 502;

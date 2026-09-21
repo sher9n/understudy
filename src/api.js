@@ -143,9 +143,47 @@ function askedOf(c) {
       ? last.content
       : (Array.isArray(last?.content) ? last.content.map((p) => p?.text || '').join(' ') : '');
     const one = String(text).replace(/\s+/g, ' ').trim();
-    return one ? clip(one, 120) : null;
+    return one ? clip(one, 160) : null;
   } catch { return null; }
 }
+
+/* What the model answered, in one line: the text, or the tools it chose to call. */
+function answeredOf(c) {
+  if (c.content_purged_at) return null;
+  try {
+    const res = JSON.parse(c.response_json || 'null');
+    const msg = res?.choices?.[0]?.message;
+    if (!msg) return null;
+    const text = typeof msg.content === 'string'
+      ? msg.content
+      : (Array.isArray(msg.content) ? msg.content.map((p) => p?.text || '').join(' ') : '');
+    const one = String(text).replace(/\s+/g, ' ').trim();
+    if (one) return clip(one, 160);
+    const tools = (msg.tool_calls || []).map((t) => t?.function?.name).filter(Boolean);
+    return tools.length ? `called ${tools.join(', ')}` : null;
+  } catch { return null; }
+}
+
+/* One call as a row. Shared by the list and the single call so the two never disagree. */
+const callRow = (c) => ({
+  id: c.id,
+  at: c.created_at,
+  source: c.source,
+  model: c.served_model || c.requested_model,
+  status: c.status_code,
+  promptTokens: c.prompt_tokens,
+  completionTokens: c.completion_tokens,
+  cost: round8(c.charged_usd || c.cost_usd || 0),
+  latencyMs: c.latency_ms,
+  asked: askedOf(c),
+  answered: answeredOf(c),
+  purged: !!c.content_purged_at,
+});
+
+const CALLS_PER_PAGE = 25;
+const CALL_COLUMNS = `id, source, requested_model, served_model, status_code, prompt_tokens,
+  completion_tokens, charged_usd, cost_usd, latency_ms, created_at, request_json, response_json,
+  content_purged_at`;
 
 const statusLabel = (w) => {
   if (w.routed_model) return { label: 'Optimized', tone: 'ok' };
@@ -264,17 +302,6 @@ api.get('/workloads/:id', async (req, res) => {
   const t = await db.prepare(
     `SELECT COUNT(*) AS calls, COALESCE(SUM(charged_usd), 0) AS cost FROM calls
       WHERE workload_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(w.id, since);
-  /* The calls themselves. A workload is a claim about a group of requests, and until now the
-     only way to check that claim was to believe it: the page said "420 calls" and showed
-     none of them. The first line of each request is carried along because that, not an id,
-     is how somebody recognises which of their own calls they are looking at. */
-  const recent = await db.prepare(
-    `SELECT id, source, requested_model, served_model, status_code, prompt_tokens,
-            completion_tokens, charged_usd, cost_usd, latency_ms, created_at, request_json,
-            content_purged_at
-       FROM calls WHERE workload_id = ? AND source NOT IN ('replay', 'test')
-      ORDER BY created_at DESC LIMIT 25`).all(w.id);
-
   const cert = await certificate(w.id);
   const best = cert?.results.find((r) => r.verdict === 'cleared' && r.model_id !== w.routed_model);
   const refCost = cert?.referenceCostMonth ?? null;
@@ -297,23 +324,60 @@ api.get('/workloads/:id', async (req, res) => {
         gates: { structure: r.gate_structure, accuracy: r.gate_accuracy, coverage: r.gate_coverage, complete: r.gate_complete },
       })),
     },
-    calls_recent: recent.map((c) => ({
-      id: c.id,
-      at: c.created_at,
-      source: c.source,
-      model: c.served_model || c.requested_model,
-      status: c.status_code,
-      promptTokens: c.prompt_tokens,
-      completionTokens: c.completion_tokens,
-      cost: round8(c.charged_usd || c.cost_usd || 0),
-      latencyMs: c.latency_ms,
-      asked: askedOf(c),
-    })),
     candidate: best && {
       model: best.model_id, gap: best.gap_pct, costMonth: best.cost_month_usd,
       accuracy: round8(100 - best.gap_pct),
     },
   });
+});
+
+/* The calls in a workload, a page at a time, optionally narrowed by a search.
+ *
+ * Paged on the server because a workload can hold tens of thousands of calls and the only
+ * useful number to send the browser is the twenty-five it is about to draw. The search looks
+ * at what people actually wrote and what came back, and at the model, and NOT at the JSON
+ * around them: matching the raw request would make "content" or "role" match every call
+ * there is, since those words are in the structure of every one. */
+api.get('/workloads/:id/calls', async (req, res) => {
+  const w = await db.prepare('SELECT id FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+
+  const q = String(req.query.q || '').trim().slice(0, 200);
+  // a percent or an underscore typed into the box means itself, not a wildcard
+  const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
+  const where = `workload_id = ? AND source NOT IN ('replay', 'test')`
+    + (q ? ` AND (
+        served_model ILIKE ? OR requested_model ILIKE ?
+        OR EXISTS (SELECT 1 FROM jsonb_array_elements(
+             CASE WHEN jsonb_typeof(request_json::jsonb -> 'messages') = 'array'
+                  THEN request_json::jsonb -> 'messages' ELSE '[]'::jsonb END) m
+           WHERE m ->> 'content' ILIKE ?)
+        OR (response_json::jsonb #>> '{choices,0,message,content}') ILIKE ?)` : '');
+  const args = q ? [w.id, like, like, like, like] : [w.id];
+
+  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE ${where}`).get(...args)).n;
+  const pages = Math.max(1, Math.ceil(total / CALLS_PER_PAGE));
+  const page = Math.min(pages, Math.max(1, Number.parseInt(req.query.page, 10) || 1));
+  const rows = await db.prepare(
+    `SELECT ${CALL_COLUMNS} FROM calls WHERE ${where}
+      ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+    .all(...args, CALLS_PER_PAGE, (page - 1) * CALLS_PER_PAGE);
+
+  return res.json({ total, page, pages, per: CALLS_PER_PAGE, q, rows: rows.map(callRow) });
+});
+
+/* One call, whole: every message that went in and everything that came back. Fetched when
+   somebody asks to see it rather than sent with the page, because a real request can run to
+   thousands of tokens and twenty-five of them would be most of a megabyte nobody reads. */
+api.get('/workloads/:id/calls/:callId', async (req, res) => {
+  const c = await db.prepare(
+    `SELECT ${CALL_COLUMNS} FROM calls
+      WHERE id = ? AND workload_id = ? AND workspace_id = ?`)
+    .get(req.params.callId, req.params.id, req.workspace.id);
+  if (!c) return fail(res, 404, 'No such call.');
+  const parse = (t) => { try { return JSON.parse(t || 'null'); } catch { return null; } };
+  return res.json({ ...callRow(c), request: parse(c.request_json), response: parse(c.response_json) });
 });
 
 api.post('/workloads/:id/mode', async (req, res) => {
