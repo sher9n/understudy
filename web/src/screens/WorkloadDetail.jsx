@@ -6,6 +6,9 @@ import { CandidateChart, chartPoints } from '../Charts.jsx';
 import WorkloadCalls from './WorkloadCalls.jsx';
 import Measurement from './Measurement.jsx';
 import SwitchedCard from './SwitchedCard.jsx';
+import Learning from './Learning.jsx';
+import Outcomes from './Outcomes.jsx';
+import { ServingFlow, inHundred } from '../LearnCharts.jsx';
 
 const Tile = ({ k, v, s }) => (
   <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
@@ -70,7 +73,10 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
   const [runData, setRunData] = useState(null);
   const barRef = useRef(null);
 
-  const load = () => api.workload(id).then(setW).catch((e) => setErr(e.message));
+  // what live calls are teaching us: read beside the workload, and again whenever it changes
+  const [learn, setLearn] = useState(null);
+  const loadLearn = () => api.learning(id).then(setLearn).catch(() => {});
+  const load = () => Promise.all([api.workload(id).then(setW).catch((e) => setErr(e.message)), loadLearn()]);
   useEffect(() => { load(); }, [id]);
   useEffect(() => {
     if (!openRun) { setRunData(null); return undefined; }
@@ -144,7 +150,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
 
       <section className={`dcard${switched ? ' done' : hot ? ' hot' : ''}`}>
         {switched && w.switched ? (
-          <SwitchedCard s={w.switched} />
+          <SwitchedCard s={w.switched} learn={learn} />
         ) : (
           <>
             {switched && <span className="eyebrow eyeok">Switched automatically</span>}
@@ -152,12 +158,16 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
 
             <h2>{headline(w, cand, switched)}</h2>
             <p>{blurb(w, cand, switched)}</p>
+            {hot && cand.name && cand.name.kind !== 'model' && (
+              <ServingFlow kind={cand.name.kind} first={cand.name.first} fallback={cand.name.fallback} reference={w.reference}
+                sentOn={cand.escalated === null || cand.escalated === undefined ? null : cand.escalated / 100} sentOnFrom="measured" />
+            )}
 
             {/* A candidate's figures come from the measurement that found it, and so does the
                 bar it is held to: the workload's own bar is cleared by a measurement that
                 could not set one, and read as 0 it made this say "your bar is 100%". */}
             {hot && (
-              <div className="kpis">
+              <div className={`kpis${candBg(cand, learn) ? ' three' : ''}`}>
                 <div className="kpi">
                   <div className="kk">Accuracy</div>
                   <div className="kv">{accuracy(w, cand, switched)}</div>
@@ -171,6 +181,15 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                   <div className="kv">{costLine(w, cand, switched)}</div>
                   <div className="ks">{costSub(w, cand, switched)}</div>
                 </div>
+                {candBg(cand, learn) && (
+                  <div className="kpi">
+                    <div className="kk">On your live calls</div>
+                    <div className="kv">{`${(candBg(cand, learn).rate * 100).toFixed(1)}%`}</div>
+                    <div className="ks">
+                      of {num(candBg(cand, learn).calls)} background answers matched yours. Your app never saw them, and nothing was changed.
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </>
@@ -188,10 +207,15 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           {hot && copiesOnly && (
             <>
               <a className="minig lnk" href={href('connect')}>Send calls through Understudy</a>
-              <code className="recmodel m">{cand.model}</code>
-              <button className="minig" onClick={() => { navigator.clipboard?.writeText(cand.model).catch(() => {}); }}>
-                Copy model name
-              </button>
+              {/* a strategy runs its check here, so it cannot be copied into anybody's code as a model name */}
+              {(!cand.name || cand.name.kind === 'model') && (
+                <>
+                  <code className="recmodel m">{cand.model}</code>
+                  <button className="minig" onClick={() => { navigator.clipboard?.writeText(cand.model).catch(() => {}); }}>
+                    Copy model name
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>
@@ -327,11 +351,16 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
             </div>
             {cert.results.map((r) => {
               const [label, tone] = VERDICT[r.verdict] || [r.verdict, 'q'];
-              const serving = r.model === w.model;
+              // what serves, by its measurement's own name: a cascade's row, not its cheap model's
+              const serving = r.model === (w.servingKey || w.model);
               const why = whyOf(r, cert.refSpeed, cert);
+              const strategy = r.name && r.name.kind !== 'model';
               return (
                 <div className="cdrow cd6" key={r.model}>
-                  <div className="mdl">{r.model}</div>
+                  <div className="mdl">
+                    {strategy ? r.name.label : r.model}
+                    {strategy && <span className="cdkind">{kindWords(r)}</span>}
+                  </div>
                   <div className="num">{num(r.runs)}</div>
                   <div className="num">{r.gap === null || r.verdict === 'failed' ? 'not judged' : `${r.gap.toFixed(2)}%`}</div>
                   <div className={`num cdspeed${r.verdict === 'slower' ? ' slow' : ''}`}>{secs(typical(r, cert)) ?? 'not timed'}</div>
@@ -357,9 +386,26 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         )}
       </section>
 
+      <Learning w={w} d={learn} onReload={loadLearn} />
+      <Outcomes w={w} />
+
       <WorkloadCalls workloadId={w.id} />
     </>
   );
+}
+
+/* What a candidate's background answers on live calls showed, when it has given any. */
+function candBg(cand, learn) {
+  const o = cand && learn?.others?.find((x) => x.key === cand.model);
+  return o && o.shadow?.calls > 0 && o.shadow.rate !== null ? o.shadow : null;
+}
+
+/* What a strategy is, in a few words under its name in the table. */
+function kindWords(r) {
+  const on = r.escalated === null || r.escalated === undefined ? null : inHundred(r.escalated / 100);
+  if (r.name.kind === 'cascade') return `A cheaper model, checked${on ? `: ${on} calls sent on` : ''}`;
+  if (r.name.kind === 'router') return `Picked call by call${on ? `: ${on} calls to ${String(r.name.fallback).split('/').pop()}` : ''}`;
+  return 'Your own model, asked to think less';
 }
 
 /* Asked through the chart's own rule, so the page never draws an empty box above it. */
@@ -370,13 +416,16 @@ const vendor = (m) => (m && m.includes('/') ? `${m.split('/')[0]}, your own choi
 
 const accuracy = (w, cand, switched) => {
   const gap = switched
-    ? (w.certificate?.results.find((r) => r.model === w.model)?.gap ?? 0)
+    ? (w.certificate?.results.find((r) => r.model === (w.servingKey || w.model))?.gap ?? 0)
     : (cand?.gap ?? 0);
   return `${(100 - gap).toFixed(1)}%`;
 };
 
 const headline = (w, cand, switched) => {
   if (switched) return `${short(w.model)} is serving ${w.name}`;
+  if (cand && cand.name?.kind === 'cascade') return `A checked cheaper model cleared your bar`;
+  if (cand && cand.name?.kind === 'router') return `Picking a model call by call cleared your bar`;
+  if (cand && cand.name?.kind === 'lighter') return `${short(w.reference)} thinking less cleared your bar`;
   if (cand) return `${short(cand.model)} cleared your bar`;
   if (w.label === 'Measuring') return 'We are still learning your bar';
   if (w.certificate?.outcome === 'unmeasurable' || w.certificate?.outcome === 'refused') return 'We could not set a bar for this workload';
@@ -393,6 +442,15 @@ const blurb = (w, cand, switched) => {
       + `reach us as copies, after your own provider has answered them, so a switch here starts with the first `
       + `call that comes through Understudy: that is one change of base URL in your code. If you call OpenRouter `
       + `yourself, you can instead change the model your code asks for to the one below.`;
+  }
+  if (cand && cand.name && cand.name.kind !== 'model') {
+    const lead = cand.name.kind === 'cascade'
+      ? `${short(cand.name.first)} answers each call and a quick check reads the answer; when the check is unsure, ${short(cand.name.fallback)} answers instead.`
+      : cand.name.kind === 'router'
+        ? `A small model learned from your own calls sends each one either to ${short(cand.name.first)} or to ${short(cand.name.fallback)}.`
+        : `The same model, asked to think less before it answers.`;
+    return `${lead} Worked out on your own calls, it stayed inside your bar. `
+      + (w.optimizeMode === 'ask' ? 'Nothing changes until you approve it.' : 'This workload optimizes automatically, so it switches on its own.');
   }
   if (cand) {
     return w.optimizeMode === 'ask'
@@ -427,7 +485,7 @@ const blurb = (w, cand, switched) => {
 
 const costLine = (w, cand, switched) => {
   const target = switched
-    ? w.certificate?.results.find((r) => r.model === w.model)?.costMonth
+    ? w.certificate?.results.find((r) => r.model === (w.servingKey || w.model))?.costMonth
     : cand?.costMonth;
   const base = w.certificate?.referenceCostMonth;
   if (!target || !base || base <= 0) return target ? `${usd(target)} a month` : '—';
@@ -436,7 +494,7 @@ const costLine = (w, cand, switched) => {
 
 const costSub = (w, cand, switched) => {
   const target = switched
-    ? w.certificate?.results.find((r) => r.model === w.model)?.costMonth
+    ? w.certificate?.results.find((r) => r.model === (w.servingKey || w.model))?.costMonth
     : cand?.costMonth;
   const base = w.certificate?.referenceCostMonth;
   if (!target) return 'measured once a full month of traffic is in';

@@ -138,7 +138,7 @@ function placed(points, px, py, area, avoid) {
     || a.x - b.x || a.y - b.y);
   for (const d of order) {
     // JetBrains Mono at 11px advances 6.6px a letter; the rest keeps two names apart
-    const w = 6.6 * shortModel(d.r.model).length + 4;
+    const w = 6.6 * nameOf(d.r).length + 4;
     const base = d.y + 3.5;   // the baseline that centres a line of text on its dot
     let best = null;
     for (const drop of DROPS) {
@@ -217,6 +217,10 @@ export function chartPoints(results, reference, referenceCostMonth) {
 }
 
 const shortModel = (m) => String(m).split('/').pop();
+/* What a dot is called: a model by its own name, and a strategy by its short name, because
+   "cascade:vendor/x" cut at its last slash reads exactly like the plain model beside it. */
+const nameOf = (r) => r.name?.short || shortModel(r.model);
+const isStrategy = (r) => !!r.name && r.name.kind !== 'model';
 
 /* What a dot means, in the same words the table under the chart uses. */
 const RESULT = {
@@ -301,9 +305,13 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
         <path key={`lead-${r.model}`} d={`M${dx} ${dy} L${lx + (right ? -3 : 3)} ${ly - 4}`}
           stroke="var(--line-strong)" strokeWidth="1" fill="none" />
       ))}
+      {/* a strategy, rather than one model, is a diamond, so the two can be told apart at a glance */}
       {labels.map(({ r, x: dx, y: dy }) => (tone(r) === 'cur'
         ? <circle key={`dot-${r.model}`} cx={dx} cy={dy} r="6.5" fill="var(--raise)" stroke={colour.cur} strokeWidth="2.2" />
-        : <circle key={`dot-${r.model}`} cx={dx} cy={dy} r="6" fill={colour[tone(r)]} />))}
+        : isStrategy(r)
+          ? <rect key={`dot-${r.model}`} x={dx - 5.2} y={dy - 5.2} width="10.4" height="10.4" rx="1.5"
+            transform={`rotate(45 ${dx} ${dy})`} fill={colour[tone(r)]} />
+          : <circle key={`dot-${r.model}`} cx={dx} cy={dy} r="6" fill={colour[tone(r)]} />))}
       {named.map(({ r, lx, ly, right }) => {
         const k = tone(r);
         return (
@@ -312,7 +320,7 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
             fontWeight={k === 'pass' ? 600 : undefined}
             fill={k === 'pass' ? 'var(--ink)' : 'var(--mut-read)'}
             stroke="var(--raise)" strokeWidth="3.6" paintOrder="stroke" strokeLinejoin="round">
-            {shortModel(r.model)}
+            {nameOf(r)}
           </text>
         );
       })}
@@ -328,7 +336,11 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
     {cur && (
       <div className={`charttip dotcard${cur.x > CW * 0.6 ? ' left' : ''}`} aria-live="polite"
         style={{ left: `${(cur.x / CW) * 100}%`, top: `${Math.min(84, Math.max(14, (cur.y / CH) * 100))}%` }}>
-        <div className="tipday">{cur.r.model}</div>
+        <div className="tipday">{cur.r.name?.label || cur.r.model}</div>
+        {isStrategy(cur.r) && cur.r.escalated !== null && cur.r.escalated !== undefined && (
+          <div className="tiprow"><span className="tipkey">{cur.r.name.kind === 'cascade' ? 'Sent on after the check' : 'Sent to the dearer model'}</span>
+            <span className="tipval">{Number(cur.r.escalated).toFixed(1)}%</span></div>
+        )}
         <div className="tiprow"><span className="tipkey">Cost a month</span>
           <span className="tipval">{usd(cur.r.costMonth)}</span></div>
         {cur.r.verdict !== 'reference' && (
@@ -342,6 +354,12 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
         <div className="tiprow"><span className="tipkey">Result</span>
           <span className="tipval">{RESULT[cur.r.verdict] || cur.r.verdict}</span></div>
       </div>
+    )}
+    {labels.some((l) => isStrategy(l.r)) && (
+      <p className="cchartnote">
+        A diamond is a strategy rather than one model: a cheaper model whose answers are checked, with the doubtful
+        ones sent on to yours, or a pick made call by call. Its cost includes every check and every call sent on.
+      </p>
     )}
     {unnamed > 0 && (
       <p className="cchartnote">

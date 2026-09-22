@@ -24,13 +24,16 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
      numbers about what their own models cost. */
   const hasDay = data.priced && data.series.some((d) => d.paid > 0 || d.would > 0);
   const runRate = data.days ? (data.spend / data.days) * 30 : 0;
+  // how calls turned out, the way every workload page counts it
+  const oc = data.outcomes;
+  const judged = oc ? oc.calls - oc.recent : 0;
 
   return (
     <>
       <div className="phead"><h1>Dashboard</h1>
         <PeriodChip days={data.days} periods={data.periods} onPick={onPeriod} busy={busy} /></div>
 
-      <div className="tiles">
+      <div className="tiles five">
         <Tile k={`Spend · last ${data.days} days`} v={data.priced ? usd(data.spend) : '—'}
           s={!data.priced ? 'prices sync once a provider key is set'
             : data.spend > 0 ? `on track for ${usd(runRate)} a month` : 'nothing charged yet'} />
@@ -41,6 +44,9 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
           s={data.workloads
             ? `${data.optimized} optimized${data.waiting ? `, ${data.waiting} waiting for routing` : ''}, ${data.ready} ready, ${data.measuring} measuring`
             : 'found automatically from your calls'} />
+        <Tile k="Worked" v={oc && oc.rate !== null ? `${(oc.rate * 100).toFixed(1)}%` : '—'}
+          s={!oc || !judged ? 'how calls turned out, once they arrive'
+            : oc.problem ? `${num(oc.problem)} of ${num(judged)} calls had a problem` : `of ${num(judged)} calls, no problem seen`} />
         <Tile k="Calls" v={num(data.calls)} s="since you connected" />
       </div>
 

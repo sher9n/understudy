@@ -1,4 +1,5 @@
 import { db, now } from '../db/index.js';
+import config from '../config.js';
 import { defOf, SIGNALS, describe } from './outcomes.js';
 
 /* What the pages show about how a workload's calls turned out, and the tasks they were part of.
@@ -8,29 +9,57 @@ const DAY = 86400000;
 const parse = (s, fallback) => { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } };
 const short = (m) => String(m || '').split('/').pop();
 
+/* How a call turned out, in the four groups every screen uses, and the same way the learning layer
+   reads them (see src/learn/explore.js): a problem was seen, it was confirmed to have worked, nothing
+   went wrong that anything could see, or it is too recent to say. A call only counts once a retry or
+   a correction would have had time to arrive. Calls refused for the customer's own reasons, a
+   malformed request or a spent balance, say nothing about how serving went and are left out. */
+const COUNTED = `(status_code IS NULL OR status_code = 200 OR status_code IN (0, 404, 408, 429) OR status_code >= 500)`;
+const OKAY = `(status_code IS NULL OR status_code = 200)`;
+const GROUPS = `COUNT(*) AS calls,
+      COUNT(*) FILTER (WHERE NOT ${OKAY} OR reward < 0.5) AS problem,
+      COUNT(*) FILTER (WHERE ${OKAY} AND reward >= 0.5) AS confirmed,
+      COUNT(*) FILTER (WHERE ${OKAY} AND reward IS NULL AND created_at < ?) AS quiet,
+      COUNT(*) FILTER (WHERE ${OKAY} AND reward IS NULL AND created_at >= ?) AS recent,
+      COUNT(*) FILTER (WHERE reward IS NOT NULL) AS known`;
+const settledAt = () => now() - config.LEARN_SETTLE_MIN * 60000;
+const grouped = (r) => {
+  const g = { calls: Number(r.calls), problem: Number(r.problem), confirmed: Number(r.confirmed), quiet: Number(r.quiet),
+    recent: Number(r.recent), known: Number(r.known) };
+  const judged = g.calls - g.recent;
+  return { ...g, rate: judged > 0 ? (g.confirmed + g.quiet) / judged : null };
+};
+
+/** How a workspace's calls turned out over a window, across every workload. */
+export async function outcomeTotals(workspaceId, since) {
+  const at = settledAt();
+  return grouped(await db.prepare(`SELECT ${GROUPS} FROM calls WHERE workspace_id = ? AND workload_id IS NOT NULL
+      AND source IN ('routed', 'trace') AND created_at >= ? AND ${COUNTED}`).get(at, at, workspaceId, since));
+}
+
 /** How a workload's calls turned out over a window: overall, day by day, by signal, by model. */
 export async function outcomeSummary(workloadId, days = 30) {
   const since = now() - days * DAY;
+  const at = settledAt();
   const def = await defOf(workloadId);
-  const totals = await db.prepare(`SELECT COUNT(*) AS calls,
-      COUNT(*) FILTER (WHERE reward IS NOT NULL) AS known,
-      COUNT(*) FILTER (WHERE reward >= 0.5) AS worked,
-      COUNT(*) FILTER (WHERE reward < 0.5) AS failed
-    FROM calls WHERE workload_id = ? AND source IN ('routed', 'trace') AND created_at >= ?`).get(workloadId, since);
+  const totals = grouped(await db.prepare(`SELECT ${GROUPS}
+    FROM calls WHERE workload_id = ? AND source IN ('routed', 'trace') AND created_at >= ? AND ${COUNTED}`).get(at, at, workloadId, since));
 
   // day by day, oldest first, each day labelled by the moment it ends (as the Dashboard does)
   const t0 = now();
   const first = t0 - (days - 1) * DAY;
-  const series = Array.from({ length: days }, (_, i) => ({ at: first + i * DAY, calls: 0, known: 0, worked: 0 }));
-  const rows = await db.prepare(`SELECT created_at, reward FROM calls WHERE workload_id = ? AND source IN ('routed', 'trace')
-      AND created_at >= ?`).all(workloadId, since);
+  const series = Array.from({ length: days }, (_, i) => ({ at: first + i * DAY, calls: 0, problem: 0, confirmed: 0, quiet: 0, recent: 0 }));
+  const rows = await db.prepare(`SELECT created_at, reward, status_code FROM calls WHERE workload_id = ? AND source IN ('routed', 'trace')
+      AND created_at >= ? AND ${COUNTED}`).all(workloadId, since);
   for (const r of rows) {
     const b = Math.min(days - 1, Math.max(0, Math.ceil((Number(r.created_at) - first) / DAY)));
-    series[b].calls += 1;
-    if (r.reward !== null && r.reward !== undefined) {
-      series[b].known += 1;
-      if (Number(r.reward) >= 0.5) series[b].worked += 1;
-    }
+    const d = series[b];
+    d.calls += 1;
+    const okay = r.status_code === null || r.status_code === undefined || Number(r.status_code) === 200;
+    if (!okay || (r.reward !== null && Number(r.reward) < 0.5)) d.problem += 1;
+    else if (r.reward !== null) d.confirmed += 1;
+    else if (Number(r.created_at) < at) d.quiet += 1;
+    else d.recent += 1;
   }
 
   const signals = (await db.prepare(`SELECT kind, COUNT(*) AS n FROM outcomes WHERE workload_id = ? AND occurred_at >= ?
@@ -44,29 +73,27 @@ export async function outcomeSummary(workloadId, days = 30) {
     return { event: r.event, n: Number(r.n), means: d?.means ?? null, waiting: Number(r.waiting) };
   });
 
-  // what each model that served calls here achieved, when anything is known about it
-  const byModel = (await db.prepare(`SELECT served_model AS model, COUNT(*) AS calls,
-      COUNT(*) FILTER (WHERE reward IS NOT NULL) AS known,
-      COUNT(*) FILTER (WHERE reward >= 0.5) AS worked,
+  // what each model that served calls here achieved, the same four ways
+  const byModel = (await db.prepare(`SELECT served_model AS model, ${GROUPS},
       AVG(COALESCE(NULLIF(charged_usd, 0), cost_usd)) AS cost, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms) AS latency
-    FROM calls WHERE workload_id = ? AND source IN ('routed', 'trace') AND created_at >= ? AND served_model IS NOT NULL
-    GROUP BY served_model ORDER BY 2 DESC LIMIT 8`).all(workloadId, since))
-    .map((r) => ({ model: r.model, calls: Number(r.calls), known: Number(r.known), worked: Number(r.worked),
-      rate: Number(r.known) ? Number(r.worked) / Number(r.known) : null, cost: r.cost === null ? null : Number(r.cost),
+    FROM calls WHERE workload_id = ? AND source IN ('routed', 'trace') AND created_at >= ? AND served_model IS NOT NULL AND ${COUNTED}
+    GROUP BY served_model ORDER BY 2 DESC LIMIT 8`).all(at, at, workloadId, since))
+    .map((r) => ({ model: r.model, ...grouped(r), cost: r.cost === null ? null : Number(r.cost),
       latency: r.latency === null ? null : Math.round(Number(r.latency)) }));
 
-  const failures = (await db.prepare(`SELECT id, created_at, served_model, reward_json FROM calls WHERE workload_id = ?
-      AND source IN ('routed', 'trace') AND reward < 0.5 AND created_at >= ? ORDER BY created_at DESC LIMIT 5`)
-    .all(workloadId, since)).map((r) => ({ id: r.id, at: r.created_at, model: r.served_model, why: describe(parse(r.reward_json, [])) }));
+  const failures = (await db.prepare(`SELECT id, created_at, served_model, reward_json, status_code FROM calls WHERE workload_id = ?
+      AND source IN ('routed', 'trace') AND created_at >= ? AND ${COUNTED} AND (reward < 0.5 OR NOT ${OKAY})
+      ORDER BY created_at DESC LIMIT 5`)
+    .all(workloadId, since)).map((r) => ({ id: r.id, at: r.created_at, model: r.served_model,
+    why: r.status_code && Number(r.status_code) !== 200 ? `the provider failed the call (${r.status_code})` : describe(parse(r.reward_json, [])) }));
 
-  const known = Number(totals.known);
   return {
     days,
-    calls: Number(totals.calls),
-    known,
-    worked: Number(totals.worked),
-    failed: Number(totals.failed),
-    rate: known ? Number(totals.worked) / known : null,
+    ...totals,
+    // kept under their first names too: a call confirmed to have worked, and one with a problem
+    worked: totals.confirmed,
+    failed: totals.problem,
+    settleMin: config.LEARN_SETTLE_MIN,
     series,
     signals,
     events,

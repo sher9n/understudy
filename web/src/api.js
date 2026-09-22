@@ -47,6 +47,12 @@ export const api = {
   finishOnboarding: () => send('POST', '/connect/done'),
   addCredit: (amountUsd) => send('POST', '/billing/checkout', { amountUsd }),
   regenerateKey: () => send('POST', '/connect/regenerate-key'),
+  // what live calls are teaching us, how calls turned out, and the tasks they were part of
+  learning: (id) => send('GET', `/workloads/${id}/learning`),
+  setExplore: (id, b) => send('POST', `/workloads/${id}/explore`, b),
+  outcomes: (id) => send('GET', `/workloads/${id}/outcomes`),
+  saveOutcomeDef: (id, def) => send('POST', `/workloads/${id}/outcomes/def`, def),
+  tasks: (id) => send('GET', `/workloads/${id}/tasks`),
 };
 
 /* Money, at a precision where the number can actually be seen.

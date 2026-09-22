@@ -10,10 +10,11 @@ import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity } f
 import { account, ledger, gateRouting, stripe } from './billing.js';
 import { planFor, forgetPlan } from './eval/plan.js';
 import { recipeKind } from './eval/select.js';
-import { outcomeSummary, tasksFor } from './learn/views.js';
+import { outcomeSummary, outcomeTotals, tasksFor } from './learn/views.js';
+import { nameOfResult } from './learn/arms.js';
 import { saveDef } from './learn/outcomes.js';
 import { learningView, exploreOf, forgetState, EXPLORE_MODES } from './learn/explore.js';
-import { certificate, promote, revert, trafficOf } from './eval/promote.js';
+import { certificate, promote, revert, trafficOf, servingKey } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
 import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
 import { switchStory } from './eval/switch-story.js';
@@ -271,6 +272,10 @@ const resultRow = (r, runs = r.runs) => ({
   thinkingOff: recipeKind(parseJson(r.recipe_json)) === 'off',
   rank: parseJson(r.rank_json),
   gates: { structure: r.gate_structure, accuracy: r.gate_accuracy, coverage: r.gate_coverage, complete: r.gate_complete },
+  // a strategy rather than one model: what to call it, and how often it sent a call on
+  name: nameOfResult(r),
+  escalated: r.escalated_pct ?? null,
+  costRatio: r.cost_ratio ?? null,
 });
 
 /* The customer's own model's speed on a measurement's calls, which every model is held to. */
@@ -352,11 +357,15 @@ async function overview(workspaceId, days = 30) {
     ready: rows.filter((w) => !w.routed_model && w.status === 'certified').length,
     measuring: rows.filter((w) => w.status === 'measuring').length,
     series,
+    // how calls turned out over the window, in the same four groups each workload page shows
+    outcomes: await outcomeTotals(workspaceId, since),
     rows: rows.map((w) => ({
       id: w.id, name: w.slug, calls: w.calls,
       shape: shapeLabel[w.shape_kind] || w.shape_kind,
       cost: round8(w.spend),
-      model: w.routed_model || w.reference_model || 'not set',
+      // a strategy by its short name: a cascade is its cheap model, checked
+      model: w.routed_model && (w.arm_kind === 'cascade' || w.arm_kind === 'router') && w.arm_label
+        ? w.arm_label : w.routed_model || w.reference_model || 'not set',
       ...statusLabel(w, carriesOf({ mode: w.ws_mode, routed: w.recent_routed, copies: w.recent_copies })),
     })),
     activity: await liveFeed(workspaceId, 40),
@@ -385,7 +394,11 @@ function callLine(c) {
   if (failed) {
     return { kind: 'bad', text: `A call did not get through, on ${model} (${c.status_code})` };
   }
-  const head = job ? `${job} ran on ${model}` : `A call arrived, on ${model}`;
+  /* Why a call ran where it did, when that is not what serves it: the check sent it on to the
+     customer's own model, or it was one of the few calls an experiment answers. Without it, a
+     switched workload's feed showed its old model now and then, which read as the switch failing. */
+  const why = Number(c.escalated) === 1 ? ', sent on by the check' : Number(c.explored) === 1 ? ', an experiment' : '';
+  const head = job ? `${job} ran on ${model}${why}` : `A call arrived, on ${model}`;
   return { kind: 'call', text: ms ? `${head}, ${ms}` : head };
 }
 
@@ -553,7 +566,9 @@ api.get('/workloads/:id', async (req, res) => {
   /* A candidate is what the run itself would switch to: cleared, priced, and cheaper a month.
      Any cleared model used to be offered, so one that cleared but cost more showed "-25% lower",
      "You keep -$2.50" and, in auto mode, "switches on its own", which it never would. */
-  const best = cert ? cheaperCleared(cert.results).find((r) => r.model_id !== w.routed_model) : null;
+  // what serves it now, by the name its measurement row carries: a cascade's is its own, not its cheap model's
+  const servingAs = w.routed_model ? await servingKey(w) : null;
+  const best = cert ? cheaperCleared(cert.results).find((r) => r.model_id !== servingAs) : null;
   const refCost = cert?.referenceCostMonth ?? null;
   const compared = cert ? cert.results.filter((r) => r.verdict !== 'reference') : [];
   /* The newest measurement that compared any model. It can be older than the one shown, and
@@ -569,6 +584,7 @@ api.get('/workloads/:id', async (req, res) => {
     id: w.id, name: w.slug, shape: shapeLabel[w.shape_kind] || w.shape_kind,
     tools: JSON.parse(w.tool_names || '[]'),
     model: w.routed_model || w.reference_model, reference: w.reference_model,
+    servingKey: servingAs,
     optimizeMode: w.optimize_mode, floor: w.floor_pct,
     speedPref: w.speed_pref || null,
     calls: t.calls, cost: round8(t.cost),
@@ -602,6 +618,7 @@ api.get('/workloads/:id', async (req, res) => {
     candidate: best && {
       model: best.model_id, gap: best.gap_pct, costMonth: best.cost_month_usd,
       accuracy: round8(100 - best.gap_pct),
+      name: nameOfResult(best), escalated: best.escalated_pct ?? null,
     },
     traffic: { routed: traffic.routed, copies: traffic.copies, carries: traffic.carries, observe: traffic.observe },
   });

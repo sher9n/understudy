@@ -2,6 +2,8 @@ import { db, now, round8 } from '../db/index.js';
 import config from '../config.js';
 import { perCall, withFeeOn, callsPerMonth, projectSavings, cheaperPct } from './savings.js';
 import { OUTCOME_OF } from './outcome.js';
+import { servingKey } from './promote.js';
+import { armById } from '../learn/arms.js';
 
 /* Everything the switched card says about a workload we moved to a cheaper model, worked out
  * from the record rather than from whichever measurement happens to be newest.
@@ -46,30 +48,37 @@ async function answerLength(workloadId, modelId, since) {
 export async function switchStory(w) {
   if (!w?.routed_model) return null;
   const from = w.reference_model;
+  // the model that answers most of its calls, and the strategy it belongs to
   const to = w.routed_model;
+  const arm = w.routed_arm_id ? await armById(w.routed_arm_id) : null;
+  /* The name the switch and its measurement know it by: the model, or for a strategy its own name,
+     "cascade:<model>" and the like. Looked up by the model alone, a cascade found no measurement at
+     all and its card said it had been switched for no reason. */
+  const key = await servingKey(w);
+  const kind = arm?.spec?.kind ?? 'model';
   const at = w.promoted_at;
   const fee = config.ROUTING_FEE_PCT;
   const t = now();
 
   const promo = await db.prepare(
     `SELECT actor_user_id, run_id FROM promotions WHERE workload_id = ? AND action = 'promote' AND to_model = ?
-      ORDER BY created_at DESC LIMIT 1`).get(w.id, to);
+      ORDER BY created_at DESC LIMIT 1`).get(w.id, key);
 
   /* The measurement it was switched on. The switch records its run, but a manual approval can
      record a newer run that never tried this model, so the run is only trusted if it has a
      result for the model; otherwise the newest earlier run that does. */
   const resultIn = (runId) => db.prepare(
     `SELECT r.id, COALESCE(r.finished_at, r.created_at) AS at, r.sample_size, r.floor_pct, e.gap_pct, e.verdict,
-            e.cost_ratio
+            e.cost_ratio, e.escalated_pct
        FROM eval_runs r JOIN eval_results e ON e.run_id = r.id AND e.model_id = ?
-      WHERE r.id = ?`).get(to, runId);
+      WHERE r.id = ?`).get(key, runId);
   let evidence = w.promoted_run_id ? await resultIn(w.promoted_run_id) : null;
   if (!evidence) {
     evidence = await db.prepare(
       `SELECT r.id, COALESCE(r.finished_at, r.created_at) AS at, r.sample_size, r.floor_pct, e.gap_pct, e.verdict,
-              e.cost_ratio
+              e.cost_ratio, e.escalated_pct
          FROM eval_runs r JOIN eval_results e ON e.run_id = r.id AND e.model_id = ?
-        WHERE r.workload_id = ? AND r.created_at <= ? ORDER BY r.created_at DESC LIMIT 1`).get(to, w.id, at);
+        WHERE r.workload_id = ? AND r.created_at <= ? ORDER BY r.created_at DESC LIMIT 1`).get(key, w.id, at);
   }
 
   /* The newest finished measurement since the switch, and what it found about this model, if
@@ -80,7 +89,7 @@ export async function switchStory(w) {
        FROM eval_runs r LEFT JOIN eval_results e ON e.run_id = r.id AND e.model_id = ?
       WHERE r.workload_id = ? AND r.status = 'done' AND r.created_at > ?
         AND ${OUTCOME_OF('r.')} IN ('compared', 'unmeasurable', 'refused')
-      ORDER BY r.created_at DESC LIMIT 1`).get(to, w.id, at);
+      ORDER BY r.created_at DESC LIMIT 1`).get(key, w.id, at);
 
   const ws = await db.prepare('SELECT measure_every_days FROM workspaces WHERE id = ?').get(w.workspace_id);
   const cadenceDays = ws?.measure_every_days ?? config.MEASURE_EVERY_DAYS;
@@ -138,10 +147,17 @@ export async function switchStory(w) {
      Paid is what they were charged, fee included. What those calls would have cost on the
      original model is their real prompts at its prices, and its usual answer length, because
      how long its answers would have been cannot be read off a call it never answered. */
+  /* A strategy's calls are the ones it answered, whichever of its models did: a cascade call sent
+     on is answered by the customer's own model and still paid for as this strategy's, check and
+     all. Calls an experiment gave to something else are not this strategy's. */
   const served = await db.prepare(
-    `SELECT COUNT(*) AS n, COALESCE(SUM(charged_usd), 0) AS paid, COALESCE(SUM(prompt_tokens), 0) AS pin
-       FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ? AND status_code = 200
-        AND created_at >= ?`).get(w.id, to, at);
+    `SELECT COUNT(*) AS n, COALESCE(SUM(charged_usd), 0) AS paid, COALESCE(SUM(prompt_tokens), 0) AS pin,
+            COUNT(*) FILTER (WHERE escalated = 1) AS sent_on
+       FROM calls WHERE workload_id = ? AND source = 'routed' AND status_code = 200 AND created_at >= ?
+        AND (arm_id = ? OR (arm_id IS NULL AND served_model = ?))`).get(w.id, at, w.routed_arm_id ?? '', to);
+  const tried = (await db.prepare(
+    `SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND source = 'routed' AND explored = 1 AND created_at >= ?`)
+    .get(w.id, at)).n;
   const copies = (await db.prepare(
     `SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND source = 'trace' AND created_at >= ?`)
     .get(w.id, at)).n;
@@ -153,11 +169,13 @@ export async function switchStory(w) {
     'SELECT COALESCE(SUM(spend_usd), 0) AS s FROM eval_runs WHERE workload_id = ?').get(w.id)).s;
 
   return {
-    from, to, at,
+    from, to, at, key, kind,
+    label: arm?.label ?? null,
+    spec: arm?.spec ?? null,
     how: promo?.actor_user_id ? 'you' : 'automatic',
     evidence: evidence ? {
       runId: evidence.id, at: evidence.at, sample: evidence.sample_size, floor: evidence.floor_pct,
-      gap: evidence.gap_pct, verdict: evidence.verdict,
+      gap: evidence.gap_pct, verdict: evidence.verdict, escalated: evidence.escalated_pct ?? null,
     } : null,
     latest: latest ? {
       runId: latest.id, at: latest.at, outcome: latest.outcome, noise: latest.noise_pct,
@@ -182,6 +200,8 @@ export async function switchStory(w) {
     },
     soFar: {
       calls: served.n, copies,
+      // a cascade's calls sent on to the customer's own model, and calls experiments answered instead
+      sentOn: Number(served.sent_on || 0), explored: Number(tried || 0),
       paid: round8(served.paid),
       wouldHave: wouldHave == null ? null : round8(wouldHave),
       saved: wouldHave == null ? null : round8(wouldHave - served.paid),

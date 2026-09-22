@@ -136,6 +136,8 @@ async function shop(tag, { optimize = 'auto', explore = 'normal', switched = tru
   workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id);
   if (switched) {
     await promote(workload, STEADY, { spec: { kind: 'model', model: STEADY, recipe: null }, auto: true });
+    // switched two days ago, so the calls written below, an hour old, came after it as they would
+    await db.prepare('UPDATE workloads SET promoted_at = ? WHERE id = ?').run(now() - 2 * 86400000, workload.id);
     workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id);
   }
   const results = [

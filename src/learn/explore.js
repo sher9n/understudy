@@ -451,13 +451,17 @@ export async function learningView(workload) {
   const s = exploreOf(workload);
   const st = await stateOf(workload, { fresh: true });
   const ref = workload.reference_model;
+  /* The last seven days, or the days since the switch when it is more recent: the customer's own
+     model answering before the switch is not an experiment, and counted in with them it read as a
+     yardstick taking an eighth of the traffic. */
+  const weekSince = Math.max(now() - 7 * DAY, Number(workload.promoted_at) || 0);
   const share = await db.prepare(
     `SELECT COALESCE(arm_id, '') AS arm, served_model, COUNT(*) AS n,
             COALESCE(SUM(CASE WHEN explored = 1 THEN 1 ELSE 0 END), 0) AS explored,
             COALESCE(SUM(CASE WHEN escalated = 1 THEN 1 ELSE 0 END), 0) AS escalated,
             COALESCE(SUM(cost_usd), 0) AS cost
        FROM calls WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND ${COUNTED}
-      GROUP BY 1, 2`).all(workload.id, now() - 7 * DAY);
+      GROUP BY 1, 2`).all(workload.id, weekSince);
   const week = new Map();
   let weekCalls = 0;
   for (const r of share) {
@@ -473,7 +477,8 @@ export async function learningView(workload) {
     weekCalls += Number(r.n);
   }
   const shape = (a, role) => ({
-    id: a.virtual ? null : a.id, role, label: a.label || labelOf(a.spec, ref), kind: a.kind || a.spec?.kind, status: a.status,
+    id: a.virtual ? null : a.id, key: a.spec ? keyOfSpec(a.spec, ref) : null,
+    role, label: a.label || labelOf(a.spec, ref), kind: a.kind || a.spec?.kind, status: a.status,
     spec: a.spec, ratio: a.ratio, offline: a.offline ?? null, ...readingOf(a),
     week: week.get(a.id) || { calls: 0, explored: 0, escalated: 0, cost: 0 },
   });
@@ -488,7 +493,7 @@ export async function learningView(workload) {
   return {
     explore: { ...s, spentToday: st.extraToday, reason: whyNot(workload, s, st) },
     tolerance: config.LEARN_TOLERANCE, confidence: config.LEARN_CONFIDENCE, minCalls: config.LEARN_MIN_CALLS,
-    halfLifeDays: config.LEARN_HALF_LIFE_DAYS, weekCalls,
+    halfLifeDays: config.LEARN_HALF_LIFE_DAYS, weekCalls, weekSince, weekFromSwitch: weekSince > now() - 7 * DAY + 60000,
     serving, baseline, others,
     shadow: { recent: shadows.map((r) => ({ ...r, agreement: r.agreement === null ? null : Number(r.agreement) })), spentUsd: Number(spent.c) },
   };

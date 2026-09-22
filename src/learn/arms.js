@@ -79,6 +79,27 @@ export async function setStatus(armId, status) {
   await db.prepare('UPDATE arms SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), armId);
 }
 
+/**
+ * What a screen calls a measurement's result: the plain model, or a strategy in words, long and
+ * short, with what kind of thing it is so a chart can draw it differently.
+ *   kind: model | lighter | cascade | router
+ */
+export function nameOfResult(row) {
+  const spec = parse(row?.arm_json, null);
+  const id = String(row?.model_id || '');
+  if (!spec) return { kind: 'model', label: id, short: short(id) };
+  if (spec.kind === 'cascade') {
+    const same = spec.first.model === spec.fallback.model;
+    return { kind: 'cascade', label: labelOf(spec), short: same ? `${short(spec.first.model)} thinking less, checked` : `${short(spec.first.model)}, checked`,
+      first: spec.first.model, fallback: spec.fallback.model, threshold: spec.threshold ?? null };
+  }
+  if (spec.kind === 'router') {
+    return { kind: 'router', label: labelOf(spec), short: `${short(spec.cheap.model)}, picked per call`,
+      first: spec.cheap.model, fallback: spec.strong.model, threshold: spec.threshold ?? null };
+  }
+  return { kind: 'lighter', label: `${short(spec.model)}, thinking less`, short: `${short(spec.model)}, thinking less`, first: spec.model };
+}
+
 /** The strategy a measurement's result row stands for: its own, or the plain model it names. */
 export function specOfResult(row) {
   const own = parse(row?.arm_json, null);
