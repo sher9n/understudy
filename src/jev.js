@@ -1,7 +1,7 @@
 import config, { canJev } from './config.js';
 import { reportCallFailure } from './alerts.js';
 
-/* Jev, TypeSafe's System One model.
+/* Jev, TypeSafe's System One model, reached through OpenRouter unless JEV_VIA says otherwise.
  *
  * It does not write text. It is handed some state and a few narrow questions, and it answers
  * each with a probability: a yes/no ("noul"), a pick from a list ("choice"), or a place on a
@@ -54,8 +54,47 @@ const release = () => {
   if (next) next(); else active -= 1;
 };
 
-/** What a request cost, from the tokens Jev says it read. Output is free. */
-export const jevCost = (usage) => ((usage?.input_tokens ?? 0) * config.JEV_PRICE_PER_MTOK) / 1e6;
+/** What a request cost: as OpenRouter reports it, or from the tokens Jev read. Output is free. */
+export const jevCost = (usage) => {
+  const said = Number(usage?.cost);
+  if (usage?.cost !== undefined && usage?.cost !== null && Number.isFinite(said)) return said;
+  return ((usage?.input_tokens ?? 0) * config.JEV_PRICE_PER_MTOK) / 1e6;
+};
+
+/* Where a question goes, and with which key. Through OpenRouter it is sent only to a provider
+   that keeps nothing, like every other call Understudy makes: the state Jev reads is a
+   customer's own requests and answers. */
+const viaOpenRouter = () => config.JEV_VIA === 'openrouter';
+const route = () => (viaOpenRouter()
+  ? {
+    url: `${config.OPENROUTER_BASE}/systemone`,
+    headers: {
+      Authorization: `Bearer ${config.OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': config.PUBLIC_URL,
+      'X-Title': 'Understudy',
+    },
+    extra: config.ZDR_ONLY ? { provider: { zdr: true, data_collection: 'deny' } } : {},
+    who: 'Jev (via OpenRouter)',
+  }
+  : {
+    url: `${config.TYPESAFE_BASE}/systemone`,
+    headers: { Authorization: `Bearer ${config.TYPESAFE_API_KEY}`, 'Content-Type': 'application/json' },
+    extra: {},
+    who: 'Jev (TypeSafe)',
+  });
+
+/* Why a refusal that will not pass by itself happened, in words for the page. */
+const restingReason = (status) => {
+  if (viaOpenRouter()) {
+    if (status === 402) return 'Our OpenRouter account has no credit left, so Jev cannot answer until more is added.';
+    if (status === 404) return 'OpenRouter has no provider that keeps nothing serving Jev right now.';
+    return 'OpenRouter refused our key for Jev, so it cannot answer until that is fixed.';
+  }
+  return status === 402
+    ? 'The TypeSafe account has no credit left, so Jev cannot answer until more is added.'
+    : 'TypeSafe refused the key, so Jev cannot answer until it is fixed.';
+};
 
 /**
  * Ask Jev one or more questions about one state.
@@ -63,7 +102,8 @@ export const jevCost = (usage) => ((usage?.input_tokens ?? 0) * config.JEV_PRICE
  * caller always knows the difference between "Jev said no" and "Jev said nothing".
  */
 export async function ask(state, questions, { retries = 3, model = config.JEV_MODEL } = {}) {
-  if (!canJev()) throw new JevError(0, 'No TYPESAFE_API_KEY is set.');
+  if (!canJev()) throw new JevError(0, `Jev is not set up (JEV_VIA is ${config.JEV_VIA}).`);
+  const to = route();
   if (Date.now() < restingUntil) throw new JevError(503, restingWhy || 'Jev is resting after a refusal');
   await acquire();
   try {
@@ -71,10 +111,10 @@ export async function ask(state, questions, { retries = 3, model = config.JEV_MO
       const started = Date.now();
       let res;
       try {
-        res = await fetch(`${config.TYPESAFE_BASE}/systemone`, {
+        res = await fetch(to.url, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${config.TYPESAFE_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model, state, questions }),
+          headers: to.headers,
+          body: JSON.stringify({ model, state, questions, ...to.extra }),
           signal: AbortSignal.timeout(config.JEV_TIMEOUT_MS),
         });
       } catch (err) {
@@ -92,12 +132,11 @@ export async function ask(state, questions, { retries = 3, model = config.JEV_MO
       if (!res.ok || !body?.answers) {
         const raw = body?.error?.message || body?.message || body?.detail || text.slice(0, 200) || 'no answer';
         const msg = typeof raw === 'string' ? raw : JSON.stringify(raw).slice(0, 200);
-        if ([401, 402, 403].includes(res.status)) {
+        // a missing private provider is as lasting through OpenRouter as a missing credit
+        if ([401, 402, 403].includes(res.status) || (viaOpenRouter() && res.status === 404)) {
           restingUntil = Date.now() + REST_MS;
-          restingWhy = res.status === 402
-            ? 'The TypeSafe account has no credit left, so Jev cannot answer until more is added.'
-            : 'TypeSafe refused the key, so Jev cannot answer until it is fixed.';
-          if (!outage) reportCallFailure({ kind: 'Jev (TypeSafe)', model, status: res.status, message: msg });
+          restingWhy = restingReason(res.status);
+          if (!outage) reportCallFailure({ kind: to.who, model, status: res.status, message: msg });
           outage = true;
         }
         throw new JevError(res.status, msg);
@@ -106,6 +145,7 @@ export async function ask(state, questions, { retries = 3, model = config.JEV_MO
       return {
         answers: body.answers,
         model: body.model || model,
+        provider: body.provider || null,
         usage: body.usage || null,
         costUsd: jevCost(body.usage),
         ms: Date.now() - started,

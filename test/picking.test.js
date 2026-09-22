@@ -5,6 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 process.env.JOBS_ENABLED = 'false';
+process.env.JEV_VIA = 'off';
 process.env.TYPESAFE_API_KEY = '';
 process.env.ALERTS_ENABLED = 'false';
 const { thinkingFit, eligibility, chanceOf, selectCandidates, refThinksOf, speedChanceOf, recipeKind } = await import('../src/eval/select.js');

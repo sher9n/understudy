@@ -152,6 +152,11 @@ enough comes from how fast it was against the customer's kind of model in recent
 measurements, and from its providers' published speeds. A model whose provider was too busy
 to answer in the last few hours waits behind the rest for a while.
 
+Jev is TypeSafe's judging model: it answers narrow questions with a probability rather than
+writing text. It is reached through OpenRouter's System One API with the same key as every
+other call, and only through a provider that keeps nothing. Without it, the language model in
+`EVAL_JUDGE_MODEL` judges written answers alone and models are ranked without Jev's reading.
+
 Models that think before answering are asked to work the way the current model does. When
 it answers straight away, a candidate is asked not to think, or to think as little as it
 allows, and if it wins it is routed that way too. The measurement checks how the current
@@ -209,7 +214,7 @@ src/eval/judge.js    whether two written answers mean the same: Jev, then a lang
 src/eval/run.js      one measurement run end to end, as a race
 src/models/facts.js  model facts, providers that keep nothing, prices as really charged
 src/models/arena.js  the Arena leaderboard, matched to model names
-src/jev.js           the Jev client, with a rest after a refusal
+src/jev.js           the Jev client, through OpenRouter, with a rest after a refusal
 src/eval/promote.js  switching, switching back, and the certificate
 src/billing.js       balance, ledger, gates, automatic top up
 src/jobs.js          the background runner, claimed one row at a time

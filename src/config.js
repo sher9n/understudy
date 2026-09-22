@@ -176,8 +176,14 @@ export const config = {
   SPEED_PREFILTER_X: num('SPEED_PREFILTER_X', 3),
 
   /* Jev, TypeSafe's judging model. It answers a narrow question with a probability rather than
-     writing text, which is what judging two answers and ranking models both need. Without a
-     key, the model named in EVAL_JUDGE_MODEL judges alone, as it did before. */
+     writing text, which is what judging two answers and ranking models both need.
+
+     It is reached through OpenRouter by default: the same System One API, billed to the
+     OpenRouter account the replays already use, and served there by a provider that keeps
+     nothing, which TypeSafe's own API offers only on enterprise plans. JEV_VIA picks the route:
+     'openrouter', 'typesafe' (TypeSafe's own API, with TYPESAFE_API_KEY), or 'off', in which
+     case the model named in EVAL_JUDGE_MODEL judges alone, as it did before. */
+  JEV_VIA: str('JEV_VIA', 'openrouter'),
   TYPESAFE_API_KEY: str('TYPESAFE_API_KEY', ''),
   TYPESAFE_BASE: str('TYPESAFE_BASE', 'https://api.typesafe.ai/v1'),
   JEV_MODEL: str('JEV_MODEL', 'jev-latest'),
@@ -260,6 +266,7 @@ export const canEmail = () => config.RESEND_API_KEY !== '';
 /** True when a key can be shown again after it was made. */
 export const canRevealKeys = () => config.KEY_SECRET !== '';
 /** True when Jev can be asked to judge and rank. */
-export const canJev = () => config.TYPESAFE_API_KEY !== '';
+export const canJev = () => (config.JEV_VIA === 'openrouter' ? config.OPENROUTER_API_KEY !== ''
+  : config.JEV_VIA === 'typesafe' ? config.TYPESAFE_API_KEY !== '' : false);
 
 export default config;

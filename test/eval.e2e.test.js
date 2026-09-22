@@ -36,6 +36,7 @@ process.env.EVAL_MIN_RUNS = '100';
 process.env.EVAL_MAX_USD_PER_RUN = '100';
 process.env.JOBS_ENABLED = 'false';
 // never the real Jev, whatever .env says: a test must not reach a paid service
+process.env.JEV_VIA = 'off';
 process.env.TYPESAFE_API_KEY = '';
 process.env.TYPESAFE_BASE = `http://127.0.0.1:${PORT}/typesafe`;
 process.env.ALERTS_ENABLED = 'false';
