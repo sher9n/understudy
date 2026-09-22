@@ -27,8 +27,10 @@ const vendorOf = (id) => String(id).split('/')[0];
    gpt-5.3-codex both said nothing and both thought, and mimo-v2.5 says nothing and thinks. */
 export function thinksByDefault(r) {
   if (!r) return false;
-  return r.mandatory === true || r.default_enabled === true
-    || (r.default_enabled !== false && r.default_effort !== 'none');
+  if (r.mandatory === true) return true;
+  // "on, at an effort of none" is off: gpt-5.1 says exactly that
+  if (r.default_effort === 'none') return false;
+  return r.default_enabled === true || r.default_enabled !== false;
 }
 
 /* Whether the customer's own model thinks on these calls: true, false, or null when nothing
@@ -38,14 +40,17 @@ export function thinksByDefault(r) {
  * a candidate wrongly assumed not to think can be cut off mid-answer, while this guess only
  * decides how the candidates are asked, and a measurement corrects it as soon as it has timed
  * the customer's model on the calls. */
-export function refThinksOf(refModel, measured = null) {
+export function refThinksOf(refModel, measured = null, asked = null) {
+  // the customer's own requests saying so beats everything
+  if (asked === 'off') return false;
+  if (asked === 'on') return true;
   if (measured && measured.n >= 3) return measured.share >= 0.3;
   if (!refModel) return null;
   const r = refModel.reasoning;
   if (!r) return false;
-  if (r.mandatory === true || r.default_enabled === true) return true;
+  if (r.mandatory === true) return true;
   if (r.default_enabled === false || r.default_effort === 'none') return false;
-  if (r.default_effort) return true;
+  if (r.default_enabled === true || r.default_effort) return true;
   return null;
 }
 
@@ -103,45 +108,78 @@ export function thinkingFit(model, profile, room, refThinks = null) {
   };
 }
 
+const fmt = (n) => Number(n).toLocaleString('en-US');
+const INPUT_WORDS = { image: 'images', audio: 'audio', video: 'video', file: 'files' };
+
+/* What one way of reaching a model can do, against what the workload's requests need: the
+   catalogue's entry, or one provider's. The first thing it cannot do, in words, or null. `where`
+   is put after the ability, for a model that could do it somewhere, just not privately. */
+function cannotServe(x, profile, where = '') {
+  const params = Array.isArray(x.params) ? x.params : null;
+  if (profile.tools && params && !params.includes('tools')) return `cannot call tools${where}, which your requests use`;
+  if (profile.toolChoice && params && !params.includes('tool_choice')) {
+    return `cannot be told which tool to call${where}, which your requests do`;
+  }
+  if (profile.json === 'schema' && params && !params.includes('structured_outputs') && !params.includes('response_format')) {
+    return `cannot follow a JSON schema${where}, which your requests set`;
+  }
+  if (profile.json === 'object' && params && !params.includes('response_format') && !params.includes('structured_outputs')) {
+    return `cannot be asked for JSON${where}, which your requests are`;
+  }
+  const need = Math.ceil((profile.promptMax || 0) + (profile.outCap || profile.outP95 || 0));
+  if (x.contextLen && need > x.contextLen) {
+    return `can read ${fmt(x.contextLen)} tokens${where}, and your longest call needs ${fmt(need)}`;
+  }
+  const outNeed = Math.max(profile.outCap || 0, profile.outP95 || 0);
+  if (x.maxOutput && outNeed > x.maxOutput) {
+    return `writes at most ${fmt(x.maxOutput)} tokens${where}, and your answers can run to ${fmt(outNeed)}`;
+  }
+  return null;
+}
+
 /* Everything that rules a model out, in the order it is checked. The first that applies is the
-   reason given, so the reason is always the most basic one. */
+   reason given, so the reason is always the most basic one.
+
+   When every call has to go to a provider that keeps nothing, what counts is what those
+   providers can do, not what the model can do somewhere: a catalogue entry describes all of a
+   model's providers together. gpt-4o-mini's says it calls tools, and neither of its providers
+   that keep nothing does; qwen3-30b-a3b's says it reads 131,072 tokens, and its only private
+   provider reads 40,960. The providers that can do the job are handed back as `routes`, so the
+   price and the health are read from them alone. */
 export function eligibility(model, ctx) {
   const { profile, reference, zdrKnown, zdrOnly, room, expiryMs, at, minUptime } = ctx;
   if (model.id === reference) return { ok: false, step: 'current', reason: 'is the model you use now' };
-  if (zdrOnly && zdrKnown && !(model.endpoints || []).length) {
+  const privately = zdrOnly && zdrKnown;
+  if (privately && !(model.endpoints || []).length) {
     return { ok: false, step: 'private', reason: 'has no provider that keeps nothing, so every call to it is refused' };
   }
-  const params = Array.isArray(model.params) ? model.params : null;
-  if (profile.tools && params && !params.includes('tools')) {
-    return { ok: false, step: 'features', reason: 'cannot call tools, which your requests use' };
+  const inputs = profile.inputs || (profile.images ? ['image'] : []);
+  if (Array.isArray(model.inputs)) {
+    const missing = inputs.find((x) => !model.inputs.includes(x));
+    if (missing) return { ok: false, step: 'features', reason: `cannot read ${INPUT_WORDS[missing] || missing}, which your requests send` };
   }
-  if (profile.toolChoice && params && !params.includes('tool_choice')) {
-    return { ok: false, step: 'features', reason: 'cannot be told which tool to call, which your requests do' };
-  }
-  if (profile.json === 'schema' && params && !params.includes('structured_outputs') && !params.includes('response_format')) {
-    return { ok: false, step: 'features', reason: 'cannot follow a JSON schema, which your requests set' };
-  }
-  if (profile.json === 'object' && params && !params.includes('response_format') && !params.includes('structured_outputs')) {
-    return { ok: false, step: 'features', reason: 'cannot be asked for JSON, which your requests are' };
-  }
-  if (profile.images && Array.isArray(model.inputs) && !model.inputs.includes('image')) {
-    return { ok: false, step: 'features', reason: 'cannot read images, which your requests send' };
-  }
-  const need = Math.ceil((profile.promptMax || 0) + (profile.outCap || profile.outP95 || 0));
-  if (model.contextLen && need > model.contextLen) {
-    return { ok: false, step: 'features', reason: `can read ${model.contextLen.toLocaleString('en-US')} tokens, and your longest call needs ${need.toLocaleString('en-US')}` };
-  }
-  const outNeed = Math.max(profile.outCap || 0, profile.outP95 || 0);
-  if (model.maxOutput && outNeed > model.maxOutput) {
-    return { ok: false, step: 'features', reason: `writes at most ${model.maxOutput.toLocaleString('en-US')} tokens, and your answers can run to ${outNeed.toLocaleString('en-US')}` };
+  let routes = null;
+  if (privately) {
+    // a provider that does not say what it supports is taken to support what the model does
+    const asRoute = (e) => ({ params: e.params ?? model.params, contextLen: e.context_len ?? model.contextLen, maxOutput: e.max_output ?? model.maxOutput });
+    const eps = model.endpoints;
+    const why = eps.map((e) => cannotServe(asRoute(e), profile));
+    routes = eps.filter((e, i) => why[i] === null);
+    if (!routes.length) {
+      const anywhere = cannotServe(model, profile) === null;
+      return { ok: false, step: 'features', reason: cannotServe(asRoute(eps[0]), profile, anywhere ? ' at any provider that keeps nothing' : '') };
+    }
+  } else {
+    const why = cannotServe(model, profile);
+    if (why) return { ok: false, step: 'features', reason: why };
   }
   const think = thinkingFit(model, profile, room, ctx.refThinks ?? null);
   if (!think.ok) return { ok: false, step: 'thinking', reason: think.reason };
   if (model.expiresAt && model.expiresAt - at < expiryMs) {
     return { ok: false, step: 'retiring', reason: 'is being retired soon' };
   }
-  if (zdrOnly && zdrKnown) {
-    const h = healthOf(model);
+  if (privately) {
+    const h = healthOf({ endpoints: routes });
     if (h.bestUptime !== null && h.bestUptime < minUptime) {
       return { ok: false, step: 'health', reason: `answered only ${h.bestUptime.toFixed(1)}% of calls over the last day at its best provider` };
     }
@@ -149,7 +187,9 @@ export function eligibility(model, ctx) {
       return { ok: false, step: 'health', reason: 'has no provider answering reliably right now' };
     }
   }
-  return { ok: true, recipe: think.recipe, note: think.note || null, thinks: !!think.thinks, mustThink: !!think.mustThink };
+  return {
+    ok: true, recipe: think.recipe, note: think.note || null, thinks: !!think.thinks, mustThink: !!think.mustThink, routes,
+  };
 }
 
 /* The chance a model gives answers the customer would accept in place of their own model's.
@@ -261,18 +301,31 @@ export function selectCandidates(input) {
   /* The price a routed call would really cost: through a provider that keeps nothing, when we
      know which those are. When that list has never been read, the catalogue's price is the best
      there is, and ruling every model out for want of a list would measure nothing. */
-  const priceOf = (m) => (zdrOnly && facts.zdrKnown
-    ? routedCallPrice(m, pin, pout, profile.hours, { zdrOnly })
+  const priceOf = (m, routes = null) => (zdrOnly && facts.zdrKnown
+    ? routedCallPrice(routes ? { ...m, endpoints: routes } : m, pin, pout, profile.hours, { zdrOnly })
     : callPrice(m, pin, pout, profile.hours));
-  const refPrice = refModel ? (priceOf(refModel) ?? callPrice(refModel, pin, pout, profile.hours)) : null;
-  const refHealth = refModel ? healthOf(refModel) : null;
+  // the customer's model, through the providers that can serve these requests
+  const refRoutes = refModel ? (refModel.endpoints || []).filter((e) => cannotServe(
+    { params: e.params ?? refModel.params, contextLen: e.context_len ?? refModel.contextLen, maxOutput: e.max_output ?? refModel.maxOutput },
+    profile) === null) : [];
+  /* What a call on the customer's model costs. A model the catalogue does not list (a free
+     variant, an alias, one we cannot reach) is priced from what its calls have actually cost,
+     because without a price nothing can be ruled out as dearer, and ranking by chance alone
+     favours the dearest models. */
+  const refPrice = (refModel
+    ? (priceOf(refModel, refRoutes.length ? refRoutes : null) ?? callPrice(refModel, pin, pout, profile.hours))
+    : null) || profile.refCostPerCall || null;
+  const refHealth = refModel ? healthOf(refRoutes.length ? { endpoints: refRoutes } : refModel) : null;
 
   const funnel = [];
   const excluded = [];
   const count = (step, label, left) => funnel.push({ step, label, left });
 
   const all = [...facts.models.values()];
-  const pool = all.filter((m) => (enabled === null || enabled.has(m.id)) && m.id !== reference);
+  /* The model serving the workload now is always checked again, even if it has since been
+     switched off in Models, become dearer or been set aside: a model left serving unmeasured is
+     the one that can quietly cost the customer. */
+  const pool = all.filter((m) => (enabled === null || enabled.has(m.id) || m.id === serving) && m.id !== reference);
   count('enabled', 'switched on in Models', pool.length);
 
   const kept = [];
@@ -284,7 +337,7 @@ export function selectCandidates(input) {
       byStep.set(e.step, (byStep.get(e.step) || 0) + 1);
       continue;
     }
-    kept.push({ m, recipe: e.recipe, note: e.note, thinks: e.thinks, mustThink: e.mustThink });
+    kept.push({ m, recipe: e.recipe, note: e.note, thinks: e.thinks, mustThink: e.mustThink, routes: e.routes || null });
   }
   let left = pool.length;
   for (const [step, label] of [
@@ -301,7 +354,13 @@ export function selectCandidates(input) {
   // cheaper, at the price we would actually pay
   const priced = [];
   for (const k of kept) {
-    const price = priceOf(k.m);
+    const price = priceOf(k.m, k.routes);
+    const isServing = k.m.id === serving;
+    if (isServing) {
+      // measured again whatever it costs now: the measurement finds out what it really costs
+      priced.push({ ...k, price: price > 0 ? price : callPrice(k.m, pin, pout, profile.hours) });
+      continue;
+    }
     if (price === null || !(price > 0)) {
       excluded.push({ model: k.m.id, step: 'price', reason: 'has no price we could reach it at' });
       continue;
@@ -316,15 +375,15 @@ export function selectCandidates(input) {
 
   // switched back once already on this workload: not tried again
   const fresh = priced.filter((k) => {
-    if (!reverted.has(k.m.id)) return true;
+    if (!reverted.has(k.m.id) || k.m.id === serving) return true;
     excluded.push({ model: k.m.id, step: 'reverted', reason: 'was switched to before on this workload and switched back' });
     return false;
   });
 
   // far too slow to start or to write, going by its providers' published speeds
   const quick = fresh.filter((k) => {
-    if (!speed || !speed.factor || !refHealth) return true;
-    const h = healthOf(k.m);
+    if (!speed || !speed.factor || !refHealth || k.m.id === serving) return true;
+    const h = healthOf(k.routes ? { endpoints: k.routes } : k.m);
     const x = config.SPEED_PREFILTER_X;
     /* The published time to a first word is of a model left to think. One that will be asked
        not to, or to think less, starts sooner than that, so it is not ruled out on it. */
@@ -348,10 +407,10 @@ export function selectCandidates(input) {
      answers, and it is forgotten once the providers have had time to recover. */
   const ranked = quick.map((k) => {
     const c = chanceOf(k.m, { ...ctx, reference });
-    const sp = speedChanceOf(k.m, k.recipe, { speed, speedHistory, refHealth, profile, config });
+    const reach = k.routes ? { ...k.m, endpoints: k.routes } : k.m;
+    const sp = speedChanceOf(reach, k.recipe, { speed, speedHistory, refHealth, profile, config });
     const wasBusy = busy?.get(k.m.id) || null;
-    const reach = wasBusy ? 0.35 : 1;
-    const overall = c.chance * (sp ? sp.p : 1) * reach;
+    const overall = c.chance * (sp ? sp.p : 1) * (wasBusy ? 0.35 : 1);
     const saving = refPrice === null ? null : refPrice - k.price;
     return {
       model: k.m.id,
@@ -371,7 +430,7 @@ export function selectCandidates(input) {
       note: k.note,
       thinks: k.thinks,
       mustThink: !!k.mustThink,
-      health: healthOf(k.m),
+      health: healthOf(reach),
     };
   }).sort((a, b) => b.expected - a.expected || a.price - b.price);
 

@@ -234,8 +234,11 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
   const px = x.at;
   const py = (v) => CH - CB - (v / ymax) * (CH - CB - CT);
   const yticks = [0, ymax / 4, ymax / 2, (ymax * 3) / 4, ymax];
+  /* A model that matched but was too slow is drawn in the same colour the table gives it: it
+     can sit under the bar, because its answers were close enough, and red there read as a
+     contradiction of the line it sits under. */
   const tone = (r) => (r.model === reference || r.verdict === 'reference' ? 'cur'
-    : r.verdict === 'cleared' ? 'pass' : r.verdict === 'review' ? 'near' : 'fail');
+    : r.verdict === 'cleared' ? 'pass' : r.verdict === 'review' || r.verdict === 'slower' ? 'near' : 'fail');
   const colour = { cur: 'var(--mut)', pass: 'var(--brand)', near: 'var(--warn)', fail: 'var(--bad)' };
 
   const barText = `YOUR BAR · ${floor.toFixed(2)}%`;
@@ -264,7 +267,7 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
       onFocus={(e) => { if (e.currentTarget.matches(':focus-visible')) setAt((i) => (i === null ? 0 : i)); }}
       onBlur={() => setAt(null)}>
     <svg viewBox={`0 0 ${CW} ${CH}`} width="100%" role="img"
-      aria-label={`Every model tested, placed by cost a month and how far it drifted. Anything below the dashed line cleared your bar.${x.log ? ' Cost is drawn in steps of ten, so each price marked along the bottom is ten times the one before it.' : ''}`}>
+      aria-label={`Every model tested, placed by cost a month and how far it drifted. Anything below the dashed line answered within your bar, and a model marked slower did so but took too long.${x.log ? ' Cost is drawn in steps of ten, so each price marked along the bottom is ten times the one before it.' : ''}`}>
       {yticks.map((v) => (
         <g key={v}>
           <line x1={CL} y1={py(v)} x2={CW - CR} y2={py(v)} stroke="var(--line)" strokeWidth="1" />

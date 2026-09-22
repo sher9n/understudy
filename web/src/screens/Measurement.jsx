@@ -186,7 +186,7 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
                     + (quietFor(live) >= 60000
                       ? ` If nothing is running it any more, it is closed ${num(live.staleMin || 15)} minutes after it was last heard from.`
                       : '')
-                  : `${whereTheCountComesFrom(live)} You can leave this page; it keeps going.`}
+                  : `${whereTheCountComesFrom(live, w.shape === 'free text')} You can leave this page; it keeps going.`}
               </p>
             )}
           </div>
@@ -200,8 +200,8 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
             {m.canRun ? (
               <p className="mwhy">
                 {num(m.sample)} of this workload&rsquo;s {num(m.pool)} calls are replayed:
-                twice on {shortName(w.reference)} to set the bar, then on up to{' '}
-                {num(m.models)} cheaper models, dropping any that cannot win.
+                twice on {shortName(w.reference)} to set the bar, then on cheaper models until{' '}
+                {num(m.models)} {m.models === 1 ? 'has' : 'have'} answered every call, dropping any that cannot win.
                 {w.shape === 'free text'
                   ? ' Written answers cannot be compared word for word, so a judge also compares each pair.'
                   : ''}{' '}
@@ -261,7 +261,7 @@ const STOPPED = 'Stopped. You were charged only for the calls it made, and nothi
 /* What the count on a running measurement is made of, in numbers. Your own model answers each
    sampled call twice, each candidate answers it once, and for written answers a judge model
    compares the pairs: the count is all of those, and the judge is usually most of it. */
-function whereTheCountComesFrom(live) {
+function whereTheCountComesFrom(live, freeText = false) {
   const sample = Number(live.sample) || 0;
   const models = Number(live.models) || 0;
   const replays = sample * (2 + models);
@@ -271,7 +271,8 @@ function whereTheCountComesFrom(live) {
   if (!sample) return `Your own model answers each sampled call twice to set the bar, then ${race}.`;
   const base = `Your own model answers each of ${num(sample)} sampled calls twice to set the bar, then ${race}, `
     + `until ${num(models)} ${models === 1 ? 'has' : 'have'} answered every call. The count grows by the calls a dropped model made.`;
-  const judging = judged > 0
+  // only written answers are judged; a model dropped part way also adds calls to the count
+  const judging = freeText && judged > 0
     ? ' Written answers cannot be compared word for word, so a judge also compares each pair, and each comparison counts as a call.'
     : '';
   return `${base}${judging} Answers already paid for are reused and cost nothing.`;

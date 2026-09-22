@@ -24,6 +24,7 @@ const secs = (ms) => (ms === null || ms === undefined ? null : `${(ms / 1000).to
    models to, so a model marked slower is slower in the column beside it. */
 const timedToFirstWord = (cert) => cert?.plan?.speed?.metric === 'ttft' && !!cert?.refSpeed?.ttftP50;
 const typical = (x, cert) => (timedToFirstWord(cert) ? x?.ttftP50 : x?.latencyP50);
+const slowOf = (x, cert) => (timedToFirstWord(cert) ? x?.ttftP90 : x?.latencyP90);
 
 /* Why a model got the verdict it did, in a few words under the verdict. */
 function whyOf(r, refSpeed, cert) {
@@ -36,13 +37,26 @@ function whyOf(r, refSpeed, cert) {
   if (r.verdict === 'slower') {
     const mine = typical(r, cert);
     const theirs = typical(refSpeed, cert);
+    const factor = cert?.plan?.speed?.factor || 1.5;
+    /* Slow at the end rather than typically: most calls as quick as allowed, too many far slower.
+       Said as it is, because a typical time as good as yours under "Slower than yours" reads as
+       a mistake. */
+    if (mine && theirs && mine <= theirs * factor + 300) {
+      const end = slowOf(r, cert);
+      const theirsEnd = slowOf(refSpeed, cert);
+      if (end && theirsEnd) return `Usually quick enough, but one call in ten took ${secs(end)}, against ${secs(theirsEnd)} for yours`;
+    }
     const what = timedToFirstWord(cert) ? 'Starts answering in' : 'Typically';
     return mine && theirs ? `${what} ${secs(mine)}, against ${secs(theirs)} for yours` : 'Slower than your speed setting allows';
   }
   if (r.stopped === 'bar') return `Stopped after ${r.runs} of ${cert.sampleSize} calls, once it could not reach your bar`;
   if (r.verdict === 'missed' && r.difference) return `Mostly ${r.difference}`;
-  if (r.thinking === 'off') return 'Measured with its thinking switched off, like your model';
-  if (r.thinking === 'light') return 'Has to think, so it was measured thinking as little as it allows';
+  if (r.thinking && r.thinking !== 'default') {
+    // why thinking was changed, as the plan said it: because of the cap, or to match your model
+    const planned = cert?.plan?.order?.find((o) => o.model === r.model);
+    if (planned?.note) return planned.note.charAt(0).toUpperCase() + planned.note.slice(1);
+    return r.thinking === 'off' ? 'Measured with its thinking switched off' : 'Measured thinking as little as it allows';
+  }
   if (r.difference && r.gap > 0) return `Where it differed: ${r.difference}`;
   return null;
 }
@@ -88,7 +102,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
     rounds: 1, sampleSize: runData.sample, floor: runData.floor, noise: runData.noise,
     reference: runData.reference, finishedAt: runData.finishedAt,
     referenceCostMonth: runData.referenceCostMonth, results: runData.results,
-    refSpeed: runData.refSpeed, reused: runData.reused, saved: runData.saved,
+    refSpeed: runData.refSpeed, reused: runData.reused, saved: runData.saved, plan: runData.plan,
   } : w.certificate;
   /* Whether the measurement shown tried any model. One that could not set a bar, ran out of
      balance or was stopped early tried none, and the sections below say why instead of
@@ -369,6 +383,21 @@ const blurb = (w, cand, switched) => {
      measurement actually found. */
   if ((w.certificate?.outcome === 'unmeasurable' || w.certificate?.outcome === 'refused') && w.certificate.nothing) {
     return w.certificate.nothing;
+  }
+  /* Said from what the models actually did: "drifted" is only true of the ones whose answers
+     missed. A model that matched but was too slow, or whose provider could not be reached, did
+     not drift at all. */
+  const rs = w.certificate?.results || [];
+  const matchedSlow = rs.some((r) => r.verdict === 'slower' && !r.stopped);
+  const missed = rs.some((r) => r.verdict === 'missed');
+  if (rs.length && rs.every((r) => r.verdict === 'failed')) {
+    return 'None of the models we tried could be reached this time: their providers refused them or were too busy. We try again on the next measurement.';
+  }
+  if (matchedSlow && !missed) {
+    return 'The models whose answers matched yours were slower than your speed setting allows. A setting that allows more time would let them through; otherwise we keep trying as faster models land.';
+  }
+  if (matchedSlow) {
+    return 'No model we tried both matched your answers and kept to your speed setting. We keep trying as new models land.';
   }
   return 'Every model we tried drifted further from your own model than your bar allows. We keep trying as new models land.';
 };

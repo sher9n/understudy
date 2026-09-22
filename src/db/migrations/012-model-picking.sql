@@ -171,3 +171,15 @@ ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS ref_error TEXT;           -- why 
 -- measured: a model measured with its thinking off is routed with its thinking off.
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS speed_pref TEXT;
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS routed_recipe TEXT;
+
+-- how long a live streamed call took to its first word, which is what the live watch holds a
+-- streamed workload to after a switch
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS ttft_ms INTEGER;
+
+-- the lookups the picking makes on every workload page and every measurement: which answers to
+-- a workload's calls are already paid for, what recent measurements found, and Jev's readings
+CREATE INDEX IF NOT EXISTS ix_replay_cache_call ON replay_cache (call_id, model_id);
+CREATE INDEX IF NOT EXISTS ix_results_run ON eval_results (run_id);
+CREATE INDEX IF NOT EXISTS ix_runs_time ON eval_runs (created_at);
+CREATE INDEX IF NOT EXISTS ix_runs_shape ON eval_runs (shape_kind, created_at);
+CREATE INDEX IF NOT EXISTS ix_model_fits_task ON model_fits (task_key);

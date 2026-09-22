@@ -33,6 +33,8 @@ handle('eval_run', async ({ workloadId, trigger }, job) =>
 
 handle('catalog_sync', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
+  // the next reading is booked first, so one that fails still leaves the next one coming
+  await enqueue('catalog_sync', {}, { runAfter: now() + config.CATALOG_SYNC_HOURS * 3600000, unique: true });
   /* This is the earliest thing that breaks when the key is wrong or the credit is gone, and
      it breaks silently: the prices simply stop moving. Worth hearing about on its own. */
   let list;
@@ -47,9 +49,8 @@ handle('catalog_sync', async () => {
   }
   const n = await saveCatalog(list);
   forgetFacts();
-  await enqueue('catalog_sync', {}, { runAfter: now() + config.CATALOG_SYNC_HOURS * 3600000, unique: true });
   // which providers keep nothing depends on the models, so it is read again straight after
-  await enqueue('model_health', {}, { unique: true });
+  await enqueue('model_health', {}, { unique: true, sooner: true });
   return { ok: true, models: n };
 });
 
@@ -60,12 +61,12 @@ handle('catalog_sync', async () => {
  * would rule out every model, and yesterday's is far closer to the truth than none. */
 handle('model_health', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
+  await enqueue('model_health', {}, { runAfter: now() + config.HEALTH_TTL_MIN * 60000, unique: true });
   const rows = await fetchZdrEndpoints();
   if (rows.length) {
     await saveZdrEndpoints(rows);
     forgetFacts();
   }
-  await enqueue('model_health', {}, { runAfter: now() + config.HEALTH_TTL_MIN * 60000, unique: true });
   return { ok: true, providers: rows.length };
 });
 

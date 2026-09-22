@@ -32,22 +32,22 @@ export async function workloadFor(workspaceId, body) {
 export async function recordCall({
   workspaceId, workloadId = null, source, requestedModel = null, servedModel = null,
   statusCode = null, promptTokens = 0, completionTokens = 0, costUsd = 0, chargedUsd = 0,
-  latencyMs = null, request = null, response = null,
+  latencyMs = null, ttftMs = null, request = null, response = null,
 }) {
   const row = {
     id: id('call'), workspace_id: workspaceId, workload_id: workloadId, source,
     requested_model: requestedModel, served_model: servedModel, status_code: statusCode,
     prompt_tokens: promptTokens | 0, completion_tokens: completionTokens | 0,
-    cost_usd: round8(costUsd), charged_usd: round8(chargedUsd), latency_ms: latencyMs,
+    cost_usd: round8(costUsd), charged_usd: round8(chargedUsd), latency_ms: latencyMs, ttft_ms: ttftMs,
     request_json: request ? JSON.stringify(request) : null,
     response_json: response ? JSON.stringify(response) : null,
     created_at: now(),
   };
   await db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model,
-      status_code, prompt_tokens, completion_tokens, cost_usd, charged_usd, latency_ms,
+      status_code, prompt_tokens, completion_tokens, cost_usd, charged_usd, latency_ms, ttft_ms,
       request_json, response_json, created_at)
       VALUES (@id, @workspace_id, @workload_id, @source, @requested_model, @served_model,
-      @status_code, @prompt_tokens, @completion_tokens, @cost_usd, @charged_usd, @latency_ms,
+      @status_code, @prompt_tokens, @completion_tokens, @cost_usd, @charged_usd, @latency_ms, @ttft_ms,
       @request_json, @response_json, @created_at)`).run(row);
   if (workloadId) await db.prepare('UPDATE workloads SET updated_at = ? WHERE id = ?').run(now(), workloadId);
   return row.id;

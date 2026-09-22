@@ -5,8 +5,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 process.env.JOBS_ENABLED = 'false';
+process.env.TYPESAFE_API_KEY = '';
+process.env.ALERTS_ENABLED = 'false';
 const { thinkingFit, eligibility, chanceOf, selectCandidates, refThinksOf, speedChanceOf, recipeKind } = await import('../src/eval/select.js');
 const { slowEndCount } = await import('../src/eval/run.js');
+const { failingClearly, tailAtLeast } = await import('../src/eval/promote.js');
+const { thinkingAsked, profileFromRows } = await import('../src/eval/profile.js');
 const { callPrice, routedCallPrice, healthOf } = await import('../src/models/facts.js');
 const { numbersOf, numbersDiffer } = await import('../src/eval/judge.js');
 const { replayKey } = await import('../src/eval/replay.js');
@@ -302,3 +306,110 @@ test('one slow call is never enough to call a model slow', () => {
   assert.equal(slowEndCount(12), 4);
   for (let n = 1; n <= 40; n += 1) assert.ok(slowEndCount(n) >= 2, `n=${n}`);
 });
+
+test('what a model can do is read from the providers every call has to use', () => {
+  // the catalogue says it calls tools; its only providers that keep nothing do not
+  const mini = model('openai/gpt-4o-mini', {
+    endpoints: [ep({ params: ['response_format', 'structured_outputs'] }), ep({ tag: 'q', params: ['response_format'] })],
+  });
+  const e = eligibility(mini, ctx({ profile: profile({ tools: true }) }));
+  assert.equal(e.ok, false);
+  assert.equal(e.step, 'features');
+  assert.match(e.reason, /cannot call tools at any provider that keeps nothing/);
+  // one private provider that can is enough, and only that one is priced and timed
+  const some = model('x/some', {
+    endpoints: [ep({ params: ['response_format'], price_in: 1e-9, price_out: 1e-9 }), ep({ tag: 'q', params: ['tools', 'response_format'] })],
+  });
+  const ok = eligibility(some, ctx({ profile: profile({ tools: true }) }));
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.routes.map((r) => r.tag), ['q']);
+  // a shorter context at the private provider than in the catalogue
+  const short = model('x/short-private', { contextLen: 131072, endpoints: [ep({ context_len: 40960, params: ['tools'] })] });
+  const s = eligibility(short, ctx({ profile: profile({ promptMax: 60000 }) }));
+  assert.equal(s.ok, false);
+  assert.match(s.reason, /can read 40,960 tokens at any provider that keeps nothing/);
+  // hearing is not seeing
+  const eyes = model('x/eyes', { inputs: ['text', 'image'] });
+  assert.equal(eligibility(eyes, ctx({ profile: profile({ inputs: ['audio'] }) })).step, 'features');
+  assert.equal(eligibility(eyes, ctx({ profile: profile({ inputs: ['image'] }) })).ok, true);
+});
+
+test('the model serving a workload is always measured again, whatever it costs now', () => {
+  const models = new Map();
+  const ref = model('openai/gpt-5.4', { endpoints: [ep({ price_in: 1e-7, price_out: 1e-7 })] });
+  models.set(ref.id, ref);
+  // dearer than the customer's model now, switched off in Models, and set aside before
+  models.set('x/serving', model('x/serving', { endpoints: [ep({ price_in: 5e-7, price_out: 5e-7 })] }));
+  models.set('x/cheap', model('x/cheap', { endpoints: [ep({ price_in: 1e-8, price_out: 1e-8 })] }));
+  const sel = selectCandidates({
+    facts: { models, zdrKnown: true }, profile: profile(), reference: 'openai/gpt-5.4', enabled: new Set(['x/cheap']),
+    want: 2, serving: 'x/serving', reverted: new Set(['x/serving']), config, at: Date.now(),
+  });
+  assert.equal(sel.order[0].model, 'x/serving');
+  assert.ok(sel.order.some((r) => r.model === 'x/cheap'));
+});
+
+test('a customer model the catalogue cannot price is priced from what its calls cost', () => {
+  const models = new Map([['x/cheap', model('x/cheap', { endpoints: [ep({ price_in: 1e-8, price_out: 1e-8 })] })],
+    ['x/dear', model('x/dear', { endpoints: [ep({ price_in: 1e-5, price_out: 1e-5 })] })]]);
+  const sel = selectCandidates({
+    facts: { models, zdrKnown: true }, profile: profile({ refCostPerCall: 1e-4 }), reference: 'someone/unlisted',
+    enabled: null, want: 2, config, at: Date.now(),
+  });
+  assert.deepEqual(sel.order.map((r) => r.model), ['x/cheap']);
+  assert.equal(sel.excluded.find((e) => e.model === 'x/dear')?.step, 'price');
+});
+
+test('on at an effort of none is off, and the customer saying so decides', () => {
+  const gpt51 = model('openai/gpt-5.1', { reasoning: { mandatory: false, default_enabled: true, supported_efforts: ['high', 'none'], default_effort: 'none' } });
+  assert.equal(refThinksOf(gpt51), false);
+  assert.equal(thinkingFit(gpt51, profile(), 4000, false).recipe, null, 'nothing to switch off');
+  assert.equal(refThinksOf(model('openai/gpt-4.1'), null, 'on'), true);
+  assert.equal(refThinksOf(model('x/r', { reasoning: { mandatory: true } }), { share: 1, n: 9 }, 'off'), false);
+});
+
+test('the live watch switches back on clear evidence only', () => {
+  assert.equal(failingClearly(2, 20, 0), false, 'two failures in twenty is a blip, not a pattern');
+  assert.equal(failingClearly(4, 20, 0), false, 'still fewer than five');
+  assert.equal(failingClearly(8, 40, 0), true, 'eight in forty against a clean record is');
+  assert.equal(failingClearly(5, 100, 0.04), false, 'five in a hundred is what it did before');
+  assert.equal(failingClearly(12, 100, 0.04), true, 'three times the rate before is not chance');
+  assert.ok(tailAtLeast(0, 10, 0.5) === 1 && tailAtLeast(11, 10, 0.5) === 0);
+  assert.ok(Math.abs(tailAtLeast(1, 3, 0.5) - 0.875) < 1e-12);
+});
+
+test('a request says whether to think only when it says so', () => {
+  assert.equal(thinkingAsked({ reasoning: { enabled: false } }), 'off');
+  assert.equal(thinkingAsked({ reasoning_effort: 'none' }), 'off');
+  assert.equal(thinkingAsked({ reasoning: { effort: 'low' } }), 'on');
+  assert.equal(thinkingAsked({ reasoning: { max_tokens: 2000 } }), 'on');
+  assert.equal(thinkingAsked({ reasoning: { exclude: true } }), null, 'hiding the notes is not a thinking setting');
+  assert.equal(thinkingAsked({ include_reasoning: false }), null);
+  const rows = (bodies) => bodies.map((b, i) => ({ request_json: JSON.stringify(b), created_at: Date.now() - i, status_code: 200 }));
+  const w = { id: 'wl_x', slug: 'x', shape_kind: 'free_text', reference_model: 'm/ref' };
+  assert.equal(profileFromRows(w, rows([{ reasoning: { exclude: true } }, {}])).reasoningSet, false);
+  assert.equal(profileFromRows(w, rows([{ reasoning: { effort: 'high' } }])).reasoningSet, true);
+  assert.equal(profileFromRows(w, rows([{ reasoning: { enabled: false } }])).thinking, 'off');
+  assert.equal(profileFromRows(w, rows([{ reasoning: { enabled: false } }, { reasoning: { effort: 'high' } }])).thinking, 'mixed');
+  // what a request sends besides text, each kind on its own
+  const audio = profileFromRows(w, rows([{ messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: {} }] }] }]));
+  assert.deepEqual(audio.inputs, ['audio']);
+  assert.equal(audio.images, false);
+  // the key Jev's readings are kept under does not move with every new call
+  const k1 = profileFromRows(w, rows([{ messages: [{ role: 'user', content: 'a' }] }])).taskKey;
+  const k2 = profileFromRows(w, rows([{ messages: [{ role: 'user', content: 'b' }] }, { messages: [{ role: 'user', content: 'a' }] }])).taskKey;
+  assert.equal(k1, k2);
+});
+
+test('price windows that end at midnight, or name no days, are read', () => {
+  const hy3 = { priceIn: 1.32e-7, priceOut: 0, overrides: [
+    { utc_start: 0, utc_end: 1600, prompt: '0.000000132', completion: '0' },
+    { utc_start: 1600, utc_end: 0, prompt: '0.0000000825', completion: '0' }] };
+  const at = (day, hour) => { const h = new Array(168).fill(0); h[day * 24 + hour] = 1; return h; };
+  assert.ok(Math.abs(callPrice(hy3, 1e6, 0, at(1, 20)) - 0.0825) < 1e-9, 'evening, every day');
+  assert.ok(Math.abs(callPrice(hy3, 1e6, 0, at(4, 9)) - 0.132) < 1e-9, 'morning');
+  const wrap = { priceIn: 1e-6, priceOut: 0, overrides: [{ utc_days: ['monday'], utc_start: 2200, utc_end: 200, prompt: '0.0000005', completion: '0' }] };
+  assert.ok(Math.abs(callPrice(wrap, 1e6, 0, at(1, 23)) - 0.5) < 1e-9, 'a window past midnight');
+  assert.ok(Math.abs(callPrice(wrap, 1e6, 0, at(1, 12)) - 1) < 1e-9);
+});
+

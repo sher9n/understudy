@@ -105,8 +105,17 @@ export function callPrice(p, promptTokens, completionTokens, hours = null) {
     pout = Number(tiers[0].completion ?? pout);
   }
 
-  const timed = overrides.filter((o) => o && Array.isArray(o.utc_days));
+  /* A window of hours, on some days or on every day. One that ends at 0 ends at midnight, and one
+     that ends before it starts runs past midnight: tencent/hy3 is cheaper from 16:00 to 0, every
+     day, and read literally that window never matched an hour. */
+  const timed = overrides.filter((o) => o && (Array.isArray(o.utc_days) || o.utc_start != null || o.utc_end != null));
   if (!timed.length) return pin * promptTokens + pout * completionTokens;
+  const inWindow = (o, day, minute) => {
+    if (Array.isArray(o.utc_days) && !o.utc_days.map((d) => String(d).toLowerCase()).includes(day)) return false;
+    const start = o.utc_start == null ? 0 : minutesOf(o.utc_start);
+    const end = o.utc_end == null ? 1440 : minutesOf(o.utc_end);
+    return end > start ? minute >= start && minute < end : minute >= start || minute < end;
+  };
   let total = 0;
   let weight = 0;
   for (let h = 0; h < 168; h += 1) {
@@ -114,9 +123,7 @@ export function callPrice(p, promptTokens, completionTokens, hours = null) {
     if (!w) continue;
     const day = DAYS[Math.floor(h / 24)];
     const minute = (h % 24) * 60 + 30;
-    const hit = timed.find((o) => o.utc_days.map((d) => String(d).toLowerCase()).includes(day)
-      && (o.utc_start == null || minute >= minutesOf(o.utc_start))
-      && (o.utc_end == null || minute < minutesOf(o.utc_end)));
+    const hit = timed.find((o) => inWindow(o, day, minute));
     const hi = hit ? Number(hit.prompt ?? pin) : pin;
     const ho = hit ? Number(hit.completion ?? pout) : pout;
     total += w * (hi * promptTokens + ho * completionTokens);

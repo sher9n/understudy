@@ -79,6 +79,7 @@ export default function HowWePick({ w, m, onChanged }) {
   const s = m.selection;
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [speedErr, setSpeedErr] = useState(null);
   if (!s) return null;
   const want = s.want;
   const first = s.funnel[0]?.left ?? 0;
@@ -95,7 +96,15 @@ export default function HowWePick({ w, m, onChanged }) {
 
   const setSpeed = async (pref) => {
     setSaving(true);
-    try { await api.setSpeed(w.id, pref); if (onChanged) await onChanged(); } finally { setSaving(false); }
+    setSpeedErr(null);
+    try {
+      await api.setSpeed(w.id, pref);
+      if (onChanged) await onChanged();
+    } catch (e) {
+      setSpeedErr(`That did not save: ${e.message || 'the server did not answer'}. Try again.`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -114,7 +123,7 @@ export default function HowWePick({ w, m, onChanged }) {
             state, which leaves {num(left)}. Nothing here is a guess: it is read from each model&rsquo;s
             published facts and from your own requests.
           </p>
-          <div className="hwpfun" aria-label="How many models are left after each check">
+          <div className="hwpfun" role="img" aria-label={`How many models are left after each check: ${s.funnel.map((f) => `${f.left} ${f.label}`).join(', ')}`}>
             {s.funnel.map((f) => (
               <div className="hwpfr" key={f.step}>
                 <span className="hwpfb"><i style={{ width: `${first ? (f.left / first) * 100 : 0}%` }} /></span>
@@ -213,7 +222,9 @@ export default function HowWePick({ w, m, onChanged }) {
                 ? `Automatic is ${autoIs} here, because your calls ${s.streamed ? 'are streamed and somebody watches the words appear' : 'are not streamed'}. `
                 : ''}
               Right now: {speedText}{s.speed?.metric === 'ttft' ? ', timed to the first word' : ', timed to the whole answer'}.
+              {m.running ? ' A measurement already running keeps the setting it started with.' : ''}
             </span>
+            {speedErr && <span className="hwpserr" role="alert">{speedErr}</span>}
           </div>
         </li>
 

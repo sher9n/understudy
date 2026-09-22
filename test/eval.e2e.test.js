@@ -35,6 +35,10 @@ process.env.EVAL_SAMPLE_SIZE = '100';
 process.env.EVAL_MIN_RUNS = '100';
 process.env.EVAL_MAX_USD_PER_RUN = '100';
 process.env.JOBS_ENABLED = 'false';
+// never the real Jev, whatever .env says: a test must not reach a paid service
+process.env.TYPESAFE_API_KEY = '';
+process.env.TYPESAFE_BASE = `http://127.0.0.1:${PORT}/typesafe`;
+process.env.ALERTS_ENABLED = 'false';
 
 const { db, now } = await import('../src/db/index.js');
 const { default: migrate } = await import('../src/db/migrate.js');
@@ -43,7 +47,8 @@ const { workloadFor, recordCall } = await import('../src/traffic.js');
 const { saveCatalog } = await import('../src/openrouter.js');
 const { runEvaluation, stopMeasuring, closeAbandoned } = await import('../src/eval/run.js');
 const { move, withFee } = await import('../src/billing.js');
-const { enqueue } = await import('../src/jobs.js');
+const { enqueue, handle, runOnce } = await import('../src/jobs.js');
+const { promote, revert } = await import('../src/eval/promote.js');
 const { considerMeasuring } = await import('../src/proxy.js');
 
 await migrate({ quiet: true });
@@ -71,6 +76,10 @@ let releaseAt = null;
 let holdModel = null;
 const seenBy = new Map();
 const holdCall = (model, ahead) => { holdModel = { model, n: (seenBy.get(model) || 0) + ahead }; };
+/* Or it fails the next calls to one model with the status given, one per entry: a provider that
+   is busy (503), refuses the model (404), or refuses our own account (402). */
+const faults = new Map();
+const failNext = (model, status, times = 1) => { faults.set(model, [...(faults.get(model) || []), ...Array(times).fill(status)]); };
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
@@ -85,6 +94,14 @@ const server = http.createServer((req, res) => {
       await gate;
     }
     if (hold) { held += 1; await hold; }
+    const queued = faults.get(asked);
+    if (queued && queued.length) {
+      const status = queued.shift();
+      seen += 1;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: status === 402 ? 'Insufficient credits' : status === 503 ? 'Provider is overloaded' : 'No endpoints found' } }));
+      return;
+    }
     const payload = JSON.parse(body || '{}');
     const model = payload.model;
     // the marker the request carries tells us which sampled call this is
@@ -674,3 +691,73 @@ test('stopping a measurement that has not started takes it out of the queue', as
   assert.equal(job.status, 'cancelled');
   assert.equal((await load(workload.id)).status, 'new', 'no longer "Measuring", because nothing will');
 });
+
+const latestRun = async (workloadId) => db.prepare(
+  'SELECT * FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1').get(workloadId);
+
+test('a provider too busy to answer the customer model interrupts the run, and blames nobody', async () => {
+  const { workload } = await seed('busy-ref');
+  failNext('openai/gpt-5.4', 503, 30);
+  const out = await runEvaluation(workload.id);
+  faults.clear();
+  assert.equal(out.ok, false, JSON.stringify(out));
+  const run = await latestRun(workload.id);
+  assert.equal(run.outcome, 'interrupted');
+  assert.match(run.error, /too busy/);
+  const w = await load(workload.id);
+  assert.notEqual(w.status_note, 'Your own model could not answer these calls', 'an outage is not the model failing');
+  assert.equal(Number((await db.prepare('SELECT COUNT(*) AS n FROM eval_results WHERE run_id = ?').get(run.id)).n), 0);
+});
+
+test('our own account refused by the provider stops the run and holds nothing against any model', async () => {
+  const { workload } = await seed('account');
+  failNext('vendor/steady-small', 402, 3);
+  failNext('vendor/drifty-small', 402, 3);
+  const out = await runEvaluation(workload.id);
+  faults.clear();
+  assert.equal(out.ok, false, JSON.stringify(out));
+  const run = await latestRun(workload.id);
+  assert.equal(run.outcome, 'interrupted');
+  assert.match(run.error, /account/);
+  const failed = await db.prepare(`SELECT COUNT(*) AS n FROM eval_results WHERE run_id = ? AND verdict = 'failed'`).get(run.id);
+  assert.equal(Number(failed.n), 0, 'no model is marked as failing for our account');
+  const kept = await db.prepare('SELECT COUNT(*) AS n FROM replay_cache WHERE status = 402').get();
+  assert.equal(Number(kept.n), 0, 'and nothing is remembered as refused');
+});
+
+test('a job that books its own next run gets one, and a dead claim does not block it', async () => {
+  handle('refresh_test', async () => {
+    await enqueue('refresh_test', {}, { runAfter: now() + 3600000, unique: true });
+    return { ok: true };
+  });
+  // the earliest possible start, so it is the one the runner picks up
+  const first = await enqueue('refresh_test', {}, { runAfter: 1, unique: true });
+  assert.equal(await runOnce(), true);
+  const rows = await db.prepare(`SELECT id, status, run_after FROM jobs WHERE kind = 'refresh_test' ORDER BY created_at`).all();
+  assert.equal(rows.find((r) => r.id === first).status, 'done');
+  const next = rows.find((r) => r.id !== first);
+  assert.ok(next && next.status === 'queued' && next.run_after > now(), 'the next run is booked');
+
+  // a claim left behind by a process that went away half an hour ago no longer counts as open
+  await db.prepare(`INSERT INTO jobs (id, kind, payload, status, attempts, run_after, created_at, claimed_at)
+              VALUES ('job_deadclaim', 'refresh_dead', '{}', 'claimed', 1, 0, 0, ?)`).run(now() - 31 * 60000);
+  const fresh = await enqueue('refresh_dead', {}, { unique: true });
+  assert.notEqual(fresh, 'job_deadclaim');
+  // but a measurement's claim does, however long it has been running
+  await db.prepare(`INSERT INTO jobs (id, kind, payload, status, attempts, run_after, created_at, claimed_at)
+              VALUES ('job_longrun', 'eval_run', '{"workloadId":"wl_long"}', 'claimed', 1, 0, 0, ?)`).run(now() - 90 * 60000);
+  assert.equal(await enqueue('eval_run', { workloadId: 'wl_long' }, { unique: true }), 'job_longrun');
+});
+
+test('a switch back only undoes the model it was decided about', async () => {
+  const { workload } = await seed('stale-revert');
+  await promote(await load(workload.id), 'vendor/steady-small', { recipe: null });
+  const stale = await load(workload.id);
+  // somebody switches to another model after the decision was read
+  await promote(await load(workload.id), 'vendor/drifty-small', { recipe: null });
+  const out = await revert(stale, { auto: true, reason: 'evidence about steady-small' });
+  assert.equal(out.ok, false);
+  assert.equal(out.code, 'moved');
+  assert.equal((await load(workload.id)).routed_model, 'vendor/drifty-small', 'the newer switch stands');
+});
+

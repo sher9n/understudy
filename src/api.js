@@ -8,7 +8,7 @@ import send, { signInEmail } from './email.js';
 import { issueKey, listKeys, revokeKey, revealKey } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity } from './traffic.js';
 import { account, ledger, gateRouting, stripe } from './billing.js';
-import { planFor } from './eval/plan.js';
+import { planFor, forgetPlan } from './eval/plan.js';
 import { recipeKind } from './eval/select.js';
 import { certificate, promote, revert } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
@@ -435,7 +435,7 @@ api.get('/workloads/:id', async (req, res) => {
   /* A measurement nothing is running any more is closed before the page is told what is
      running, so a deploy in the middle of one cannot leave a bar here that never moves. */
   await closeAbandoned(w.id);
-  const plan = await planFor(w, { canRoute: canRoute() });
+  const plan = await planFor(w, { canRoute: canRoute(), memo: true });
   const running = await db.prepare(
     `SELECT id, steps_total, steps_done, phase, spend_usd, started_at, models_planned, sample_size,
             stop_requested_at, heartbeat_at
@@ -467,8 +467,10 @@ api.get('/workloads/:id', async (req, res) => {
     picked: plan.order.slice(0, plan.models).map((r) => r.model),
     /* How the models were chosen, for the page to explain: what ruled each group out, in what
        order the rest will be tried and why, what Jev and the leaderboard said, how old each fact
-       is, and the speed every model is held to. */
-    selection: {
+       is, and the speed every model is held to. Nothing when no choice was made, because the
+       workload has too few calls yet or nothing to measure against: a panel built from an empty
+       plan read "Out of the 0 models switched on" on every new workload. */
+    selection: !plan.funnel.length ? null : {
       want: plan.models,
       funnel: plan.funnel,
       ruledOut: Object.values(plan.excluded.reduce((a, e) => {
@@ -576,7 +578,8 @@ api.get('/workloads/:id', async (req, res) => {
       reused: cert.run.reused ?? 0,
       saved: round8(cert.run.saved_usd || 0),
       plan: parseJson(cert.run.plan_json),
-      results: compared.map((r) => resultRow(r, r.runs_total)),
+      // this measurement's calls, like the reference row beside them and the note above them
+      results: compared.map((r) => resultRow(r)),
       nothing: compared.length ? null : nothingCompared(cert.run),
     },
     lastComparison: lastComparison
@@ -695,6 +698,7 @@ api.post('/workloads/:id/speed', async (req, res) => {
   if (!SPEED_PREFS.includes(pref)) return fail(res, 400, 'That is not one of the choices.');
   await db.prepare('UPDATE workloads SET speed_pref = ?, updated_at = ? WHERE id = ?')
     .run(pref === 'auto' ? null : pref, now(), w.id);
+  forgetPlan(w.id);
   return res.json({ ok: true, pref });
 });
 

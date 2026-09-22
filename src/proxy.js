@@ -161,6 +161,8 @@ v1.post('/chat/completions', async (req, res) => {
     let answer = '';
     let finish_reason = null;
     let model = null;
+    // when the first word reached the customer: what somebody watching a streamed answer waits for
+    let firstAt = null;
     const reader = upstream.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -176,6 +178,8 @@ v1.post('/chat/completions', async (req, res) => {
         if (j.model) model = j.model;
         const ch = j.choices?.[0];
         if (typeof ch?.delta?.content === 'string') answer += ch.delta.content;
+        if (firstAt === null && ((typeof ch?.delta?.content === 'string' && ch.delta.content)
+          || (Array.isArray(ch?.delta?.tool_calls) && ch.delta.tool_calls.length))) firstAt = Date.now();
         if (ch?.finish_reason) finish_reason = ch.finish_reason;
       } catch { /* not a JSON line, which SSE comments and keep-alives are allowed to be */ }
     };
@@ -198,7 +202,8 @@ v1.post('/chat/completions', async (req, res) => {
       model, streamed: true, usage,
       choices: [{ index: 0, message: { role: 'assistant', content: answer }, finish_reason }],
     };
-    await finish({ wsId, workload, requested, served, usage, started, body, response, status: 200 });
+    await finish({ wsId, workload, requested, served, usage, started, body, response, status: 200,
+      ttftMs: firstAt === null ? null : firstAt - started });
     return undefined;
   } catch (err) {
     const status = err instanceof UpstreamError ? err.status : 502;
@@ -218,7 +223,7 @@ v1.post('/chat/completions', async (req, res) => {
 });
 
 async function finish({ wsId, workload, requested, served, usage, started, body, response, status,
-  latencyMs, source = 'routed' }) {
+  latencyMs, ttftMs = null, source = 'routed' }) {
   const cost = Number(usage?.cost ?? 0);
   const note = workload ? `${workload.slug} on ${served}` : `Test call on ${served}`;
   const charged = cost > 0 ? await chargeCall(wsId, cost, note) : 0;
@@ -226,7 +231,7 @@ async function finish({ wsId, workload, requested, served, usage, started, body,
     workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
     servedModel: served, statusCode: status,
     promptTokens: usage?.prompt_tokens ?? 0, completionTokens: usage?.completion_tokens ?? 0,
-    costUsd: cost, chargedUsd: charged, latencyMs: latencyMs ?? Date.now() - started,
+    costUsd: cost, chargedUsd: charged, latencyMs: latencyMs ?? Date.now() - started, ttftMs,
     request: body, response,
   });
   if (workload) await considerMeasuring(wsId, workload);

@@ -1,5 +1,6 @@
 import { db, now } from '../db/index.js';
 import { recipeKind } from './select.js';
+import { WATCH_COOL_OFF_DAYS } from './promote.js';
 
 /* What earlier measurements found, as evidence for ranking the next one.
  *
@@ -37,9 +38,11 @@ export async function historyFor(workload) {
       GROUP BY r.model_id`).all(workload.shape_kind, workload.id, now() - 60 * DAY);
   for (const a of agg) shape.set(a.model_id, { n: Number(a.n), cleared: Number(a.cleared) });
 
+  // switched back for good, or for something that can change, within its cool-off
   const reverted = new Set((await db.prepare(
-    `SELECT DISTINCT from_model FROM promotions WHERE workload_id = ? AND action IN ('revert', 'auto_revert')`)
-    .all(workload.id)).map((r) => r.from_model));
+    `SELECT DISTINCT from_model FROM promotions WHERE workload_id = ?
+        AND (action IN ('revert', 'auto_revert') OR (action = 'soft_revert' AND created_at >= ?))`)
+    .all(workload.id, now() - WATCH_COOL_OFF_DAYS * DAY)).map((r) => r.from_model));
   return { own, shape, reverted };
 }
 

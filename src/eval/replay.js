@@ -40,7 +40,13 @@ export function replayKey(workspaceId, body, model, recipe = null, slot = 0) {
 
 /* Refusals that will be refused again: the model cannot be reached this way, or the request is
    one it will not take. Being busy, rate limited or timing out is not one of them. */
-const lasting = (status) => [400, 401, 402, 403, 404, 405, 413, 422].includes(status);
+const lasting = (status) => [400, 403, 404, 405, 413, 422].includes(status);
+
+/* Not about the model at all: our own account with the provider needs attention, a key it no
+   longer takes or credit that has run out. That is true of every model at once and passes the
+   moment it is fixed, so it is never remembered against a model, and a measurement that meets it
+   stops rather than marking one model after another as refusing. */
+export const accountLevel = (status) => status === 401 || status === 402;
 
 const fromRow = (r) => ({
   json: r.response_json ? JSON.parse(r.response_json) : null,
@@ -81,7 +87,7 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
       const life = hit.status === 200 ? config.REPLAY_REUSE_DAYS * DAY : config.REPLAY_FAILURE_REUSE_HOURS * HOUR;
       if (now() - hit.created_at < life) {
         const r = fromRow(hit);
-        return { ...r, cost: 0, reused: true, savedUsd: r.ok ? Number(hit.cost_usd || 0) : 0, key, transient: false };
+        return { ...r, cost: 0, reused: true, savedUsd: r.ok ? Number(hit.cost_usd || 0) : 0, key, transient: false, account: false };
       }
     }
   }
@@ -95,8 +101,11 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
       got = await streamCollect(clean, model, { recipe });
     } catch (err) {
       /* A stream that broke for a reason of its own, rather than a refusal, is asked once more
-         without streaming. The answer is what matters; its first-word time is then unknown. */
+         without streaming. The answer is what matters; its first-word time is then unknown. One
+         that ran out of time is not asked again: the model was too slow, and a second paid
+         answer would only say so twice. */
       if (err instanceof UpstreamError) throw err;
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') throw err;
       const plain = await chat(clean, model, { recipe, pace: true });
       got = { json: plain.json, latencyMs: plain.latencyMs, ttftMs: null };
     }
@@ -138,5 +147,6 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
     promptTokens: out.promptTokens ?? 0, completionTokens: out.completionTokens ?? 0,
     costUsd: out.cost, chargedUsd: 0, latencyMs: out.latencyMs,
   });
-  return { ...out, reused: false, savedUsd: 0, key, transient: !out.ok && !lasting(out.status) };
+  const account = !out.ok && accountLevel(out.status);
+  return { ...out, reused: false, savedUsd: 0, key, transient: !out.ok && !lasting(out.status) && !account, account };
 }

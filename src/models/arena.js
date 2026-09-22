@@ -144,6 +144,10 @@ export async function ratingsFor(modelIds, facts, { link = true, maxJev = 60 } =
         asked += 1;
         name = await jevMatch(id, facts?.models?.get(id), close.map((c) => c.name));
         how = 'jev';
+        /* Jev did not answer: nothing is known, so nothing is written. Written as "not on the
+           leaderboard", a failure was believed for a month, and with Jev out of credit every
+           model it was asked about read as unrated. */
+        if (name === undefined) continue;
       }
     }
     await db.prepare(`INSERT INTO arena_links (model_id, arena_name, how, linked_at) VALUES (?, ?, ?, ?)
@@ -156,7 +160,7 @@ export async function ratingsFor(modelIds, facts, { link = true, maxJev = 60 } =
 
 async function jevMatch(id, model, names) {
   const criteria = { none: 'None of these entries is the same model' };
-  names.forEach((n) => { criteria[n] = null; });
+  names.forEach((n) => { criteria[n] = `The leaderboard entry named ${n}`; });
   try {
     const r = await ask(
       { model: { id, name: model?.name || id, description: String(model?.description || '').slice(0, 400) } },
@@ -170,10 +174,12 @@ async function jevMatch(id, model, names) {
         },
       },
     );
-    const a = r.answers.same;
-    if (!a || a.choice === 'none' || (a.confidence ?? 0) < 0.6) return null;
+    const a = r.answers?.same;
+    // no answer is not an answer: left unknown, and asked again next time
+    if (!a || !a.choice) return undefined;
+    if (a.choice === 'none' || (a.confidence ?? 0) < 0.6) return null;
     return names.includes(a.choice) ? a.choice : null;
   } catch {
-    return null;
+    return undefined;
   }
 }

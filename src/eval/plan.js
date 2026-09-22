@@ -65,9 +65,25 @@ async function cachedBarShare(workload, sample) {
 let queueFit = null;
 export const onMissingFits = (fn) => { queueFit = fn; };
 
+/* A page asks for the plan every couple of seconds while a measurement runs, and the plan reads
+   a good deal to answer. The page's copy is kept for a few seconds, under everything about the
+   workload that changes what it says, so a change of setting shows at once. A measurement, and a
+   press of Measure now, always work it out afresh. */
+const pageMemo = new Map();
+const PAGE_MEMO_MS = 10000;
+export const forgetPlan = (workloadId) => pageMemo.delete(workloadId);
+
 /* The whole plan, and whether it can run. `reason` is written to be shown to somebody as it
    is: it is the sentence under a button that cannot be pressed. */
-export async function planFor(workload, { canRoute, forRun = false } = {}) {
+export async function planFor(workload, { canRoute, forRun = false, memo = false } = {}) {
+  if (memo && !forRun) {
+    const key = [workload.speed_pref, workload.routed_model, workload.reference_model, workload.status, canRoute].join('|');
+    const hit = pageMemo.get(workload.id);
+    if (hit && hit.key === key && Date.now() - hit.at < PAGE_MEMO_MS) return hit.plan;
+    const plan = await planFor(workload, { canRoute, forRun: false });
+    pageMemo.set(workload.id, { key, at: Date.now(), plan });
+    return plan;
+  }
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workload.workspace_id);
   const models = modelCountFor(ws);
   const pool = await eligible(workload.id);
@@ -100,7 +116,7 @@ export async function planFor(workload, { canRoute, forRun = false } = {}) {
   const fleet = await fleetHistory();
   const enabled = await enabledSet(workload.workspace_id);
   // whether the customer's model thinks, so candidates are asked the same way; the run checks it
-  const refThinks = refThinksOf(facts.models.get(workload.reference_model) || null, profile.refThinking);
+  const refThinks = refThinksOf(facts.models.get(workload.reference_model) || null, profile.refThinking, profile.thinking);
   plan.factsAt = facts.syncedAt;
   plan.profile = profile;
   plan.speed = speed;

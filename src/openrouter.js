@@ -177,7 +177,8 @@ export async function streamCollect(body, model, { recipe = null, retries = 3, s
         const c = calls[i] || (calls[i] = { id: null, type: 'function', function: { name: '', arguments: '' } });
         if (tc.id) c.id = tc.id;
         if (tc.type) c.type = tc.type;
-        if (tc.function?.name) c.function.name += tc.function.name;
+        // the name comes whole, once or repeated in every piece; the arguments come in pieces
+        if (tc.function?.name) c.function.name = tc.function.name;
         if (typeof tc.function?.arguments === 'string') c.function.arguments += tc.function.arguments;
       }
     }

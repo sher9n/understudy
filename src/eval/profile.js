@@ -19,8 +19,32 @@ const pct = (xs, p) => {
 const textOf = (content) => (typeof content === 'string' ? content
   : Array.isArray(content) ? content.map((p) => (typeof p === 'string' ? p : p?.text || '')).join(' ') : '');
 
-const hasImage = (msgs) => msgs.some((m) => Array.isArray(m?.content)
-  && m.content.some((p) => /image|file|audio|video/.test(String(p?.type || ''))));
+/* What a request sends besides text, named the way the model catalogue names what a model can
+   read. A picture, a sound and a document are different abilities: a model that can see cannot
+   necessarily hear. */
+const MEDIA = [['image', 'image'], ['audio', 'audio'], ['video', 'video'], ['file', 'file']];
+const inputsOf = (msgs) => {
+  const out = new Set();
+  for (const m of msgs) {
+    if (!Array.isArray(m?.content)) continue;
+    for (const part of m.content) {
+      const type = String(part?.type || '');
+      for (const [word, input] of MEDIA) if (type.includes(word)) out.add(input);
+    }
+  }
+  return out;
+};
+
+/* What a request says about thinking: 'off', 'on', or null when it says nothing about whether
+   to think. Asking only for the notes to be left out of the answer ({exclude: true}, or
+   include_reasoning) says nothing about whether the model thinks. */
+export function thinkingAsked(b) {
+  const r = b?.reasoning && typeof b.reasoning === 'object' ? b.reasoning : null;
+  const effort = r?.effort ?? b?.reasoning_effort ?? null;
+  if (r?.enabled === false || effort === 'none') return 'off';
+  if (r?.enabled === true || (effort && effort !== 'none') || Number(r?.max_tokens) > 0) return 'on';
+  return null;
+}
 
 const memo = new Map();
 const MEMO_MS = 5 * 60000;
@@ -30,7 +54,7 @@ export async function profileOf(workload, { fresh = false } = {}) {
   if (!fresh && hit && Date.now() - hit.at < MEMO_MS) return hit.profile;
 
   const rows = await db.prepare(
-    `SELECT request_json, prompt_tokens, completion_tokens, latency_ms, status_code, served_model, created_at
+    `SELECT request_json, prompt_tokens, completion_tokens, latency_ms, status_code, served_model, cost_usd, created_at
        FROM calls WHERE workload_id = ? AND source NOT IN ('replay', 'test') AND created_at >= ?
       ORDER BY created_at DESC LIMIT 600`).all(workload.id, now() - 30 * DAY);
   const profile = profileFromRows(workload, rows);
@@ -74,8 +98,8 @@ export function profileFromRows(workload, rows) {
   let tools = false;
   let toolChoice = false;
   let json = 'none';
-  let images = false;
-  let reasoningSet = false;
+  const inputs = new Set();
+  const asked = new Set();
   const caps = [];
   const hours = new Array(168).fill(0);
   const examples = [];
@@ -93,8 +117,9 @@ export function profileFromRows(workload, rows) {
     if (rf === 'json_schema') json = 'schema';
     else if (rf === 'json_object' && json === 'none') json = 'object';
     const msgs = Array.isArray(b.messages) ? b.messages : [];
-    if (hasImage(msgs)) images = true;
-    if (b.reasoning || b.reasoning_effort || b.include_reasoning !== undefined) reasoningSet = true;
+    for (const x of inputsOf(msgs)) inputs.add(x);
+    const ask = thinkingAsked(b);
+    if (ask) asked.add(ask);
     const cap = Number(b.max_completion_tokens ?? b.max_tokens);
     if (Number.isFinite(cap) && cap > 0) caps.push(cap);
     if (examples.length < 3) {
@@ -110,7 +135,11 @@ export function profileFromRows(workload, rows) {
   const pout = ok.map((r) => r.completion_tokens || 0).filter((x) => x > 0);
   const ref = workload.reference_model;
   const onRef = ok.filter((r) => r.served_model === ref && r.latency_ms > 0).map((r) => r.latency_ms);
+  const refCosts = ok.filter((r) => r.served_model === ref && Number(r.cost_usd) > 0).map((r) => Number(r.cost_usd));
   const streamedShare = withBody ? streamed / withBody : 0;
+  /* What the customer's requests ask about thinking, taken together: off, on, or both, in which
+     case they are left to say it call by call. */
+  const thinking = asked.size === 1 ? [...asked][0] : asked.size > 1 ? 'mixed' : null;
 
   const task = {
     name: workload.slug || 'workload',
@@ -124,8 +153,14 @@ export function profileFromRows(workload, rows) {
     tools,
     toolChoice,
     json,
-    images,
-    reasoningSet,
+    inputs: [...inputs],
+    images: inputs.has('image'),
+    /* Whether the customer's requests set how much to think: when they do (on, or differently
+       call by call), every model is sent them as they are. Asking for thinking to be off is
+       read as the customer's model answering straight away, which is how candidates are then
+       asked too. */
+    thinking,
+    reasoningSet: thinking === 'on' || thinking === 'mixed',
     /* The tightest cap the customer sets on answers, when most calls set one: a thinking model
        has to fit its thinking and its answer under it. */
     outCap: caps.length >= Math.max(1, withBody * 0.5) ? Math.min(...caps) : null,
@@ -137,14 +172,19 @@ export function profileFromRows(workload, rows) {
     outP95: pct(pout, 0.95) ?? 0,
     refLatencyP50: pct(onRef, 0.5),
     refLatencyP90: pct(onRef, 0.9),
+    // what a call on the customer's model has really cost, for a model the catalogue cannot price
+    refCostPerCall: refCosts.length ? refCosts.reduce((a, b) => a + b, 0) / refCosts.length : null,
     hours: rows.length ? hours : null,
     /* Somebody watching words appear feels the wait for the first one, so a streamed workload
        keeps the customer's own speed by default; one that is not streamed may be a little
        slower, because nobody is watching it being written. */
     speedAuto: streamedShare >= 0.5 ? 'same' : 'slower_ok',
     task,
+    /* What Jev's readings of this task are kept under. The workload's own identity, not its
+       newest requests: those change with every call, and a key that changes with every call is
+       a cache that is never read. */
     taskKey: crypto.createHash('sha256')
-      .update(JSON.stringify({ shape: workload.shape_kind, name: task.name, examples }))
+      .update(JSON.stringify({ shape: workload.shape_kind, workload: workload.struct_key || workload.fingerprint || workload.id }))
       .digest('hex').slice(0, 32),
   };
   return profile;
