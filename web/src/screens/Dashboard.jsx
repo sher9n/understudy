@@ -35,7 +35,8 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
           s={!data.priced ? 'prices sync once a provider key is set'
             : data.spend > 0 ? `on track for ${usd(runRate)} a month` : 'nothing charged yet'} />
         <Tile k={`Saved · last ${data.days} days`} v={data.priced && data.saved > 0 ? usd(data.saved) : '—'}
-          s={!data.priced ? 'waiting on prices' : data.saved > 0 ? 'against your own models' : 'nothing optimized yet'} />
+          s={!data.priced ? 'waiting on prices' : data.saved > 0 ? 'against your own models'
+            : data.optimized ? 'no calls on a switched model yet' : 'nothing optimized yet'} />
         <Tile k="Workloads" v={num(data.workloads)}
           s={data.workloads
             ? `${data.optimized} optimized${data.waiting ? `, ${data.waiting} waiting for routing` : ''}, ${data.ready} ready, ${data.measuring} measuring`
