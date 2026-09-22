@@ -131,14 +131,12 @@ export const config = {
      then something a person asks for. Set in Settings; this is what a workspace has until it
      chooses, and it is always one of MEASURE_CHOICES. */
   MEASURE_EVERY_DAYS: measureDefault(),
-  /* A running measurement writes a heartbeat after every call it makes. One whose heartbeat
-     is older than this has nothing running it any more, usually because a deploy or a
-     restart took the process that was, and is closed so its workload can be measured again.
-     It has to outlast the slowest single call, which with its retries can take minutes. */
+  /* A running measurement writes a heartbeat just before every call it sends. One whose
+     heartbeat is older than this has nothing running it any more, usually because a deploy or
+     a restart took the process that was, and is closed so its workload can be measured again.
+     It has to outlast the slowest single call: up to UPSTREAM_TIMEOUT_MS, plus the waits
+     between the retries a busy provider asks for. */
   EVAL_STALE_MIN: num('EVAL_STALE_MIN', 15),
-  /* How long a stop somebody asked for may go unanswered before the run is treated as having
-     nobody to answer it. A live run answers within one call, usually seconds. */
-  EVAL_STOP_GRACE_MIN: num('EVAL_STOP_GRACE_MIN', 2),
 
   /* Email. Without a key nothing is sent, and the code is written to the log instead so
      the flow can still be walked locally. The FROM address has to be on a domain the

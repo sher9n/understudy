@@ -74,14 +74,14 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     sample_size: samples.length, created_at: now(), started_at: now(),
     steps_total: stepsTotal, steps_done: 0, phase: `Setting your bar on ${reference}`,
     trigger: trigger === 'automatic' ? 'automatic' : 'manual',
-    models_planned: candidates.length, heartbeat_at: now(),
+    models_planned: candidates.length, heartbeat_at: now(), job_id: jobId,
   };
   await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
               sample_size, created_at, started_at, steps_total, steps_done, phase, trigger, models_planned,
-              heartbeat_at)
+              heartbeat_at, job_id)
               VALUES (@id, @workspace_id, @workload_id, @status, @shape_kind, @reference_model,
               @sample_size, @created_at, @started_at, @steps_total, @steps_done, @phase, @trigger,
-              @models_planned, @heartbeat_at)`).run(run);
+              @models_planned, @heartbeat_at, @job_id)`).run(run);
   /* Whatever started it, a workload being measured says so from the moment the run exists. A
      scheduled run used to leave the page saying whatever it said before, and only the button
      ever set this. */
@@ -90,17 +90,30 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   /* Written as the run goes, not at the end: a screen watching this is the only way somebody
      knows the thing they paid for is happening.
 
-     Each step is also the heartbeat that says something is still running this, and the place a
-     stop is noticed: it answers true when the run should end here. By then the call before it
-     has come back and been counted, so what it cost is known and charged, and nothing more is
-     sent. A row already closed from outside, because it looked abandoned, ends the run too. */
+     A step answers true when the run should end there: somebody asked it to stop, or its row
+     was closed from outside because it looked abandoned. */
   let done = 0;
+  /* calls that have come back since the last step, so a stop between the two replays of a pair
+     still counts the one that ran and was paid for */
+  let pending = 0;
+  const ended = (row) => !row || row.status !== 'running' || !!row.stop_requested_at;
   const step = async (by, phase) => {
     done += by;
+    pending = 0;
     const r = await db.prepare(`UPDATE eval_runs SET steps_done = ?, phase = ?, heartbeat_at = ?
                   WHERE id = ? RETURNING status, stop_requested_at`).run(done, phase, now(), run.id);
-    const row = r.rows[0];
-    return !row || row.status !== 'running' || !!row.stop_requested_at;
+    return ended(r.rows[0]);
+  };
+
+  /* Asked before every call goes out: the heartbeat, and whether to send the call at all.
+     Checking only between steps let a stop through with a call still to send, because one
+     step can be two replays, or a replay and two judgements. Checked here, nothing more is sent
+     once somebody presses Stop; and since the heartbeat is written just before each call, a
+     run waiting on one slow call is never mistaken for an abandoned one. */
+  const halted = async () => {
+    const r = await db.prepare(`UPDATE eval_runs SET heartbeat_at = ? WHERE id = ?
+                  RETURNING status, stop_requested_at`).run(now(), run.id);
+    return ended(r.rows[0]);
   };
 
   let spend = 0;
@@ -126,9 +139,11 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      still lands here, where the spend is, and the stop is not announced twice. */
   const endStopped = async () => {
     await settle(`Measuring ${workload.slug}, stopped`);
+    done += pending;
+    pending = 0;
     const closed = await db.prepare(`UPDATE eval_runs SET status = 'stopped', outcome = 'stopped',
-                  finished_at = ?, phase = NULL WHERE id = ? AND status = 'running' RETURNING id`)
-      .run(now(), run.id);
+                  finished_at = ?, phase = NULL, steps_done = ? WHERE id = ? AND status = 'running' RETURNING id`)
+      .run(now(), done, run.id);
     await db.prepare('UPDATE eval_runs SET phase = NULL WHERE id = ?').run(run.id);
     if (!closed.rows.length) return { ok: true, runId: run.id, stopped: true };
     await rest(workloadId);
@@ -152,9 +167,14 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   // the bar first: the reference model against itself, measured fresh
   for (const s of samples) {
     const body = JSON.parse(s.request_json);
+    if (await halted()) return await endStopped();
     const a = await replay(body, reference, workload, run.id);
+    spend += a.cost;
+    pending += 1;
+    if (await halted()) return await endStopped();
     const b = await replay(body, reference, workload, run.id);
-    spend += a.cost + b.cost;
+    spend += b.cost;
+    pending += 1;
     await db.prepare(`INSERT INTO eval_samples (id, run_id, call_id, quartile, ref_a_json, ref_b_json, charged)
                 VALUES (?, ?, ?, ?, ?, ?, 0)`)
       .run(id('smp'), run.id, s.id, s.quartile ?? 0,
@@ -167,7 +187,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
 
   const noiseScores = [];
   for (const p of refPairs) {
+    // free text asks a judge, and a judgement is a call like any other
+    if (judgements && await halted()) return await endStopped();
     noiseScores.push(await scoreOf(p.a, p.b, shape, askOf(p.body), (c) => { spend += c; }));
+    if (judgements) pending += 1;
     if (judgements
       && await step(1, `Comparing answers on ${reference}, ${noiseScores.length} of ${refPairs.length}`)) {
       return await endStopped();
@@ -179,17 +202,24 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   });
   await db.prepare('UPDATE eval_runs SET noise_pct = ?, floor_pct = ? WHERE id = ?')
     .run(round8(noise * 100), round8(floor), run.id);
-  await db.prepare('UPDATE workloads SET floor_pct = ?, updated_at = ? WHERE id = ?')
-    .run(round8(floor), now(), workloadId);
+
+  /* The run's ending is written only while it is still running and nobody has asked it to stop.
+     A stop can arrive after the last step, while the last charge is being settled; unguarded,
+     the run then wrote "done" and switched the model, while the page, told it was stopping,
+     said nothing had been switched. Answers false when the stop won, and the run ends stopped. */
+  const finish = async (outcome, error) => (await db.prepare(
+    `UPDATE eval_runs SET status = 'done', outcome = ?, finished_at = ?, error = ?, phase = NULL
+      WHERE id = ? AND status = 'running' AND stop_requested_at IS NULL RETURNING id`)
+    .run(outcome, now(), error, run.id)).rows.length > 0;
 
   /* If the reference model cannot answer its own calls consistently, the bar it produces is
      not a quality standard, it is noise. Certifying against it would let anything through,
      which is the opposite of what this product promises. Stop here and say so. */
   if (!barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
     await settle(`Measuring ${workload.slug}, setting the bar`);
-    await db.prepare(`UPDATE eval_runs SET status = 'done', outcome = 'unmeasurable', finished_at = ?, error = ?,
-                phase = NULL WHERE id = ?`)
-      .run(now(), `reference disagreed with itself on ${(noise * 100).toFixed(1)}% of calls`, run.id);
+    if (!await finish('unmeasurable', `reference disagreed with itself on ${(noise * 100).toFixed(1)}% of calls`)) {
+      return await endStopped();
+    }
     await db.prepare(`UPDATE workloads SET status = 'no_match', status_note = ?, floor_pct = NULL,
                 updated_at = ? WHERE id = ?`)
       .run('We could not measure this workload', now(), workloadId);
@@ -203,10 +233,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return { ok: true, runId: run.id, floor: null, results: 0, unmeasurable: true };
   }
 
+  /* A bar worth holding models to, so from here it is the workload's bar. It used to be written
+     before the check above, so a run stopped at that moment left a bar nobody could clear. */
+  await db.prepare('UPDATE workloads SET floor_pct = ?, updated_at = ? WHERE id = ?')
+    .run(round8(floor), now(), workloadId);
+
   if (!await settle(`Measuring ${workload.slug}, setting the bar`)) {
-    await db.prepare(`UPDATE eval_runs SET status = 'done', outcome = 'no_balance', finished_at = ?, error = ?,
-                phase = NULL WHERE id = ?`)
-      .run(now(), 'balance ran out after the bar was set', run.id);
+    if (!await finish('no_balance', 'balance ran out after the bar was set')) return await endStopped();
     await rest(workloadId);
     await addActivity(workload.workspace_id, {
       kind: 'floor', title: `Measuring ${workload.slug} stopped early`,
@@ -223,17 +256,23 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     let failures = 0;
     const pairs = [];
     for (const p of refPairs) {
+      if (await halted()) return await endStopped();
       const c = await replay(p.body, cand.model_id, workload, run.id);
       spend += c.cost;
+      pending += 1;
       runs += 1;
       const got = extract(c.json, shape);
       if (!got.ok) failures += 1;
       const ask = askOf(p.body);
       const add = (x) => { spend += x; };
-      const score = Math.min(
-        await scoreOf(got, p.a, shape, ask, add),
-        await scoreOf(got, p.b, shape, ask, add),
-      );
+      // each comparison of free text is a judgement, and a judgement is a call
+      if (judgements && await halted()) return await endStopped();
+      const againstA = await scoreOf(got, p.a, shape, ask, add);
+      if (judgements) pending += 1;
+      if (judgements && await halted()) return await endStopped();
+      const againstB = await scoreOf(got, p.b, shape, ask, add);
+      if (judgements) pending += 1;
+      const score = Math.min(againstA, againstB);
       pairs.push({ cand: got, ref: p.a.ok ? p.a : p.b, score });
       /* Counted here rather than every five calls, so the bar moves while a slow model is
          answering rather than jumping in blocks. One replay, plus its two comparisons when
@@ -272,9 +311,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   }
 
   await settle(`Measuring ${workload.slug}`);
-  await db.prepare(`UPDATE eval_runs SET status = 'done', outcome = 'compared', finished_at = ?, error = ?,
-              phase = NULL WHERE id = ?`)
-    .run(now(), stoppedShort ? `balance ran out after ${stoppedShort}` : null, run.id);
+  // a stop that arrived during that last settle wins: stopped, and nothing switched
+  if (!await finish('compared', stoppedShort ? `balance ran out after ${stoppedShort}` : null)) {
+    return await endStopped();
+  }
 
   // the cheapest model that cleared, and what we do about it
   const refMonthly = await monthlyOn(workloadId, reference);
@@ -324,15 +364,34 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
 
 /* Whether anything is still running a measurement.
  *
- * A live run writes a heartbeat after every call, so one that has gone quiet for longer than
- * the slowest call could take has nothing running it: the process that was went away, usually
- * in a deploy or a restart. One that was asked to stop and has not moved since is the same,
- * sooner, because a live run answers a stop within one call. */
+ * A live run writes a heartbeat just before every call it sends, so one that has gone quiet
+ * for longer than the slowest single call could take has nothing running it: the process that
+ * was went away, usually in a deploy or a restart.
+ *
+ * A run started by the code before this has no heartbeat at all, and during a deploy the old
+ * process may still be running it while this one boots. Such a run is only judged once this
+ * process has been up longer than the same window, by which time the old one is certainly
+ * gone; judged earlier, a run still being worked on could be closed from under it. */
 export function isAbandoned(run, at = now()) {
-  const beat = run.heartbeat_at ?? run.started_at ?? run.created_at;
-  if (at - beat > config.EVAL_STALE_MIN * 60000) return true;
-  return !!run.stop_requested_at && beat < run.stop_requested_at
-    && at - run.stop_requested_at > config.EVAL_STOP_GRACE_MIN * 60000;
+  const stale = config.EVAL_STALE_MIN * 60000;
+  if (run.heartbeat_at == null) {
+    return process.uptime() * 1000 > stale && at - (run.started_at ?? run.created_at) > stale;
+  }
+  return at - run.heartbeat_at > stale;
+}
+
+/* Every finished run says what it found. The migration filled this in for runs before it, but
+   during a deploy the old process can still finish one afterwards, without the word; read as
+   "compared", a run that ran out of balance would then stand in for the last real measurement.
+   Run at boot and hourly, and it only ever touches rows that have no outcome yet. */
+export async function settleOutcomes() {
+  return (await db.prepare(`UPDATE eval_runs SET outcome = CASE
+      WHEN status = 'failed' THEN 'interrupted'
+      WHEN status = 'stopped' THEN 'stopped'
+      WHEN error LIKE 'reference disagreed with itself%' THEN 'unmeasurable'
+      WHEN error = 'balance ran out after the bar was set' THEN 'no_balance'
+      ELSE 'compared' END
+    WHERE outcome IS NULL AND status IN ('done', 'failed', 'stopped')`).run()).changes;
 }
 
 /* What a workload's status should say while nothing is measuring it: what the last measurement
@@ -385,6 +444,13 @@ async function closeRun(run, how) {
     .run(how === 'stopped' ? 'stopped' : 'failed', how, now(),
          how === 'stopped' ? null : 'interrupted', run.id);
   if (!closed.rows.length) return false;
+  /* and let go of the job that started it. Left claimed, the job still counted as open, so
+     Measure now was answered with it and started nothing, and a later boot revived it and ran
+     a measurement nobody had asked for then. */
+  if (run.job_id) {
+    await db.prepare(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ? AND status = 'claimed'`)
+      .run(how === 'stopped' ? 'stopped by you' : 'interrupted', run.job_id);
+  }
   await rest(run.workload_id);
   const slug = (await db.prepare('SELECT slug FROM workloads WHERE id = ?').get(run.workload_id))?.slug
     ?? 'a workload';
@@ -410,6 +476,16 @@ export async function closeAbandoned(workloadId = null) {
   for (const r of rows) {
     if (isAbandoned(r) && await closeRun(r, r.stop_requested_at ? 'stopped' : 'interrupted')) closed += 1;
   }
+  /* A job can be left claimed with no run at all: its process died between picking it up and
+     starting. Claimed for longer than any run goes quiet, with no running run of its own, it is
+     let go too, for the same reason a closed run's job is. */
+  const since = now() - config.EVAL_STALE_MIN * 60000;
+  await db.prepare(
+    `UPDATE jobs SET status = 'failed', error = 'interrupted: nothing was running it'
+      WHERE kind = 'eval_run' AND status = 'claimed' AND claimed_at < ?
+        ${workloadId ? `AND (payload::jsonb ->> 'workloadId') = ?` : ''}
+        AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id AND r.status = 'running')`)
+    .run(...(workloadId ? [since, workloadId] : [since]));
   return closed;
 }
 
@@ -433,6 +509,12 @@ export async function stopMeasuring(workload, { actorUserId = null } = {}) {
     `SELECT * FROM eval_runs WHERE workload_id = ? AND status = 'running'`).all(workload.id);
   if (!runs.length) {
     await rest(workload.id);
+    /* Nothing running. If one finished a moment ago, the stop came too late, and saying it was
+       "stopped before it started" would be untrue of a measurement that ran to the end. */
+    const recent = await db.prepare(
+      `SELECT status FROM eval_runs WHERE workload_id = ? AND finished_at > ?
+        ORDER BY created_at DESC LIMIT 1`).get(workload.id, now() - 60000);
+    if (recent?.status === 'done') return { ok: true, state: 'finished' };
     return { ok: true, state: cancelled ? 'cancelled' : 'idle' };
   }
   let live = 0;

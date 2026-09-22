@@ -165,7 +165,7 @@ export default function Settings({ data, reload }) {
                 The choices come from the server with the setting, so the default is always one
                 of them: this screen kept its own list once, and the default was not on it. */}
             <span className="seg">
-              {data.measureChoices.map((c) => (
+              {(data.measureChoices || []).map((c) => (
                 <button key={c.days} disabled={busy}
                   className={c.days === data.measureEveryDays ? 'segb on' : 'segb'}
                   onClick={run(() => api.setMeasureEvery(c.days))}>{c.label}</button>

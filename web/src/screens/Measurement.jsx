@@ -36,6 +36,10 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
   const [halting, setHalting] = useState(false);
   // what the last stop did, said once the panel has gone, so a stop never ends in silence
   const [notice, setNotice] = useState('');
+  /* Set the moment Stop is confirmed. A progress check sent just before the stop was written
+     comes back saying nothing about it, and would otherwise put the Stop button back and lose
+     the notice when the run ends. */
+  const stopAsked = useRef(false);
   const poll = useRef(null);
 
   const loadRuns = useCallback(() => {
@@ -54,9 +58,11 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
     poll.current = setInterval(async () => {
       try {
         const d = await api.workload(w.id);
-        if (d.measure?.running) setLive(d.measure.running);
-        else {
-          if (live?.stopping) setNotice(STOPPED);
+        if (d.measure?.running) {
+          setLive(stopAsked.current ? { ...d.measure.running, stopping: true } : d.measure.running);
+        } else {
+          if (stopAsked.current || live?.stopping) setNotice(await stopOutcome(w.id));
+          stopAsked.current = false;
           setLive(null); loadRuns(); if (onRan) onRan();
         }
       } catch { /* the next tick tries again */ }
@@ -66,6 +72,7 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
 
   const start = async () => {
     setStarting(true); setErr(''); setNotice('');
+    stopAsked.current = false;
     try {
       await api.measure(w.id);
       const d = await api.workload(w.id);
@@ -79,15 +86,17 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
      nothing was running any more, is over the moment the server answers. */
   const stop = async () => {
     setHalting(true); setErr('');
+    stopAsked.current = true;
     try {
       const out = await api.stopMeasuring(w.id);
       setAsking(false);
       if (out?.state === 'stopping') setLive((l) => (l ? { ...l, stopping: true } : l));
       else {
-        setNotice(out?.state === 'stopped' ? STOPPED : 'Stopped before it started, so nothing was spent.');
+        stopAsked.current = false;
+        setNotice(AFTER_STOP[out?.state] ?? '');
         setLive(null); loadRuns(); if (onRan) onRan();
       }
-    } catch (e) { setErr(e.message); } finally { setHalting(false); }
+    } catch (e) { stopAsked.current = false; setErr(e.message); } finally { setHalting(false); }
   };
 
   const stopping = !!live?.stopping;
@@ -245,6 +254,25 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
 const shortName = (m) => (m ? String(m).split('/').pop() : 'your model');
 
 const STOPPED = 'Stopped. You were charged only for the calls it made, and nothing was switched.';
+const FINISHED = 'It had already finished when the stop reached it, so it was not stopped. What it found is below.';
+
+/* What each answer to a stop means, in the words the panel leaves behind. */
+const AFTER_STOP = {
+  stopped: STOPPED,
+  cancelled: 'Stopped before it started, so nothing was spent.',
+  finished: FINISHED,
+  idle: '',
+};
+
+/* What a stop came to, read from the run itself rather than assumed: a measurement can finish
+   in the moment between the press and the stop arriving, and then it was not stopped at all. */
+async function stopOutcome(workloadId) {
+  try {
+    const { runs } = await api.workloadRuns(workloadId);
+    if (runs?.[0]?.status === 'done') return FINISHED;
+  } catch { /* say what was asked for */ }
+  return STOPPED;
+}
 
 /* A measurement waiting its turn. One held back for a while, usually until the balance allows
    it, says until when, in IST, rather than leaving somebody watching a panel that never moves. */

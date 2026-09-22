@@ -102,6 +102,12 @@ export async function switchStory(w) {
   // how much traffic that is, from the customer's own calls over the last thirty days
   const days = prompt.c > 0 ? Math.max(1, Math.min(30, (t - prompt.first) / DAY)) : 30;
   const monthly = callsPerMonth(prompt.c, days);
+  /* and how it reaches us. Only a routed call can be served by the new model; a copy has
+     already run on the original at the customer's own provider by the time we see it, so a
+     workload that only sends copies saves nothing yet, and the card must not say it does. */
+  const routedRecent = (await db.prepare(
+    `SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND source = 'routed' AND ${TRAFFIC} AND created_at >= ?`)
+    .get(w.id, window)).n;
 
   /* What it has actually saved: every call it has served for the customer since the switch.
      Paid is what they were charged, fee included. What those calls would have cost on the
@@ -139,7 +145,7 @@ export async function switchStory(w) {
       toPerCall: toPerCall == null ? null : round8(toPerCall),
       cheaperPct: cheaperPct(fromPerCall, toPerCall),
     },
-    volume: { calls: prompt.c, days, monthly: round8(monthly) },
+    volume: { calls: prompt.c, routed: routedRecent, copies: prompt.c - routedRecent, days, monthly: round8(monthly) },
     soFar: {
       calls: served.n, copies,
       paid: round8(served.paid),

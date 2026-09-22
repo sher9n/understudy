@@ -62,7 +62,9 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
      balance or was stopped early tried none, and the sections below say why instead of
      disappearing, and offer the newest measurement that did compare models. */
   const compared = !!cert && cert.results.length > 0;
-  const earlier = cert && !compared && w.lastComparison && w.lastComparison.runId !== cert.runId
+  /* With nothing finished at all, a measurement that was stopped part way can still have
+     finished some models, and Stop promised they keep their results, so they are offered too. */
+  const earlier = !compared && w.lastComparison && w.lastComparison.runId !== cert?.runId
     ? w.lastComparison : null;
   // the row in the history that the page is showing, whether somebody opened it or not
   const showingId = openRun || w.certificate?.runId || null;
@@ -150,7 +152,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
       <Measurement w={w} busy={busy} onRan={load}
         openRunId={openRun} onOpenRun={setOpenRun} showingId={showingId} />
 
-      {cert && (
+      {(cert || earlier) && (
         <section className="opt ovis">
           <div className="opthead">
             <h2>How the candidates compare</h2>
@@ -194,7 +196,8 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
               </>
             ) : (
               <div className="optempty mnone">
-                <p>{cert.nothing || 'No models were compared in this measurement.'}</p>
+                <p>{!cert ? 'No measurement has finished yet.'
+                  : cert.nothing || 'No models were compared in this measurement.'}</p>
                 {earlier && (
                   <button className="minig" onClick={() => setOpenRun(earlier.runId)}>
                     Show the measurement from {timeIST(earlier.at)} IST, which
@@ -211,7 +214,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         <div className="opthead">
           <h2>Candidates tested</h2>
           <span className="s">
-            {!cert ? 'Nothing has been tried yet.'
+            {!cert ? (earlier ? '' : 'Nothing has been tried yet.')
               : compared ? `${cert.sampleSize} of your own calls replayed on every model.` : ''}
             {openRun && runData ? (
               <>
@@ -222,7 +225,11 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           </span>
         </div>
         {!cert ? (
-          <div className="optempty">Candidates appear here after the first run, once your bar is set.</div>
+          <div className="optempty">
+            {earlier
+              ? 'No measurement has finished yet. The one above that was stopped part way shows the models it finished.'
+              : 'Candidates appear here after the first run, once your bar is set.'}
+          </div>
         ) : !compared ? (
           <div className="optempty">No models were tried in this measurement.</div>
         ) : (

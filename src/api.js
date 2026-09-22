@@ -457,7 +457,9 @@ api.get('/workloads/:id', async (req, res) => {
      means it can never get stuck again, whatever ends a run. It goes back to what the last
      measurement that found anything found, the same rule a stop uses, rather than guessing
      "ready to optimize" from whether a bar was ever set. */
-  if (w.status === 'measuring' && !running && await rest(w.id)) {
+  /* "Ready to optimize" is read again too: the code before this set it from whether a bar had
+     ever been set, and some workloads still say it with no candidate behind them. */
+  if (((w.status === 'measuring' && !running && !waiting) || w.status === 'certified') && await rest(w.id)) {
     Object.assign(w, await db.prepare('SELECT status, status_note FROM workloads WHERE id = ?').get(w.id));
   }
 
@@ -616,8 +618,15 @@ api.post('/workloads/:id/measure', async (req, res) => {
   /* A run a restart left behind still says "running", and without this it would answer every
      press of the button with "already running" for ever. */
   await closeAbandoned(w.id);
+  /* Running, or waiting its turn. A job that is only waiting has a payload of its own, so the
+     queue's own check does not see a scheduled one when somebody presses the button, and a
+     page left open could start a second measurement beside the first. */
   const running = await db.prepare(
-    `SELECT id FROM eval_runs WHERE workload_id = ? AND status = 'running'`).get(w.id);
+    `SELECT id FROM eval_runs WHERE workload_id = ? AND status = 'running'
+     UNION ALL
+     SELECT id FROM jobs WHERE kind = 'eval_run' AND (payload::jsonb ->> 'workloadId') = ?
+        AND (status = 'queued' OR (status = 'claimed' AND claimed_at > ?))
+     LIMIT 1`).get(w.id, w.id, now() - 60000);
   if (running) return res.json({ ok: true, already: true });
 
   const plan = await planFor(w, { canRoute: canRoute() });
