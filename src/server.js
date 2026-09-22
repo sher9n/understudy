@@ -234,6 +234,8 @@ handle('name_workload', async ({ workloadId }) => {
 
 /** Content ages out; the numbers the charts need do not. */
 handle('purge', async () => {
+  // the next one is booked first, so one that fails still leaves the next one coming
+  await enqueue('purge', {}, { runAfter: now() + 6 * 3600000, unique: true });
   /* Each workspace chooses its own window in Settings, so this runs per workspace rather
      than against one deployment-wide cutoff. A window of 0 means keep indefinitely, and
      those workspaces are skipped entirely: nothing of theirs is ever blanked. */
@@ -253,7 +255,6 @@ handle('purge', async () => {
           SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`)
       .run(now(), ws.id, cutoff)).changes;
   }
-  await enqueue('purge', {}, { runAfter: now() + 6 * 3600000, unique: true });
   return { ok: true, calls: a, samples: b };
 });
 
@@ -265,6 +266,8 @@ handle('purge', async () => {
  * days means never, and it is the one setting that must not be quietly overridden by a
  * default somewhere. */
 handle('recheck', async () => {
+  // the next one is booked first, so one that fails still leaves the next one coming
+  await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
   /* A measurement a deploy or a restart left saying "running" is closed here too, not only when
      somebody opens its page, so it cannot hold a workload in "Measuring" that nobody visits. */
   await closeAbandoned();
@@ -294,7 +297,6 @@ handle('recheck', async () => {
       queued += 1;
     }
   }
-  await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
   return { ok: true, queued };
 });
 

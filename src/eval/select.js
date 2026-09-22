@@ -340,6 +340,8 @@ export function selectCandidates(input) {
     kept.push({ m, recipe: e.recipe, note: e.note, thinks: e.thinks, mustThink: e.mustThink, routes: e.routes || null });
   }
   let left = pool.length;
+  // a check that cannot apply to this workload is not shown: the length cap, when there is none
+  const capped = profile.outCap !== null && profile.outCap !== undefined && profile.outCap < ctx.room;
   for (const [step, label] of [
     ['private', 'reachable with nothing kept'],
     ['features', 'able to handle your requests'],
@@ -348,6 +350,7 @@ export function selectCandidates(input) {
     ['health', 'answering reliably'],
   ]) {
     left -= byStep.get(step) || 0;
+    if (step === 'thinking' && !capped && !byStep.get(step)) continue;
     count(step, label, left);
   }
 
@@ -398,7 +401,7 @@ export function selectCandidates(input) {
     }
     return true;
   });
-  count('speed', 'quick enough for your speed setting', quick.length);
+  if (speed && speed.factor) count('speed', 'quick enough for your speed setting', quick.length);
 
   /* Rank by expected saving: what it saves if it works out, times the chance that it does.
      Its answers have to match and it has to be quick enough, so the two chances multiply. A
