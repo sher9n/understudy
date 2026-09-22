@@ -3,6 +3,8 @@ import { matchWorkload } from './workloads.js';
 import { enqueue } from './jobs.js';
 import { signatureOf, nameFor } from './classify.js';
 import config from './config.js';
+import { requestHash, beforeHash, afterHash, answerOf } from './learn/threads.js';
+import { noteCall } from './learn/outcomes.js';
 
 export async function addActivity(workspaceId, { kind, title, detail = null, workloadId = null, at = now() }) {
   await db.prepare(`INSERT INTO activity (id, workspace_id, workload_id, kind, title, detail, created_at)
@@ -28,28 +30,58 @@ export async function workloadFor(workspaceId, body) {
   return workload;
 }
 
+/* Learning from a call happens after it is recorded and never holds up the answer. What is still
+   being read is kept here, so a test (or a graceful stop) can wait for it to finish. */
+const learning = new Set();
+export async function learningSettled() {
+  while (learning.size) await Promise.allSettled([...learning]);
+}
+
 /** One call, recorded. Everything the screens and the measurement need comes from here. */
 export async function recordCall({
-  workspaceId, workloadId = null, source, requestedModel = null, servedModel = null,
+  id: givenId = null, workspaceId, workloadId = null, source, requestedModel = null, servedModel = null,
   statusCode = null, promptTokens = 0, completionTokens = 0, costUsd = 0, chargedUsd = 0,
-  latencyMs = null, ttftMs = null, request = null, response = null,
+  latencyMs = null, ttftMs = null, request = null, response = null, ref = null,
+  armId = null, propensity = null, explored = null, escalated = null, check = null,
 }) {
+  /* A call the customer made, routed or copied, carries its fingerprints: the request itself (the
+     same request sent again is a retry), and the conversation before and after it (a follow-up
+     call continues it, and becomes the next step of the same task). */
+  const customer = source === 'routed' || source === 'trace';
+  const answer = customer && statusCode === 200 ? answerOf(response) : null;
   const row = {
-    id: id('call'), workspace_id: workspaceId, workload_id: workloadId, source,
+    id: givenId || id('call'), workspace_id: workspaceId, workload_id: workloadId, source,
     requested_model: requestedModel, served_model: servedModel, status_code: statusCode,
     prompt_tokens: promptTokens | 0, completion_tokens: completionTokens | 0,
     cost_usd: round8(costUsd), charged_usd: round8(chargedUsd), latency_ms: latencyMs, ttft_ms: ttftMs,
     request_json: request ? JSON.stringify(request) : null,
     response_json: response ? JSON.stringify(response) : null,
     created_at: now(),
+    ref,
+    request_hash: customer && request ? requestHash(request) : null,
+    before_hash: customer && request ? beforeHash(request.messages) : null,
+    after_hash: answer && request ? afterHash(request.messages, answer) : null,
+    arm_id: armId, propensity, explored: explored === null ? null : (explored ? 1 : 0),
+    escalated: escalated === null ? null : (escalated ? 1 : 0),
+    check_json: check ? JSON.stringify(check) : null,
   };
+  row.task_id = customer ? row.id : null;
+  row.step = customer ? 1 : null;
   await db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model,
       status_code, prompt_tokens, completion_tokens, cost_usd, charged_usd, latency_ms, ttft_ms,
-      request_json, response_json, created_at)
+      request_json, response_json, created_at, ref, request_hash, before_hash, after_hash, task_id, step,
+      arm_id, propensity, explored, escalated, check_json)
       VALUES (@id, @workspace_id, @workload_id, @source, @requested_model, @served_model,
       @status_code, @prompt_tokens, @completion_tokens, @cost_usd, @charged_usd, @latency_ms, @ttft_ms,
-      @request_json, @response_json, @created_at)`).run(row);
+      @request_json, @response_json, @created_at, @ref, @request_hash, @before_hash, @after_hash, @task_id, @step,
+      @arm_id, @propensity, @explored, @escalated, @check_json)`).run(row);
   if (workloadId) await db.prepare('UPDATE workloads SET updated_at = ? WHERE id = ?').run(now(), workloadId);
+  if (customer && workloadId) {
+    const p = noteCall(row, { request, response })
+      .catch((err) => { console.error(`learning from ${row.id} failed: ${err.message}`); })
+      .finally(() => { learning.delete(p); });
+    learning.add(p);
+  }
   return row.id;
 }
 

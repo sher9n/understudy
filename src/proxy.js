@@ -1,6 +1,6 @@
 import express from 'express';
 import { safeRouter } from './safe.js';
-import { db, now } from './db/index.js';
+import { db, now, id } from './db/index.js';
 import { reportCallFailure } from './alerts.js';
 import config, { canRoute } from './config.js';
 import { verifyKey, bearerOf } from './keys.js';
@@ -8,6 +8,8 @@ import { workloadFor, recordCall, addActivity } from './traffic.js';
 import { chat, chatStream, priceCall, UpstreamError } from './openrouter.js';
 import { gateRouting, chargeCall, grantStarterCredit } from './billing.js';
 import { enqueue } from './jobs.js';
+import { refOf } from './learn/threads.js';
+import { report } from './learn/outcomes.js';
 
 export const v1 = safeRouter();
 
@@ -101,19 +103,21 @@ async function recordRefusal(wsId, body, status, json) {
   }).catch(() => { /* never let bookkeeping break the answer */ });
 }
 
-export async function routeOnce(wsId, body, { source = 'routed', classify = true } = {}) {
+export async function routeOnce(wsId, body, { source = 'routed', classify = true, ref = null } = {}) {
   const ready = await prepare(wsId, body, { classify });
   if (ready.error) {
     if (source === 'routed') await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return { ok: false, status: ready.error.status, json: ready.error.json };
   }
   const { workload, requested, served, recipe } = ready;
+  // made up front, so the answer can carry it and the customer can report how this call went
+  const callId = id('call');
   const started = Date.now();
   try {
     const { json, latencyMs } = await chat(body, served, { recipe });
     await finish({ wsId, workload, requested, served, usage: json?.usage, started, body,
-      response: json, status: 200, latencyMs, source });
-    return { ok: true, status: 200, json, served, requested,
+      response: json, status: 200, latencyMs, source, callId, ref });
+    return { ok: true, status: 200, json, served, requested, callId,
       latencyMs: latencyMs ?? Date.now() - started, costUsd: Number(json?.usage?.cost ?? 0) };
   } catch (err) {
     const status = err instanceof UpstreamError ? err.status : 502;
@@ -125,10 +129,10 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
       message: json?.error?.message || err.message,
     });
     await recordCall({
-      workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
-      servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body,
+      id: callId, workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
+      servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body, ref,
     });
-    return { ok: false, status, json, served, requested };
+    return { ok: false, status, json, served, requested, callId };
   }
 }
 
@@ -137,8 +141,10 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
 v1.post('/chat/completions', async (req, res) => {
   const wsId = req.key.workspace_id;
   const body = req.body || {};
+  const ref = refOf(req.headers, body);
   if (!body.stream) {
-    const out = await routeOnce(wsId, body);
+    const out = await routeOnce(wsId, body, { ref });
+    if (out.callId) res.setHeader('x-understudy-call-id', out.callId);
     return res.status(out.status).json(out.json);
   }
   const ready = await prepare(wsId, body);
@@ -147,10 +153,12 @@ v1.post('/chat/completions', async (req, res) => {
     return res.status(ready.error.status).json(ready.error.json);
   }
   const { workload, requested, served, recipe } = ready;
+  const callId = id('call');
   const started = Date.now();
   try {
     const upstream = await chatStream(body, served, { recipe });
     res.status(200);
+    res.setHeader('x-understudy-call-id', callId);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -159,6 +167,7 @@ v1.post('/chat/completions', async (req, res) => {
        away, so a streamed call could be counted and charged but never read: the workload
        page could show what was asked and nothing of what came back. */
     let answer = '';
+    const toolCalls = [];
     let finish_reason = null;
     let model = null;
     // when the first word reached the customer: what somebody watching a streamed answer waits for
@@ -178,6 +187,15 @@ v1.post('/chat/completions', async (req, res) => {
         if (j.model) model = j.model;
         const ch = j.choices?.[0];
         if (typeof ch?.delta?.content === 'string') answer += ch.delta.content;
+        if (Array.isArray(ch?.delta?.tool_calls)) {
+          for (const tc of ch.delta.tool_calls) {
+            const at = Number.isInteger(tc.index) ? tc.index : toolCalls.length;
+            const c = toolCalls[at] || (toolCalls[at] = { id: tc.id, type: 'function', function: { name: '', arguments: '' } });
+            if (tc.id) c.id = tc.id;
+            if (tc.function?.name) c.function.name = tc.function.name;
+            if (typeof tc.function?.arguments === 'string') c.function.arguments += tc.function.arguments;
+          }
+        }
         if (firstAt === null && ((typeof ch?.delta?.content === 'string' && ch.delta.content)
           || (Array.isArray(ch?.delta?.tool_calls) && ch.delta.tool_calls.length))) firstAt = Date.now();
         if (ch?.finish_reason) finish_reason = ch.finish_reason;
@@ -198,12 +216,13 @@ v1.post('/chat/completions', async (req, res) => {
     }
     if (buf) read(buf);
     res.end();
+    const calls = toolCalls.filter(Boolean);
     const response = {
       model, streamed: true, usage,
-      choices: [{ index: 0, message: { role: 'assistant', content: answer }, finish_reason }],
+      choices: [{ index: 0, message: { role: 'assistant', content: answer, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason }],
     };
     await finish({ wsId, workload, requested, served, usage, started, body, response, status: 200,
-      ttftMs: firstAt === null ? null : firstAt - started });
+      ttftMs: firstAt === null ? null : firstAt - started, callId, ref });
     return undefined;
   } catch (err) {
     const status = err instanceof UpstreamError ? err.status : 502;
@@ -213,8 +232,8 @@ v1.post('/chat/completions', async (req, res) => {
       message: payload?.error?.message || err.message,
     });
     await recordCall({
-      workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
-      servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body,
+      id: callId, workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
+      servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body, ref,
     });
     if (!res.headersSent) res.status(status).json(payload);
     else res.end();
@@ -223,16 +242,16 @@ v1.post('/chat/completions', async (req, res) => {
 });
 
 async function finish({ wsId, workload, requested, served, usage, started, body, response, status,
-  latencyMs, ttftMs = null, source = 'routed' }) {
+  latencyMs, ttftMs = null, source = 'routed', callId = null, ref = null, decision = null }) {
   const cost = Number(usage?.cost ?? 0);
   const note = workload ? `${workload.slug} on ${served}` : `Test call on ${served}`;
   const charged = cost > 0 ? await chargeCall(wsId, cost, note) : 0;
   await recordCall({
-    workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
+    id: callId, workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
     servedModel: served, statusCode: status,
     promptTokens: usage?.prompt_tokens ?? 0, completionTokens: usage?.completion_tokens ?? 0,
     costUsd: cost, chargedUsd: charged, latencyMs: latencyMs ?? Date.now() - started, ttftMs,
-    request: body, response,
+    request: body, response, ref, ...(decision || {}),
   });
   if (workload) await considerMeasuring(wsId, workload);
 }
@@ -288,11 +307,25 @@ v1.post('/traces', async (req, res) => {
       costUsd: own ?? 0, chargedUsd: 0,
       latencyMs: Number.isFinite(t?.latency_ms) ? t.latency_ms : null,
       request, response: t?.response ?? null,
+      ref: t?.ref !== undefined && t?.ref !== null && t?.ref !== '' ? String(t.ref).slice(0, 200) : refOf(req.headers, request),
     });
     await considerMeasuring(wsId, workload);
     accepted += 1;
   }
   res.json({ accepted, rejected: list.length - accepted });
+});
+
+/* How calls turned out, told to us afterwards: a ticket resolved, an email answered, a form a
+   person had to correct. Named by the call id each answer carries in x-understudy-call-id, or by
+   the customer's own reference sent with the call (x-understudy-ref, or metadata.ref). One or
+   many at once. */
+v1.post('/outcomes', async (req, res) => {
+  const body = req.body || {};
+  const list = Array.isArray(body.outcomes) ? body.outcomes : Array.isArray(body) ? body : [body];
+  if (!list.length) return res.status(400).json({ error: { message: 'Send an outcome, or a list of them under "outcomes".', type: 'invalid_request_error' } });
+  if (list.length > 500) return res.status(400).json({ error: { message: 'Send at most 500 outcomes at a time.', type: 'too_many' } });
+  const out = await report(req.key.workspace_id, list);
+  return res.json(out);
 });
 
 export default v1;

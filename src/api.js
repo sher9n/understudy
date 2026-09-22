@@ -10,6 +10,8 @@ import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity } f
 import { account, ledger, gateRouting, stripe } from './billing.js';
 import { planFor, forgetPlan } from './eval/plan.js';
 import { recipeKind } from './eval/select.js';
+import { outcomeSummary, tasksFor } from './learn/views.js';
+import { saveDef } from './learn/outcomes.js';
 import { certificate, promote, revert, trafficOf } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
 import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
@@ -693,6 +695,36 @@ api.post('/workloads/:id/revert', async (req, res) => {
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
   return res.json(await revert(w, { actorUserId: req.user.id }));
+});
+
+/* How a workload's calls turned out: read from the traffic that followed them and from what the
+   customer reported, with the definition of "worked" they can change. */
+api.get('/workloads/:id/outcomes', async (req, res) => {
+  const w = await db.prepare('SELECT id FROM workloads WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  return res.json({
+    ...(await outcomeSummary(w.id, 30)),
+    // what the page shows as the way to report outcomes
+    endpoint: `${config.PUBLIC_URL}/v1/outcomes`,
+    callIdHeader: 'x-understudy-call-id',
+    refHeader: 'x-understudy-ref',
+  });
+});
+
+api.post('/workloads/:id/outcomes/def', async (req, res) => {
+  const w = await db.prepare('SELECT id FROM workloads WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  const b = req.body || {};
+  if (b.events !== undefined && !Array.isArray(b.events)) return fail(res, 400, 'events has to be a list.');
+  const def = await saveDef(w.id, b);
+  return res.json({ ok: true, def });
+});
+
+/** The multi-step tasks this workload's calls were part of. */
+api.get('/workloads/:id/tasks', async (req, res) => {
+  const w = await db.prepare('SELECT id FROM workloads WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  return res.json(await tasksFor(w.id));
 });
 
 /* How much slower than the customer's own model a switched-to model may be on this workload.

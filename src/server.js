@@ -15,6 +15,8 @@ import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
 import { runTopUp } from './billing.js';
 import { revert, watchLive } from './eval/promote.js';
+import { onFollowUp, readFollowUp } from './learn/outcomes.js';
+import { ask as askJev, jevUsable } from './jev.js';
 import api from './api.js';
 import v1 from './proxy.js';
 
@@ -92,6 +94,17 @@ handle('model_fit', async ({ workloadId }) => {
   const plan = await planFor(w, { canRoute: canRoute(), forRun: true });
   return { ok: true, ranked: plan.order.length, pending: plan.pendingJev };
 });
+/* A person's reply after an answer, read by Jev: did they say the answer was wrong? Queued, so
+   the call that carried the reply is never kept waiting for it. Without Jev it is left unread. */
+handle('read_followup', async (payload) => {
+  if (!jevUsable()) return { ok: false, reason: 'Jev is not available' };
+  const p = await readFollowUp(payload, { ask: askJev });
+  return { ok: true, p };
+});
+onFollowUp(async (payload) => {
+  await enqueue('read_followup', payload);
+});
+
 onMissingFits((workloadId) => {
   void enqueue('model_fit', { workloadId }, { unique: true }).catch(() => {});
 });
