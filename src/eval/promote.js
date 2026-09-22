@@ -1,6 +1,7 @@
 import { db, id, now } from '../db/index.js';
 import { addActivity } from '../traffic.js';
 import { OUTCOME_OF, RECENT_CALLS, carriesOf } from './outcome.js';
+import { upsertArm, armById, leadModel, specOfResult, setStatus } from '../learn/arms.js';
 
 const record = async (workload, row, x = db) =>
   await x.prepare(`INSERT INTO promotions (id, workload_id, action, from_model, to_model, reason, run_id,
@@ -34,61 +35,88 @@ export async function trafficOf(workload) {
   return { routed, copies, observe: ws?.mode === 'observe', carries: carriesOf({ mode: ws?.mode, routed, copies }) };
 }
 
-export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined } = {}) {
+/* A switch names what it switched to by one key: the model, for a model; "cascade:<model>" for a
+   cheap model whose answers are checked and sent on when doubtful; "router:<model>" for one picked
+   call by call; "<model>#lighter" for the customer's own model thinking less. It is the name a
+   measurement gives the strategy's result, and the name the record of switches keeps. */
+export function keyOfSpec(spec, reference) {
+  // the customer's own model thinking less, as a part of a strategy or on its own
+  const part = (p) => (p.model === reference && p.recipe?.reasoning ? `${p.model}#lighter` : p.model);
+  if (spec.kind === 'cascade') return `cascade:${part(spec.first)}`;
+  if (spec.kind === 'router') return `router:${part(spec.cheap)}`;
+  return part(spec);
+}
+
+/** What a workload is served by now, by that key. */
+export async function servingKey(workload) {
+  if (!workload.routed_model) return workload.reference_model;
+  if (workload.routed_arm_id) {
+    const arm = await armById(workload.routed_arm_id);
+    if (arm?.spec) return keyOfSpec(arm.spec, workload.reference_model);
+  }
+  return workload.routed_model;
+}
+
+export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined, spec: given = null } = {}) {
   if (auto && await everReverted(workload.id, modelId)) {
     return { ok: false, code: 'previously_reverted' };
   }
-  const from = workload.routed_model || workload.reference_model;
+  const from = await servingKey(workload);
   if (from === modelId) return { ok: true, already: true };
-  /* How the model was measured is how it is routed: one that cleared with its thinking switched
-     off is sent every live call with its thinking switched off. When the caller does not say,
-     it is read from the measurement the switch rests on. */
-  let how = recipe;
-  if (how === undefined) {
-    /* The run named, when it measured this model; otherwise the newest run that did. A model
-       approved from an older measurement than the latest was measured in that older one, and
-       routing it without its recipe would route a different model from the one that cleared:
-       one measured with its thinking off, sent live with it on, can spend a short answer cap
-       thinking and answer nothing. */
-    const row = (runId ? await db.prepare('SELECT recipe_json FROM eval_results WHERE run_id = ? AND model_id = ?')
+  /* How it was measured is how it is served: a model that cleared with its thinking switched off
+     is sent every live call that way, and a cascade keeps the check and the threshold it cleared
+     with. Read from the measurement the switch rests on: the run named, when it measured this,
+     otherwise the newest run that did. A model approved from an older measurement than the latest
+     was measured in that older one, and serving it any other way would serve something that never
+     cleared: one measured with its thinking off, sent live with it on, can spend a short answer
+     cap thinking and answer nothing. */
+  let spec = given;
+  if (!spec) {
+    const row = (runId ? await db.prepare('SELECT model_id, recipe_json, arm_json FROM eval_results WHERE run_id = ? AND model_id = ?')
       .get(runId, modelId) : null) || await db.prepare(
-      `SELECT r.recipe_json FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
+      `SELECT r.model_id, r.recipe_json, r.arm_json FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
         WHERE e.workload_id = ? AND r.model_id = ? ORDER BY e.created_at DESC LIMIT 1`).get(workload.id, modelId);
-    try { how = row?.recipe_json ? JSON.parse(row.recipe_json) : null; } catch { how = null; }
+    spec = row ? specOfResult(row) : { kind: 'model', model: modelId, recipe: null };
   }
+  if (recipe !== undefined && spec.kind === 'model') spec = { ...spec, recipe };
+  const arm = await upsertArm(workload, spec, { status: 'serving', originRunId: runId });
+  const lead = leadModel(spec);
   await db.tx(async (tx) => {
-    await tx.prepare(`UPDATE workloads SET routed_model = ?, routed_recipe = ?, promoted_at = ?, promoted_run_id = ?,
+    await tx.prepare(`UPDATE workloads SET routed_model = ?, routed_recipe = ?, routed_arm_id = ?, promoted_at = ?, promoted_run_id = ?,
                 status = 'promoted', status_note = NULL, updated_at = ? WHERE id = ?`)
-      .run(modelId, how ? JSON.stringify(how) : null, now(), runId, now(), workload.id);
+      .run(lead.model, lead.recipe ? JSON.stringify(lead.recipe) : null, arm.id, now(), runId, now(), workload.id);
     await record(workload, { action: 'promote', from_model: from, to_model: modelId, reason, run_id: runId, actor_user_id: actorUserId }, tx);
   });
+  if (workload.routed_arm_id && workload.routed_arm_id !== arm.id) await setStatus(workload.routed_arm_id, 'resting');
+  await setStatus(arm.id, 'serving');
   // said as it is for a workload whose calls arrive as copies: set up, and waiting for them
   const traffic = await trafficOf(workload);
   await addActivity(workload.workspace_id, {
     kind: 'ok',
-    title: traffic.carries ? `${workload.slug} now runs on ${modelId}`
-      : `${workload.slug} will run on ${modelId} once its calls come through Understudy`,
+    title: traffic.carries ? `${workload.slug} now runs on ${arm.label}`
+      : `${workload.slug} will run on ${arm.label} once its calls come through Understudy`,
     detail: (auto
       ? 'Switched on its own, because this workload optimizes automatically.'
       : 'Switched because you approved it.')
       + (traffic.carries ? '' : ' Its calls reach us as copies, so the switch starts with the first one that comes through Understudy.'),
     workloadId: workload.id,
   });
-  return { ok: true, from, to: modelId, waiting: !traffic.carries };
+  return { ok: true, from, to: modelId, armId: arm.id, label: arm.label, waiting: !traffic.carries };
 }
 
 /** Back to the customer's own model, from the next call onwards. */
 export async function revert(workload, { reason = 'you asked for it', actorUserId = null, auto = false, soft = false } = {}) {
   if (!workload.routed_model) return { ok: true, already: true };
-  const from = workload.routed_model;
-  /* Only the model this was decided about. The row can be read a while before it is written, and
-     a switch made in between, by a person or by a measurement finishing, must not be undone on
-     the strength of evidence about the model before it. */
+  const from = await servingKey(workload);
+  /* Only the strategy this was decided about. The row can be read a while before it is written,
+     and a switch made in between, by a person or by a measurement finishing, must not be undone
+     on the strength of evidence about the one before it. */
   let moved = false;
   await db.tx(async (tx) => {
-    const r = await tx.prepare(`UPDATE workloads SET routed_model = NULL, routed_recipe = NULL, promoted_at = NULL,
-                promoted_run_id = NULL, status = 'certified', updated_at = ? WHERE id = ? AND routed_model = ?`)
-      .run(now(), workload.id, from);
+    const r = await tx.prepare(`UPDATE workloads SET routed_model = NULL, routed_recipe = NULL, routed_arm_id = NULL, promoted_at = NULL,
+                promoted_run_id = NULL, status = 'certified', updated_at = ?
+              WHERE id = ? AND routed_model = ? AND routed_arm_id IS NOT DISTINCT FROM ?`)
+      .run(now(), workload.id, workload.routed_model, workload.routed_arm_id ?? null);
     if (!r.changes) { moved = true; return; }
     await record(workload, {
       action: soft ? 'soft_revert' : auto ? 'auto_revert' : 'revert', from_model: from,
@@ -96,6 +124,7 @@ export async function revert(workload, { reason = 'you asked for it', actorUserI
     }, tx);
   });
   if (moved) return { ok: false, code: 'moved' };
+  if (workload.routed_arm_id) await setStatus(workload.routed_arm_id, soft ? 'resting' : 'retired');
   await addActivity(workload.workspace_id, {
     kind: 'revert',
     title: `${workload.slug} is back on ${workload.reference_model}`,
@@ -188,9 +217,14 @@ export async function watchLive({ minCalls = 20, speedFactor = null } = {}) {
   let reverted = 0;
   for (const w of rows) {
     const since = Math.max(w.promoted_at, now() - DAY);
-    const after = await db.prepare(
-      `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ?
-          AND created_at >= ? ORDER BY created_at DESC LIMIT 500`).all(w.id, w.routed_model, since);
+    // the calls the switched-to strategy served: all of a cascade's, the ones it sent on included
+    const after = w.routed_arm_id
+      ? await db.prepare(
+        `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND arm_id = ?
+            AND created_at >= ? ORDER BY created_at DESC LIMIT 500`).all(w.id, w.routed_arm_id, since)
+      : await db.prepare(
+        `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ?
+            AND created_at >= ? ORDER BY created_at DESC LIMIT 500`).all(w.id, w.routed_model, since);
     if (after.length < minCalls) continue;
     const before = await db.prepare(
       `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ?

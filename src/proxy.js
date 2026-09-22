@@ -10,6 +10,10 @@ import { gateRouting, chargeCall, grantStarterCredit } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
 import { report } from './learn/outcomes.js';
+import { chooseStrategy } from './learn/choose.js';
+import { serveWith, writeAsStream } from './learn/serve.js';
+import { leadModel } from './learn/arms.js';
+import { featuresOf, predict } from './learn/router.js';
 
 export const v1 = safeRouter();
 
@@ -70,16 +74,23 @@ async function prepare(wsId, body, { classify = true } = {}) {
      workload: it would leave a one-call workload in their list that nothing produced. */
   const workload = classify ? await workloadFor(wsId, body) : null;
   const requested = body.model || workload?.reference_model || null;
-  const served = workload?.routed_model || requested;
+  /* The strategy that serves this call: the one the workload was switched to (a model asked the
+     way it was measured, or a cascade, or a pick made call by call), or, now and then and within
+     the workload's limits, one being tried. None, and the call goes to the model it asked for. */
+  const strategy = workload ? await chooseStrategy(workload) : null;
+  const lead = strategy ? leadModel(strategy.spec) : null;
+  const served = lead?.model || requested;
   if (!served) return no(400, '"model" is required.', 'invalid_request_error');
-  /* A switched-to model is asked the way it was measured, which for a thinking model with a
-     tight answer cap means with its thinking switched off. */
-  let recipe = null;
-  if (workload?.routed_model && served === workload.routed_model && workload.routed_recipe) {
-    try { recipe = JSON.parse(workload.routed_recipe); } catch { recipe = null; }
-  }
-  return { workload, requested, served, recipe };
+  const recipe = lead?.recipe ?? null;
+  return { workload, requested, served, recipe, strategy };
 }
+
+/* What a call says about how it was decided, kept on its row: the strategy, the chance it had of
+   being chosen, whether it was an experiment, and for a cascade whether it was sent on and why. */
+const decisionOf = (strategy, out = null) => (strategy ? {
+  armId: strategy.armId, propensity: strategy.propensity, explored: strategy.explored,
+  escalated: out ? !!out.escalated : null, check: out?.check ?? null,
+} : null);
 
 /* One routed call, from the gate to the ledger. The proxy uses this for every ordinary
    call, and so does Connect's "Send a test call", which is the point: what the test
@@ -109,14 +120,23 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     if (source === 'routed') await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return { ok: false, status: ready.error.status, json: ready.error.json };
   }
-  const { workload, requested, served, recipe } = ready;
+  const { workload, requested, served, recipe, strategy } = ready;
   // made up front, so the answer can carry it and the customer can report how this call went
   const callId = id('call');
   const started = Date.now();
   try {
+    if (strategy && strategy.spec.kind !== 'model') {
+      const out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId });
+      // charged for everything the strategy spent on it: a cascade's check, and a call it sent on
+      await finish({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
+        started, body, response: out.json, status: 200, latencyMs: out.latencyMs, source, callId, ref,
+        decision: decisionOf(strategy, out) });
+      return { ok: true, status: 200, json: out.json, served: out.served, requested, callId,
+        latencyMs: out.latencyMs, costUsd: out.cost };
+    }
     const { json, latencyMs } = await chat(body, served, { recipe });
     await finish({ wsId, workload, requested, served, usage: json?.usage, started, body,
-      response: json, status: 200, latencyMs, source, callId, ref });
+      response: json, status: 200, latencyMs, source, callId, ref, decision: decisionOf(strategy) });
     return { ok: true, status: 200, json, served, requested, callId,
       latencyMs: latencyMs ?? Date.now() - started, costUsd: Number(json?.usage?.cost ?? 0) };
   } catch (err) {
@@ -131,6 +151,7 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     await recordCall({
       id: callId, workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
       servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body, ref,
+      ...(decisionOf(strategy) || {}),
     });
     return { ok: false, status, json, served, requested, callId };
   }
@@ -152,9 +173,47 @@ v1.post('/chat/completions', async (req, res) => {
     await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return res.status(ready.error.status).json(ready.error.json);
   }
-  const { workload, requested, served, recipe } = ready;
+  const { workload, requested, strategy } = ready;
+  let { served, recipe } = ready;
   const callId = id('call');
   const started = Date.now();
+  let decision = decisionOf(strategy);
+  if (strategy && strategy.spec.kind === 'cascade') {
+    /* A cascade cannot stream its first answer before the check has read it, so the answer is
+       worked out whole and then sent as a stream. The first word arrives when the whole answer
+       would have; a measurement holds a cascade to the workload's speed setting on exactly that. */
+    try {
+      const out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId });
+      res.status(200);
+      res.setHeader('x-understudy-call-id', callId);
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      writeAsStream(res, out.json);
+      res.end();
+      await finish({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
+        started, body, response: out.json, status: 200, latencyMs: out.latencyMs, ttftMs: out.latencyMs, callId, ref,
+        decision: decisionOf(strategy, out) });
+    } catch (err) {
+      const status = err instanceof UpstreamError ? err.status : 502;
+      const payload = err instanceof UpstreamError ? err.body : { error: { message: 'The provider could not be reached.' } };
+      reportCallFailure({ kind: 'streamed call', model: served, status, workspaceId: wsId, message: payload?.error?.message || err.message });
+      await recordCall({
+        id: callId, workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
+        servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body, ref, ...(decision || {}),
+      });
+      if (!res.headersSent) res.status(status).json(payload);
+      else res.end();
+    }
+    return undefined;
+  }
+  if (strategy && strategy.spec.kind === 'router') {
+    // picked before anything is sent, from what can be seen of the call, so it streams as ever
+    const p = predict(strategy.spec, featuresOf(body));
+    const use = p >= strategy.spec.threshold ? strategy.spec.cheap : strategy.spec.strong;
+    served = use.model;
+    recipe = use.recipe ?? null;
+    decision = { ...decision, escalated: use === strategy.spec.strong, check: { by: 'router', p: Math.round(p * 1000) / 1000 } };
+  }
   try {
     const upstream = await chatStream(body, served, { recipe });
     res.status(200);
@@ -222,7 +281,7 @@ v1.post('/chat/completions', async (req, res) => {
       choices: [{ index: 0, message: { role: 'assistant', content: answer, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason }],
     };
     await finish({ wsId, workload, requested, served, usage, started, body, response, status: 200,
-      ttftMs: firstAt === null ? null : firstAt - started, callId, ref });
+      ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision });
     return undefined;
   } catch (err) {
     const status = err instanceof UpstreamError ? err.status : 502;
@@ -233,7 +292,7 @@ v1.post('/chat/completions', async (req, res) => {
     });
     await recordCall({
       id: callId, workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
-      servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body, ref,
+      servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body, ref, ...(decision || {}),
     });
     if (!res.headersSent) res.status(status).json(payload);
     else res.end();

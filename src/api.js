@@ -489,7 +489,7 @@ api.get('/workloads/:id', async (req, res) => {
         return a;
       }, {})).sort((x, y) => y.count - x.count),
       order: plan.order.slice(0, plan.models + 5).map((r) => ({
-        model: r.model, savingShare: r.savingShare, chance: r.chance,
+        model: r.model, key: r.key ?? null, label: r.label ?? null, savingShare: r.savingShare, chance: r.chance,
         parts: (r.parts || []).map((x) => ({ source: x.source, p: x.p, note: x.note })),
         family: r.family, thinking: recipeKind(r.recipe), thinkingOff: recipeKind(r.recipe) === 'off',
         speedChance: r.speedChance ?? null, answerChance: r.answerChance ?? null,

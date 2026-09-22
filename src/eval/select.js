@@ -435,7 +435,36 @@ export function selectCandidates(input) {
       mustThink: !!k.mustThink,
       health: healthOf(reach),
     };
-  }).sort((a, b) => b.expected - a.expected || a.price - b.price);
+  });
+
+  /* The customer's own model, thinking less. When it thinks before every answer and can be asked to
+     think less, that is often the safest saving there is: the same model, very likely the same
+     answers, and a good share of the billed tokens gone, since thinking is billed like the answer.
+     Its price is a guess until measured (six tenths of the model's own); the measurement finds the
+     real one. It is raced under its own name, and served the way it was measured if it wins. */
+  if (refModel && refThinks === true && !profile.reasoningSet && refPrice) {
+    const r = refModel.reasoning || {};
+    const efforts = Array.isArray(r.supported_efforts) ? r.supported_efforts : [];
+    let reasoning = null;
+    if (r.mandatory !== true && efforts.includes('none')) reasoning = { effort: 'none' };
+    else {
+      const lightest = ['minimal', 'low'].find((e) => efforts.includes(e) && e !== r.default_effort);
+      if (lightest) reasoning = { effort: lightest };
+    }
+    if (reasoning) {
+      const price = refPrice * 0.6;
+      const chance = 0.6;
+      ranked.push({
+        model: reference, key: `${reference}#lighter`, label: `${short(reference)}, thinking less`, name: refModel.name,
+        price, refPrice, savingShare: 0.4, chance, answerChance: chance, speedChance: null, speedMeasured: null, busy: false,
+        expected: (refPrice - price) * chance,
+        parts: [{ source: 'same model', p: chance, w: 1, note: 'your own model, asked to think less' }],
+        family: true, recipe: { reasoning }, note: 'your own model, asked to think less', thinks: true, mustThink: false,
+        health: refHealth,
+      });
+    }
+  }
+  ranked.sort((a, b) => b.expected - a.expected || a.price - b.price);
 
   /* At most two from one maker in the list, so one family's shared weakness cannot take every
      place; the rest of that family waits behind everybody else rather than being dropped. The

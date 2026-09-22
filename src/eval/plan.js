@@ -193,6 +193,14 @@ function estimate(plan, profile, facts, workload) {
   const extra = plan.order.slice(plan.models);
   for (const c of finalists) total += c.price * plan.sample;
   for (const c of extra) total += c.price * Math.min(plan.sample, config.EVAL_SCREEN_CALLS);
+  /* Strategies for the cheaper models that cannot manage alone: up to two dropped part way have
+     their other calls finished, and up to three have each answer checked once by Jev. */
+  const cheapest = [...plan.order].sort((a, b) => a.price - b.price).slice(0, 3);
+  for (const c of cheapest.slice(0, 2)) total += c.price * plan.sample * 0.5;
+  if (jevUsable()) {
+    const perCheck = ((Math.min(pin, 700) + Math.min(pout, 700) + 350) * config.JEV_PRICE_PER_MTOK) / 1e6;
+    total += cheapest.length * plan.sample * perCheck;
+  }
   const judged = judgementsFor(workload.shape_kind, plan.sample, finalists.length);
   if (judged) {
     const llm = facts.models.get(config.EVAL_JUDGE_MODEL);

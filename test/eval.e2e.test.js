@@ -779,7 +779,7 @@ test('a switch on copies waits for routed calls, and copies are never counted as
   const said = await db.prepare(`SELECT title, detail FROM activity WHERE workload_id = ? AND kind = 'ok' ORDER BY created_at`).all(workload.id);
   assert.ok(said.some((a) => /cleared your bar/.test(a.title) && /copies, so a switch starts with the first call that comes through Understudy/.test(a.detail)),
     JSON.stringify(said));
-  assert.ok(said.some((a) => /will run on vendor\/steady-small once its calls come through Understudy/.test(a.title)), JSON.stringify(said));
+  assert.ok(said.some((a) => /will run on steady-small once its calls come through Understudy/.test(a.title)), JSON.stringify(said));
   // the first routed call is served by the new model, and from then on it counts
   await recordCall({
     workspaceId: workspace.id, workloadId: workload.id, source: 'routed', requestedModel: 'openai/gpt-5.4',

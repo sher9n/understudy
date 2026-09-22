@@ -13,6 +13,12 @@ import { loadFacts } from '../models/facts.js';
 import { forgetFleet } from './history.js';
 import { OUTCOME_OF, OUTCOME_CASE, cheaperCleared } from './outcome.js';
 import { reportCallFailure } from '../alerts.js';
+import { jevUsable } from '../jev.js';
+import { structureOf, jevCheck, requestText, answerText as checkedText } from '../learn/check.js';
+import { simulateCascade, simulateRouter, bestOf } from '../learn/simulate.js';
+import { featuresOf, train, leaveOneOut } from '../learn/router.js';
+import { labelOf } from '../learn/arms.js';
+import { servingKey, keyOfSpec } from './promote.js';
 
 /* A measurement, run as a race.
  *
@@ -54,6 +60,11 @@ const pct = (xs, p) => {
   return s[Math.min(s.length - 1, Math.floor(p * (s.length - 1) + 0.5))];
 };
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+// a candidate's own name in a run: the model, or the customer's model thinking less
+const keyOf = (cand) => cand.key || cand.model;
+const short = (m) => String(m || '').split('/').pop();
+// strategies are only worked out with enough calls to learn from, and a router needs more than a cascade
+const ROUTER_MIN_CALLS = 40;
 
 /* The fewest of n calls past the slow end that chance would give less than one time in twenty,
    when one call in ten runs past it anyway. Never fewer than two: one slow call is never enough. */
@@ -193,8 +204,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       return a;
     }, {})),
     order: queue.map((r) => ({
-      model: r.model, price: r.price, savingShare: r.savingShare, chance: r.chance, expected: r.expected,
-      parts: r.parts, family: r.family, recipe: r.recipe, note: r.note,
+      model: r.model, key: r.key ?? null, label: r.label ?? null, price: r.price, savingShare: r.savingShare, chance: r.chance,
+      expected: r.expected, parts: r.parts, family: r.family, recipe: r.recipe, note: r.note,
     })),
     want, judge: plan.judge, difficulty: plan.difficulty, speed,
   };
@@ -456,6 +467,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       if (j.judgedBy) judgedWith.add(j.judgedBy);
       if (j.cost > 0 && await step(1, `Comparing ${reference}'s answers with each other`)) stopped = true;
     } else score = disagreement(p.a, p.b, shape) ?? 1;
+    p.noise = score;
     noiseScores.push(score);
   });
   } catch (err) {
@@ -530,8 +542,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   let reasked = false;
   if (refThinks !== plan.refThinks) {
     const facts = await loadFacts();
+    // the customer's model thinking less only means something when it thinks at all
+    if (refThinks === false) {
+      for (let k = queue.length - 1; k >= 0; k -= 1) if (queue[k].key) queue.splice(k, 1);
+    }
     for (const cand of queue) {
-      if (cand.model === workload.routed_model) continue;
+      if (cand.model === workload.routed_model || cand.key) continue;
       const m = facts.models.get(cand.model);
       const t = m ? thinkingFit(m, plan.profile, config.EVAL_THINKING_ROOM_TOKENS, refThinks) : null;
       if (t?.ok) { cand.recipe = t.recipe; cand.note = t.note || null; reasked = true; }
@@ -584,16 +600,19 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const results = [];
   let halt = null;
 
-  /* One model's run through the calls, until it finishes or cannot win. */
-  const tryModel = async (cand) => {
+  /* One model's run through the calls, until it finishes or cannot win. With `noDrop` it answers
+     every call whatever its answers are like: a model a cascade might rescue is only worth
+     judging on all of them. */
+  const tryModel = async (cand, { noDrop = false } = {}) => {
     const st = {
       runs: 0, counted: 0, sum: 0, failures: 0, errors: 0, errorText: null, lat: [], ttft: [], reused: 0,
-      candCost: 0, refCost: 0, kinds: new Map(), pairs: [], stopped: null,
+      candCost: 0, refCost: 0, kinds: new Map(), pairs: [], stopped: null, calls: [],
     };
+    const key = keyOf(cand);
     // a model already serving this workload is re-checked on fresh answers, so a change in it shows
-    const reuse = !(trigger === 'automatic' && cand.model === workload.routed_model);
-    answered.set(cand.model, 0);
-    for (const p of kept) {
+    const reuse = !(trigger === 'automatic' && cand.model === workload.routed_model && !cand.key);
+    answered.set(key, 0);
+    for (const [i, p] of kept.entries()) {
       if (halt) { st.stopped = halt === 'budget' ? 'budget' : 'user'; break; }
       /* Never past the most one measurement may spend, whatever it was quoted at: the quote counts
          a few calls for each model dropped early, and a model can be dropped late. */
@@ -639,8 +658,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         } else if (shape === 'free_text') {
           /* The replay has come back and is counted before the judgement is asked for, so a stop
              that lands between the two still counts the call that ran and was paid for. */
-          answered.set(cand.model, st.runs);
-          if (await step(1, `Trying ${cand.model}, ${st.runs} of ${kept.length} calls`)) {
+          answered.set(key, st.runs);
+          if (await step(1, `Trying ${cand.label || cand.model}, ${st.runs} of ${kept.length} calls`)) {
             counted = true;
             halt = halt || 'stopped';
             st.stopped = 'user';
@@ -648,7 +667,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
           if (!st.stopped && await halted()) { halt = halt || 'stopped'; st.stopped = 'user'; }
           counted = true;
           if (st.stopped === 'user') {
-            await keepReplay(run.id, p.s.id, cand.model, 0, r, { score: null, judged: null, failure: null });
+            await keepReplay(run.id, p.s.id, key, 0, r, { score: null, judged: null, failure: null });
             break;
           }
           judged = await judgeCandidate(askOf(p.body), got.value, p.a.ok ? p.a.value : null, p.b.ok ? p.b.value : null,
@@ -659,23 +678,28 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         } else {
           score = Math.min(p.a.ok ? disagreement(got, p.a, shape) ?? 1 : 1, p.b.ok ? disagreement(got, p.b, shape) ?? 1 : 1);
         }
-        st.pairs.push({ cand: got, ref: p.a.ok ? p.a : p.b, score });
+        st.pairs.push({ cand: got, ref: p.a.ok ? p.a : p.b, score, i });
       }
       const kind = score > 0 && scored ? (judged?.detail?.kind || failure || null) : null;
       if (kind) st.kinds.set(kind, (st.kinds.get(kind) || 0) + 1);
       if (scored) { st.sum += score; st.counted += 1; }
-      await keepReplay(run.id, p.s.id, cand.model, 0, r, { score, judged, failure });
+      // everything about this call a strategy built on this model would need to be worked out later
+      st.calls.push({
+        i, ok: !!r.ok && !failure, answered: !!r.ok, transient: !r.ok && !!r.transient, scored, score,
+        json: r.ok ? r.json : null, cost: r.ok ? paid(r) : 0, latency: r.latencyMs ?? null, ttft: r.ttftMs ?? r.latencyMs ?? null,
+      });
+      await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure });
       /* The best it could still do is get every remaining call right. When even that leaves it
          outside the review band, it cannot win, and every further call would be money spent on
          nothing. */
-      if (!st.stopped && (st.sum / kept.length) * 100 > floor * reviewBand) st.stopped = 'bar';
+      if (!noDrop && !st.stopped && (st.sum / kept.length) * 100 > floor * reviewBand) st.stopped = 'bar';
       /* The model serving the workload is timed on every call before anything is decided about its
          speed: a few slow calls early would otherwise switch a customer back on the least evidence. */
-      if (!st.stopped && cand.model !== workload.routed_model && tooSlow(st)) st.stopped = 'speed';
+      if (!noDrop && !st.stopped && cand.model !== workload.routed_model && tooSlow(st)) st.stopped = 'speed';
       // a judgement that went out is a model call too, and is counted like one
       const judgeCalls = judged && judged.cost > 0 ? 1 : 0;
-      answered.set(cand.model, st.stopped ? kept.length : st.runs);
-      if (await step((counted ? 0 : 1) + judgeCalls, `Trying ${cand.model}, ${st.runs} of ${kept.length} calls`)) {
+      answered.set(key, st.stopped ? kept.length : st.runs);
+      if (await step((counted ? 0 : 1) + judgeCalls, `Trying ${cand.label || cand.model}, ${st.runs} of ${kept.length} calls`)) {
         halt = halt || 'stopped';
         if (!st.stopped) st.stopped = 'user';
         break;
@@ -708,8 +732,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       : await monthlyOn(workloadId, cand.model);
     const g = gates(st.pairs, shape);
     const kinds = [...st.kinds.entries()].sort((a, b) => b[1] - a[1]);
+    stats.set(keyOf(cand), { cand, st });
     const row = {
-      id: id('res'), run_id: run.id, model_id: cand.model, runs: st.runs,
+      id: id('res'), run_id: run.id, model_id: keyOf(cand), runs: st.runs,
       gap_pct: round8(gap), cost_month_usd: costMonth, verdict,
       gate_structure: Math.round(g.structure * 100), gate_accuracy: Math.round(g.accuracy * 100),
       gate_coverage: Math.round(g.coverage * 100), gate_complete: Math.round(g.complete * 100),
@@ -723,17 +748,24 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       rank_json: JSON.stringify({ chance: cand.chance, savingShare: cand.savingShare, parts: cand.parts, family: cand.family }),
       recipe_json: cand.recipe ? JSON.stringify(cand.recipe) : null,
       cost_ratio: ratio === null ? null : round8(ratio),
+      // the customer's own model thinking less is a strategy of its own, served the way it was measured
+      arm_json: cand.key ? JSON.stringify({ kind: 'model', model: cand.model, recipe: cand.recipe ?? null }) : null,
+      escalated_pct: null,
     };
+    await insertResult(row);
+    return finished;
+  };
+
+  const insertResult = async (row) => {
     await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict,
                 gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at,
                 latency_p50, latency_p90, ttft_p50, ttft_p90, errors, stopped, error_text, difference, reused,
-                rank_json, recipe_json, cost_ratio)
+                rank_json, recipe_json, cost_ratio, arm_json, escalated_pct)
                 VALUES (@id, @run_id, @model_id, @runs, @gap_pct, @cost_month_usd, @verdict,
                 @gate_structure, @gate_accuracy, @gate_coverage, @gate_complete, @failures, @created_at,
                 @latency_p50, @latency_p90, @ttft_p50, @ttft_p90, @errors, @stopped, @error_text, @difference, @reused,
-                @rank_json, @recipe_json, @cost_ratio)`).run(row);
+                @rank_json, @recipe_json, @cost_ratio, @arm_json, @escalated_pct)`).run(row);
     results.push(row);
-    return finished;
   };
 
   /* The race. Several models at once, each in its own lane, the next in line starting as soon
@@ -744,6 +776,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   let running = 0;
   let finished = 0;
   const answered = new Map();
+  // each model's run, kept for the strategies worked out once the race is over
+  const stats = new Map();
   let accountHit = null;
   let overQuote = false;
   const quote = Number(plan.estimateUsd) || 0;
@@ -784,7 +818,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
            than was asked for, paid for on every call. */
         running -= 1;
       }
-      answered.delete(cand.model);
+      answered.delete(keyOf(cand));
       /* Charged as each model ends, the way a measurement always settled: often enough that a
          balance running low stops the next model starting, without a charge in the middle of
          every model's calls. */
@@ -810,6 +844,143 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     reportCallFailure({ kind: 'measurement replays', model: accountHit?.model ?? null, status: accountHit?.status, message: accountHit?.error });
     return await interrupt(accountProblem(accountHit));
   }
+
+  /* Strategies, for the cheaper models that could not manage alone.
+   *
+   * A model wrong on a small share of calls misses the bar, and most of what it would save is
+   * lost with it. A cascade keeps that saving on the calls it gets right: it answers first, a
+   * quick check reads the answer, and a doubtful one is sent on to the customer's own model. A
+   * router does the same without the check, by picking the model before the call is sent, from a
+   * small model of which calls it got right. Both are worked out here from answers already paid
+   * for, plus one check per answer, and only what clears the bar can be switched to. */
+  const noiseMean = mean(noiseScores);
+  const refOfPair = (p) => {
+    const r = p.ra?.ok ? p.ra : p.rb;
+    return { cost: p.refCost, latency: r?.latencyMs ?? null, ttft: r?.ttftMs ?? r?.latencyMs ?? null,
+      noise: p.noise ?? noiseMean };
+  };
+  const quickEnough = (xs) => {
+    if (!limit) return true;
+    return !tooSlow(metric === 'ttft' ? { ttft: xs, lat: xs } : { lat: xs, ttft: xs }, { final: true });
+  };
+  // a check's cost on a live call: what Jev reads, at its price per token
+  const liveCheckCost = (p, json) => ((requestText(p.body).length + checkedText(json).length) / 4 + 350)
+    * (config.JEV_PRICE_PER_MTOK / 1e6);
+  const strategyRow = (cand, spec, reading, verdict, extra = {}) => {
+    const costMonth = refMonthly !== null && reading.ratio !== null ? round8(refMonthly * reading.ratio) : null;
+    return {
+      id: id('res'), run_id: run.id, model_id: keyOfSpec(spec, reference), runs: kept.length,
+      gap_pct: round8(reading.gap), cost_month_usd: costMonth, verdict,
+      gate_structure: 100, gate_accuracy: Math.round(100 - reading.gap), gate_coverage: 100, gate_complete: 100,
+      failures: 0, created_at: now(),
+      latency_p50: pct(reading.latency, 0.5), latency_p90: pct(reading.latency, 0.9),
+      ttft_p50: pct(reading.ttft, 0.5), ttft_p90: pct(reading.ttft, 0.9),
+      errors: 0, stopped: null, error_text: null, difference: extra.difference ?? null, reused: 0,
+      rank_json: JSON.stringify({ chance: cand.chance, savingShare: cand.savingShare, parts: cand.parts, family: cand.family }),
+      recipe_json: cand.recipe ? JSON.stringify(cand.recipe) : null,
+      cost_ratio: reading.ratio === null ? null : round8(reading.ratio),
+      arm_json: JSON.stringify(spec), escalated_pct: round8(reading.escalated * 100),
+    };
+  };
+  const verdictOf = (reading) => {
+    let v = reading.inside ? verdictFor(reading.gap, floor, kept.length, { minRuns, reviewBand }) : reading.near ? 'review' : 'missed';
+    if ((v === 'cleared' || v === 'review') && !quickEnough(metric === 'ttft' ? reading.ttft : reading.latency)) v = 'slower';
+    return v;
+  };
+
+  const cascadeFor = async (cand, st) => {
+    const spec = { kind: 'cascade', first: { model: cand.model, recipe: cand.recipe ?? null }, fallback: { model: reference, recipe: null } };
+    const label = labelOf(spec, reference);
+    const checks = [];
+    let checked = 0;
+    for (const c of st.calls) {
+      const p = kept[c.i];
+      if (!c.ok) { checks.push({ structureOk: false, p: 0, ms: 0, liveCost: 0 }); continue; }
+      const shapeOk = structureOf(p.body, c.json, shape);
+      if (!shapeOk.ok) { checks.push({ structureOk: false, p: 0, ms: 0, liveCost: 0 }); continue; }
+      if (halt || spentTotal >= hardLimit) return false;
+      if (await halted()) { halt = 'stopped'; return false; }
+      let j;
+      try { j = await jevCheck(p.body, c.json, shape, { scope: workload.workspace_id }); } catch { return false; }
+      addJudge(j.cost);
+      checked += 1;
+      strategyLeft = Math.max(0, strategyLeft - 1);
+      if (j.cost > 0 && await step(1, `Checking ${short(cand.model)}'s answers, ${checked} of ${kept.length}`)) { halt = 'stopped'; return false; }
+      checks.push({ structureOk: true, p: j.p, ms: j.ms || 0, liveCost: liveCheckCost(p, c.json) });
+    }
+    const calls = st.calls.map((c, k) => ({ ok: c.ok, score: c.scored ? c.score : (kept[c.i].noise ?? noiseMean),
+      cost: c.cost, latency: c.latency, ttft: c.ttft, check: checks[k], ref: refOfPair(kept[c.i]) }));
+    const readings = simulateCascade(calls, { checkCost: (i) => checks[i].liveCost, checkMs: (i) => checks[i].ms });
+    const best = bestOf(readings, { floor, reviewBand, fast: (r) => quickEnough(metric === 'ttft' ? r.ttft : r.latency) });
+    await insertResult(strategyRow(cand, { ...spec, threshold: best.threshold }, best, verdictOf(best), { difference: label }));
+    return true;
+  };
+
+  const routerFor = async (cand, st) => {
+    const usable = st.calls.filter((c) => c.ok && c.scored);
+    const matched = usable.filter((c) => c.score === 0).length;
+    // something to tell apart: some calls it gets right and some it does not
+    if (usable.length < ROUTER_MIN_CALLS || matched < 5 || usable.length - matched < 5) return false;
+    const samples = usable.map((c) => ({ x: featuresOf(kept[c.i].body), y: c.score === 0 ? 1 : 0, c }));
+    const loo = leaveOneOut(samples);
+    const byCall = new Map(samples.map((s, k) => [s.c.i, loo[k]]));
+    const calls = st.calls.map((c) => ({ ok: c.ok, score: c.scored ? c.score : (kept[c.i].noise ?? noiseMean), cost: c.cost,
+      latency: c.latency, ttft: c.ttft, p: byCall.get(c.i) ?? 0, ref: refOfPair(kept[c.i]) }));
+    const readings = simulateRouter(calls);
+    const best = bestOf(readings, { floor, reviewBand, fast: (r) => quickEnough(metric === 'ttft' ? r.ttft : r.latency) });
+    /* A router is only worth keeping when it clears the bar on calls it did not learn from, and
+       saves something doing it: one that sends every call to the customer's own model clears
+       the bar at no saving, and is the customer's own model with extra steps. */
+    if (!best.inside || best.ratio === null || best.ratio > 0.95) return false;
+    const model = train(samples);
+    const spec = { kind: 'router', cheap: { model: cand.model, recipe: cand.recipe ?? null }, strong: { model: reference, recipe: null },
+      threshold: best.threshold, ...model };
+    await insertResult(strategyRow(cand, spec, best, verdictOf(best)));
+    return true;
+  };
+
+  let strategyLeft = 0;
+  if (!halt) {
+    const cheaper = (r) => r.cost_month_usd !== null && (refMonthly === null || r.cost_month_usd < refMonthly);
+    // one model, or the customer's own thinking less; never a strategy built on a strategy
+    const plain = results.filter((r) => r.verdict !== 'reference' && stats.has(r.model_id)
+      && (!r.arm_json || String(r.model_id).endsWith('#lighter')));
+    // answered every call, and could not manage alone
+    const pool = plain.filter((r) => ['missed', 'review'].includes(r.verdict) && !r.stopped && cheaper(r));
+    /* Dropped part way for its answers, but it could still save something with the calls it gets
+       wrong sent on: its own price, plus the customer's model on the share it got wrong, has to
+       leave room under the customer's price. Judged on the saving rather than on how far it
+       missed, because a model dropped after a few calls has a rough reading of how often it is
+       wrong, and a cheap model wrong one time in eight is exactly what a cascade is for. */
+    const roomLeft = (r) => (r.cost_ratio === null ? 0 : 1 - (Number(r.cost_ratio) + Math.min(1, Number(r.gap_pct) / 100)));
+    const close = plain.filter((r) => r.stopped === 'bar' && cheaper(r) && roomLeft(r) >= 0.25)
+      .sort((a, b) => a.cost_month_usd - b.cost_month_usd).slice(0, 2);
+    const worth = [...pool, ...close].sort((a, b) => a.cost_month_usd - b.cost_month_usd).slice(0, 3);
+    if (worth.length && (jevUsable() || kept.length >= ROUTER_MIN_CALLS)) {
+      strategyLeft = worth.length * kept.length;
+      remaining = () => strategyLeft;
+      try {
+        for (const r of worth) {
+          if (halt) break;
+          let { cand, st } = stats.get(r.model_id);
+          if (st.runs < kept.length) {
+            // finishes the calls it was dropped before; the ones already answered cost nothing again
+            const more = await tryModel(cand, { noDrop: true });
+            answered.delete(keyOf(cand));
+            if (more.runs < kept.length || more.stopped) continue;
+            st = more;
+          }
+          if (jevUsable()) await cascadeFor(cand, st);
+          if (!halt) await routerFor(cand, st);
+        }
+      } catch (err) {
+        await interrupt(`Something went wrong here while trying strategies: ${String(err?.message || err).slice(0, 160)}.`, { retryMs: 0 });
+        throw err;
+      }
+      strategyLeft = 0;
+    }
+  }
+  if (halt === 'stopped') return await endStopped();
 
   await settle(`Measuring ${workload.slug}`);
   await keepSavings();
@@ -846,7 +1017,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      reason at all on its own: that is one reading, and the live watch sees how it really does. */
   const serving = workload.routed_model;
   if (serving) {
-    const mine = results.find((r) => r.model_id === serving);
+    // the strategy serving it, by the name its result carries: a cascade's is its own row
+    const servingAs = await servingKey(workload);
+    const mine = results.find((r) => r.model_id === servingAs);
     const ruled = plan.excluded.find((e) => e.model === serving);
     let why = null;
     let soft = true;
