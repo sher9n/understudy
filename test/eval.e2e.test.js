@@ -41,8 +41,10 @@ const { default: migrate } = await import('../src/db/migrate.js');
 const { createAccount } = await import('../src/auth.js');
 const { workloadFor, recordCall } = await import('../src/traffic.js');
 const { saveCatalog } = await import('../src/openrouter.js');
-const { runEvaluation } = await import('../src/eval/run.js');
-const { move } = await import('../src/billing.js');
+const { runEvaluation, stopMeasuring, closeAbandoned } = await import('../src/eval/run.js');
+const { move, withFee } = await import('../src/billing.js');
+const { enqueue } = await import('../src/jobs.js');
+const { considerMeasuring } = await import('../src/proxy.js');
 
 await migrate({ quiet: true });
 
@@ -55,10 +57,25 @@ const BEHAVIOUR = {
 };
 
 let seen = 0;
+/* While this is set, the provider holds every answer until it resolves, so a test can know a
+   measurement is mid-flight at the moment it asks it to stop. */
+let hold = null;
+let held = 0;
+/* Or it holds one particular answer, the Nth from now, so a test can stop a run at its very
+   last call. */
+let holdAt = 0;
+let releaseAt = null;
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
-  req.on('end', () => {
+  req.on('end', async () => {
+    if (holdAt && seen + 1 === holdAt) {
+      const gate = new Promise((r) => { releaseAt = r; });
+      held += 1;
+      holdAt = 0;
+      await gate;
+    }
+    if (hold) { held += 1; await hold; }
     const payload = JSON.parse(body || '{}');
     const model = payload.model;
     // the marker the request carries tells us which sampled call this is
@@ -133,6 +150,7 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
 
   const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(out.runId);
   assert.equal(run.status, 'done');
+  assert.equal(run.outcome, 'compared', 'a run that tried models says so');
   assert.equal(run.sample_size, 100);
 
   const all = await db.prepare('SELECT * FROM eval_results WHERE run_id = ? ORDER BY model_id').all(out.runId);
@@ -166,4 +184,474 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
   const charged = (await db.prepare(`SELECT COALESCE(SUM(amount_usd), 0) AS s FROM ledger
                                WHERE workspace_id = ? AND kind = 'eval'`).get(workspace.id)).s;
   assert.ok(charged < 0, 'measuring should have been charged');
+});
+
+/* Stopping ----------------------------------------------------------------------------- */
+
+const MIN = 60000;
+
+/** A workspace of its own with one measurable workload, the same shape as the one above. */
+async function seed(tag) {
+  const { workspace } = await createAccount({
+    email: `e2e-${tag}-${process.pid}@understudy.dev`, password: 'correct-horse', name: tag,
+  });
+  await move(workspace.id, { kind: 'credit', amountUsd: 50, note: 'test' });
+  let workload = null;
+  for (let i = 0; i < 200; i += 1) {
+    const request = {
+      model: 'openai/gpt-5.4',
+      messages: [
+        { role: 'system', content: `Extract the totals from invoice ${900000 + i}.` },
+        { role: 'user', content: `document #${i}` },
+      ],
+      response_format: { type: 'json_object' },
+    };
+    workload = workload || await workloadFor(workspace.id, request);
+    await recordCall({
+      workspaceId: workspace.id, workloadId: workload.id, source: 'trace',
+      requestedModel: 'openai/gpt-5.4', servedModel: 'openai/gpt-5.4', statusCode: 200,
+      promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0.002,
+      request, response: { choices: [{ message: { content: '{}' } }] },
+    });
+  }
+  await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ?').run(now() - 14 * 86400000, workload.id);
+  return { workspace, workload };
+}
+
+const load = async (workloadId) => db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
+
+async function until(check, ms = 5000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await check()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error('waited too long');
+}
+
+test('a running measurement stops when asked, pays only for what ran, and switches nothing', async () => {
+  const { workspace, workload } = await seed('stop');
+
+  let release;
+  hold = new Promise((r) => { release = r; });
+  held = 0;
+  const running = runEvaluation(workload.id);
+  // mid-flight for certain: the run exists and its first call is waiting on the provider
+  await until(async () => held > 0 && !!await db.prepare(
+    `SELECT 1 FROM eval_runs WHERE workload_id = ? AND status = 'running'`).get(workload.id));
+  assert.equal((await load(workload.id)).status, 'measuring', 'a running workload says so');
+
+  const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_test' });
+  assert.equal(asked.state, 'stopping', 'a live run is asked to stop, not killed');
+  hold = null;
+  release();
+  const out = await running;
+  assert.equal(out.stopped, true, `the run should have stopped: ${JSON.stringify(out)}`);
+
+  const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(out.runId);
+  assert.equal(run.status, 'stopped');
+  assert.equal(run.outcome, 'stopped');
+  assert.equal(run.stopped_by, 'usr_test');
+  assert.equal(run.phase, null, 'a stopped run says nothing is happening');
+  assert.ok(run.steps_done > 0 && run.steps_done < run.steps_total,
+    `it stopped part way, at ${run.steps_done} of ${run.steps_total}`);
+
+  // the call in flight came back and was counted, and the ledger holds exactly that, with the fee
+  assert.ok(run.spend_usd > 0, 'the calls that ran were paid for');
+  const charged = (await db.prepare(`SELECT COALESCE(SUM(amount_usd), 0) AS s FROM ledger
+                               WHERE workspace_id = ? AND kind = 'eval'`).get(workspace.id)).s;
+  assert.ok(Math.abs(-charged - withFee(run.spend_usd)) < 1e-7,
+    `charged ${-charged}, should be what ran plus the fee, ${withFee(run.spend_usd)}`);
+  const replays = (await db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND source = 'replay'`)
+    .get(workload.id)).n;
+  assert.equal(replays, run.steps_done, 'nothing more was sent once the stop was seen');
+
+  const after = await load(workload.id);
+  assert.equal(after.routed_model, null, 'a stopped run switches nothing');
+  assert.equal(after.status, 'new', 'and the workload goes back to what it was, not "Measuring"');
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(workload.id)).n, 0);
+  const said = await db.prepare(`SELECT title FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`)
+    .get(workload.id);
+  assert.match(said.title, /stopped/);
+
+  // the next call of a stopped workload must not start it again behind the person's back
+  const before = (await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run'`).get()).n;
+  await considerMeasuring(workspace.id, after);
+  assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run'`).get()).n, before);
+});
+
+test('a measurement a restart left behind is closed the moment somebody stops it', async () => {
+  const { workspace, workload } = await seed('orphan');
+  const t = now();
+  // as a deploy leaves one: still "running", and not heard from in twenty minutes
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, heartbeat_at, steps_total, steps_done)
+              VALUES ('run_orphan_stop', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 40)`)
+    .run(workspace.id, workload.id, t - 25 * MIN, t - 25 * MIN, t - 20 * MIN);
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE kind = 'eval_run'
+              AND (payload::jsonb ->> 'workloadId') = ?`).run(t - 25 * MIN, workload.id);
+  await db.prepare(`UPDATE workloads SET status = 'measuring' WHERE id = ?`).run(workload.id);
+
+  const out = await stopMeasuring(await load(workload.id));
+  assert.equal(out.state, 'stopped', 'nothing would ever answer a stop request, so it is closed now');
+  const run = await db.prepare(`SELECT * FROM eval_runs WHERE id = 'run_orphan_stop'`).get();
+  assert.equal(run.status, 'stopped');
+  assert.equal(run.outcome, 'stopped');
+  assert.equal((await load(workload.id)).status, 'new');
+  // and its job leaves the queue, or the next restart would put it back and start again
+  const job = await db.prepare(`SELECT status FROM jobs WHERE kind = 'eval_run'
+                AND (payload::jsonb ->> 'workloadId') = ?`).get(workload.id);
+  assert.equal(job.status, 'cancelled');
+});
+
+test('a measurement nothing is running any more is closed without anybody asking', async () => {
+  const { workspace, workload } = await seed('sweep');
+  const t = now();
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, heartbeat_at, steps_total, steps_done)
+              VALUES ('run_orphan_sweep', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 40),
+                     ('run_alive_sweep', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 12)`)
+    .run(workspace.id, workload.id, t - 40 * MIN, t - 40 * MIN, t - 30 * MIN,
+         workspace.id, workload.id, t - 2 * MIN, t - 2 * MIN, t - 5000);
+
+  assert.equal(await closeAbandoned(workload.id), 1, 'only the one gone quiet is closed');
+  const gone = await db.prepare(`SELECT * FROM eval_runs WHERE id = 'run_orphan_sweep'`).get();
+  assert.equal(gone.status, 'failed');
+  assert.equal(gone.outcome, 'interrupted');
+  const alive = await db.prepare(`SELECT status FROM eval_runs WHERE id = 'run_alive_sweep'`).get();
+  assert.equal(alive.status, 'running', 'a run that wrote a heartbeat seconds ago is left alone');
+  await db.prepare(`UPDATE eval_runs SET status = 'failed' WHERE id = 'run_alive_sweep'`).run();
+});
+
+test('the switched card is built from the switch and the calls since, and adds up by hand', async () => {
+  const { switchStory } = await import('../src/eval/switch-story.js');
+  const { workspace, workload } = await seed('switched');
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true);
+  const w = await load(workload.id);
+  assert.equal(w.routed_model, 'vendor/steady-small', 'the cheaper steady model was switched to');
+
+  // "cost a month" is the customer's own traffic only: 200 calls of 800 in and 60 out over 14
+  // days, never the replays the measurement made (it used to count those as traffic too)
+  const steady = await db.prepare(`SELECT cost_month_usd FROM eval_results WHERE run_id = ? AND model_id = ?`)
+    .get(out.runId, 'vendor/steady-small');
+  const perDay = (0.2e-6 * 800 + 0.6e-6 * 60) * 200 / 14;
+  assert.ok(Math.abs(steady.cost_month_usd - perDay * 30) < 1e-6, `a month on it is ${steady.cost_month_usd}`);
+
+  /* before any call has come through us, all 200 are copies, which already ran on the original
+     model: nothing is being saved, and the figures are what routing all of it would save */
+  const before = await switchStory(await load(workload.id));
+  assert.equal(before.volume.routed, 0);
+  assert.equal(before.volume.copies, 200);
+  assert.equal(before.volume.basis, 'all');
+  assert.ok(Math.abs(before.projection[0].saved
+    - (before.prices.fromPerCall - before.prices.toPerCall) * (200 / 14) * 30) < 1e-6);
+
+  // twelve calls served by it since the switch, charged as routed calls are
+  for (let i = 0; i < 12; i += 1) {
+    await recordCall({
+      workspaceId: workspace.id, workloadId: workload.id, source: 'routed',
+      requestedModel: 'openai/gpt-5.4', servedModel: 'vendor/steady-small', statusCode: 200,
+      promptTokens: 800, completionTokens: 60, costUsd: 0.000196, chargedUsd: withFee(0.000196),
+    });
+  }
+  const s = await switchStory(await load(workload.id));
+  assert.equal(s.from, 'openai/gpt-5.4');
+  assert.equal(s.to, 'vendor/steady-small');
+  assert.equal(s.how, 'automatic');
+  assert.equal(s.evidence.verdict, 'cleared', 'why it switched comes from the measurement it switched on');
+  assert.equal(s.evidence.runId, out.runId);
+  assert.equal(s.latest, null, 'nothing has measured it again yet');
+  assert.ok(s.nextCheckAt > now(), 'and the next check is due on the 30 day default');
+
+  // a call on each: 800 in at its price, and each model's own answer length
+  assert.ok(Math.abs(s.prices.fromPerCall - (2.5e-6 * 800 + 15e-6 * 60)) < 1e-9, `${s.prices.fromPerCall}`);
+  assert.ok(Math.abs(s.prices.toPerCall - (0.2e-6 * 800 + 0.6e-6 * 60) * 1.01) < 1e-9, 'the fee is on the new model');
+
+  // the twelve served calls, actual: what was paid, and the same prompts on the original
+  assert.equal(s.soFar.calls, 12);
+  assert.ok(Math.abs(s.soFar.paid - 12 * withFee(0.000196)) < 1e-7, `paid ${s.soFar.paid}`);
+  assert.ok(Math.abs(s.soFar.wouldHave - 12 * (2.5e-6 * 800 + 15e-6 * 60)) < 1e-7, `would have ${s.soFar.wouldHave}`);
+  assert.ok(Math.abs(s.soFar.saved - (s.soFar.wouldHave - s.soFar.paid)) < 1e-9);
+
+  /* The saving projected is on the calls that come through us, at their own pace: twelve today
+     is 360 a month. It used to be projected from all 212, copies included, which is the saving
+     routing everything would bring, not the one that is happening; that is kept, labelled. */
+  const perCallSaving = s.prices.fromPerCall - s.prices.toPerCall;
+  assert.equal(s.volume.calls, 212);
+  assert.equal(s.volume.routed, 12);
+  assert.equal(s.volume.copies, 200);
+  assert.equal(s.volume.basis, 'routed');
+  assert.ok(Math.abs(s.volume.monthlyRouted - 360) < 1e-6, `routed a month is ${s.volume.monthlyRouted}`);
+  const [month] = s.projection;
+  assert.ok(Math.abs(month.saved - perCallSaving * 360) < 1e-6, `a month saves ${month.saved}`);
+  assert.ok(Math.abs(s.volume.allMonthSaved - perCallSaving * (212 / 14) * 30) < 1e-6,
+    'and what routing the copies too would save is there, apart');
+  assert.ok(s.measuring.spent > 0, 'and what measuring cost is there to be shown');
+
+  // calls of no known size cannot be priced: "$0.00 a call" and "0% less" were not findings
+  await db.prepare('UPDATE calls SET prompt_tokens = 0, completion_tokens = 0 WHERE workload_id = ?').run(workload.id);
+  const blind = await switchStory(await load(workload.id));
+  assert.equal(blind.prices.sized, false);
+  assert.equal(blind.prices.fromPerCall, null);
+  assert.equal(blind.prices.toPerCall, null);
+  assert.equal(blind.prices.cheaperPct, null);
+  assert.equal(blind.prices.fromListed, true, 'and it says why: the model is sold, the calls have no size');
+  assert.deepEqual(blind.projection, []);
+});
+
+test('a stop that lands while the last charge is being settled switches nothing', async () => {
+  // the guard on the ending itself: every call has been made and counted, the run is settling
+  // what it spent, and a stop arrives. It used to write "done" and switch the model.
+  const { workspace, workload } = await seed('settling');
+  held = 0;
+  holdAt = seen + 350; // 200 to set the bar, 100 on the first model, then half way through the second
+  const running = runEvaluation(workload.id);
+  await until(async () => held > 0, 20000);
+  // hold the balance while the rest of the calls run, so the run waits at its last settle
+  const lock = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  await lock.connect();
+  await lock.query('BEGIN');
+  await lock.query('SELECT 1 FROM billing_accounts WHERE workspace_id = $1 FOR UPDATE', [workspace.id]);
+  releaseAt();
+  await until(async () => {
+    const r = await db.prepare(`SELECT steps_done, steps_total FROM eval_runs WHERE workload_id = ? AND status = 'running'`)
+      .get(workload.id);
+    return r && r.steps_done === r.steps_total;
+  }, 20000);
+  const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_settle' });
+  assert.equal(asked.state, 'stopping');
+  await lock.query('ROLLBACK');
+  await lock.end();
+  const out = await running;
+  assert.equal(out.stopped, true, JSON.stringify(out));
+  const after = await load(workload.id);
+  assert.equal(after.routed_model, null, 'the steady model cleared, and was still not switched to');
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(workload.id)).n, 0);
+  const run = await db.prepare('SELECT status, outcome, spend_usd FROM eval_runs WHERE id = ?').get(out.runId);
+  assert.equal(run.status, 'stopped');
+  assert.equal(run.outcome, 'stopped');
+  const charged = (await db.prepare(`SELECT COALESCE(SUM(amount_usd), 0) AS s FROM ledger
+                               WHERE workspace_id = ? AND kind = 'eval'`).get(workspace.id)).s;
+  assert.ok(Math.abs(-charged - withFee(run.spend_usd)) < 1e-7, 'every call it made was charged, once, with the fee');
+});
+
+test('a stop that cancels a waiting measurement says so, even just after one finished', async () => {
+  const { workspace, workload } = await seed('justfinished');
+  const t = now();
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, steps_total, steps_done)
+              VALUES ('run_just_finished', ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 300)`)
+    .run(workspace.id, workload.id, t - 20000, t - 20000, t - 5000);
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' }, { unique: true });
+  const out = await stopMeasuring(await load(workload.id));
+  assert.equal(out.state, 'cancelled', 'the waiting one was stopped before it started; the earlier one is not the answer');
+  const quiet = await stopMeasuring(await load(workload.id));
+  assert.equal(quiet.state, 'finished', 'with nothing to cancel, a run that ended a moment ago is');
+});
+
+test('a stop in a run\'s last moments says it had finished, not that nothing was spent', async () => {
+  const { workspace, workload } = await seed('tail');
+  const t = now();
+  // it has written its ending and is tidying up: its job is still claimed, and belongs to it
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE id = ?`).run(t - 30000, jobId);
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, heartbeat_at, steps_total, steps_done, spend_usd, job_id)
+              VALUES ('run_tail', ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, ?, 300, 300, 0.62, ?)`)
+    .run(workspace.id, workload.id, t - 30000, t - 30000, t - 500, t - 600, jobId);
+  const out = await stopMeasuring(await load(workload.id));
+  assert.equal(out.state, 'finished');
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'claimed',
+    'the run\'s own job is left to it');
+});
+
+test('a model that cleared but costs more a month is not a candidate', async () => {
+  const { restingStatus } = await import('../src/eval/run.js');
+  const { workspace, workload } = await seed('dearer');
+  const t = now();
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, floor_pct)
+              VALUES ('run_dearer', ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 3)`)
+    .run(workspace.id, workload.id, t - 60000, t - 60000, t - 30000);
+  await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict, created_at)
+              VALUES ('res_dearer_ref', 'run_dearer', 'openai/gpt-5.4', 200, 0, 2.00, 'reference', ?),
+                     ('res_dearer_c', 'run_dearer', 'vendor/steady-small', 100, 1, 2.50, 'cleared', ?)`).run(t, t);
+  const r = await restingStatus(workload.id);
+  assert.equal(r.status, 'no_match', 'what the run said at its end: nothing cleared that would save anything');
+});
+
+test('closing a dead run leaves alone a job a new run has picked up', async () => {
+  const { workspace, workload } = await seed('samejob');
+  const t = now();
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic' });
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE id = ?`).run(t - 1000, jobId);
+  // the run a restart killed, and the run the requeued job started under the same id
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, heartbeat_at, steps_total, steps_done, job_id)
+              VALUES ('run_dead_samejob', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 40, ?),
+                     ('run_live_samejob', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 5, ?)`)
+    .run(workspace.id, workload.id, t - 40 * MIN, t - 40 * MIN, t - 30 * MIN, jobId,
+         workspace.id, workload.id, t - 1000, t - 1000, t - 500, jobId);
+  assert.equal(await closeAbandoned(workload.id), 1);
+  assert.equal((await db.prepare(`SELECT status FROM eval_runs WHERE id = 'run_dead_samejob'`).get()).status, 'failed');
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'claimed',
+    'the job stays with the run that is using it');
+  await db.prepare(`UPDATE eval_runs SET status = 'failed' WHERE id = 'run_live_samejob'`).run();
+});
+
+test('a run the old code finished without an outcome is read from what it wrote', async () => {
+  const { restingStatus } = await import('../src/eval/run.js');
+  const { workspace, workload } = await seed('nooutcome');
+  const t = now();
+  // an earlier measurement found a candidate
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, floor_pct)
+              VALUES ('run_found', ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 3)`)
+    .run(workspace.id, workload.id, t - 3 * 86400000, t - 3 * 86400000, t - 3 * 86400000);
+  await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict, created_at)
+              VALUES ('res_found_ref', 'run_found', 'openai/gpt-5.4', 200, 0, 2.00, 'reference', ?),
+                     ('res_found', 'run_found', 'vendor/steady-small', 100, 1, 0.50, 'cleared', ?)`).run(t, t);
+  // then the old process, during a deploy, finished one that ran out of balance, with no outcome
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, error)
+              VALUES ('run_old_nobalance', ?, ?, 'done', 'json', 'openai/gpt-5.4', 100, ?, ?, ?,
+                      'balance ran out after the bar was set')`)
+    .run(workspace.id, workload.id, t - 60000, t - 60000, t - 30000);
+  const r = await restingStatus(workload.id);
+  assert.equal(r.status, 'certified', 'it was a run that found nothing, not the newest comparison');
+});
+
+test('a stop on the very last call of a measurement switches nothing', async () => {
+  const { workspace, workload } = await seed('lastcall');
+  // 100 sampled calls: 200 to set the bar, then 100 on each of the two cheaper models
+  held = 0;
+  holdAt = seen + 400;
+  const running = runEvaluation(workload.id);
+  await until(async () => held > 0, 20000);
+  const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_last' });
+  assert.equal(asked.state, 'stopping');
+  releaseAt();
+  const out = await running;
+  assert.equal(out.stopped, true, JSON.stringify(out));
+  const after = await load(workload.id);
+  assert.equal(after.routed_model, null, 'the model that would have cleared was not switched to');
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(workload.id)).n, 0);
+  const run = await db.prepare('SELECT status, steps_done, steps_total FROM eval_runs WHERE id = ?').get(out.runId);
+  assert.equal(run.status, 'stopped');
+  assert.equal(run.steps_done, run.steps_total, 'every call it made is counted, and it made them all');
+  // the one model that finished before the stop keeps its result; the stopped one has none
+  const kept = await db.prepare(`SELECT model_id FROM eval_results WHERE run_id = ? AND verdict <> 'reference'`).all(out.runId);
+  assert.equal(kept.length, 1);
+  void workspace;
+});
+
+test('a run a restart interrupted lets go of its job, so it can be measured again', async () => {
+  const { workspace, workload } = await seed('release');
+  const t = now();
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE id = ?`).run(t - 25 * MIN, jobId);
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, heartbeat_at, steps_total, steps_done, job_id)
+              VALUES ('run_release', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 40, ?)`)
+    .run(workspace.id, workload.id, t - 25 * MIN, t - 25 * MIN, t - 20 * MIN, jobId);
+  // before: the dead job counted as open, so asking again was answered with it and ran nothing
+  assert.equal(await closeAbandoned(workload.id), 1);
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'failed');
+  const again = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' }, { unique: true });
+  assert.notEqual(again, jobId, 'a new measurement can be queued');
+  await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE id = ?`).run(again);
+
+  // a job left claimed with no run at all, its process gone before it started, is let go too
+  const orphan = await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic' });
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE id = ?`).run(t - 30 * MIN, orphan);
+  await closeAbandoned(workload.id);
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(orphan)).status, 'failed');
+
+  // and an interrupted run, which nobody stopped, does not keep a new workload from starting itself
+  await db.prepare(`UPDATE workloads SET status = 'new' WHERE id = ?`).run(workload.id);
+  const before = (await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND status = 'queued'`).get()).n;
+  await considerMeasuring(workspace.id, await load(workload.id));
+  assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND status = 'queued'`).get()).n,
+    before + 1);
+  await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE kind = 'eval_run' AND status = 'queued'`).run();
+});
+
+test('money moved at the same moment is all counted, and a reference counts once', async () => {
+  const { workspace } = await createAccount({
+    email: `e2e-money-${process.pid}@understudy.dev`, password: 'correct-horse', name: 'money',
+  });
+  await move(workspace.id, { kind: 'credit', amountUsd: 50, note: 'test' });
+  // twenty $1 charges at once: read, add and write back used to lose most of them
+  await Promise.all(Array.from({ length: 20 }, () => move(workspace.id, { kind: 'call', amountUsd: -1, note: 'test' })));
+  const acct = await db.prepare('SELECT balance_usd FROM billing_accounts WHERE workspace_id = ?').get(workspace.id);
+  assert.equal(acct.balance_usd, 30);
+  const afters = (await db.prepare(`SELECT balance_after FROM ledger WHERE workspace_id = ? AND kind = 'call'
+                    ORDER BY balance_after DESC`).all(workspace.id)).map((r) => r.balance_after);
+  assert.deepEqual(afters, Array.from({ length: 20 }, (_, i) => 49 - i), 'each ledger row holds the balance it produced');
+  // one payment reported twice at the same moment lands once
+  const both = await Promise.all([1, 2].map(() => move(workspace.id, { kind: 'credit', amountUsd: 10, note: 'test', ref: `pi_same_${process.pid}` })));
+  assert.equal(both.filter((b) => b.duplicate).length, 1);
+  assert.equal((await db.prepare('SELECT balance_usd FROM billing_accounts WHERE workspace_id = ?').get(workspace.id)).balance_usd, 40);
+});
+
+test('a stop that lands while a measurement is being picked up ends it before anything is sent', async () => {
+  const { workload } = await seed('pickup');
+  // claimed by the runner, then cancelled by a stop, before the run existed to be asked
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
+  await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE id = ?`).run(jobId);
+  const out = await runEvaluation(workload.id, { jobId });
+  assert.equal(out.stopped, true, JSON.stringify(out));
+  const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(out.runId);
+  assert.equal(run.status, 'stopped');
+  assert.equal(run.steps_done, 0);
+  const sent = (await db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND source = 'replay'`)
+    .get(workload.id)).n;
+  assert.equal(sent, 0, 'not one call was sent');
+  assert.equal((await load(workload.id)).status, 'new');
+});
+
+test('a job cancelled while it runs stays cancelled, even when it asks to be tried again', async () => {
+  const { handle, runOnce } = await import('../src/jobs.js');
+  // the measurement's job is stopped while its handler is running, and the handler then asks
+  // to wait for balance, which used to put the stopped job straight back in the queue
+  handle('test_cancelled_mid_run', async (_payload, job) => {
+    await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE id = ?`).run(job.id);
+    return { snoozeMs: 30 * MIN, note: 'waiting for balance' };
+  });
+  const jobId = await enqueue('test_cancelled_mid_run', {}, { runAfter: 0 });
+  await runOnce();
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'cancelled');
+});
+
+test('stopping a workload asks every run of it to stop, not only the newest', async () => {
+  const { workspace, workload } = await seed('tworuns');
+  const t = now();
+  // one asked for and one on schedule, both alive
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, heartbeat_at, steps_total, steps_done, trigger)
+              VALUES ('run_two_a', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 30, 'manual'),
+                     ('run_two_b', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 10, 'automatic')`)
+    .run(workspace.id, workload.id, t - 60000, t - 60000, t - 1000,
+         workspace.id, workload.id, t - 30000, t - 30000, t - 2000);
+  const out = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_two' });
+  assert.equal(out.state, 'stopping');
+  const asked = await db.prepare(`SELECT id FROM eval_runs WHERE workload_id = ? AND stop_requested_at IS NOT NULL
+                ORDER BY id`).all(workload.id);
+  assert.deepEqual(asked.map((r) => r.id), ['run_two_a', 'run_two_b']);
+  await db.prepare(`UPDATE eval_runs SET status = 'failed' WHERE workload_id = ?`).run(workload.id);
+});
+
+test('stopping a measurement that has not started takes it out of the queue', async () => {
+  const { workload } = await seed('queued');
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' }, { unique: true });
+  await db.prepare(`UPDATE workloads SET status = 'measuring' WHERE id = ?`).run(workload.id);
+
+  const out = await stopMeasuring(await load(workload.id));
+  assert.equal(out.state, 'cancelled');
+  const job = await db.prepare(`SELECT status FROM jobs WHERE kind = 'eval_run'
+                AND (payload::jsonb ->> 'workloadId') = ?`).get(workload.id);
+  assert.equal(job.status, 'cancelled');
+  assert.equal((await load(workload.id)).status, 'new', 'no longer "Measuring", because nothing will');
 });

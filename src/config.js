@@ -20,6 +20,23 @@ const bool = (name, fallback) => {
   return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
 };
 
+/* The cadences a workspace can choose on Settings, in days. 0 is "only when I ask". The
+   screen, the route that saves a choice and the default all read this one list. */
+export const MEASURE_CHOICES = [0, 1, 5, 10, 30, 90];
+
+/* The cadence a workspace has until it chooses one. It has to be one of the choices: it used
+   to be 7, which is not, so a workspace that never chose saw no choice selected on Settings
+   while every workload was quietly measured every week, on a cadence nobody could see or
+   pick. A value from the environment that is not a choice falls back to 30 and says so,
+   rather than recreating that. */
+const measureDefault = () => {
+  const days = num('MEASURE_EVERY_DAYS', 30);
+  if (MEASURE_CHOICES.includes(days)) return days;
+  console.warn(`MEASURE_EVERY_DAYS=${days} is not one of the choices on Settings `
+    + `(${MEASURE_CHOICES.join(', ')}), so 30 is used instead.`);
+  return 30;
+};
+
 /* The address customers are given.
 
    Connect shows this to them as the base URL to point their client at, so getting it wrong
@@ -56,6 +73,11 @@ export const config = {
   ZDR_ONLY: bool('ZDR_ONLY', true),
   MODEL_MIN_GAP_MS: num('MODEL_MIN_GAP_MS', 3200),
   UPSTREAM_TIMEOUT_MS: num('UPSTREAM_TIMEOUT_MS', 120000),
+  /* The longest we wait before retrying when a provider says it is busy, whatever it asks for.
+     Uncapped, one call could wait out any Retry-After three times over and outlast the silence
+     a measurement is allowed (EVAL_STALE_MIN), so a slow but live run would be closed as
+     abandoned. Capped, the slowest call is four timeouts and three of these waits. */
+  UPSTREAM_RETRY_WAIT_MAX_MS: num('UPSTREAM_RETRY_WAIT_MAX_MS', 30000),
 
   // what we keep, and for how long
   RETENTION_DAYS: num('RETENTION_DAYS', 30),
@@ -111,8 +133,15 @@ export const config = {
   EVAL_JUDGE_MODEL: str('EVAL_JUDGE_MODEL', 'openai/gpt-5.4-mini'),
   EVAL_RECHECK_HOURS: num('EVAL_RECHECK_HOURS', 24),
   /* How often a workspace re-measures by itself, in days. Zero means never: measuring is
-     then something a person asks for. Set in Settings; this is the default for a new one. */
-  MEASURE_EVERY_DAYS: num('MEASURE_EVERY_DAYS', 7),
+     then something a person asks for. Set in Settings; this is what a workspace has until it
+     chooses, and it is always one of MEASURE_CHOICES. */
+  MEASURE_EVERY_DAYS: measureDefault(),
+  /* A running measurement writes a heartbeat just before every call it sends. One whose
+     heartbeat is older than this has nothing running it any more, usually because a deploy or
+     a restart took the process that was, and is closed so its workload can be measured again.
+     It has to outlast the slowest single call: four tries of UPSTREAM_TIMEOUT_MS and three
+     waits of at most UPSTREAM_RETRY_WAIT_MAX_MS, which by default is nine and a half minutes. */
+  EVAL_STALE_MIN: num('EVAL_STALE_MIN', 15),
 
   /* Email. Without a key nothing is sent, and the code is written to the log instead so
      the flow can still be walked locally. The FROM address has to be on a domain the

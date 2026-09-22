@@ -20,19 +20,36 @@ export async function account(workspaceId, x = db) {
 export async function move(workspaceId, { kind, amountUsd, note = null, ref = null }, outer = null) {
   const body = async (x) => {
     const acct = await account(workspaceId, x);
-    const after = round8(acct.balance_usd + amountUsd);
     if (ref && await x.prepare('SELECT 1 FROM ledger WHERE ref = ?').get(ref)) {
       return { ok: true, duplicate: true, balance: acct.balance_usd };
     }
-    await x.prepare('UPDATE billing_accounts SET balance_usd = ?, updated_at = ? WHERE workspace_id = ?')
-      .run(after, now(), workspaceId);
+    /* The balance moves in one statement, from whatever it is at that moment. It used to be read,
+       added to here and written back, which loses money whenever two moves overlap, and they
+       do: measurements run side by side and every live call is charged as it finishes. Twenty
+       $1 charges landing together moved a balance by $6. The statement also locks the row until
+       this transaction ends, so the ledger row below records the balance this move produced. */
+    const r = await x.prepare(
+      `UPDATE billing_accounts SET balance_usd = ROUND((balance_usd + ?)::numeric, 8)::double precision,
+              updated_at = ? WHERE workspace_id = ? RETURNING balance_usd`).run(amountUsd, now(), workspaceId);
+    const after = r.rows[0].balance_usd;
     await x.prepare(`INSERT INTO ledger (id, workspace_id, kind, amount_usd, balance_after, note, ref, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id('led'), workspaceId, kind, round8(amountUsd), after, note, ref, now());
     return { ok: true, balance: after };
   };
   // join the caller's transaction when there is one, otherwise open our own
-  return outer ? body(outer) : db.tx(body);
+  if (outer) return body(outer);
+  try {
+    return await db.tx(body);
+  } catch (err) {
+    /* Two moves with the same reference arriving at once both pass the check above, and the
+       second is refused by the ledger's unique reference, which rolls its balance change back
+       with it. That is a duplicate, the same answer the check gives, not a failure. */
+    if (ref && err?.code === '23505') {
+      return { ok: true, duplicate: true, balance: (await account(workspaceId)).balance_usd };
+    }
+    throw err;
+  }
 }
 
 /** The first routed call has to work before any card exists, so a small credit is granted once. */

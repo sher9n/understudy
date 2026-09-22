@@ -1,7 +1,7 @@
 import express from 'express';
 import { safeRouter } from './safe.js';
 import { db, now, round8, usd } from './db/index.js';
-import config, { canRoute, canBill } from './config.js';
+import config, { canRoute, canBill, MEASURE_CHOICES } from './config.js';
 import { createAccount, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
   requestLoginCode, verifyLoginCode, verifyLoginLink } from './auth.js';
 import send, { signInEmail } from './email.js';
@@ -10,6 +10,9 @@ import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity } f
 import { account, ledger, gateRouting, stripe } from './billing.js';
 import { planFor } from './eval/plan.js';
 import { certificate, promote, revert } from './eval/promote.js';
+import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
+import { outcomeOf, cheaperCleared } from './eval/outcome.js';
+import { switchStory } from './eval/switch-story.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
 
@@ -230,6 +233,8 @@ const callRow = (c) => {
 const runRow = (r) => ({
   id: r.id,
   status: r.status,
+  // read from its error when the old process finished it without one, as everywhere else
+  outcome: outcomeOf(r),
   trigger: r.trigger,
   sample: r.sample_size,
   models: r.models_planned,
@@ -237,10 +242,43 @@ const runRow = (r) => ({
   noise: r.noise_pct,
   spend: round8(r.spend_usd || 0),
   error: r.error,
+  done: r.steps_done ?? null,
+  total: r.steps_total ?? null,
   at: r.finished_at || r.started_at || r.created_at,
   startedAt: r.started_at,
   finishedAt: r.finished_at,
 });
+
+/* The columns a measurement row is read with, wherever the page lists or opens one. */
+const RUN_COLUMNS = `id, status, outcome, trigger, sample_size, models_planned, floor_pct, noise_pct,
+  spend_usd, error, steps_done, steps_total, started_at, finished_at, created_at`;
+
+/* Why a measurement has no models to show, in words somebody can act on. The page puts this
+   where the chart would be. It used to leave the section out instead, so opening one of these
+   from the history made "How the candidates compare" vanish without a word about why. */
+function nothingCompared(r) {
+  const ref = r.reference_model || 'your model';
+  if (r.status === 'running') {
+    return 'This measurement is still running. Each model appears here once it has answered every call.';
+  }
+  switch (outcomeOf(r)) {
+    case 'unmeasurable':
+      return `${ref} gave a different answer to the same call ${Number(r.noise_pct ?? 0).toFixed(1)}% of the `
+        + `time when we asked it each of ${r.sample_size} of your calls twice, so there was no steady bar `
+        + 'to hold a cheaper model to. No models were tried, and nothing was switched.';
+    case 'no_balance':
+      return 'Your balance ran out once the bar was set, so no models were tried. Add credit and it can '
+        + 'be measured again.';
+    case 'stopped':
+      return 'This measurement was stopped before any model had answered all of its calls, so there is '
+        + 'nothing to compare. You were charged only for the calls it made, and nothing was switched.';
+    case 'interrupted':
+      return 'This measurement was interrupted before any model had answered all of its calls, so there '
+        + 'is nothing to compare. Nothing was switched.';
+    default:
+      return 'No models were compared in this measurement.';
+  }
+}
 
 const CALLS_PER_PAGE = 10;
 const CALL_COLUMNS = `id, source, requested_model, served_model, status_code, prompt_tokens,
@@ -364,20 +402,33 @@ api.get('/workloads/:id', async (req, res) => {
   const t = await db.prepare(
     `SELECT COUNT(*) AS calls, COALESCE(SUM(charged_usd), 0) AS cost FROM calls
       WHERE workload_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(w.id, since);
+  /* A measurement nothing is running any more is closed before the page is told what is
+     running, so a deploy in the middle of one cannot leave a bar here that never moves. */
+  await closeAbandoned(w.id);
   const plan = await planFor(w, { canRoute: canRoute() });
   const running = await db.prepare(
-    `SELECT id, steps_total, steps_done, phase, spend_usd, started_at, models_planned, sample_size
+    `SELECT id, steps_total, steps_done, phase, spend_usd, started_at, models_planned, sample_size,
+            stop_requested_at, heartbeat_at
        FROM eval_runs WHERE workload_id = ? AND status = 'running'
       ORDER BY created_at DESC LIMIT 1`).get(w.id);
+  /* A measurement asked for and not started yet is a job waiting its turn, which can be a few
+     seconds or, when the balance is short, much longer. The page shows it as one, with its Stop
+     button, rather than hiding the panel at its first check and leaving a run to start a moment
+     later with nobody watching it. A job claimed more than a minute ago with no run behind it
+     was abandoned, and is not shown as waiting. */
+  const waiting = running ? null : await db.prepare(
+    `SELECT id, run_after FROM jobs WHERE kind = 'eval_run'
+        AND (status = 'queued' OR (status = 'claimed' AND claimed_at > ?))
+        AND (payload::jsonb ->> 'workloadId') = ?
+      ORDER BY run_after LIMIT 1`).get(now() - 60000, w.id);
   const last = await db.prepare(
-    `SELECT id, status, trigger, sample_size, models_planned, floor_pct, noise_pct, spend_usd,
-            error, started_at, finished_at, created_at
-       FROM eval_runs WHERE workload_id = ? AND status != 'running'
+    `SELECT ${RUN_COLUMNS} FROM eval_runs WHERE workload_id = ? AND status != 'running'
       ORDER BY created_at DESC LIMIT 1`).get(w.id);
   const runCount = (await db.prepare('SELECT COUNT(*) AS n FROM eval_runs WHERE workload_id = ?').get(w.id)).n;
   const measure = {
-    canRun: plan.canRun && !running,
-    reason: running ? 'A measurement is running now.' : plan.reason,
+    canRun: plan.canRun && !running && !waiting,
+    reason: running ? 'A measurement is running now.'
+      : waiting ? 'A measurement is waiting to start.' : plan.reason,
     pool: plan.pool,
     sample: plan.sample,
     models: plan.candidates.length,
@@ -395,28 +446,50 @@ api.get('/workloads/:id', async (req, res) => {
       startedAt: running.started_at,
       models: running.models_planned,
       sample: running.sample_size,
+      // asked to stop and not there yet: the call in flight is finishing first
+      stopping: !!running.stop_requested_at,
+      /* when it was last heard from, and how long silence may last before it counts as having
+         nothing running it, so a stop waiting on a run whose process has gone can say so */
+      heartbeatAt: running.heartbeat_at ?? running.started_at,
+      // as a duration, worked out here: the browser's clock is not the server's
+      quietMs: Math.max(0, now() - (running.heartbeat_at ?? running.started_at ?? now())),
+      staleMin: config.EVAL_STALE_MIN,
+    } : waiting ? {
+      queued: true, startsAt: waiting.run_after, total: 0, done: 0, spend: 0, phase: null,
     } : null,
   };
 
   /* A workload only says "Measuring" while something is measuring it. The status is stored,
      so a run that ended without clearing it, or a restart in the middle of one, would leave
      the word on the screen for ever. Correcting it here rather than only in a migration
-     means it can never get stuck again, whatever ends a run. */
-  if (w.status === 'measuring' && !running) {
-    const queued = await db.prepare(
-      `SELECT 1 FROM jobs WHERE kind = 'eval_run' AND status IN ('queued', 'claimed')
-          AND payload LIKE ?`).get(`%${w.id}%`);
-    if (!queued) {
-      const back = w.floor_pct == null ? 'new' : 'certified';
-      await db.prepare('UPDATE workloads SET status = ?, updated_at = ? WHERE id = ?')
-        .run(back, now(), w.id);
-      w.status = back;
-    }
+     means it can never get stuck again, whatever ends a run. It goes back to what the last
+     measurement that found anything found, the same rule a stop uses, rather than guessing
+     "ready to optimize" from whether a bar was ever set. */
+  /* "Ready to optimize" and "Nothing cleared yet" are read again too. The code before this set
+     the first from whether a bar had ever been set, so some say it with no candidate behind
+     them; and a run the old process finished during a deploy could set the second over a
+     candidate an earlier measurement found. */
+  if (((w.status === 'measuring' && !running && !waiting) || w.status === 'certified' || w.status === 'no_match')
+    && await rest(w.id)) {
+    Object.assign(w, await db.prepare('SELECT status, status_note FROM workloads WHERE id = ?').get(w.id));
   }
 
   const cert = await certificate(w.id);
-  const best = cert?.results.find((r) => r.verdict === 'cleared' && r.model_id !== w.routed_model);
+  /* A candidate is what the run itself would switch to: cleared, priced, and cheaper a month.
+     Any cleared model used to be offered, so one that cleared but cost more showed "-25% lower",
+     "You keep -$2.50" and, in auto mode, "switches on its own", which it never would. */
+  const best = cert ? cheaperCleared(cert.results).find((r) => r.model_id !== w.routed_model) : null;
   const refCost = cert?.referenceCostMonth ?? null;
+  const compared = cert ? cert.results.filter((r) => r.verdict !== 'reference') : [];
+  /* The newest measurement that compared any model. It can be older than the one shown, and
+     the page offers it when the one shown has nothing to compare, so a measurement that could
+     not set a bar never hides the comparison that came before it. */
+  const lastComparison = await db.prepare(
+    `SELECT r.id, COALESCE(r.finished_at, r.started_at, r.created_at) AS at,
+            (SELECT COUNT(*) FROM eval_results e WHERE e.run_id = r.id AND e.verdict <> 'reference') AS models
+       FROM eval_runs r WHERE r.workload_id = ? AND r.status <> 'running'
+        AND EXISTS (SELECT 1 FROM eval_results e WHERE e.run_id = r.id AND e.verdict <> 'reference')
+      ORDER BY r.created_at DESC LIMIT 1`).get(w.id);
   return res.json({
     id: w.id, name: w.slug, shape: shapeLabel[w.shape_kind] || w.shape_kind,
     tools: JSON.parse(w.tool_names || '[]'),
@@ -429,16 +502,25 @@ api.get('/workloads/:id', async (req, res) => {
     measure,
     ...statusLabel(w),
     certificate: cert && {
+      runId: cert.run.id, outcome: outcomeOf(cert.run),
       rounds: cert.rounds, sampleSize: cert.run.sample_size, floor: cert.run.floor_pct,
       noise: cert.run.noise_pct, reference: cert.run.reference_model,
       finishedAt: cert.run.finished_at,
       referenceCostMonth: refCost,
-      results: cert.results.filter((r) => r.verdict !== 'reference').map((r) => ({
+      results: compared.map((r) => ({
         model: r.model_id, runs: r.runs_total, gap: r.gap_pct,
         costMonth: r.cost_month_usd, verdict: r.verdict,
         gates: { structure: r.gate_structure, accuracy: r.gate_accuracy, coverage: r.gate_coverage, complete: r.gate_complete },
       })),
+      nothing: compared.length ? null : nothingCompared(cert.run),
     },
+    lastComparison: lastComparison
+      ? { runId: lastComparison.id, at: lastComparison.at, models: lastComparison.models }
+      : null,
+    /* For a workload we moved to a cheaper model: from what, to what, why, what it saves and
+       what that comes to over time. Read from the switch's own record, never from whichever
+       measurement is newest, which may not have tried the model serving it at all. */
+    switched: w.routed_model ? await switchStory(w) : null,
     candidate: best && {
       model: best.model_id, gap: best.gap_pct, costMonth: best.cost_month_usd,
       accuracy: round8(100 - best.gap_pct),
@@ -547,8 +629,18 @@ api.post('/workloads/:id/measure', async (req, res) => {
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
 
+  /* A run a restart left behind still says "running", and without this it would answer every
+     press of the button with "already running" for ever. */
+  await closeAbandoned(w.id);
+  /* Running, or waiting its turn. A job that is only waiting has a payload of its own, so the
+     queue's own check does not see a scheduled one when somebody presses the button, and a
+     page left open could start a second measurement beside the first. */
   const running = await db.prepare(
-    `SELECT id FROM eval_runs WHERE workload_id = ? AND status = 'running'`).get(w.id);
+    `SELECT id FROM eval_runs WHERE workload_id = ? AND status = 'running'
+     UNION ALL
+     SELECT id FROM jobs WHERE kind = 'eval_run' AND (payload::jsonb ->> 'workloadId') = ?
+        AND (status = 'queued' OR (status = 'claimed' AND claimed_at > ?))
+     LIMIT 1`).get(w.id, w.id, now() - 60000);
   if (running) return res.json({ ok: true, already: true });
 
   const plan = await planFor(w, { canRoute: canRoute() });
@@ -559,6 +651,16 @@ api.post('/workloads/:id/measure', async (req, res) => {
   return res.json({ ok: true, sample: plan.sample, models: plan.candidates.length, estimateUsd: plan.estimateUsd });
 });
 
+/* Stop measuring. What already ran is kept and charged like any other call, and nothing is
+   switched on the strength of a measurement that did not finish. A measurement still waiting
+   in the queue is simply taken out of it. */
+api.post('/workloads/:id/measure/stop', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  return res.json(await stopMeasuring(w, { actorUserId: req.user.id }));
+});
+
 /* Every measurement this workload has had, newest first. The results of each one are already
    kept; nothing ever showed them, so a switch made in October could not be looked up in
    November. */
@@ -567,9 +669,7 @@ api.get('/workloads/:id/runs', async (req, res) => {
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
   const runs = await db.prepare(
-    `SELECT id, status, trigger, sample_size, models_planned, floor_pct, noise_pct, spend_usd,
-            error, started_at, finished_at, created_at
-       FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 30`).all(w.id);
+    `SELECT ${RUN_COLUMNS} FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 30`).all(w.id);
   return res.json({ runs: runs.map(runRow) });
 });
 
@@ -586,16 +686,18 @@ api.get('/workloads/:id/runs/:runId', async (req, res) => {
             gate_structure, gate_accuracy, gate_coverage, gate_complete
        FROM eval_results WHERE run_id = ? ORDER BY cost_month_usd NULLS LAST`).all(run.id);
   const ref = rows.find((r) => r.verdict === 'reference');
+  const compared = rows.filter((r) => r.verdict !== 'reference');
   return res.json({
     ...runRow(run),
     reference: run.reference_model,
     referenceCostMonth: ref?.cost_month_usd ?? null,
-    results: rows.filter((r) => r.verdict !== 'reference').map((r) => ({
+    results: compared.map((r) => ({
       model: r.model_id, runs: r.runs, gap: r.gap_pct, costMonth: r.cost_month_usd,
       verdict: r.verdict, failures: r.failures,
       gates: { structure: r.gate_structure, accuracy: r.gate_accuracy,
                coverage: r.gate_coverage, complete: r.gate_complete },
     })),
+    nothing: compared.length ? null : nothingCompared(run),
   });
 });
 
@@ -669,6 +771,7 @@ api.get('/settings', async (req, res) => {
     evalModels: req.workspace.eval_models ?? config.EVAL_MODELS_DEFAULT,
     evalModelsMax: config.EVAL_MODELS_MAX,
     measureEveryDays: req.workspace.measure_every_days ?? config.MEASURE_EVERY_DAYS,
+    measureChoices: MEASURE_OPTIONS,
     retentionChoices: RETENTION_CHOICES,
     zdrOnly: config.ZDR_ONLY,
     canBill: canBill(),
@@ -715,8 +818,13 @@ api.post('/settings/models-tested', async (req, res) => {
 });
 
 /* How often measuring happens by itself. Zero is "only when I ask", and it is a real choice
-   rather than an off switch: everything else still works, nothing is spent unasked. */
-const MEASURE_CHOICES = [0, 1, 5, 10, 30, 90];
+   rather than an off switch: everything else still works, nothing is spent unasked.
+
+   The cadences themselves are config's, and the screen draws whatever this sends. The screen
+   used to keep its own copy of the list, which is how the default came to be a cadence it did
+   not offer, and a workspace that never chose saw nothing selected at all. */
+const measureLabel = (days) => (days === 0 ? 'Only when I ask' : days === 1 ? 'Every day' : `Every ${days} days`);
+const MEASURE_OPTIONS = MEASURE_CHOICES.map((days) => ({ days, label: measureLabel(days) }));
 
 api.post('/settings/measure-every', async (req, res) => {
   const days = Math.round(Number(req.body?.days));

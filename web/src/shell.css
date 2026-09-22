@@ -269,3 +269,126 @@ a.wm:hover { text-decoration: none; }
    inline style on the wizard only, so the same button was 52x30 there and 57x35 on the
    in-app page. One rule, both screens. */
 .tabs .ghost { padding: 5px 10px; font-size: 12px; }
+
+/* The measurement section of a workload page: what a measurement would do, one while it runs,
+   and every measurement there has been. These rules are the app's own, so they live here. They
+   were written into app.css, which is regenerated from the design board and has none of them,
+   so the next lift would have taken the whole section's styling away without a word. */
+.measure .cardpad { padding: 16px 18px 18px; }
+.mtop { display: flex; align-items: flex-start; gap: 18px; flex-wrap: wrap; }
+.mtop > div { flex: 0 0 auto; }
+.mwhy { flex: 1 1 340px; margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--mut-read); }
+.mwhy.cannot { color: var(--mut-read); }
+.mpick { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.mpickh { font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--mut); font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.mpickp { margin: 8px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--mut-read); max-width: 74ch; }
+.mpicks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+.mpickm { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px 4px 5px; }
+.mpickn { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px;
+  border-radius: 5px; background: var(--raise); color: var(--mut); font-size: 10px; font-weight: 700; }
+
+/* While it runs. A number that moves, not a spinner that says nothing. */
+.mrun { display: block; }
+.mrunhead { display: flex; align-items: center; gap: 12px; }
+.mrunt { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.mruns { font-size: 11.5px; color: var(--mut-read); margin-top: 2px; }
+.mpct { margin-left: auto; font-size: 15px; font-weight: 700; color: var(--brand-read); }
+.mbar { margin-top: 12px; height: 5px; border-radius: 3px; background: var(--panel);
+  border: 1px solid var(--line); overflow: hidden; }
+.mbar span { display: block; height: 100%; background: var(--brand); transition: width 0.4s ease; }
+.mnote { margin: 11px 0 0; font-size: 12px; line-height: 1.55; color: var(--mut); max-width: 74ch; }
+.mspin { width: 15px; height: 15px; border-radius: 50%; flex: 0 0 auto;
+  border: 2px solid var(--line-strong); border-top-color: var(--brand);
+  animation: mspin 0.9s linear infinite; }
+@keyframes mspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .mspin { animation: none; border-top-color: var(--line-strong); }
+  .mbar span { transition: none; }
+}
+
+/* Stopping one: a button beside the percentage, then a single line that says what stopping
+   costs and keeps, before anything is stopped. */
+.mstopb { margin-left: 4px; padding: 7px 12px; font-size: 12.5px; }
+.mstopask { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); }
+.mstopask p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--mut-read); max-width: 74ch; }
+.mstopacts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.mstopacts .mini, .mstopacts .minig { padding: 7px 12px; font-size: 12.5px; }
+
+/* Every measurement there has been, and the one being shown.
+
+   A row's highlight reaches a little past its words on both sides, so the row being shown
+   reads as a band with room round what it says. It had no side padding, so the band ended
+   exactly where the text did and the words sat against both of its edges. The room is
+   borrowed from the card's own padding, which keeps the words lined up with the heading. A
+   rounded band does not sit well across ruled lines, so the rows are spaced rather than ruled.
+
+   The row being shown is .mshown, not .on: app.css styles a bare .on as a workload name. */
+.mhist { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.mrow { display: grid; grid-template-columns: 116px minmax(0, 1fr) 96px 72px 62px; gap: 12px;
+  align-items: baseline; width: calc(100% + 20px); margin: 0 -10px; padding: 9px 10px;
+  text-align: left; border: 0; border-radius: 8px; background: none; cursor: pointer; font: inherit; }
+.mhist .mpickh + .mrow { margin-top: 6px; }
+.mrow + .mrow { margin-top: 2px; }
+.mrow:hover { background: var(--panel); }
+.mrow.mshown { background: var(--brandq); }
+.mrow:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.mwhen { font-size: 11px; color: var(--mut-read); white-space: nowrap; }
+.mwhat { font-size: 12.5px; color: var(--ink); overflow-wrap: anywhere; }
+.mtrig, .mspend { font-size: 11px; color: var(--mut); white-space: nowrap; }
+.mspend { text-align: right; }
+.mopen { font-size: 11px; color: var(--brand-read); text-align: right; white-space: nowrap; }
+.mmore { display: inline-block; margin-top: 10px; background: none; border: 0; }
+@media (max-width: 900px) {
+  .mrow { grid-template-columns: 96px minmax(0, 1fr) 56px; }
+  .mrow > :nth-child(n+4) { display: none; }
+}
+
+/* A measurement that compared no models says why where the chart would be, with the way to
+   the newest one that did. The section used to vanish instead. */
+.mnone p { margin: 0 auto; max-width: 62ch; }
+.mnone .minig { margin-top: 14px; }
+
+/* A switched workload: the model it started on, the one serving it now, what that saves, and
+   the same thing over time. The tiles are the card's own .kpi, so the two states of the card
+   read as one design; a model's name is longer than a number and sits smaller, in ink. */
+.swtiles { display: grid; grid-template-columns: minmax(0, 1fr) 26px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px; align-items: stretch; margin-top: 20px; max-width: 960px; }
+.swarrow { align-self: center; justify-self: center; font-size: 20px; color: var(--mut); }
+.dcard.done .kv.swmodel { font-size: 21px; letter-spacing: -0.02em; color: var(--ink); overflow-wrap: anywhere; }
+
+.swcost { margin-top: 16px; max-width: 960px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--raise); overflow: hidden; }
+.swhead { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; padding: 14px 17px 12px; }
+.swbasis { font-size: 12.5px; color: var(--mut-read); }
+.swrow { display: grid; grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr)); gap: 16px;
+  align-items: baseline; padding: 11px 17px; border-top: 1px solid var(--line); font-size: 13.5px; }
+.swrow > span:nth-child(n+2) { text-align: right; }
+.swth { background: var(--panel); }
+.swth span { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--mut); font-weight: 700; }
+/* the one row that is not an estimate says so */
+.swactual { background: var(--okq); }
+.swactual em { font-style: normal; margin-left: 7px; padding: 2px 7px; border-radius: 999px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ok); border: 1px solid var(--ok); }
+.swempty span { grid-column: 1 / -1; font-size: 12.5px; line-height: 1.55; color: var(--mut-read); }
+.swsaved { color: var(--ok); font-weight: 600; }
+.swmore { color: var(--warn); font-weight: 600; }
+/* .dcard p sets every paragraph in the card; this one is a footnote to the table */
+.dcard .swnote { margin: 0; max-width: none; padding: 11px 17px 13px; border-top: 1px solid var(--line);
+  font-size: 12px; line-height: 1.55; color: var(--mut); }
+@media (max-width: 760px) {
+  .swtiles { grid-template-columns: minmax(0, 1fr); }
+  .swarrow { transform: rotate(90deg); }
+  /* Four columns do not fit a phone: the figures ran into one another and a model's name broke
+     into a column of fragments. The period takes the row's whole width and its three figures
+     sit under it, each with a third of the width to itself. */
+  .swrow { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 10px; padding: 10px 13px; font-size: 12.5px; }
+  .swrow > span:first-child { grid-column: 1 / -1; }
+  .swth > span:first-child { display: none; }
+  .swth span { overflow-wrap: anywhere; }
+  .swrow .num { font-size: 12px; }
+}

@@ -229,6 +229,13 @@ async function finish({ wsId, workload, requested, served, usage, started, body,
 /** Once a workload has enough calls to be trusted, it measures itself without being asked. */
 export async function considerMeasuring(wsId, workload) {
   if (workload.status !== 'new') return;
+  /* A workload somebody stopped measuring is "new" again, but a person has answered it, and the
+     very next call must not start it again behind their back: the schedule on Settings takes it
+     from there. Only a stop counts. A run a restart interrupted, or one the balance cut short,
+     was answered by nobody, and waiting a whole cadence for it would leave a new workload
+     unmeasured for a month. */
+  if (await db.prepare(`SELECT 1 FROM eval_runs WHERE workload_id = ? AND status = 'stopped' LIMIT 1`)
+    .get(workload.id)) return;
   const n = (await db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workload_id = ?').get(workload.id)).n;
   if (n < config.EVAL_FIRST_RUN_MIN_CALLS) return;
   await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), workload.id);

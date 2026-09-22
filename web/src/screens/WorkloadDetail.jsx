@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { href } from '../router.js';
 import { plainClick } from '../nav.jsx';
-import { api, usd, num, dateIST } from '../api.js';
+import { api, usd, num, dateIST, timeIST } from '../api.js';
 import { CandidateChart, chartPoints } from '../Charts.jsx';
 import WorkloadCalls from './WorkloadCalls.jsx';
 import Measurement from './Measurement.jsx';
+import SwitchedCard from './SwitchedCard.jsx';
 
 const Tile = ({ k, v, s }) => (
   <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
@@ -52,10 +53,21 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
      table below reads from whichever it is, so the page shows one run at a time rather than
      two sets of numbers that look alike. */
   const cert = openRun && runData ? {
+    runId: runData.id, outcome: runData.outcome, nothing: runData.nothing,
     rounds: 1, sampleSize: runData.sample, floor: runData.floor, noise: runData.noise,
     reference: runData.reference, finishedAt: runData.finishedAt,
     referenceCostMonth: runData.referenceCostMonth, results: runData.results,
   } : w.certificate;
+  /* Whether the measurement shown tried any model. One that could not set a bar, ran out of
+     balance or was stopped early tried none, and the sections below say why instead of
+     disappearing, and offer the newest measurement that did compare models. */
+  const compared = !!cert && cert.results.length > 0;
+  /* With nothing finished at all, a measurement that was stopped part way can still have
+     finished some models, and Stop promised they keep their results, so they are offered too. */
+  const earlier = !compared && w.lastComparison && w.lastComparison.runId !== cert?.runId
+    ? w.lastComparison : null;
+  // the row in the history that the page is showing, whether somebody opened it or not
+  const showingId = openRun || w.certificate?.runId || null;
   /* The model this measurement's bar came from. Usually the workload's own, but an older run
      opened from the history may have been measured against a model it has since moved off,
      and its chart and table have to name that one, not today's. */
@@ -82,27 +94,37 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
       </div>
 
       <section className={`dcard${switched ? ' done' : hot ? ' hot' : ''}`}>
-        {switched && <span className="eyebrow eyeok">Switched automatically</span>}
-        {hot && <span className="eyebrow">A candidate is ready</span>}
+        {switched && w.switched ? (
+          <SwitchedCard s={w.switched} />
+        ) : (
+          <>
+            {switched && <span className="eyebrow eyeok">Switched automatically</span>}
+            {hot && <span className="eyebrow">A candidate is ready</span>}
 
-        <h2>{headline(w, cand, switched)}</h2>
-        <p>{blurb(w, cand, switched)}</p>
+            <h2>{headline(w, cand, switched)}</h2>
+            <p>{blurb(w, cand, switched)}</p>
 
-        {(switched || cand) && (
-          <div className="kpis">
-            <div className="kpi">
-              <div className="kk">Accuracy</div>
-              <div className="kv">{accuracy(w, cand, switched)}</div>
-              <div className="ks">
-                of answers matched {short(w.reference)}. Your bar is {(100 - (w.floor ?? 0)).toFixed(1)}%.
+            {/* A candidate's figures come from the measurement that found it, and so does the
+                bar it is held to: the workload's own bar is cleared by a measurement that
+                could not set one, and read as 0 it made this say "your bar is 100%". */}
+            {hot && (
+              <div className="kpis">
+                <div className="kpi">
+                  <div className="kk">Accuracy</div>
+                  <div className="kv">{accuracy(w, cand, switched)}</div>
+                  <div className="ks">
+                    of answers matched {short(w.reference)}.
+                    {w.certificate?.floor != null ? ` Your bar is ${(100 - w.certificate.floor).toFixed(1)}%.` : ''}
+                  </div>
+                </div>
+                <div className="kpi">
+                  <div className="kk">Cost</div>
+                  <div className="kv">{costLine(w, cand, switched)}</div>
+                  <div className="ks">{costSub(w, cand, switched)}</div>
+                </div>
               </div>
-            </div>
-            <div className="kpi">
-              <div className="kk">Cost</div>
-              <div className="kv">{costLine(w, cand, switched)}</div>
-              <div className="ks">{costSub(w, cand, switched)}</div>
-            </div>
-          </div>
+            )}
+          </>
         )}
 
         <div className="dacts">
@@ -117,7 +139,9 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         </div>
 
         <div className="choices">
-          {[['auto', 'Optimize automatically', 'We switch as soon as a candidate clears your bar, and switch back if it slips.'],
+          {/* It said "and switch back if it slips", which nothing does yet: a model that stops
+              clearing is not switched back automatically. Said as it is until it does. */}
+          {[['auto', 'Optimize automatically', 'We switch as soon as a candidate clears your bar. Switching back is one click, at any time.'],
             ['ask', 'Ask me first', 'We test and recommend. Nothing changes until you approve it.']].map(([mode, t, s]) => (
             <button key={mode} className={`choicebox${w.optimizeMode === mode ? ' picked' : ''}`}
               disabled={busy} onClick={act(() => api.setMode(w.id, mode))}>
@@ -128,12 +152,13 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
       </section>
 
       <Measurement w={w} busy={busy} onRan={load}
-        openRunId={openRun} onOpenRun={setOpenRun} />
+        openRunId={openRun} onOpenRun={setOpenRun} showingId={showingId} />
 
-      {cert && cert.results.length > 0 && (
+      {(cert || earlier) && (
         <section className="opt ovis">
           <div className="opthead">
             <h2>How the candidates compare</h2>
+            {compared && (
             <div className="trigwrap" ref={barRef}>
               <div className="trigrow">
                 <span className="pill go">Your bar · {(cert.floor ?? w.floor ?? 0).toFixed(2)}%</span>
@@ -157,14 +182,30 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                 </div>
               )}
             </div>
+            )}
           </div>
           <div className="cbody">
-            <CandidateChart results={cert.results} floor={cert.floor ?? 0} reference={measuredOn}
-              referenceCostMonth={cert.referenceCostMonth} />
-            {!plottable(cert, measuredOn) && (
-              <div className="optempty">
-                There is nothing to place on the chart yet: every model in this measurement
-                stopped before it had answered enough calls to be judged.
+            {compared ? (
+              <>
+                <CandidateChart results={cert.results} floor={cert.floor ?? 0} reference={measuredOn}
+                  referenceCostMonth={cert.referenceCostMonth} />
+                {!plottable(cert, measuredOn) && (
+                  <div className="optempty">
+                    There is nothing to place on the chart yet: every model in this measurement
+                    stopped before it had answered enough calls to be judged.
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="optempty mnone">
+                <p>{!cert ? 'No measurement has finished yet.'
+                  : cert.nothing || 'No models were compared in this measurement.'}</p>
+                {earlier && (
+                  <button className="minig" onClick={() => setOpenRun(earlier.runId)}>
+                    Show the measurement from {timeIST(earlier.at)} IST, which
+                    compared {num(earlier.models)} {earlier.models === 1 ? 'model' : 'models'}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -175,9 +216,8 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         <div className="opthead">
           <h2>Candidates tested</h2>
           <span className="s">
-            {cert
-              ? `${cert.sampleSize} of your own calls replayed on every model.`
-              : 'Nothing has been tried yet.'}
+            {!cert ? (earlier ? '' : 'Nothing has been tried yet.')
+              : compared ? `${cert.sampleSize} of your own calls replayed on every model.` : ''}
             {openRun && runData ? (
               <>
                 {' '}Showing the measurement from {dateIST(runData.at)} IST.{' '}
@@ -187,7 +227,13 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           </span>
         </div>
         {!cert ? (
-          <div className="optempty">Candidates appear here after the first run, once your bar is set.</div>
+          <div className="optempty">
+            {earlier
+              ? 'No measurement has finished yet. The one above that was stopped part way shows the models it finished.'
+              : 'Candidates appear here after the first run, once your bar is set.'}
+          </div>
+        ) : !compared ? (
+          <div className="optempty">No models were tried in this measurement.</div>
         ) : (
           <>
             <div className="cdhrow">
@@ -217,9 +263,10 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                 </div>
               );
             })}
+            {/* It went on "a model we switch to is re-tested on fresh ones. If it stops clearing,
+                it goes back", which nothing does yet. Said as it is until it does. */}
             <div className="barnote">
-              Every model answered the same {num(cert.sampleSize)} calls, and a model we switch to is
-              re-tested on fresh ones. If it stops clearing, it goes back.
+              Every model answered the same {num(cert.sampleSize)} calls.
               {cert.finishedAt ? ` Last run ${dateIST(cert.finishedAt)} IST.` : ''}
             </div>
           </>
@@ -248,12 +295,14 @@ const headline = (w, cand, switched) => {
   if (switched) return `${short(w.model)} is serving ${w.name}`;
   if (cand) return `${short(cand.model)} cleared your bar`;
   if (w.label === 'Measuring') return 'We are still learning your bar';
+  if (w.certificate?.outcome === 'unmeasurable') return 'We could not set a bar for this workload';
   return 'Nothing has cleared your bar yet';
 };
 
 const blurb = (w, cand, switched) => {
   if (switched) {
-    return `We switched it because it cleared your bar. We re-test it on fresh calls and put you back on ${short(w.reference)} the moment it stops clearing.`;
+    // only when the switch's own record is missing; the card above is the ordinary case
+    return `We switched it because it cleared your bar. Switch back at any time and your calls go to ${short(w.reference)} again from the next one.`;
   }
   if (cand) {
     return w.optimizeMode === 'ask'
@@ -263,6 +312,9 @@ const blurb = (w, cand, switched) => {
   if (w.label === 'Measuring') {
     return 'Before we can recommend anything we measure how much your own model varies from itself. We replay your calls twice and compare the two answers, and that variation becomes the bar a cheaper model has to clear.';
   }
+  /* No model was tried at all, so "every model we tried drifted" would be untrue: say what the
+     measurement actually found. */
+  if (w.certificate?.outcome === 'unmeasurable' && w.certificate.nothing) return w.certificate.nothing;
   return 'Every model we tried drifted further from your own model than your bar allows. We keep trying as new models land.';
 };
 

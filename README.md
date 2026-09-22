@@ -3,7 +3,8 @@
 Point your OpenAI-compatible client at Understudy instead of your provider. We group your
 calls into workloads by the job they do, measure how much your own model disagrees with
 itself, and move a workload to a cheaper model only when that model stays inside the same
-bar. If it stops clearing, it goes back.
+bar. Switching back is one click. Switching back by itself, when a model stops clearing, is
+not built yet: a re-check says so on the workload, and nothing moves until you do.
 
 Nothing here pretends. Where a key is missing, the screen says so instead of showing a zero
 as though it were a fact.
@@ -122,6 +123,22 @@ as total disagreement and is never skipped. Nothing is judged on fewer than 100 
 If a model disagrees with itself more often than `EVAL_NOISE_MAX_PCT`, there is no steady
 bar to hold anything to, so the workload is reported as unmeasurable and nothing is
 switched. A bar that everything clears is worse than no bar.
+
+A workspace is measured again every 30 days until it chooses otherwise on Settings, where
+the choices are only when asked, or every 1, 5, 10, 30 or 90 days. The default comes from
+`MEASURE_EVERY_DAYS` and has to be one of those.
+
+## Stopping a measurement
+
+A running measurement has a Stop button. It stops at its next step: the call in flight comes
+back and is charged like the rest, every model that answered all of its calls keeps its
+result, and nothing is switched on the strength of a measurement that did not finish. One
+still waiting its turn is taken out of the queue and costs nothing.
+
+A running measurement writes a heartbeat after every call. One that a deploy or a restart
+left behind goes quiet, and once it has been quiet for `EVAL_STALE_MIN` minutes it is closed
+as interrupted, so it cannot sit on the page as a bar that never moves or keep Measure now
+from starting another.
 
 ## What is kept, and for how long
 
