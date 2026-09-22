@@ -143,6 +143,62 @@ export const config = {
      waits of at most UPSTREAM_RETRY_WAIT_MAX_MS, which by default is nine and a half minutes. */
   EVAL_STALE_MIN: num('EVAL_STALE_MIN', 15),
 
+  /* Choosing which models to measure, and racing them.
+     A measurement tries models in order of what they are expected to save, several at once,
+     and drops each one the moment it cannot win. It keeps going until the number asked for
+     in Settings have answered every call, trying at most this many times that number. */
+  EVAL_TRY_MULTIPLE: num('EVAL_TRY_MULTIPLE', 3),
+  EVAL_PARALLEL_MODELS: num('EVAL_PARALLEL_MODELS', 5),
+  /* The first few calls every model answers before anything is decided about it. */
+  EVAL_SCREEN_CALLS: num('EVAL_SCREEN_CALLS', 3),
+  /* A model is only tried when at least one provider that keeps nothing answered this share
+     of its calls over the last day. */
+  EVAL_MIN_UPTIME_PCT: num('EVAL_MIN_UPTIME_PCT', 99),
+  /* A model that thinks before it answers needs room to think. When a workload caps its
+     answers below this, a thinking model is measured with its thinking switched off, or
+     left out when it cannot be switched off. */
+  EVAL_THINKING_ROOM_TOKENS: num('EVAL_THINKING_ROOM_TOKENS', 4000),
+  /* A model retiring within this many days is not worth switching anybody to. */
+  EVAL_EXPIRY_DAYS: num('EVAL_EXPIRY_DAYS', 30),
+  /* How much slower than the customer's own model a switched-to model may be, by setting.
+     "same" allows a little, because two measurements of the same speed never match exactly.
+     The slow end (one call in ten) is allowed half as much again on top. */
+  SPEED_SAME: num('SPEED_SAME', 1.2),
+  SPEED_SLOWER_OK: num('SPEED_SLOWER_OK', 1.5),
+  SPEED_SLOW_END_EXTRA: num('SPEED_SLOW_END_EXTRA', 0.5),
+  /* And never slower by less than this, in milliseconds: a gap nobody would notice is not worth
+     turning a model down for, and two measurements of a fast model differ by that much anyway. */
+  SPEED_SLACK_MS: num('SPEED_SLACK_MS', 300),
+  /* Before anything is spent, a model whose published speed is this many times worse than the
+     customer's own model's is not tried at all. Published speeds mix everybody's traffic, so
+     this only catches the wildly slow; the calls themselves decide the rest. */
+  SPEED_PREFILTER_X: num('SPEED_PREFILTER_X', 3),
+
+  /* Jev, TypeSafe's judging model. It answers a narrow question with a probability rather than
+     writing text, which is what judging two answers and ranking models both need. Without a
+     key, the model named in EVAL_JUDGE_MODEL judges alone, as it did before. */
+  TYPESAFE_API_KEY: str('TYPESAFE_API_KEY', ''),
+  TYPESAFE_BASE: str('TYPESAFE_BASE', 'https://api.typesafe.ai/v1'),
+  JEV_MODEL: str('JEV_MODEL', 'jev-latest'),
+  JEV_PRICE_PER_MTOK: num('JEV_PRICE_PER_MTOK', 0.042),
+  JEV_CONCURRENCY: num('JEV_CONCURRENCY', 12),
+  JEV_TIMEOUT_MS: num('JEV_TIMEOUT_MS', 20000),
+  /* Between these, Jev is not sure whether two answers mean the same thing, and the model in
+     EVAL_JUDGE_MODEL is asked as well. */
+  JEV_UNSURE_LOW: num('JEV_UNSURE_LOW', 0.3),
+  JEV_UNSURE_HIGH: num('JEV_UNSURE_HIGH', 0.7),
+
+  /* How long what we learn stays true. Models improve, providers are added and dropped,
+     prices and speeds move, so every fact is read again once it is this old. */
+  HEALTH_TTL_MIN: num('HEALTH_TTL_MIN', 60),          // which providers keep nothing, and their uptime
+  SPEED_TTL_MIN: num('SPEED_TTL_MIN', 60),            // published first-token times and speeds
+  FIT_TTL_DAYS: num('FIT_TTL_DAYS', 14),              // Jev's reading of how a model suits a task
+  ARENA_TTL_DAYS: num('ARENA_TTL_DAYS', 7),           // the public Arena leaderboard
+  ARENA_LINK_TTL_DAYS: num('ARENA_LINK_TTL_DAYS', 30),
+  REPLAY_REUSE_DAYS: num('REPLAY_REUSE_DAYS', 14),    // an answer already paid for
+  REPLAY_FAILURE_REUSE_HOURS: num('REPLAY_FAILURE_REUSE_HOURS', 6),  // a refusal, which can be fixed sooner
+  JUDGE_CACHE_DAYS: num('JUDGE_CACHE_DAYS', 14),      // a verdict on a pair of answers
+
   /* Email. Without a key nothing is sent, and the code is written to the log instead so
      the flow can still be walked locally. The FROM address has to be on a domain the
      provider has verified, or every message is silently rejected. */
@@ -191,7 +247,7 @@ export const config = {
   // background work
   JOBS_ENABLED: bool('JOBS_ENABLED', true),
   JOBS_TICK_MS: num('JOBS_TICK_MS', 5000),
-  CATALOG_SYNC_HOURS: num('CATALOG_SYNC_HOURS', 12),
+  CATALOG_SYNC_HOURS: num('CATALOG_SYNC_HOURS', 6),
 };
 
 /** True when the platform can actually reach a model provider. */
@@ -202,5 +258,7 @@ export const canBill = () => config.STRIPE_SECRET_KEY !== '';
 export const canEmail = () => config.RESEND_API_KEY !== '';
 /** True when a key can be shown again after it was made. */
 export const canRevealKeys = () => config.KEY_SECRET !== '';
+/** True when Jev can be asked to judge and rank. */
+export const canJev = () => config.TYPESAFE_API_KEY !== '';
 
 export default config;

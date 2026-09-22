@@ -70,7 +70,13 @@ async function prepare(wsId, body, { classify = true } = {}) {
   const requested = body.model || workload?.reference_model || null;
   const served = workload?.routed_model || requested;
   if (!served) return no(400, '"model" is required.', 'invalid_request_error');
-  return { workload, requested, served };
+  /* A switched-to model is asked the way it was measured, which for a thinking model with a
+     tight answer cap means with its thinking switched off. */
+  let recipe = null;
+  if (workload?.routed_model && served === workload.routed_model && workload.routed_recipe) {
+    try { recipe = JSON.parse(workload.routed_recipe); } catch { recipe = null; }
+  }
+  return { workload, requested, served, recipe };
 }
 
 /* One routed call, from the gate to the ledger. The proxy uses this for every ordinary
@@ -101,10 +107,10 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     if (source === 'routed') await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return { ok: false, status: ready.error.status, json: ready.error.json };
   }
-  const { workload, requested, served } = ready;
+  const { workload, requested, served, recipe } = ready;
   const started = Date.now();
   try {
-    const { json, latencyMs } = await chat(body, served);
+    const { json, latencyMs } = await chat(body, served, { recipe });
     await finish({ wsId, workload, requested, served, usage: json?.usage, started, body,
       response: json, status: 200, latencyMs, source });
     return { ok: true, status: 200, json, served, requested,
@@ -140,10 +146,10 @@ v1.post('/chat/completions', async (req, res) => {
     await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return res.status(ready.error.status).json(ready.error.json);
   }
-  const { workload, requested, served } = ready;
+  const { workload, requested, served, recipe } = ready;
   const started = Date.now();
   try {
-    const upstream = await chatStream(body, served);
+    const upstream = await chatStream(body, served, { recipe });
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');

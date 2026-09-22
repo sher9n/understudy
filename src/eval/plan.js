@@ -1,15 +1,21 @@
 import { db, now } from '../db/index.js';
 import config from '../config.js';
-import { priceCall } from '../openrouter.js';
+import { jevUsable, jevResting } from '../jev.js';
 import { account } from '../billing.js';
-import { judgementsFor } from './judge.js';
+import { loadFacts, routedCallPrice, callPrice } from '../models/facts.js';
+import { ratingsFor } from '../models/arena.js';
+import { profileOf, speedRule } from './profile.js';
+import { selectCandidates } from './select.js';
+import { fitsFor } from './fit.js';
+import { historyFor } from './history.js';
+import { judgementsFor, judgementCost } from './judge.js';
 
 /* What a measurement WOULD do, worked out before anything is spent.
  *
- * One function, used by the button and by the run itself, so the screen can never promise
- * something the run then refuses. Before this the button marked a workload "Measuring" and
- * the run quietly declined a moment later for a reason nobody was told, which left workloads
- * saying "Measuring" for ever. */
+ * One function, used by the page and by the run itself, so the screen can never promise
+ * something the run then refuses or does differently. The page reads it from what is already
+ * known, cached facts and cached judgements, and never waits on anybody; the run asks Jev for
+ * whatever the page had to go without, and then chooses exactly as the page showed. */
 
 const DAY = 86400000;
 
@@ -29,85 +35,48 @@ export function sampleSizeFor(pool) {
   return Math.max(config.EVAL_SAMPLE_MIN, Math.min(config.EVAL_SAMPLE_MAX, half));
 }
 
-/** How many models this workspace tries, within the ceiling everyone shares. */
+/** How many models this workspace measures to the end, within the ceiling everyone shares. */
 export function modelCountFor(ws) {
   const asked = Number(ws?.eval_models);
   const n = Number.isFinite(asked) && asked > 0 ? asked : config.EVAL_MODELS_DEFAULT;
   return Math.max(1, Math.min(config.EVAL_MODELS_MAX, Math.round(n)));
 }
 
-/* Which models to try.
- *
- * Not "the cheapest few", which is what this used to be. The cheapest few models in a
- * catalogue of three hundred are tiny ones that will fail almost anything, so a run spent
- * real money confirming that the bottom of the market is the bottom of the market, and told
- * you nothing about the middle.
- *
- * Instead: every model the workspace has ENABLED, priced on this workload's own average call
- * rather than on a headline rate, keeping only those cheaper than what it runs on now,
- * because a dearer model cannot save anything. Then spread the picks evenly across that
- * range, from the one just below the current model down to the cheapest. A run then shows
- * where quality falls away as price does, which is the question being asked. */
-export async function candidatesFor(workspaceId, workloadId, reference, wanted) {
-  const t = await db.prepare(
-    `SELECT COALESCE(AVG(prompt_tokens), 0) AS pin, COALESCE(AVG(completion_tokens), 0) AS pout
-       FROM calls WHERE workload_id = ? AND source NOT IN ('replay', 'test')`).get(workloadId);
-
-  const enabled = await db.prepare(
-    `SELECT c.model_id, c.price_in, c.price_out FROM models_catalog c
+async function enabledSet(workspaceId) {
+  return new Set((await db.prepare(
+    `SELECT c.model_id FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
-      WHERE COALESCE(wm.enabled, 1) = 1 AND c.price_in > 0 AND c.price_out > 0
-        AND c.model_id != ?`).all(workspaceId, reference);
-
-  const per = (m) => m.price_in * t.pin + m.price_out * t.pout;
-  const refPer = await priceCall(reference, t.pin, t.pout);
-
-  const cheaper = enabled
-    .map((m) => ({ model_id: m.model_id, per: per(m) }))
-    .filter((m) => m.per > 0 && (refPer === null || m.per < refPer))
-    .sort((a, b) => b.per - a.per);          // dearest first: nearest your model, then down
-
-  if (cheaper.length <= wanted) return cheaper;
-
-  /* Evenly spaced across the price range, always including both ends, so the list is a
-     ladder from just-below-yours to the cheapest rather than a clump. */
-  const picked = [];
-  for (let i = 0; i < wanted; i += 1) {
-    const at = Math.round((i * (cheaper.length - 1)) / (wanted - 1));
-    if (!picked.some((p) => p.model_id === cheaper[at].model_id)) picked.push(cheaper[at]);
-  }
-  return picked;
+      WHERE COALESCE(wm.enabled, 1) = 1`).all(workspaceId)).map((r) => r.model_id));
 }
 
-/** What a run would cost, from this workload's own average call. */
-export async function estimateFor(workloadId, reference, candidates, sample, shapeKind) {
-  const t = await db.prepare(
-    `SELECT COALESCE(AVG(prompt_tokens), 0) AS pin, COALESCE(AVG(completion_tokens), 0) AS pout
-       FROM calls WHERE workload_id = ? AND source NOT IN ('replay', 'test')`).get(workloadId);
-  const refPer = (await priceCall(reference, t.pin, t.pout)) ?? 0;
-  let total = refPer * sample * 2;           // the bar is your own model, run twice
-  for (const c of candidates) total += ((await priceCall(c.model_id, t.pin, t.pout)) ?? 0) * sample;
-  /* Free text is settled by asking a model whether two answers mean the same thing, and
-     those questions are model calls too. Leaving them out of the estimate would put a price
-     on the button that the run then beats. */
-  const judgements = judgementsFor(shapeKind, sample, candidates.length);
-  if (judgements) {
-    const per = (await priceCall(config.EVAL_JUDGE_MODEL, Math.min(t.pin, 600) + 400, 6)) ?? 0;
-    total += per * judgements;
-  }
-  return Math.round(total * 1e8) / 1e8;
+/* How much of the bar is already paid for: answers from the customer's own model to this
+   workload's recent calls, still young enough to use again. */
+async function cachedBarShare(workload, sample) {
+  const n = (await db.prepare(
+    `SELECT COUNT(*) AS n FROM replay_cache r
+      WHERE r.model_id = ? AND r.status = 200 AND r.created_at >= ?
+        AND r.call_id IN (SELECT id FROM calls WHERE workload_id = ? AND created_at >= ?)`)
+    .get(workload.reference_model, now() - config.REPLAY_REUSE_DAYS * DAY, workload.id, now() - 30 * DAY)).n;
+  return Math.min(1, Number(n) / Math.max(1, sample * 2));
 }
+
+/* Work for Jev a later look at the page will want: readings of how each model suits this
+   task, and which leaderboard entry each model is. Queued, never waited on here. */
+let queueFit = null;
+export const onMissingFits = (fn) => { queueFit = fn; };
 
 /* The whole plan, and whether it can run. `reason` is written to be shown to somebody as it
    is: it is the sentence under a button that cannot be pressed. */
-export async function planFor(workload, { canRoute }) {
+export async function planFor(workload, { canRoute, forRun = false } = {}) {
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workload.workspace_id);
   const models = modelCountFor(ws);
   const pool = await eligible(workload.id);
   const sample = sampleSizeFor(pool);
   const plan = {
-    pool, sample, models, candidates: [], estimateUsd: null,
-    canRun: false, reason: null, reference: workload.reference_model,
+    pool, sample, models, candidates: [], order: [], funnel: [], excluded: [], waiting: 0,
+    estimateUsd: null, canRun: false, reason: null, reference: workload.reference_model,
+    judge: jevUsable() ? 'jev' : 'llm', jevResting: jevResting(), factsAt: {}, speed: null, profile: null, pendingJev: 0,
+    difficulty: null, cachedBar: 0,
   };
 
   if (!canRoute) {
@@ -124,29 +93,103 @@ export async function planFor(workload, { canRoute }) {
     return plan;
   }
 
-  plan.candidates = await candidatesFor(workload.workspace_id, workload.id, workload.reference_model, models);
-  if (!plan.candidates.length) {
-    plan.reason = 'Nothing you have enabled in Models costs less than what this workload runs on, '
-      + 'so there is nothing cheaper to try. Enable more models and this turns on.';
+  const facts = await loadFacts();
+  const profile = await profileOf(workload);
+  const speed = speedRule(workload, profile, config);
+  const history = await historyFor(workload);
+  const enabled = await enabledSet(workload.workspace_id);
+  plan.factsAt = facts.syncedAt;
+  plan.profile = profile;
+  plan.speed = speed;
+  const base = {
+    facts, profile, reference: workload.reference_model, enabled, want: models,
+    tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, serving: workload.routed_model,
+    history, speed, config, at: now(),
+  };
+
+  // who survives the rules, before anything is ranked
+  const first = selectCandidates(base);
+  const survivors = first.ranked.map((r) => r.model);
+
+  // what Jev and the leaderboard say about the survivors; the run asks for what is missing
+  const { fits, difficulty } = await fitsFor(profile, survivors, facts, { compute: forRun });
+  const arena = await ratingsFor([workload.reference_model, ...survivors], facts, { link: forRun });
+  plan.pendingJev = jevUsable() ? survivors.filter((id) => !fits.has(id)).length : 0;
+  if (!forRun && plan.pendingJev && queueFit) queueFit(workload.id);
+  plan.difficulty = difficulty;
+
+  const sel = selectCandidates({ ...base, fits, arena, difficulty });
+  plan.funnel = sel.funnel;
+  plan.excluded = sel.excluded;
+  plan.order = sel.order;
+  plan.waiting = sel.waiting;
+  plan.refPrice = sel.refPrice;
+  plan.refHealth = sel.refHealth;
+  plan.candidates = sel.order.map((r) => ({ model_id: r.model, per: r.price, recipe: r.recipe }));
+
+  if (!plan.order.length) {
+    const top = mostCommon(sel.excluded);
+    plan.reason = top
+      ? `Nothing you have switched on could be measured against ${short(workload.reference_model)}. `
+        + `${top.count === 1 ? 'The one model left' : `${top.count} of them were`} ruled out for the same reason, `
+        + `for example ${short(top.model)}, which ${top.reason}. Switch on more models and this turns on.`
+      : 'Nothing you have enabled in Models costs less than what this workload runs on, '
+        + 'so there is nothing cheaper to try. Enable more models and this turns on.';
     return plan;
   }
 
-  plan.estimateUsd = await estimateFor(workload.id, workload.reference_model, plan.candidates,
-    sample, workload.shape_kind);
+  plan.cachedBar = await cachedBarShare(workload, sample);
+  plan.estimateUsd = estimate(plan, profile, facts, workload);
   if (plan.estimateUsd > config.EVAL_MAX_USD_PER_RUN) {
     plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)}, over the $`
       + `${config.EVAL_MAX_USD_PER_RUN.toFixed(2)} we allow for one measurement. `
       + 'Testing fewer models in Settings brings it down.';
     return plan;
   }
-
   const acct = await account(workload.workspace_id);
   if (acct.balance_usd < plan.estimateUsd) {
     plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)} and your balance is $`
       + `${Number(acct.balance_usd).toFixed(2)}. Add credit and it can run.`;
     return plan;
   }
-
   plan.canRun = true;
   return plan;
 }
+
+/* What a measurement is expected to cost, from this workload's own average call.
+ *
+ * The bar is the customer's own model twice on every sampled call, less whatever is already
+ * paid for. The models are the ones measured to the end, every call, plus the ones dropped
+ * early, which are charged for the few calls they answered before being dropped. Judging
+ * written answers is part of the work and is counted. */
+function estimate(plan, profile, facts, workload) {
+  const pin = profile.promptAvg || 0;
+  const pout = profile.outAvg || 0;
+  const refModel = facts.models.get(workload.reference_model);
+  const refPer = plan.refPrice ?? (refModel ? routedCallPrice(refModel, pin, pout, profile.hours)
+    ?? callPrice(refModel, pin, pout, profile.hours) : 0) ?? 0;
+  let total = refPer * plan.sample * 2 * (1 - plan.cachedBar);
+  const finalists = plan.order.slice(0, plan.models);
+  const extra = plan.order.slice(plan.models);
+  for (const c of finalists) total += c.price * plan.sample;
+  for (const c of extra) total += c.price * Math.min(plan.sample, config.EVAL_SCREEN_CALLS);
+  const judged = judgementsFor(workload.shape_kind, plan.sample, finalists.length);
+  if (judged) {
+    const llm = facts.models.get(config.EVAL_JUDGE_MODEL);
+    const llmPer = llm ? callPrice(llm, Math.min(pin, 600) + 400, 6) : 0;
+    total += judged * judgementCost(pin, pout, llmPer);
+  }
+  return Math.round(total * 1e8) / 1e8;
+}
+
+function mostCommon(excluded) {
+  const by = new Map();
+  for (const e of excluded) {
+    const k = e.step;
+    if (!by.has(k)) by.set(k, { count: 0, reason: e.reason, model: e.model });
+    by.get(k).count += 1;
+  }
+  return [...by.values()].sort((a, b) => b.count - a.count)[0] || null;
+}
+
+const short = (id) => String(id || '').split('/').pop();

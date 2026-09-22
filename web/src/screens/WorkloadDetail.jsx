@@ -14,7 +14,25 @@ const Tile = ({ k, v, s }) => (
 const VERDICT = {
   cleared: ['Cleared', 'ok'], review: ['Needs review', 'wait'],
   missed: ['Missed the bar', 'q'], insufficient: ['Still running', 'wait'],
+  slower: ['Slower than yours', 'wait'], failed: ['Could not answer', 'q'],
 };
+
+const secs = (ms) => (ms === null || ms === undefined ? null : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
+
+/* Why a model got the verdict it did, in a few words under the verdict. */
+function whyOf(r, refSpeed, cert) {
+  if (r.verdict === 'failed') return r.errorText ? `Provider said: ${r.errorText}` : 'Its provider refused the calls';
+  if (r.verdict === 'slower') {
+    const mine = r.latencyP50;
+    const theirs = refSpeed?.latencyP50;
+    return mine && theirs ? `Typically ${secs(mine)}, against ${secs(theirs)} for yours` : 'Slower than your speed setting allows';
+  }
+  if (r.stopped === 'bar') return `Stopped after ${r.runs} of ${cert.sampleSize} calls, once it could not reach your bar`;
+  if (r.verdict === 'missed' && r.difference) return `Mostly ${r.difference}`;
+  if (r.thinkingOff) return 'Measured with its thinking switched off';
+  if (r.difference && r.gap > 0) return `Where it differed: ${r.difference}`;
+  return null;
+}
 
 export default function WorkloadDetail({ id, onBack, onChanged }) {
   const [w, setW] = useState(null);
@@ -57,6 +75,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
     rounds: 1, sampleSize: runData.sample, floor: runData.floor, noise: runData.noise,
     reference: runData.reference, finishedAt: runData.finishedAt,
     referenceCostMonth: runData.referenceCostMonth, results: runData.results,
+    refSpeed: runData.refSpeed, reused: runData.reused, saved: runData.saved,
   } : w.certificate;
   /* Whether the measurement shown tried any model. One that could not set a bar, ran out of
      balance or was stopped early tried none, and the sections below say why instead of
@@ -189,6 +208,16 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
               <>
                 <CandidateChart results={cert.results} floor={cert.floor ?? 0} reference={measuredOn}
                   referenceCostMonth={cert.referenceCostMonth} />
+                {cert.results.some((r) => r.stopped || r.verdict === 'failed') && (
+                  <p className="cdnote">
+                    {(() => {
+                      const n = cert.results.filter((r) => r.stopped || r.verdict === 'failed').length;
+                      return `${n} ${n === 1 ? 'model was' : 'models were'} dropped before answering every call, `
+                        + 'so they are listed in the table below rather than drawn here: a disagreement from a '
+                        + 'few calls is not comparable with one from all of them.';
+                    })()}
+                  </p>
+                )}
                 {!plottable(cert, measuredOn) && (
                   <div className="optempty">
                     There is nothing to place on the chart yet: every model in this measurement
@@ -217,7 +246,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           <h2>Candidates tested</h2>
           <span className="s">
             {!cert ? (earlier ? '' : 'Nothing has been tried yet.')
-              : compared ? `${cert.sampleSize} of your own calls replayed on every model.` : ''}
+              : compared ? `Up to ${cert.sampleSize} of your own calls replayed on each model.` : ''}
             {openRun && runData ? (
               <>
                 {' '}Showing the measurement from {dateIST(runData.at)} IST.{' '}
@@ -236,37 +265,48 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           <div className="optempty">No models were tried in this measurement.</div>
         ) : (
           <>
-            <div className="cdhrow">
+            <div className="cdhrow cd6">
               <span>Model</span>
-              <span style={{ textAlign: 'right' }}>Runs</span>
+              <span style={{ textAlign: 'right' }}>Calls</span>
               <span style={{ textAlign: 'right' }}>Disagreement</span>
+              <span style={{ textAlign: 'right' }}>Typical time</span>
               <span style={{ textAlign: 'right' }}>Cost a month</span>
               <span>Verdict</span>
             </div>
-            <div className="cdrow cur">
+            <div className="cdrow cd6 cur">
               <div className="mdl">{measuredOn}</div>
-              <div className="num">{num(cert.sampleSize * 2 * cert.rounds)}</div>
+              <div className="num">{num(cert.sampleSize * 2)}</div>
               <div className="num">baseline</div>
+              <div className="num">{secs(cert.refSpeed?.latencyP50) ?? '—'}</div>
               <div className="num">{cert.referenceCostMonth === null ? '—' : usd(cert.referenceCostMonth)}</div>
               <div><span className="pill q">{measuredOn !== w.reference ? 'Your model then' : switched ? 'Previous model' : 'Current model'}</span></div>
             </div>
             {cert.results.map((r) => {
               const [label, tone] = VERDICT[r.verdict] || ['—', 'q'];
               const serving = r.model === w.model;
+              const why = whyOf(r, cert.refSpeed, cert);
               return (
-                <div className="cdrow" key={r.model}>
+                <div className="cdrow cd6" key={r.model}>
                   <div className="mdl">{r.model}</div>
                   <div className="num">{num(r.runs)}</div>
-                  <div className="num">{r.gap === null ? '—' : `${r.gap.toFixed(2)}%`}</div>
+                  <div className="num">{r.gap === null || r.verdict === 'failed' ? '—' : `${r.gap.toFixed(2)}%`}</div>
+                  <div className={`num cdspeed${r.verdict === 'slower' ? ' slow' : ''}`}>{secs(r.latencyP50) ?? '—'}</div>
                   <div className="num">{r.costMonth === null ? '—' : usd(r.costMonth)}</div>
-                  <div><span className={`pill ${serving ? 'ok' : tone}`}>{serving ? 'Serving now' : label}</span></div>
+                  <div>
+                    <span className={`pill ${serving ? 'ok' : tone}`}>{serving ? 'Serving now' : label}</span>
+                    {why && <span className="cdwhy">{why}</span>}
+                  </div>
                 </div>
               );
             })}
-            {/* It went on "a model we switch to is re-tested on fresh ones. If it stops clearing,
-                it goes back", which nothing does yet. Said as it is until it does. */}
+            {/* Said now because it is done: a re-check that finds the switched-to model no longer
+                clears, fails calls or is too slow switches back, and so does the live watch. */}
             <div className="barnote">
-              Every model answered the same {num(cert.sampleSize)} calls.
+              Every model was tried on the same {num(cert.sampleSize)} calls, and dropped as soon as it
+              could not win, so a model that stopped early was not paid for on every call. A model we
+              switch to is re-tested on fresh calls, and watched on your live traffic: if it stops
+              clearing, fails calls, or slows down, it goes back.
+              {cert.reused ? ` ${num(cert.reused)} answers were reused from earlier measurements${cert.saved ? `, saving ${usd(cert.saved)}` : ''}.` : ''}
               {cert.finishedAt ? ` Last run ${dateIST(cert.finishedAt)} IST.` : ''}
             </div>
           </>
@@ -295,7 +335,7 @@ const headline = (w, cand, switched) => {
   if (switched) return `${short(w.model)} is serving ${w.name}`;
   if (cand) return `${short(cand.model)} cleared your bar`;
   if (w.label === 'Measuring') return 'We are still learning your bar';
-  if (w.certificate?.outcome === 'unmeasurable') return 'We could not set a bar for this workload';
+  if (w.certificate?.outcome === 'unmeasurable' || w.certificate?.outcome === 'refused') return 'We could not set a bar for this workload';
   return 'Nothing has cleared your bar yet';
 };
 
@@ -314,7 +354,9 @@ const blurb = (w, cand, switched) => {
   }
   /* No model was tried at all, so "every model we tried drifted" would be untrue: say what the
      measurement actually found. */
-  if (w.certificate?.outcome === 'unmeasurable' && w.certificate.nothing) return w.certificate.nothing;
+  if ((w.certificate?.outcome === 'unmeasurable' || w.certificate?.outcome === 'refused') && w.certificate.nothing) {
+    return w.certificate.nothing;
+  }
   return 'Every model we tried drifted further from your own model than your bar allows. We keep trying as new models land.';
 };
 

@@ -29,6 +29,7 @@ export const api = {
     send('GET', `/workloads/${id}/calls?page=${page}&q=${encodeURIComponent(q)}`),
   callText: (id, callId, field) => send('GET', `/workloads/${id}/calls/${callId}/text?field=${field}`),
   setMode: (id, mode) => send('POST', `/workloads/${id}/mode`, { mode }),
+  setSpeed: (id, pref) => send('POST', `/workloads/${id}/speed`, { pref }),
   promote: (id, model) => send('POST', `/workloads/${id}/promote`, { model }),
   revert: (id) => send('POST', `/workloads/${id}/revert`),
   measure: (id) => send('POST', `/workloads/${id}/measure`),

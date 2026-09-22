@@ -65,14 +65,23 @@ let held = 0;
    last call. */
 let holdAt = 0;
 let releaseAt = null;
+/* Or it holds the Nth call to one model. Models now race, and a model that cannot win is dropped
+   after a few calls, so "the 400th request" no longer names the last call of a run; "the 100th
+   call to the model that answers every call" does. */
+let holdModel = null;
+const seenBy = new Map();
+const holdCall = (model, ahead) => { holdModel = { model, n: (seenBy.get(model) || 0) + ahead }; };
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', async () => {
-    if (holdAt && seen + 1 === holdAt) {
+    const asked = JSON.parse(body || '{}').model;
+    seenBy.set(asked, (seenBy.get(asked) || 0) + 1);
+    if ((holdAt && seen + 1 === holdAt) || (holdModel && asked === holdModel.model && seenBy.get(asked) === holdModel.n)) {
       const gate = new Promise((r) => { releaseAt = r; });
       held += 1;
       holdAt = 0;
+      holdModel = null;
       await gate;
     }
     if (hold) { held += 1; await hold; }
@@ -332,12 +341,16 @@ test('the switched card is built from the switch and the calls since, and adds u
   const w = await load(workload.id);
   assert.equal(w.routed_model, 'vendor/steady-small', 'the cheaper steady model was switched to');
 
-  // "cost a month" is the customer's own traffic only: 200 calls of 800 in and 60 out over 14
-  // days, never the replays the measurement made (it used to count those as traffic too)
-  const steady = await db.prepare(`SELECT cost_month_usd FROM eval_results WHERE run_id = ? AND model_id = ?`)
+  /* "cost a month" is the customer's own traffic only: 200 calls of 800 in and 60 out over 14
+     days, never the replays the measurement made (it used to count those as traffic too). The
+     customer's model is priced on that traffic; a candidate is what it actually cost on the
+     sampled calls against the customer's model on the same calls, applied to that month. Here
+     the stand-in provider charges 0.0002 a call for the steady model and 0.002 for gpt-5.4. */
+  const steady = await db.prepare(`SELECT cost_month_usd, cost_ratio FROM eval_results WHERE run_id = ? AND model_id = ?`)
     .get(out.runId, 'vendor/steady-small');
-  const perDay = (0.2e-6 * 800 + 0.6e-6 * 60) * 200 / 14;
-  assert.ok(Math.abs(steady.cost_month_usd - perDay * 30) < 1e-6, `a month on it is ${steady.cost_month_usd}`);
+  const refPerDay = (2.5e-6 * 800 + 15e-6 * 60) * 200 / 14;
+  assert.ok(Math.abs(steady.cost_ratio - 0.1) < 1e-9, `measured at ${steady.cost_ratio} of the customer model's cost`);
+  assert.ok(Math.abs(steady.cost_month_usd - refPerDay * 30 * 0.1) < 1e-6, `a month on it is ${steady.cost_month_usd}`);
 
   /* before any call has come through us, all 200 are copies, which already ran on the original
      model: nothing is being saved, and the figures are what routing all of it would save */
@@ -365,9 +378,11 @@ test('the switched card is built from the switch and the calls since, and adds u
   assert.equal(s.latest, null, 'nothing has measured it again yet');
   assert.ok(s.nextCheckAt > now(), 'and the next check is due on the 30 day default');
 
-  // a call on each: 800 in at its price, and each model's own answer length
+  /* a call on the original: 800 in at its price, and its own answer length. A call on the new
+     model is priced the way the measurement priced it, what it actually cost against the
+     original on the same calls (a tenth, here), so the card and the measurement agree */
   assert.ok(Math.abs(s.prices.fromPerCall - (2.5e-6 * 800 + 15e-6 * 60)) < 1e-9, `${s.prices.fromPerCall}`);
-  assert.ok(Math.abs(s.prices.toPerCall - (0.2e-6 * 800 + 0.6e-6 * 60) * 1.01) < 1e-9, 'the fee is on the new model');
+  assert.ok(Math.abs(s.prices.toPerCall - (2.5e-6 * 800 + 15e-6 * 60) * 0.1 * 1.01) < 1e-9, 'the fee is on the new model');
 
   // the twelve served calls, actual: what was paid, and the same prompts on the original
   assert.equal(s.soFar.calls, 12);
@@ -406,7 +421,8 @@ test('a stop that lands while the last charge is being settled switches nothing'
   // what it spent, and a stop arrives. It used to write "done" and switch the model.
   const { workspace, workload } = await seed('settling');
   held = 0;
-  holdAt = seen + 350; // 200 to set the bar, 100 on the first model, then half way through the second
+  // half way through the model that answers every call; the one that drifts was dropped long before
+  holdCall('vendor/steady-small', 50);
   const running = runEvaluation(workload.id);
   await until(async () => held > 0, 20000);
   // hold the balance while the rest of the calls run, so the run waits at its last settle
@@ -527,7 +543,8 @@ test('a stop on the very last call of a measurement switches nothing', async () 
   const { workspace, workload } = await seed('lastcall');
   // 100 sampled calls: 200 to set the bar, then 100 on each of the two cheaper models
   held = 0;
-  holdAt = seen + 400;
+  // its very last call: the steady model's 100th, the drifting one having been dropped early
+  holdCall('vendor/steady-small', 100);
   const running = runEvaluation(workload.id);
   await until(async () => held > 0, 20000);
   const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_last' });
@@ -541,9 +558,11 @@ test('a stop on the very last call of a measurement switches nothing', async () 
   const run = await db.prepare('SELECT status, steps_done, steps_total FROM eval_runs WHERE id = ?').get(out.runId);
   assert.equal(run.status, 'stopped');
   assert.equal(run.steps_done, run.steps_total, 'every call it made is counted, and it made them all');
-  // the one model that finished before the stop keeps its result; the stopped one has none
-  const kept = await db.prepare(`SELECT model_id FROM eval_results WHERE run_id = ? AND verdict <> 'reference'`).all(out.runId);
+  // the model dropped early keeps its result; the one stopped on its last call has none
+  const kept = await db.prepare(`SELECT model_id, verdict, stopped FROM eval_results WHERE run_id = ? AND verdict <> 'reference'`).all(out.runId);
   assert.equal(kept.length, 1);
+  assert.equal(kept[0].model_id, 'vendor/drifty-small');
+  assert.equal(kept[0].stopped, 'bar', 'it was dropped once it could not reach the bar, not run to the end');
   void workspace;
 });
 

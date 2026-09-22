@@ -5,13 +5,16 @@ import config, { canRoute } from './config.js';
 import { db, now } from './db/index.js';
 import migrate from './db/migrate.js';
 import { handle, startJobs, stopJobs, requeueStale, enqueue } from './jobs.js';
-import { fetchModels, saveCatalog } from './openrouter.js';
+import { fetchModels, saveCatalog, fetchZdrEndpoints, saveZdrEndpoints } from './openrouter.js';
+import { forgetFacts } from './models/facts.js';
+import { syncArena } from './models/arena.js';
+import { planFor, onMissingFits } from './eval/plan.js';
 import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './alerts.js';
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
 import { runTopUp } from './billing.js';
-import { revert } from './eval/promote.js';
+import { revert, watchLive } from './eval/promote.js';
 import api from './api.js';
 import v1 from './proxy.js';
 
@@ -43,8 +46,53 @@ handle('catalog_sync', async () => {
     throw err;
   }
   const n = await saveCatalog(list);
+  forgetFacts();
   await enqueue('catalog_sync', {}, { runAfter: now() + config.CATALOG_SYNC_HOURS * 3600000, unique: true });
+  // which providers keep nothing depends on the models, so it is read again straight after
+  await enqueue('model_health', {}, { unique: true });
   return { ok: true, models: n };
+});
+
+/* Which providers keep nothing, how healthy each has been and how fast, read every hour.
+ *
+ * It decides which models a measurement can reach at all, and uptime and speed move within the
+ * day, so this is the shortest-lived fact kept. A failure keeps the last good list: an empty one
+ * would rule out every model, and yesterday's is far closer to the truth than none. */
+handle('model_health', async () => {
+  if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
+  const rows = await fetchZdrEndpoints();
+  if (rows.length) {
+    await saveZdrEndpoints(rows);
+    forgetFacts();
+  }
+  await enqueue('model_health', {}, { runAfter: now() + config.HEALTH_TTL_MIN * 60000, unique: true });
+  return { ok: true, providers: rows.length };
+});
+
+/* The public Arena leaderboard, read once a week. It is a slow-moving, weak hint, so a failure
+   simply tries again in a few hours and ranking carries on without it meanwhile. */
+handle('arena_sync', async () => {
+  try {
+    const n = await syncArena();
+    await enqueue('arena_sync', {}, { runAfter: now() + config.ARENA_TTL_DAYS * 86400000, unique: true });
+    return { ok: true, ratings: n };
+  } catch (err) {
+    await enqueue('arena_sync', {}, { runAfter: now() + 6 * 3600000, unique: true });
+    return { ok: false, note: String(err?.message || err).slice(0, 200) };
+  }
+});
+
+/* Jev's reading of the models a workload's page is about to rank, and which leaderboard entry
+   each one is, worked out in the background so the page never waits on it. The page asks for
+   this when it finds readings missing; a measurement asks for the same thing itself. */
+handle('model_fit', async ({ workloadId }) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
+  if (!w) return { ok: false, reason: 'gone' };
+  const plan = await planFor(w, { canRoute: canRoute(), forRun: true });
+  return { ok: true, ranked: plan.order.length, pending: plan.pendingJev };
+});
+onMissingFits((workloadId) => {
+  void enqueue('model_fit', { workloadId }, { unique: true }).catch(() => {});
 });
 
 handle('topup', async ({ workspaceId }) => await runTopUp(workspaceId));
@@ -227,6 +275,9 @@ handle('recheck', async () => {
      corrected a status. */
   for (const w of await db.prepare(
     `SELECT id FROM workloads WHERE status IN ('certified', 'no_match')`).all()) await rest(w.id);
+  /* A switch that has started failing calls, or slowing down, under the customer's own load is
+     undone now rather than at the next measurement. */
+  await watchLive();
   const spaces = await db.prepare('SELECT id, measure_every_days FROM workspaces').all();
   let queued = 0;
   for (const ws of spaces) {
@@ -307,6 +358,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   await enqueue('backfill_shapes', {}, { unique: true });
   await enqueue('catalog_sync', {}, { unique: true });
+  await enqueue('model_health', {}, { unique: true });
+  await enqueue('arena_sync', {}, { unique: true });
   await enqueue('purge', {}, { unique: true });
   await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
   startJobs();

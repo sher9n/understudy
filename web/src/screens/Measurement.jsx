@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, usd, num, timeIST } from '../api.js';
+import HowWePick from './HowWePick.jsx';
 
 /* Measuring, as its own thing on the page.
  *
@@ -199,13 +200,13 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
             {m.canRun ? (
               <p className="mwhy">
                 {num(m.sample)} of this workload&rsquo;s {num(m.pool)} calls are replayed:
-                twice on {shortName(w.reference)} to set the bar, then once on each of{' '}
-                {num(m.models)} cheaper models.
+                twice on {shortName(w.reference)} to set the bar, then on up to{' '}
+                {num(m.models)} cheaper models, dropping any that cannot win.
                 {w.shape === 'free text'
-                  ? ' Written answers cannot be compared word for word, so a judge model also compares each pair.'
+                  ? ' Written answers cannot be compared word for word, so a judge also compares each pair.'
                   : ''}{' '}
-                You are charged for every one of those
-                calls{m.estimateUsd != null ? `, about ${usd(m.estimateUsd)} for this measurement` : ''}.
+                You are charged for the calls made, not for answers reused from earlier
+                measurements{m.estimateUsd != null ? `, about ${usd(m.estimateUsd)} for this one` : ''}.
               </p>
             ) : (
               <p className="mwhy cannot">{m.reason}</p>
@@ -215,34 +216,9 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
         {notice && !live && <p className="mnote">{notice}</p>}
         {err && <div className="errbox" style={{ marginTop: 12 }}>{err}</div>}
 
-        {/* Why these models and not others. Somebody paying for a run is entitled to know
-            what it decided to spend their money on before it spends it. */}
-        {m.picked && m.picked.length > 0 && (
-          <div className="mpick">
-            <div className="mpickh">
-              How the {num(m.picked.length)} models were chosen
-            </div>
-            <p className="mpickp">
-              Every model you have switched on in Models, priced on this workload&rsquo;s own
-              average call rather than on a headline rate, keeping only the ones that cost
-              less than {shortName(w.reference)} does here. Anything dearer cannot save you
-              anything, so it is not worth paying to test. Those are then spread evenly across
-              the price range instead of taking the cheapest few, so a run shows you where
-              quality falls away as the price does rather than confirming that the bottom of
-              the catalogue is the bottom of the catalogue.
-              {m.modelsWanted > m.picked.length
-                ? ` You asked for ${num(m.modelsWanted)}; only ${num(m.picked.length)} enabled models are cheaper than this one.`
-                : ' You can change how many are tried in Settings.'}
-            </p>
-            <div className="mpicks">
-              {m.picked.map((id, i) => (
-                <span className="mpickm m" key={id}>
-                  <span className="mpickn">{i + 1}</span>{shortName(id)}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
+        {/* How the models are chosen, and where Jev comes in. Somebody paying for a run is
+            entitled to know what it will spend their money on, and why, before it spends it. */}
+        <HowWePick w={w} m={m} onChanged={onRan} />
 
         {history.length > 0 && (
           <div className="mhist">
@@ -290,14 +266,15 @@ function whereTheCountComesFrom(live) {
   const models = Number(live.models) || 0;
   const replays = sample * (2 + models);
   const judged = (Number(live.total) || 0) - replays;
-  if (!sample || !replays) {
-    return 'Your own model answers each sampled call twice to set the bar, then every candidate answers the same calls once.';
-  }
-  const base = `Your own model answers each of ${num(sample)} sampled calls twice to set the bar, then each of `
-    + `${num(models)} ${models === 1 ? 'candidate' : 'candidates'} answers them once: ${num(replays)} replays.`;
-  if (judged <= 0) return base;
-  return `${base} Written answers cannot be compared word for word, so a judge model also compares each pair: `
-    + `${num(judged)} comparisons, which is why the count is ${num(live.total)}.`;
+  const race = 'the models race on the same calls, several at once, and any that cannot win is dropped '
+    + 'straight away, its place taken by the next in line';
+  if (!sample) return `Your own model answers each sampled call twice to set the bar, then ${race}.`;
+  const base = `Your own model answers each of ${num(sample)} sampled calls twice to set the bar, then ${race}, `
+    + `until ${num(models)} ${models === 1 ? 'has' : 'have'} answered every call. The count grows by the calls a dropped model made.`;
+  const judging = judged > 0
+    ? ' Written answers cannot be compared word for word, so a judge also compares each pair, and each comparison counts as a call.'
+    : '';
+  return `${base}${judging} Answers already paid for are reused and cost nothing.`;
 }
 const FINISHED = 'It had already finished when the stop reached it, so it was not stopped. What it found is below.';
 

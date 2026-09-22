@@ -59,13 +59,15 @@ export async function switchStory(w) {
      record a newer run that never tried this model, so the run is only trusted if it has a
      result for the model; otherwise the newest earlier run that does. */
   const resultIn = (runId) => db.prepare(
-    `SELECT r.id, COALESCE(r.finished_at, r.created_at) AS at, r.sample_size, r.floor_pct, e.gap_pct, e.verdict
+    `SELECT r.id, COALESCE(r.finished_at, r.created_at) AS at, r.sample_size, r.floor_pct, e.gap_pct, e.verdict,
+            e.cost_ratio
        FROM eval_runs r JOIN eval_results e ON e.run_id = r.id AND e.model_id = ?
       WHERE r.id = ?`).get(to, runId);
   let evidence = w.promoted_run_id ? await resultIn(w.promoted_run_id) : null;
   if (!evidence) {
     evidence = await db.prepare(
-      `SELECT r.id, COALESCE(r.finished_at, r.created_at) AS at, r.sample_size, r.floor_pct, e.gap_pct, e.verdict
+      `SELECT r.id, COALESCE(r.finished_at, r.created_at) AS at, r.sample_size, r.floor_pct, e.gap_pct, e.verdict,
+              e.cost_ratio
          FROM eval_runs r JOIN eval_results e ON e.run_id = r.id AND e.model_id = ?
         WHERE r.workload_id = ? AND r.created_at <= ? ORDER BY r.created_at DESC LIMIT 1`).get(to, w.id, at);
   }
@@ -77,7 +79,7 @@ export async function switchStory(w) {
             r.noise_pct, r.floor_pct, r.sample_size, e.gap_pct, e.verdict
        FROM eval_runs r LEFT JOIN eval_results e ON e.run_id = r.id AND e.model_id = ?
       WHERE r.workload_id = ? AND r.status = 'done' AND r.created_at > ?
-        AND ${OUTCOME_OF('r.')} IN ('compared', 'unmeasurable')
+        AND ${OUTCOME_OF('r.')} IN ('compared', 'unmeasurable', 'refused')
       ORDER BY r.created_at DESC LIMIT 1`).get(to, w.id, at);
 
   const ws = await db.prepare('SELECT measure_every_days FROM workspaces WHERE id = ?').get(w.workspace_id);
@@ -102,7 +104,14 @@ export async function switchStory(w) {
      were findings. */
   const sized = promptAll > 0 || fromOut > 0 || toOut > 0;
   const fromPerCall = sized ? perCall(fromPrice, { prompt: promptAll, completion: fromOut }) : null;
-  const toPerCall = sized ? withFeeOn(perCall(toPrice, { prompt: promptAll, completion: toOut }), fee) : null;
+  /* When the switch rests on a measurement, the new model is priced the way the measurement
+     priced it: what it actually cost on the sampled calls against the original model on the same
+     calls. That carries what a list price misses, and keeps this card and the measurement's own
+     table saying the same thing. Without one, today's list price and its own answer length. */
+  const measuredRatio = evidence?.cost_ratio != null && Number(evidence.cost_ratio) > 0 ? Number(evidence.cost_ratio) : null;
+  const toPerCall = !sized ? null
+    : measuredRatio !== null && fromPerCall !== null ? withFeeOn(fromPerCall * measuredRatio, fee)
+      : withFeeOn(perCall(toPrice, { prompt: promptAll, completion: toOut }), fee);
 
   // how much traffic that is, from the customer's own calls over the last thirty days
   const days = prompt.c > 0 ? Math.max(1, Math.min(30, (t - prompt.first) / DAY)) : 30;

@@ -247,11 +247,36 @@ const runRow = (r) => ({
   at: r.finished_at || r.started_at || r.created_at,
   startedAt: r.started_at,
   finishedAt: r.finished_at,
+  reused: r.reused ?? 0,
+  saved: round8(r.saved_usd || 0),
+  judge: r.judge ?? null,
+});
+
+const parseJson = (s) => { if (!s) return null; try { return JSON.parse(s); } catch { return null; } };
+
+/* One model's result in a measurement, the same everywhere it is shown. Beyond how often it
+   disagreed: how fast it was on these calls, whether its provider refused it, why it was dropped
+   if it was, how its answers mostly differed, and how it was asked. */
+const resultRow = (r, runs = r.runs) => ({
+  model: r.model_id, runs, gap: r.gap_pct, costMonth: r.cost_month_usd, verdict: r.verdict,
+  failures: r.failures ?? 0, errors: r.errors ?? 0, stopped: r.stopped ?? null, errorText: r.error_text ?? null,
+  difference: r.difference ?? null, reused: r.reused ?? 0,
+  latencyP50: r.latency_p50 ?? null, latencyP90: r.latency_p90 ?? null,
+  ttftP50: r.ttft_p50 ?? null, ttftP90: r.ttft_p90 ?? null,
+  thinkingOff: !!parseJson(r.recipe_json)?.reasoning,
+  rank: parseJson(r.rank_json),
+  gates: { structure: r.gate_structure, accuracy: r.gate_accuracy, coverage: r.gate_coverage, complete: r.gate_complete },
+});
+
+/* The customer's own model's speed on a measurement's calls, which every model is held to. */
+const refSpeedOf = (run) => ({
+  latencyP50: run.ref_latency_p50 ?? null, latencyP90: run.ref_latency_p90 ?? null,
+  ttftP50: run.ref_ttft_p50 ?? null, ttftP90: run.ref_ttft_p90 ?? null,
 });
 
 /* The columns a measurement row is read with, wherever the page lists or opens one. */
 const RUN_COLUMNS = `id, status, outcome, trigger, sample_size, models_planned, floor_pct, noise_pct,
-  spend_usd, error, steps_done, steps_total, started_at, finished_at, created_at`;
+  spend_usd, error, steps_done, steps_total, started_at, finished_at, created_at, reused, saved_usd, judge`;
 
 /* Why a measurement has no models to show, in words somebody can act on. The page puts this
    where the chart would be. It used to leave the section out instead, so opening one of these
@@ -262,6 +287,9 @@ function nothingCompared(r) {
     return 'This measurement is still running. Each model appears here once it has answered every call.';
   }
   switch (outcomeOf(r)) {
+    case 'refused':
+      return `${ref} could not answer most of these calls when we replayed them, so there was no bar to hold a `
+        + `cheaper model to.${r.ref_error ? ` ${r.ref_error}` : ''} Nothing was tried, and nothing was switched.`;
     case 'unmeasurable':
       return `${ref} gave a different answer to the same call ${Number(r.noise_pct ?? 0).toFixed(1)}% of the `
         + `time when we asked it each of ${r.sample_size} of your calls twice, so there was no steady bar `
@@ -431,10 +459,39 @@ api.get('/workloads/:id', async (req, res) => {
       : waiting ? 'A measurement is waiting to start.' : plan.reason,
     pool: plan.pool,
     sample: plan.sample,
-    models: plan.candidates.length,
+    models: Math.min(plan.models, plan.order.length),
     modelsWanted: plan.models,
     estimateUsd: plan.estimateUsd,
-    picked: plan.candidates.map((c) => c.model_id),
+    picked: plan.order.slice(0, plan.models).map((r) => r.model),
+    /* How the models were chosen, for the page to explain: what ruled each group out, in what
+       order the rest will be tried and why, what Jev and the leaderboard said, how old each fact
+       is, and the speed every model is held to. */
+    selection: {
+      want: plan.models,
+      funnel: plan.funnel,
+      ruledOut: Object.values(plan.excluded.reduce((a, e) => {
+        a[e.step] = a[e.step] || { step: e.step, count: 0, examples: [] };
+        a[e.step].count += 1;
+        if (a[e.step].examples.length < 5) a[e.step].examples.push({ model: e.model, reason: e.reason });
+        return a;
+      }, {})).sort((x, y) => y.count - x.count),
+      order: plan.order.slice(0, plan.models + 5).map((r) => ({
+        model: r.model, savingShare: r.savingShare, chance: r.chance,
+        parts: (r.parts || []).map((x) => ({ source: x.source, p: x.p, note: x.note })),
+        family: r.family, thinkingOff: !!r.recipe,
+      })),
+      queued: plan.order.length,
+      beyond: plan.waiting,
+      judge: plan.judge,
+      jevResting: plan.jevResting,
+      pendingJev: plan.pendingJev,
+      difficulty: plan.difficulty,
+      cachedBar: plan.cachedBar,
+      factsAt: plan.factsAt,
+      speed: plan.speed ? { pref: plan.speed.pref, auto: !!plan.speed.auto, factor: plan.speed.factor, metric: plan.speed.metric } : null,
+      streamed: !!plan.profile?.streamed,
+      outCap: plan.profile?.outCap ?? null,
+    },
     runs: runCount,
     last: last ? runRow(last) : null,
     running: running ? {
@@ -495,6 +552,7 @@ api.get('/workloads/:id', async (req, res) => {
     tools: JSON.parse(w.tool_names || '[]'),
     model: w.routed_model || w.reference_model, reference: w.reference_model,
     optimizeMode: w.optimize_mode, floor: w.floor_pct,
+    speedPref: w.speed_pref || null,
     calls: t.calls, cost: round8(t.cost),
     promotedAt: w.promoted_at,
     /* What a measurement would do, and whether it can. The button reads this rather than
@@ -507,11 +565,12 @@ api.get('/workloads/:id', async (req, res) => {
       noise: cert.run.noise_pct, reference: cert.run.reference_model,
       finishedAt: cert.run.finished_at,
       referenceCostMonth: refCost,
-      results: compared.map((r) => ({
-        model: r.model_id, runs: r.runs_total, gap: r.gap_pct,
-        costMonth: r.cost_month_usd, verdict: r.verdict,
-        gates: { structure: r.gate_structure, accuracy: r.gate_accuracy, coverage: r.gate_coverage, complete: r.gate_complete },
-      })),
+      refSpeed: refSpeedOf(cert.run),
+      judge: cert.run.judge ?? null,
+      reused: cert.run.reused ?? 0,
+      saved: round8(cert.run.saved_usd || 0),
+      plan: parseJson(cert.run.plan_json),
+      results: compared.map((r) => resultRow(r, r.runs_total)),
       nothing: compared.length ? null : nothingCompared(cert.run),
     },
     lastComparison: lastComparison
@@ -619,6 +678,20 @@ api.post('/workloads/:id/revert', async (req, res) => {
   return res.json(await revert(w, { actorUserId: req.user.id }));
 });
 
+/* How much slower than the customer's own model a switched-to model may be on this workload.
+   "auto" follows the traffic: streamed answers keep the same speed, others may be a little slower. */
+const SPEED_PREFS = ['auto', 'same', 'slower_ok', 'any'];
+api.post('/workloads/:id/speed', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  const pref = String(req.body?.pref || '');
+  if (!SPEED_PREFS.includes(pref)) return fail(res, 400, 'That is not one of the choices.');
+  await db.prepare('UPDATE workloads SET speed_pref = ?, updated_at = ? WHERE id = ?')
+    .run(pref === 'auto' ? null : pref, now(), w.id);
+  return res.json({ ok: true, pref });
+});
+
 /* Start a measurement, or say why it cannot start.
  *
  * It used to mark the workload "Measuring" and queue a job that quietly declined a moment
@@ -682,21 +755,16 @@ api.get('/workloads/:id/runs/:runId', async (req, res) => {
     .get(req.params.runId, w.id);
   if (!run) return fail(res, 404, 'No such measurement.');
   const rows = await db.prepare(
-    `SELECT model_id, runs, gap_pct, cost_month_usd, verdict, failures,
-            gate_structure, gate_accuracy, gate_coverage, gate_complete
-       FROM eval_results WHERE run_id = ? ORDER BY cost_month_usd NULLS LAST`).all(run.id);
+    `SELECT * FROM eval_results WHERE run_id = ? ORDER BY cost_month_usd NULLS LAST`).all(run.id);
   const ref = rows.find((r) => r.verdict === 'reference');
   const compared = rows.filter((r) => r.verdict !== 'reference');
   return res.json({
     ...runRow(run),
     reference: run.reference_model,
     referenceCostMonth: ref?.cost_month_usd ?? null,
-    results: compared.map((r) => ({
-      model: r.model_id, runs: r.runs, gap: r.gap_pct, costMonth: r.cost_month_usd,
-      verdict: r.verdict, failures: r.failures,
-      gates: { structure: r.gate_structure, accuracy: r.gate_accuracy,
-               coverage: r.gate_coverage, complete: r.gate_complete },
-    })),
+    refSpeed: refSpeedOf(run),
+    plan: parseJson(run.plan_json),
+    results: compared.map((r) => resultRow(r)),
     nothing: compared.length ? null : nothingCompared(run),
   });
 });

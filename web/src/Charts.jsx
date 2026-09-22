@@ -206,8 +206,10 @@ export function chartPoints(results, reference, referenceCostMonth) {
      was filtered out, leaving an empty box above a table full of results. The verdict
      already knows which runs were enough to judge, so the chart trusts it rather than
      keeping a threshold of its own. */
+  /* A model that never answered has no disagreement to place, and one dropped part way through
+     has only a partial one, so neither is drawn; both are in the table with the reason. */
   const tried = (results || []).filter((r) => r.costMonth !== null && r.gap !== null
-    && r.runs > 0 && r.verdict !== 'insufficient');
+    && r.runs > 0 && r.verdict !== 'insufficient' && r.verdict !== 'failed' && !r.stopped);
   /* The model the bar came from belongs on the picture: it is the thing every candidate
      is being compared against, and what it costs is the whole argument. */
   if (referenceCostMonth === null || referenceCostMonth === undefined) return tried;
@@ -217,7 +219,10 @@ export function chartPoints(results, reference, referenceCostMonth) {
 const shortModel = (m) => String(m).split('/').pop();
 
 /* What a dot means, in the same words the table under the chart uses. */
-const RESULT = { reference: 'Your model', cleared: 'Cleared', review: 'Needs review', missed: 'Missed the bar' };
+const RESULT = {
+  reference: 'Your model', cleared: 'Cleared', review: 'Needs review', missed: 'Missed the bar',
+  slower: 'Slower than yours',
+};
 
 export function CandidateChart({ results, floor, reference, referenceCostMonth }) {
   const [at, setAt] = useState(null);
@@ -327,6 +332,10 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
           <div className="tiprow"><span className="tipkey">Disagreement</span>
             <span className="tipval">{cur.r.gap.toFixed(2)}%</span></div>
         )}
+        {cur.r.latencyP50 ? (
+          <div className="tiprow"><span className="tipkey">Typical time</span>
+            <span className="tipval">{(cur.r.latencyP50 / 1000).toFixed(1)} s</span></div>
+        ) : null}
         <div className="tiprow"><span className="tipkey">Result</span>
           <span className="tipval">{RESULT[cur.r.verdict] || cur.r.verdict}</span></div>
       </div>

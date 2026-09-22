@@ -1,21 +1,36 @@
 import { db, id, now, round8 } from '../db/index.js';
 import config, { canRoute } from '../config.js';
-import { chat, priceCall, UpstreamError } from '../openrouter.js';
-import { addActivity, recordCall } from '../traffic.js';
+import { priceCall } from '../openrouter.js';
+import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval } from '../billing.js';
 import { planFor } from './plan.js';
-import { judgePair, judgementsFor } from './judge.js';
+import { judgeBarPair, judgeCandidate } from './judge.js';
 import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, barIsMeaningful } from './compare.js';
-import { promote } from './promote.js';
+import { promote, revert } from './promote.js';
+import { replayOnce } from './replay.js';
 import { OUTCOME_OF, OUTCOME_CASE, cheaperCleared } from './outcome.js';
+
+/* A measurement, run as a race.
+ *
+ * The bar comes first: the customer's own model answers each sampled call twice, and how often
+ * it disagrees with itself sets how far a cheaper model may stray. Answers already paid for by an
+ * earlier measurement are used again instead of being bought twice.
+ *
+ * Then the models the plan ranked are tried in that order, several at once, each on the same
+ * calls. A model is dropped the moment it cannot win: when a provider refuses it, when even
+ * answering every remaining call exactly right could not bring it inside the bar, or when it is
+ * slower than the workload's speed setting allows. Its place goes to the next in line, until the
+ * number of models asked for in Settings have answered every call, or the line runs out. A model
+ * that could never win used to be paid for on every call; in the one real measurement on
+ * production, four of ten answered nothing at all and were still sent all eleven. */
 
 const DAY = 86400000;
 
-/** Models this workspace is willing to try, cheapest first, never the reference itself. */
-/** What a month of this workload would cost on a given model, from its own observed tokens.
- *  The customer's traffic only: our own replays counted here once, and a workload measured a
- *  few times was projected from ten times more calls than it had ever made. */
+/** What a month of this workload would cost on a model at list price, from its real traffic. */
 async function monthlyOn(workloadId, modelId) {
+  /* Replays and test calls are ours, not the customer's traffic: counting them projected the
+     month from the measurements themselves, which on the invoice workloads was 1,200 replays
+     against 267 real calls. */
   const t = await db.prepare(
     `SELECT COALESCE(SUM(prompt_tokens), 0) AS pin, COALESCE(SUM(completion_tokens), 0) AS pout,
             COUNT(*) AS n, MIN(created_at) AS first
@@ -28,6 +43,88 @@ async function monthlyOn(workloadId, modelId) {
   return round8((per / days) * 30);
 }
 
+const pct = (xs, p) => {
+  const v = xs.filter((x) => x !== null && x !== undefined && Number.isFinite(x));
+  if (!v.length) return null;
+  const s = [...v].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.floor(p * (s.length - 1) + 0.5))];
+};
+const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+
+/* Run tasks with at most `n` going at once. */
+async function inParallel(items, n, fn) {
+  let next = 0;
+  const lane = async () => {
+    while (next < items.length) {
+      const i = next;
+      next += 1;
+      await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, lane));
+}
+
+/* The calls whose two answers from the customer's own model are already paid for and still young
+   enough to use, so the sample can prefer them. */
+async function paidForCalls(model, callIds) {
+  if (!callIds.length) return new Set();
+  const rows = await db.prepare(
+    `SELECT call_id FROM replay_cache WHERE model_id = ? AND status = 200 AND created_at >= ?
+        AND call_id = ANY(?) GROUP BY call_id HAVING COUNT(DISTINCT slot) >= 2`)
+    .all(model, now() - config.REPLAY_REUSE_DAYS * DAY, callIds);
+  return new Set(rows.map((r) => r.call_id));
+}
+
+/* What an answer said, to keep beside it, whatever shape it came in. */
+function answerText(json) {
+  const m = json?.choices?.[0]?.message;
+  if (!m) return null;
+  if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+    return JSON.stringify(m.tool_calls.map((c) => ({ name: c.function?.name, arguments: c.function?.arguments }))).slice(0, 4000);
+  }
+  return typeof m.content === 'string' ? m.content.slice(0, 4000) : null;
+}
+
+async function keepReplay(runId, callId, model, slot, r, { score = null, judged = null, failure = null } = {}) {
+  await db.prepare(
+    `INSERT INTO eval_replays (id, run_id, call_id, model_id, slot, cache_key, reused, status, error, failure, answer,
+            latency_ms, ttft_ms, completion_tokens, reasoning_tokens, cost_usd, score, judged_by, difference, created_at)
+     VALUES (@id, @run_id, @call_id, @model_id, @slot, @cache_key, @reused, @status, @error, @failure, @answer,
+            @latency_ms, @ttft_ms, @completion_tokens, @reasoning_tokens, @cost_usd, @score, @judged_by, @difference,
+            @created_at)`).run({
+    id: id('rpl'), run_id: runId, call_id: callId, model_id: model, slot, cache_key: r.key ?? null,
+    reused: r.reused ? 1 : 0, status: r.status ?? null, error: r.error ?? null, failure,
+    answer: answerText(r.json), latency_ms: r.latencyMs ?? null, ttft_ms: r.ttftMs ?? null,
+    completion_tokens: r.completionTokens ?? null, reasoning_tokens: r.reasoningTokens ?? null,
+    cost_usd: round8(r.cost || 0), score, judged_by: judged?.judgedBy ?? null,
+    difference: score > 0 ? (judged?.detail?.kind ?? failure ?? null) : null, created_at: now(),
+  });
+}
+
+/* The same refusal, said by most of the calls that were refused, in the provider's words. */
+const commonest = (texts) => {
+  const by = new Map();
+  for (const t of texts.filter(Boolean)) by.set(t, (by.get(t) || 0) + 1);
+  return [...by.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+};
+
+/* What it means when the customer's own model's answers cannot be used, in words. */
+const UNUSABLE = {
+  'no tool call': 'it answered in words instead of calling one of the tools',
+  'unparseable arguments': 'its tool calls carried arguments that were not valid JSON',
+  'unparseable json': 'it did not return valid JSON',
+  empty: 'it returned an empty answer',
+  truncated: 'its answers were cut off at the length limit',
+  'no choice': 'it returned no answer at all',
+};
+
+const KIND_WORDS = {
+  wording: 'wording only', omission: 'leaves things out', fact: 'changes facts', decision: 'reaches different decisions',
+  refusal: 'refuses', 'cut off': 'stops mid-answer', unrelated: 'answers something else', truncated: 'runs out of room',
+  empty: 'answers nothing', 'unparseable json': 'returns broken JSON', 'no tool call': 'calls no tool',
+  'unparseable arguments': 'returns broken tool arguments', refused: 'is refused by its provider',
+};
+
 export async function runEvaluation(workloadId, { trigger = 'manual', jobId = null } = {}) {
   const workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
   if (!workload) return { ok: false, reason: 'gone' };
@@ -36,9 +133,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const reference = workload.reference_model;
   if (!reference) return { ok: false, reason: 'no reference model' };
 
-  /* The same plan the button showed. Working it out twice, in two places, is how a screen
-     comes to promise something the run then refuses. */
-  const plan = await planFor(workload, { canRoute: canRoute() });
+  /* The same plan the page showed, with whatever the page had to go without asked for now: the
+     page never waits on Jev, a measurement does. */
+  const plan = await planFor(workload, { canRoute: canRoute(), forRun: true });
   if (!plan.canRun) {
     /* Back to what its last measurement found, not to "new": a workload that has been measured
        before still has that result, and forgetting it here would put "Not optimized yet" over a
@@ -52,11 +149,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
         AND source NOT IN ('replay', 'test')
       ORDER BY created_at DESC LIMIT 600`).all(workloadId, now() - 30 * DAY);
+  const samples = sampleCalls(pool, plan.sample, 1, await paidForCalls(reference, pool.map((p) => p.id)));
+  const shape = workload.shape_kind;
+  const want = plan.models;
+  const queue = plan.order;
+  const speed = plan.speed || { factor: null };
 
-  const samples = sampleCalls(pool, plan.sample);
-  const candidates = plan.candidates;
-  const estimate = plan.estimateUsd;
-  const gate = await gateEval(workload.workspace_id, { estimatedUsd: estimate });
+  const gate = await gateEval(workload.workspace_id, { estimatedUsd: plan.estimateUsd });
   if (!gate.ok) {
     await addActivity(workload.workspace_id, {
       kind: 'floor', title: `Measuring ${workload.slug} is waiting`, detail: gate.message, workloadId,
@@ -64,84 +163,116 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return { snoozeMs: 30 * 60000, note: gate.code };
   }
 
-  /* Every replay this run will make, counted up front, so the screen can say how far along
-     it is rather than spinning. Two passes of the sample to set the bar, then one pass per
-     model being tried. */
-  const judgements = judgementsFor(workload.shape_kind, samples.length, candidates.length);
-  const stepsTotal = samples.length * 2 + samples.length * candidates.length + judgements;
+  const planRecord = {
+    funnel: plan.funnel,
+    ruledOut: Object.values(plan.excluded.reduce((a, e) => {
+      a[e.step] = a[e.step] || { step: e.step, count: 0, examples: [] };
+      a[e.step].count += 1;
+      if (a[e.step].examples.length < 6) a[e.step].examples.push({ model: e.model, reason: e.reason });
+      return a;
+    }, {})),
+    order: queue.map((r) => ({
+      model: r.model, price: r.price, savingShare: r.savingShare, chance: r.chance, expected: r.expected,
+      parts: r.parts, family: r.family, recipe: r.recipe, note: r.note,
+    })),
+    want, judge: plan.judge, difficulty: plan.difficulty, speed,
+  };
+
+  /* Every model call the run expects to make: the bar's two replays of each sampled call, one
+     replay per call for each model measured to the end, and for written answers the judgements,
+     one for each of the bar's pairs and one for each model's answer. */
+  const perCall = shape === 'free_text' ? 2 : 1;
+  const finalists = Math.min(want, queue.length);
+  const nominal = samples.length * 2 + (shape === 'free_text' ? samples.length : 0) + finalists * samples.length * perCall;
   const run = {
     id: id('run'), workspace_id: workload.workspace_id, workload_id: workloadId,
-    status: 'running', shape_kind: workload.shape_kind, reference_model: reference,
+    status: 'running', shape_kind: shape, reference_model: reference,
     sample_size: samples.length, created_at: now(), started_at: now(),
-    steps_total: stepsTotal, steps_done: 0, phase: `Setting your bar on ${reference}`,
+    steps_total: nominal, steps_done: 0, phase: `Setting your bar on ${reference}`,
     trigger: trigger === 'automatic' ? 'automatic' : 'manual',
-    models_planned: candidates.length, heartbeat_at: now(), job_id: jobId,
+    models_planned: Math.min(want, queue.length), heartbeat_at: now(),
+    plan_json: JSON.stringify(planRecord), judge: plan.judge, job_id: jobId,
   };
   await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
               sample_size, created_at, started_at, steps_total, steps_done, phase, trigger, models_planned,
-              heartbeat_at, job_id)
+              heartbeat_at, plan_json, judge, job_id)
               VALUES (@id, @workspace_id, @workload_id, @status, @shape_kind, @reference_model,
               @sample_size, @created_at, @started_at, @steps_total, @steps_done, @phase, @trigger,
-              @models_planned, @heartbeat_at, @job_id)`).run(run);
-  /* Whatever started it, a workload being measured says so from the moment the run exists. A
-     scheduled run used to leave the page saying whatever it said before, and only the button
-     ever set this. */
+              @models_planned, @heartbeat_at, @plan_json, @judge, @job_id)`).run(run);
+  /* Whatever started it, a workload being measured says so from the moment the run exists. */
   await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), workloadId);
 
-  /* Written as the run goes, not at the end: a screen watching this is the only way somebody
-     knows the thing they paid for is happening.
-
-     A step answers true when the run should end there: somebody asked it to stop, or its row
-     was closed from outside because it looked abandoned. */
+  /* Written as the run goes: the heartbeat that says something is still running this, and the
+     place a stop is noticed. It answers true when the run should end here. */
   let done = 0;
-  /* calls that have come back since the last step, so a stop between the two replays of a pair
-     still counts the one that ran and was paid for */
-  let pending = 0;
+  let total = nominal;
+  /* Once the race is on, how many calls are left is worked out afresh at every step: what each
+     running model still has to answer, and the places still to fill from the models waiting in
+     line. A model dropped early leaves its unanswered calls uncounted, and when the line runs out
+     the total comes down to what will actually be made, so the count reaches its end exactly when
+     the last call does. */
+  let remaining = null;
   const ended = (row) => !row || row.status !== 'running' || !!row.stop_requested_at;
+  /* Every model call is counted the moment it comes back, so what the page says ran is exactly
+     what was sent and paid for, however many models are running at once. */
   const step = async (by, phase) => {
     done += by;
-    pending = 0;
-    const r = await db.prepare(`UPDATE eval_runs SET steps_done = ?, phase = ?, heartbeat_at = ?
-                  WHERE id = ? RETURNING status, stop_requested_at`).run(done, phase, now(), run.id);
+    total = remaining ? done + remaining() : Math.max(total, done);
+    const r = await db.prepare(`UPDATE eval_runs SET steps_done = ?, steps_total = ?, phase = ?, heartbeat_at = ?
+                  WHERE id = ? RETURNING status, stop_requested_at`).run(done, Math.max(total, done), phase, now(), run.id);
     return ended(r.rows[0]);
   };
-
-  /* Asked before every call goes out: the heartbeat, and whether to send the call at all.
-     Checking only between steps let a stop through with a call still to send, because one
-     step can be two replays, or a replay and two judgements. Checked here, nothing more is sent
-     once somebody presses Stop; and since the heartbeat is written just before each call, a
-     run waiting on one slow call is never mistaken for an abandoned one. */
+  /* Asked before every paid call goes out, replays and judgements alike, in every lane: the
+     heartbeat, and whether to send the call at all. Nothing more is sent once somebody presses
+     Stop, and a run waiting on one slow call is never mistaken for an abandoned one. */
   const halted = async () => {
     const r = await db.prepare(`UPDATE eval_runs SET heartbeat_at = ? WHERE id = ?
                   RETURNING status, stop_requested_at`).run(now(), run.id);
     return ended(r.rows[0]);
   };
+  /* The run's ending is written only while it is still running and nobody has asked it to stop.
+     A stop can arrive while the last charge is being settled; unguarded, the run then wrote
+     "done" and switched the model while the page said nothing had been switched. Answers false
+     when the stop won, and the run ends stopped. */
+  const finish = async (outcome, error) => (await db.prepare(
+    `UPDATE eval_runs SET status = 'done', outcome = ?, finished_at = ?, error = ?, phase = NULL
+      WHERE id = ? AND status = 'running' AND stop_requested_at IS NULL RETURNING id`)
+    .run(outcome, now(), error, run.id)).rows.length > 0;
 
   let spend = 0;
-  let stoppedShort = null;
-  const shape = workload.shape_kind;
-  const refPairs = [];
+  let reusedCount = 0;
+  let savedUsd = 0;
 
-  /* Charge what has run so far, and say whether there is anything left. The gate before a
-     run can only work off an estimate, so without this a long run walks past the balance. */
+  /* Charge what has run so far, and say whether there is anything left. */
   const settle = async (note) => {
     if (spend <= 0) return true;
-    await chargeEval(workload.workspace_id, spend, note);
-    await db.prepare('UPDATE eval_runs SET spend_usd = spend_usd + ? WHERE id = ?').run(round8(spend), run.id);
+    const amount = spend;
     spend = 0;
+    await chargeEval(workload.workspace_id, amount, note);
+    await db.prepare('UPDATE eval_runs SET spend_usd = spend_usd + ? WHERE id = ?').run(round8(amount), run.id);
     const left = (await db.prepare('SELECT balance_usd FROM billing_accounts WHERE workspace_id = ?')
       .get(workload.workspace_id))?.balance_usd ?? 0;
     return left > 0;
   };
+  /* Which judge actually settled the written answers, whatever the plan expected: Jev can run
+     out of credit part way, and a structured workload needs no judge at all. */
+  const judgedWith = new Set();
+  const judgeLabel = () => {
+    const all = [...judgedWith];
+    if (all.some((j) => j.startsWith('jev'))) return 'jev';
+    if (all.some((j) => j.startsWith('llm'))) return 'llm';
+    return null;
+  };
+  const keepSavings = async () => {
+    await db.prepare('UPDATE eval_runs SET reused = ?, saved_usd = ?, judge = ? WHERE id = ?')
+      .run(reusedCount, round8(savedUsd), judgeLabel(), run.id);
+  };
 
-  /* Stopped part way. Everything that ran is charged, every model that answered all of its
-     calls keeps its result, and nothing is switched: a stopped run is never a certificate,
-     because only a finished one is. If the row was already closed from outside, the charge
-     still lands here, where the spend is, and the stop is not announced twice. */
+  /* Stopped part way. Everything that ran is charged, every model that answered all of its calls
+     keeps its result, and nothing is switched. */
   const endStopped = async () => {
     await settle(`Measuring ${workload.slug}, stopped`);
-    done += pending;
-    pending = 0;
+    await keepSavings();
     const closed = await db.prepare(`UPDATE eval_runs SET status = 'stopped', outcome = 'stopped',
                   finished_at = ?, phase = NULL, steps_done = ? WHERE id = ? AND status = 'running' RETURNING id`)
       .run(now(), done, run.id);
@@ -151,73 +282,131 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await addActivity(workload.workspace_id, {
       kind: 'floor',
       title: `Measuring ${workload.slug} stopped`,
-      detail: `Stopped at ${done} of ${stepsTotal} model calls, as you asked. You were charged only for `
+      detail: `Stopped at ${done} of ${Math.max(total, done)} model calls, as you asked. You were charged only for `
         + 'the calls it made, and nothing was switched.',
       workloadId,
     });
     return { ok: true, runId: run.id, stopped: true };
   };
 
-  /* A stop that arrived while this was being picked up. Its job was cancelled after it was
-     claimed and before this run existed, so there was no run to ask; it ends here, before a
-     single call is sent. */
+  /* A stop that arrived while this was being picked up ends it before a single call is sent. */
   if (jobId && (await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId))?.status === 'cancelled') {
     return await endStopped();
   }
 
-  // the bar first: the reference model against itself, measured fresh
-  for (const s of samples) {
+  const note = (r) => {
+    if (r.reused) { reusedCount += 1; savedUsd += r.savedUsd || 0; }
+    spend += r.cost || 0;
+  };
+  const paid = (r) => (r.reused ? Number(r.originalCost || 0) : Number(r.cost || 0));
+
+  // the bar: the customer's own model against itself, reusing what is already paid for
+  const bar = [];
+  let stopped = false;
+  let cantAnswer = false;
+  await inParallel(samples, 3, async (s, i) => {
+    if (stopped || cantAnswer) return;
+    if (await halted()) { stopped = true; return; }
     const body = JSON.parse(s.request_json);
-    if (await halted()) return await endStopped();
-    const a = await replay(body, reference, workload, run.id);
-    spend += a.cost;
-    pending += 1;
-    if (await halted()) return await endStopped();
-    const b = await replay(body, reference, workload, run.id);
-    spend += b.cost;
-    pending += 1;
+    const [ra, rb] = await Promise.all([
+      replayOnce({ body, callId: s.id, model: reference, slot: 0, workload }),
+      replayOnce({ body, callId: s.id, model: reference, slot: 1, workload }),
+    ]);
+    note(ra);
+    note(rb);
+    await keepReplay(run.id, s.id, reference, 0, ra, { failure: ra.ok ? null : 'refused' });
+    await keepReplay(run.id, s.id, reference, 1, rb, { failure: rb.ok ? null : 'refused' });
     await db.prepare(`INSERT INTO eval_samples (id, run_id, call_id, quartile, ref_a_json, ref_b_json, charged)
                 VALUES (?, ?, ?, ?, ?, ?, 0)`)
       .run(id('smp'), run.id, s.id, s.quartile ?? 0,
-           a.json ? JSON.stringify(a.json) : null, b.json ? JSON.stringify(b.json) : null);
-    refPairs.push({ body, a: extract(a.json, shape), b: extract(b.json, shape) });
-    if (await step(2, `Setting your bar on ${reference}, ${refPairs.length} of ${samples.length} calls`)) {
-      return await endStopped();
-    }
-  }
+           ra.json ? JSON.stringify(ra.json) : null, rb.json ? JSON.stringify(rb.json) : null);
+    bar.push({
+      i, s, body, ra, rb, a: extract(ra.json, shape), b: extract(rb.json, shape),
+      refCost: (paid(ra) + paid(rb)) / 2,
+    });
+    if (await step(2, `Setting your bar on ${reference}, ${bar.length} of ${samples.length} calls`)) stopped = true;
+    /* When the customer's own model cannot answer the first few calls at all, the rest will not
+       go differently, and every further call would be paid for to learn nothing. */
+    if (!stopped && bar.length >= 3 && bar.every((p) => !p.a.ok && !p.b.ok)) cantAnswer = true;
+  });
+  if (stopped) return await endStopped();
+  bar.sort((x, y) => x.i - y.i);
 
-  const noiseScores = [];
-  for (const p of refPairs) {
-    // free text asks a judge, and a judgement is a call like any other
-    if (judgements && await halted()) return await endStopped();
-    noiseScores.push(await scoreOf(p.a, p.b, shape, askOf(p.body), (c) => { spend += c; }));
-    if (judgements) pending += 1;
-    if (judgements
-      && await step(1, `Comparing answers on ${reference}, ${noiseScores.length} of ${refPairs.length}`)) {
-      return await endStopped();
-    }
+  /* When the customer's own model is refused on most calls, there is nothing to measure against,
+     and the reason is the provider's, not a disagreement. It used to be counted as the model
+     disagreeing with itself every time, which told a customer their model was inconsistent when
+     every call had been refused for one plain reason. */
+  /* A call the customer's own model could not answer either time says nothing about anybody, so
+     it is left out for every model. When that is most of them, there is nothing to measure
+     against, and the reason is said plainly: the provider refused the calls, or the model did not
+     return what the calls ask for. It used to be counted as the model disagreeing with itself on
+     every call, which told somebody their model was inconsistent when it had never answered. */
+  const unusable = bar.filter((p) => !p.a.ok && !p.b.ok);
+  if (unusable.length * 2 > bar.length || cantAnswer) {
+    const refusedHttp = unusable.filter((p) => !p.ra.ok && !p.rb.ok);
+    const byProvider = refusedHttp.length * 2 >= unusable.length;
+    const count = cantAnswer ? `every one of the first ${bar.length}` : `${unusable.length} of ${bar.length}`;
+    const why = byProvider
+      ? `The provider refused ${count} calls and said: "${commonest(refusedHttp.map((p) => p.ra.error || p.rb.error)) || 'no reason given'}"`
+      : `On ${count} calls ${UNUSABLE[commonest(unusable.map((p) => p.a.reason || p.b.reason))] || 'it did not return what the calls ask for'}.`;
+    await settle(`Measuring ${workload.slug}, setting the bar`);
+    await keepSavings();
+    if (!await finish('refused', `${reference} could not answer ${count} calls`)) return await endStopped();
+    await db.prepare('UPDATE eval_runs SET ref_error = ? WHERE id = ?').run(why, run.id);
+    await db.prepare(`UPDATE workloads SET status = 'no_match', status_note = ?, floor_pct = NULL,
+                updated_at = ? WHERE id = ?`).run('Your own model could not answer these calls', now(), workloadId);
+    await addActivity(workload.workspace_id, {
+      kind: 'floor',
+      title: `We could not measure ${workload.slug}`,
+      detail: `${reference} could not answer ${count} of your calls when we replayed them, so there is no bar `
+        + `to hold a cheaper model to. ${why} Nothing has been switched.`,
+      workloadId,
+    });
+    return { ok: true, runId: run.id, floor: null, results: 0, refused: true };
   }
+  const kept = bar.filter((p) => p.a.ok || p.b.ok);
+
+  if (await step(0, `Comparing ${reference}'s answers with each other`)) return await endStopped();
+  const noiseScores = [];
+  await inParallel(kept, 6, async (p) => {
+    if (stopped) return;
+    let score;
+    if (!p.a.ok || !p.b.ok) score = 1;
+    else if (shape === 'free_text') {
+      if (await halted()) { stopped = true; return; }
+      const j = await judgeBarPair(askOf(p.body), p.a.value, p.b.value, { scope: workload.workspace_id });
+      spend += j.cost;
+      score = j.score;
+      if (j.judgedBy) judgedWith.add(j.judgedBy);
+      if (j.cost > 0 && await step(1, `Comparing ${reference}'s answers with each other`)) stopped = true;
+    } else score = disagreement(p.a, p.b, shape) ?? 1;
+    noiseScores.push(score);
+  });
+  if (stopped) return await endStopped();
   const noise = mean(noiseScores);
   const floor = floorFrom(noise * 100, {
     multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT,
   });
-  await db.prepare('UPDATE eval_runs SET noise_pct = ?, floor_pct = ? WHERE id = ?')
-    .run(round8(noise * 100), round8(floor), run.id);
 
-  /* The run's ending is written only while it is still running and nobody has asked it to stop.
-     A stop can arrive after the last step, while the last charge is being settled; unguarded,
-     the run then wrote "done" and switched the model, while the page, told it was stopping,
-     said nothing had been switched. Answers false when the stop won, and the run ends stopped. */
-  const finish = async (outcome, error) => (await db.prepare(
-    `UPDATE eval_runs SET status = 'done', outcome = ?, finished_at = ?, error = ?, phase = NULL
-      WHERE id = ? AND status = 'running' AND stop_requested_at IS NULL RETURNING id`)
-    .run(outcome, now(), error, run.id)).rows.length > 0;
+  // how fast the customer's own model is on these very calls: the yardstick for speed
+  const refLat = kept.flatMap((p) => [p.ra, p.rb]).filter((r) => r.ok).map((r) => r.latencyMs);
+  const refTtft = kept.flatMap((p) => [p.ra, p.rb]).filter((r) => r.ok).map((r) => r.ttftMs);
+  const refSpeed = {
+    latencyP50: pct(refLat, 0.5), latencyP90: pct(refLat, 0.9),
+    ttftP50: pct(refTtft, 0.5), ttftP90: pct(refTtft, 0.9),
+  };
+  await db.prepare(`UPDATE eval_runs SET noise_pct = ?, floor_pct = ?, ref_latency_p50 = ?, ref_latency_p90 = ?,
+              ref_ttft_p50 = ?, ref_ttft_p90 = ? WHERE id = ?`)
+    .run(round8(noise * 100), round8(floor), refSpeed.latencyP50, refSpeed.latencyP90,
+         refSpeed.ttftP50, refSpeed.ttftP90, run.id);
+  await db.prepare('UPDATE workloads SET floor_pct = ?, updated_at = ? WHERE id = ?')
+    .run(round8(floor), now(), workloadId);
 
   /* If the reference model cannot answer its own calls consistently, the bar it produces is
-     not a quality standard, it is noise. Certifying against it would let anything through,
-     which is the opposite of what this product promises. Stop here and say so. */
+     not a quality standard, it is noise. Stop here and say so. */
   if (!barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
     await settle(`Measuring ${workload.slug}, setting the bar`);
+    await keepSavings();
     if (!await finish('unmeasurable', `reference disagreed with itself on ${(noise * 100).toFixed(1)}% of calls`)) {
       return await endStopped();
     }
@@ -234,12 +423,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return { ok: true, runId: run.id, floor: null, results: 0, unmeasurable: true };
   }
 
-  /* A bar worth holding models to, so from here it is the workload's bar. It used to be written
-     before the check above, so a run stopped at that moment left a bar nobody could clear. */
-  await db.prepare('UPDATE workloads SET floor_pct = ?, updated_at = ? WHERE id = ?')
-    .run(round8(floor), now(), workloadId);
-
   if (!await settle(`Measuring ${workload.slug}, setting the bar`)) {
+    await keepSavings();
     if (!await finish('no_balance', 'balance ran out after the bar was set')) return await endStopped();
     await rest(workloadId);
     await addActivity(workload.workspace_id, {
@@ -250,87 +435,265 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return { ok: true, runId: run.id, floor, results: 0, spend: 0, partial: true };
   }
 
-  // then each candidate once, against both reference answers
+  /* The speed a model has to keep: the workload's setting against the customer's own model's
+     times on these calls. Typical and slow end both, because a model that is quick most of the
+     time and very slow one call in ten is slow to whoever waits on that call. */
+  const metric = speed.metric === 'ttft' && refSpeed.ttftP50 ? 'ttft' : 'latency';
+  const refP50 = metric === 'ttft' ? refSpeed.ttftP50 : refSpeed.latencyP50;
+  const refP90 = metric === 'ttft' ? refSpeed.ttftP90 : refSpeed.latencyP90;
+  const slack = config.SPEED_SLACK_MS;
+  const limit = speed.factor && refP50
+    ? { p50: speed.factor * refP50 + slack, p90: speed.slowEnd * (refP90 ?? refP50) + slack } : null;
+  const tooSlow = (st) => {
+    if (!limit) return false;
+    const xs = metric === 'ttft' ? st.ttft : st.lat;
+    if (xs.length < Math.min(config.EVAL_SCREEN_CALLS, kept.length)) return false;
+    return pct(xs, 0.5) > limit.p50 || (xs.length >= 5 && pct(xs, 0.9) > limit.p90);
+  };
+
+  const refMonthly = await monthlyOn(workloadId, reference);
+  const minRuns = Math.min(config.EVAL_MIN_RUNS, kept.length);
+  const reviewBand = config.EVAL_REVIEW_BAND;
   const results = [];
-  for (const [ci, cand] of candidates.entries()) {
-    let runs = 0;
-    let failures = 0;
-    const pairs = [];
-    for (const p of refPairs) {
-      if (await halted()) return await endStopped();
-      const c = await replay(p.body, cand.model_id, workload, run.id);
-      spend += c.cost;
-      pending += 1;
-      runs += 1;
-      const got = extract(c.json, shape);
-      if (!got.ok) failures += 1;
-      const ask = askOf(p.body);
-      const add = (x) => { spend += x; };
-      // each comparison of free text is a judgement, and a judgement is a call
-      if (judgements && await halted()) return await endStopped();
-      const againstA = await scoreOf(got, p.a, shape, ask, add);
-      if (judgements) pending += 1;
-      if (judgements && await halted()) return await endStopped();
-      const againstB = await scoreOf(got, p.b, shape, ask, add);
-      if (judgements) pending += 1;
-      const score = Math.min(againstA, againstB);
-      pairs.push({ cand: got, ref: p.a.ok ? p.a : p.b, score });
-      /* Counted here rather than every five calls, so the bar moves while a slow model is
-         answering rather than jumping in blocks. One replay, plus its two comparisons when
-         free text has to be judged. */
-      /* A model stopped part way through its calls is left out rather than judged on what
-         it managed, the same rule a verdict already has for too few runs. */
-      if (await step(1 + (judgements ? 2 : 0),
-        `Trying ${cand.model_id}, model ${ci + 1} of ${candidates.length}, ${runs} of ${refPairs.length} calls`)) {
-        return await endStopped();
+  let halt = null;
+
+  /* One model's run through the calls, until it finishes or cannot win. */
+  const tryModel = async (cand) => {
+    const st = {
+      runs: 0, counted: 0, sum: 0, failures: 0, errors: 0, errorText: null, lat: [], ttft: [], reused: 0,
+      candCost: 0, refCost: 0, kinds: new Map(), pairs: [], stopped: null,
+    };
+    // a model already serving this workload is re-checked on fresh answers, so a change in it shows
+    const reuse = !(trigger === 'automatic' && cand.model === workload.routed_model);
+    answered.set(cand.model, 0);
+    for (const p of kept) {
+      if (halt) { st.stopped = 'user'; break; }
+      if (await halted()) { halt = halt || 'stopped'; st.stopped = 'user'; break; }
+      const r = await replayOnce({ body: p.body, callId: p.s.id, model: cand.model, recipe: cand.recipe, slot: 0, workload, reuse });
+      note(r);
+      if (r.reused) st.reused += 1;
+      st.runs += 1;
+      let score = 1;
+      let judged = null;
+      let failure = null;
+      let counted = false;
+      // whether this call says anything about the model's answers
+      let scored = true;
+      if (!r.ok) {
+        st.errors += 1;
+        st.errorText = st.errorText || r.error;
+        failure = 'refused';
+        /* A provider that was only busy says nothing about the model's answers, so the call is
+           not counted as a wrong one; it counts against the model's reliability instead. */
+        if (r.transient) scored = false;
+        /* A refusal that will be repeated ends this model now: it is refused for a reason of the
+           provider's, like having no provider that keeps nothing. Two of the passing kind, busy or
+           timing out, end it too, because a model that cannot be reached reliably in a test will
+           not be in production either. */
+        if (!r.transient || st.errors >= 2) st.stopped = r.transient ? 'errors' : 'refused';
+      } else {
+        if (r.latencyMs) st.lat.push(r.latencyMs);
+        if (r.ttftMs !== null && r.ttftMs !== undefined) st.ttft.push(r.ttftMs);
+        st.candCost += paid(r);
+        st.refCost += p.refCost;
+        const got = extract(r.json, shape);
+        if (!got.ok) {
+          st.failures += 1;
+          failure = got.reason;
+        } else if (shape === 'free_text') {
+          /* The replay has come back and is counted before the judgement is asked for, so a stop
+             that lands between the two still counts the call that ran and was paid for. */
+          answered.set(cand.model, st.runs);
+          if (await step(1, `Trying ${cand.model}, ${st.runs} of ${kept.length} calls`)) {
+            counted = true;
+            halt = halt || 'stopped';
+            st.stopped = 'user';
+          }
+          if (!st.stopped && await halted()) { halt = halt || 'stopped'; st.stopped = 'user'; }
+          counted = true;
+          if (st.stopped === 'user') {
+            await keepReplay(run.id, p.s.id, cand.model, 0, r, { score: null, judged: null, failure: null });
+            break;
+          }
+          judged = await judgeCandidate(askOf(p.body), got.value, p.a.ok ? p.a.value : null, p.b.ok ? p.b.value : null,
+            { scope: workload.workspace_id });
+          spend += judged.cost;
+          score = judged.score;
+          if (judged.judgedBy) judgedWith.add(judged.judgedBy);
+        } else {
+          score = Math.min(p.a.ok ? disagreement(got, p.a, shape) ?? 1 : 1, p.b.ok ? disagreement(got, p.b, shape) ?? 1 : 1);
+        }
+        st.pairs.push({ cand: got, ref: p.a.ok ? p.a : p.b, score });
       }
+      const kind = score > 0 && scored ? (judged?.detail?.kind || failure || null) : null;
+      if (kind) st.kinds.set(kind, (st.kinds.get(kind) || 0) + 1);
+      if (scored) { st.sum += score; st.counted += 1; }
+      await keepReplay(run.id, p.s.id, cand.model, 0, r, { score, judged, failure });
+      /* The best it could still do is get every remaining call right. When even that leaves it
+         outside the review band, it cannot win, and every further call would be money spent on
+         nothing. */
+      if (!st.stopped && (st.sum / kept.length) * 100 > floor * reviewBand) st.stopped = 'bar';
+      if (!st.stopped && tooSlow(st)) st.stopped = 'speed';
+      // a judgement that went out is a model call too, and is counted like one
+      const judgeCalls = judged && judged.cost > 0 ? 1 : 0;
+      answered.set(cand.model, st.stopped ? kept.length : st.runs);
+      if (await step((counted ? 0 : 1) + judgeCalls, `Trying ${cand.model}, ${st.runs} of ${kept.length} calls`)) {
+        halt = halt || 'stopped';
+        if (!st.stopped) st.stopped = 'user';
+        break;
+      }
+      if (st.stopped) break;
     }
-    const gap = mean(pairs.map((x) => x.score)) * 100;
-    const g = gates(pairs, shape);
-    const monthly = await monthlyOn(workloadId, cand.model_id);
-    const verdict = verdictFor(gap, floor, runs, {
-      minRuns: Math.min(config.EVAL_MIN_RUNS, samples.length),
-      reviewBand: config.EVAL_REVIEW_BAND,
-    });
+    return st;
+  };
+
+  const record = async (cand, st) => {
+    const gap = st.counted ? (st.sum / st.counted) * 100 : 100;
+    const finished = st.runs === kept.length && (!st.stopped || st.stopped === 'speed' || st.stopped === 'bar');
+    let verdict;
+    if (st.stopped === 'refused' || st.stopped === 'errors') verdict = 'failed';
+    else if (st.stopped === 'speed') verdict = 'slower';
+    else if (st.stopped === 'bar') verdict = 'missed';
+    else {
+      verdict = verdictFor(gap, floor, st.runs, { minRuns, reviewBand });
+      if ((verdict === 'cleared' || verdict === 'review') && tooSlow(st)) verdict = 'slower';
+      // one refusal along the way is worth a look before anything is switched
+      if (verdict === 'cleared' && st.errors > 0) verdict = 'review';
+    }
+    /* What it would cost a month: its own cost on these calls against the customer's model's on
+       the same calls, applied to the customer's real month. That carries every difference a list
+       price hides: an answer that runs longer, thinking that is billed, a provider that charges
+       more. The list price is the fallback when a model answered nothing. */
+    const ratio = st.refCost > 0 && st.candCost > 0 ? st.candCost / st.refCost : null;
+    const costMonth = refMonthly !== null && ratio !== null
+      ? round8(refMonthly * ratio)
+      : await monthlyOn(workloadId, cand.model);
+    const g = gates(st.pairs, shape);
+    const kinds = [...st.kinds.entries()].sort((a, b) => b[1] - a[1]);
     const row = {
-      id: id('res'), run_id: run.id, model_id: cand.model_id, runs,
-      gap_pct: round8(gap), cost_month_usd: monthly, verdict,
+      id: id('res'), run_id: run.id, model_id: cand.model, runs: st.runs,
+      gap_pct: round8(gap), cost_month_usd: costMonth, verdict,
       gate_structure: Math.round(g.structure * 100), gate_accuracy: Math.round(g.accuracy * 100),
       gate_coverage: Math.round(g.coverage * 100), gate_complete: Math.round(g.complete * 100),
-      failures, created_at: now(),
+      failures: st.failures + st.errors, created_at: now(),
+      latency_p50: pct(st.lat, 0.5), latency_p90: pct(st.lat, 0.9),
+      ttft_p50: pct(st.ttft, 0.5), ttft_p90: pct(st.ttft, 0.9),
+      errors: st.errors, stopped: finished && !['speed', 'bar'].includes(st.stopped) ? null : st.stopped,
+      error_text: st.errorText, difference: kinds.length ? (KIND_WORDS[kinds[0][0]] || kinds[0][0]) : null,
+      reused: st.reused,
+      rank_json: JSON.stringify({ chance: cand.chance, savingShare: cand.savingShare, parts: cand.parts, family: cand.family }),
+      recipe_json: cand.recipe ? JSON.stringify(cand.recipe) : null,
+      cost_ratio: ratio === null ? null : round8(ratio),
     };
     await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict,
-                gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at)
+                gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at,
+                latency_p50, latency_p90, ttft_p50, ttft_p90, errors, stopped, error_text, difference, reused,
+                rank_json, recipe_json, cost_ratio)
                 VALUES (@id, @run_id, @model_id, @runs, @gap_pct, @cost_month_usd, @verdict,
-                @gate_structure, @gate_accuracy, @gate_coverage, @gate_complete, @failures, @created_at)`)
-      .run(row);
+                @gate_structure, @gate_accuracy, @gate_coverage, @gate_complete, @failures, @created_at,
+                @latency_p50, @latency_p90, @ttft_p50, @ttft_p90, @errors, @stopped, @error_text, @difference, @reused,
+                @rank_json, @recipe_json, @cost_ratio)`).run(row);
     results.push(row);
-    if (!await settle(`Measuring ${workload.slug} on ${cand.model_id}`)) {
-      stoppedShort = cand.model_id;
-      break;
+    return finished;
+  };
+
+  /* The race. Several models at once, each in its own lane, the next in line starting as soon
+     as a lane frees up, until enough have answered every call. A lane with nothing to start
+     waits for a running model to end, because a model dropped part way through gives its place
+     to the next in line. */
+  let next = 0;
+  let running = 0;
+  let finished = 0;
+  const answered = new Map();
+  remaining = () => {
+    let left = 0;
+    for (const n of answered.values()) left += Math.max(0, kept.length - n) * perCall;
+    const open = Math.max(0, want - finished - answered.size);
+    return left + Math.min(open, Math.max(0, queue.length - next)) * kept.length * perCall;
+  };
+  const waiters = [];
+  const wakeAll = () => { while (waiters.length) waiters.shift()(); };
+  const lanes = Math.max(1, Math.min(config.EVAL_PARALLEL_MODELS, want, queue.length));
+  const lane = async () => {
+    for (;;) {
+      if (halt || finished >= want || next >= queue.length) return;
+      if (finished + running >= want) {
+        await new Promise((r) => { waiters.push(r); });
+        continue;
+      }
+      const cand = queue[next];
+      next += 1;
+      running += 1;
+      const st = await tryModel(cand);
+      running -= 1;
+      if (st.stopped !== 'user' && st.stopped !== 'budget') {
+        if (await record(cand, st)) finished += 1;
+      }
+      answered.delete(cand.model);
+      /* Charged as each model ends, the way a measurement always settled: often enough that a
+         balance running low stops the next model starting, without a charge in the middle of
+         every model's calls. */
+      if (!halt && !await settle(`Measuring ${workload.slug} on ${cand.model}`)) halt = 'balance';
+      wakeAll();
     }
-  }
+  };
+  await Promise.all(Array.from({ length: lanes }, lane));
+  wakeAll();
+
+  if (halt === 'stopped') return await endStopped();
 
   await settle(`Measuring ${workload.slug}`);
+  await keepSavings();
+  const outcome = results.length ? 'compared' : 'no_balance';
   // a stop that arrived during that last settle wins: stopped, and nothing switched
-  if (!await finish('compared', stoppedShort ? `balance ran out after ${stoppedShort}` : null)) {
+  if (!await finish(outcome, halt === 'balance' ? 'balance ran out part way through' : null)) {
     return await endStopped();
+  }
+  await db.prepare('UPDATE eval_runs SET models_planned = ? WHERE id = ?').run(results.length, run.id);
+
+  /* The reference is not a candidate, but every screen compares against what it costs and how
+     fast it is, so it is recorded on the run alongside them. */
+  await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd,
+              verdict, gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at,
+              latency_p50, latency_p90, ttft_p50, ttft_p90)
+              VALUES (?, ?, ?, ?, 0, ?, 'reference', 100, 100, 100, 100, 0, ?, ?, ?, ?, ?)
+              ON CONFLICT (run_id, model_id) DO UPDATE SET runs = excluded.runs,
+                cost_month_usd = excluded.cost_month_usd, created_at = excluded.created_at`)
+    .run(id('res'), run.id, reference, kept.length * 2, refMonthly, now(),
+         refSpeed.latencyP50, refSpeed.latencyP90, refSpeed.ttftP50, refSpeed.ttftP90);
+
+  /* A model already serving this workload that no longer holds up goes back to the customer's
+     own model, whatever mode the workload is in: one that now misses the bar, is refused by its
+     provider, or is slower than the speed setting allows, and one that could not even be tried
+     because it can no longer be reached privately, is unreliable, or is being retired. It is
+     never switched to again automatically, because a model that was switched back once is not. */
+  const serving = workload.routed_model;
+  if (serving) {
+    const mine = results.find((r) => r.model_id === serving);
+    const ruled = plan.excluded.find((e) => e.model === serving);
+    let why = null;
+    if (mine && mine.verdict === 'missed') {
+      why = `it no longer clears your bar: ${mine.gap_pct.toFixed(1)}% against a ${floor.toFixed(1)}% bar`;
+    } else if (mine && mine.verdict === 'failed') {
+      why = `its provider refused it when it was re-checked${mine.error_text ? `, saying "${mine.error_text}"` : ''}`;
+    } else if (mine && mine.verdict === 'slower') {
+      why = 'it is now slower than your speed setting allows';
+    } else if (!mine && ruled && ['private', 'health', 'retiring', 'features', 'thinking'].includes(ruled.step)) {
+      why = `it ${ruled.reason}`;
+    }
+    if (why) {
+      await revert(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId), {
+        auto: true, reason: `Measured again: ${why}. Switched back to ${reference}.`,
+      });
+    }
   }
 
   // the cheapest model that cleared, and what we do about it
-  const refMonthly = await monthlyOn(workloadId, reference);
-  /* the reference is not a candidate, but every screen compares against what it costs,
-     so it is recorded on the run alongside them */
-  await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd,
-              verdict, gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at)
-              VALUES (?, ?, ?, ?, 0, ?, 'reference', 100, 100, 100, 100, 0, ?)
-              ON CONFLICT (run_id, model_id) DO UPDATE SET runs = excluded.runs,
-                cost_month_usd = excluded.cost_month_usd, created_at = excluded.created_at`)
-    .run(id('res'), run.id, reference, samples.length * 2, refMonthly, now());
   const cleared = results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd !== null)
     .filter((r) => refMonthly === null || r.cost_month_usd < refMonthly)
     .sort((a, b) => a.cost_month_usd - b.cost_month_usd);
   const best = cleared[0] || null;
+  const dropped = results.filter((r) => r.stopped).length;
 
   if (best) {
     const saving = refMonthly === null ? null : round8(refMonthly - best.cost_month_usd);
@@ -340,27 +703,32 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       kind: 'ok',
       title: `${best.model_id} cleared your bar on ${workload.slug}`,
       detail: `${best.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar`
-        + (saving ? `, about $${saving.toFixed(2)} a month less` : ''),
+        + (saving ? `, about $${saving.toFixed(2)} a month less` : '')
+        + (reusedCount ? `. ${reusedCount} answers were reused from earlier measurements` : ''),
       workloadId,
     });
     if (workload.optimize_mode === 'auto') {
+      const recipe = best.recipe_json ? JSON.parse(best.recipe_json) : null;
       await promote(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId), best.model_id, {
-        runId: run.id, reason: 'cleared your bar', auto: true,
+        runId: run.id, reason: 'cleared your bar', auto: true, recipe,
       });
     }
   } else {
     const anyReview = results.some((r) => r.verdict === 'review');
+    const anySlower = results.some((r) => r.verdict === 'slower');
     await db.prepare(`UPDATE workloads SET status = ?, status_note = ?, updated_at = ? WHERE id = ?`)
       .run(anyReview ? 'certified' : 'no_match',
-           anyReview ? 'A candidate is close and needs a look' : 'Nothing cleared your bar yet',
+           anyReview ? 'A candidate is close and needs a look'
+             : anySlower ? 'A model matched, but is slower than yours' : 'Nothing cleared your bar yet',
            now(), workloadId);
     await addActivity(workload.workspace_id, {
       kind: 'floor', title: `Nothing cleared your bar on ${workload.slug}`,
-      detail: `${results.length} models tried against a ${floor.toFixed(2)}% bar`,
+      detail: `${results.length} models tried against a ${floor.toFixed(2)}% bar`
+        + (dropped ? `, ${dropped} of them stopped early once they could not win` : ''),
       workloadId,
     });
   }
-  return { ok: true, runId: run.id, floor, results: results.length, partial: !!stoppedShort };
+  return { ok: true, runId: run.id, floor, results: results.length, partial: halt === 'balance', reused: reusedCount };
 }
 
 /* Whether anything is still running a measurement.
@@ -401,16 +769,20 @@ export async function restingStatus(workloadId) {
   if (routed) return { status: 'promoted', note: null, routed };
   const last = await db.prepare(
     `SELECT id, ${OUTCOME_OF()} AS outcome FROM eval_runs WHERE workload_id = ?
-        AND status = 'done' AND ${OUTCOME_OF()} IN ('compared', 'unmeasurable')
+        AND status = 'done' AND ${OUTCOME_OF()} IN ('compared', 'unmeasurable', 'refused')
       ORDER BY created_at DESC LIMIT 1`).get(workloadId);
   if (!last) return { status: 'new', note: null, routed };
   if (last.outcome === 'unmeasurable') return { status: 'no_match', note: 'We could not measure this workload', routed };
+  if (last.outcome === 'refused') return { status: 'no_match', note: 'Your own model could not answer these calls', routed };
   const results = await db.prepare(
     `SELECT verdict, cost_month_usd FROM eval_results WHERE run_id = ?`).all(last.id);
   // the run's own rule, so a status read again always says what the run said at its end
   if (cheaperCleared(results).length) return { status: 'certified', note: null, routed };
   if (results.some((r) => r.verdict === 'review')) {
     return { status: 'certified', note: 'A candidate is close and needs a look', routed };
+  }
+  if (results.some((r) => r.verdict === 'slower')) {
+    return { status: 'no_match', note: 'A model matched, but is slower than yours', routed };
   }
   return { status: 'no_match', note: 'Nothing cleared your bar yet', routed };
 }
@@ -543,23 +915,7 @@ export async function stopMeasuring(workload, { actorUserId = null } = {}) {
   return { ok: true, state: live ? 'stopping' : 'stopped' };
 }
 
-const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
-
-/* How far apart two answers are, 0 to 1.
- *
- * Structured answers are settled by comparing fields and cost nothing. Free text comes back
- * as null, meaning "identical strings would have been easy, this needs an opinion", and a
- * judge is asked. Without a judge it counts as different, which is the safe direction: a
- * model is never promoted because nobody could tell whether it was any good. */
-async function scoreOf(a, b, shape, request, charge) {
-  const d = disagreement(a, b, shape);
-  if (d !== null) return d;
-  const { score, cost } = await judgePair(request, a.value ?? '', b.value ?? '');
-  if (cost && charge) charge(cost);
-  return score;
-}
-
-/* What the call asked, for the judge to weigh both answers against. */
+/* What the call asked, for the judge to weigh answers against. */
 function askOf(body) {
   const msgs = Array.isArray(body?.messages) ? body.messages : [];
   return msgs.map((m) => {
@@ -568,25 +924,3 @@ function askOf(body) {
     return `${m.role}: ${c}`;
   }).join('\n').slice(0, 4000);
 }
-
-async function replay(body, model, workload, runId) {
-  try {
-    const { json, latencyMs } = await chat({ ...body, stream: false }, model);
-    const cost = Number(json?.usage?.cost ?? 0);
-    await recordCall({
-      workspaceId: workload.workspace_id, workloadId: workload.id, source: 'replay',
-      requestedModel: workload.reference_model, servedModel: model, statusCode: 200,
-      promptTokens: json?.usage?.prompt_tokens ?? 0, completionTokens: json?.usage?.completion_tokens ?? 0,
-      costUsd: cost, chargedUsd: 0, latencyMs,
-    });
-    return { json, cost };
-  } catch (err) {
-    const status = err instanceof UpstreamError ? err.status : 0;
-    await recordCall({
-      workspaceId: workload.workspace_id, workloadId: workload.id, source: 'replay',
-      requestedModel: workload.reference_model, servedModel: model, statusCode: status,
-    });
-    return { json: null, cost: 0 };
-  }
-}
-

@@ -103,8 +103,12 @@ export function verdictFor(gapPct, floorPct, runs, { minRuns, reviewBand }) {
   return 'missed';
 }
 
-/** Seeded and stratified by answer length, because length is what breaks a model. */
-export function sampleCalls(calls, size, seed = 1) {
+/** Seeded and stratified by answer length, because length is what breaks a model.
+ *
+ * `preferred` is the calls whose answers are already paid for. Within each length band they are
+ * taken first, so a measurement repeated on unchanged traffic reuses what the last one bought,
+ * while the spread across short and long answers stays exactly as it was. */
+export function sampleCalls(calls, size, seed = 1, preferred = null) {
   const withLen = calls.map((c) => ({ ...c, len: (c.response_json || '').length }));
   withLen.sort((a, b) => a.len - b.len);
   const quartiles = [[], [], [], []];
@@ -119,7 +123,10 @@ export function sampleCalls(calls, size, seed = 1) {
       const j = Math.floor(rand() * (i + 1));
       [pool[i], pool[j]] = [pool[j], pool[i]];
     }
-    out.push(...pool.slice(0, perQ).map((c) => ({ ...c, quartile: qi })));
+    const ordered = preferred && preferred.size
+      ? [...pool.filter((c) => preferred.has(c.id)), ...pool.filter((c) => !preferred.has(c.id))]
+      : pool;
+    out.push(...ordered.slice(0, perQ).map((c) => ({ ...c, quartile: qi })));
   });
   return out.slice(0, size);
 }
