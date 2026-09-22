@@ -139,7 +139,9 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         </div>
 
         <div className="choices">
-          {[['auto', 'Optimize automatically', 'We switch as soon as a candidate clears your bar, and switch back if it slips.'],
+          {/* It said "and switch back if it slips", which nothing does yet: a model that stops
+              clearing is not switched back automatically. Said as it is until it does. */}
+          {[['auto', 'Optimize automatically', 'We switch as soon as a candidate clears your bar. Switching back is one click, at any time.'],
             ['ask', 'Ask me first', 'We test and recommend. Nothing changes until you approve it.']].map(([mode, t, s]) => (
             <button key={mode} className={`choicebox${w.optimizeMode === mode ? ' picked' : ''}`}
               disabled={busy} onClick={act(() => api.setMode(w.id, mode))}>
@@ -261,9 +263,10 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                 </div>
               );
             })}
+            {/* It went on "a model we switch to is re-tested on fresh ones. If it stops clearing,
+                it goes back", which nothing does yet. Said as it is until it does. */}
             <div className="barnote">
-              Every model answered the same {num(cert.sampleSize)} calls, and a model we switch to is
-              re-tested on fresh ones. If it stops clearing, it goes back.
+              Every model answered the same {num(cert.sampleSize)} calls.
               {cert.finishedAt ? ` Last run ${dateIST(cert.finishedAt)} IST.` : ''}
             </div>
           </>
