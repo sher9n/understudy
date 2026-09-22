@@ -9,7 +9,7 @@ import { fetchModels, saveCatalog } from './openrouter.js';
 import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './alerts.js';
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
-import { runEvaluation } from './eval/run.js';
+import { runEvaluation, closeAbandoned } from './eval/run.js';
 import { runTopUp } from './billing.js';
 import { revert } from './eval/promote.js';
 import api from './api.js';
@@ -24,7 +24,8 @@ await requeueStale();
 
 /* What the background does ------------------------------------------------------ */
 
-handle('eval_run', async ({ workloadId, trigger }) => await runEvaluation(workloadId, { trigger }));
+handle('eval_run', async ({ workloadId, trigger }, job) =>
+  await runEvaluation(workloadId, { trigger, jobId: job?.id ?? null }));
 
 handle('catalog_sync', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
@@ -214,6 +215,9 @@ handle('purge', async () => {
  * days means never, and it is the one setting that must not be quietly overridden by a
  * default somewhere. */
 handle('recheck', async () => {
+  /* A measurement a deploy or a restart left saying "running" is closed here too, not only when
+     somebody opens its page, so it cannot hold a workload in "Measuring" that nobody visits. */
+  await closeAbandoned();
   const spaces = await db.prepare('SELECT id, measure_every_days FROM workspaces').all();
   let queued = 0;
   for (const ws of spaces) {

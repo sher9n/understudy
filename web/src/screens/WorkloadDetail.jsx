@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { href } from '../router.js';
 import { plainClick } from '../nav.jsx';
-import { api, usd, num, dateIST } from '../api.js';
+import { api, usd, num, dateIST, timeIST } from '../api.js';
 import { CandidateChart, chartPoints } from '../Charts.jsx';
 import WorkloadCalls from './WorkloadCalls.jsx';
 import Measurement from './Measurement.jsx';
@@ -52,10 +52,19 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
      table below reads from whichever it is, so the page shows one run at a time rather than
      two sets of numbers that look alike. */
   const cert = openRun && runData ? {
+    runId: runData.id, outcome: runData.outcome, nothing: runData.nothing,
     rounds: 1, sampleSize: runData.sample, floor: runData.floor, noise: runData.noise,
     reference: runData.reference, finishedAt: runData.finishedAt,
     referenceCostMonth: runData.referenceCostMonth, results: runData.results,
   } : w.certificate;
+  /* Whether the measurement shown tried any model. One that could not set a bar, ran out of
+     balance or was stopped early tried none, and the sections below say why instead of
+     disappearing, and offer the newest measurement that did compare models. */
+  const compared = !!cert && cert.results.length > 0;
+  const earlier = cert && !compared && w.lastComparison && w.lastComparison.runId !== cert.runId
+    ? w.lastComparison : null;
+  // the row in the history that the page is showing, whether somebody opened it or not
+  const showingId = openRun || w.certificate?.runId || null;
   /* The model this measurement's bar came from. Usually the workload's own, but an older run
      opened from the history may have been measured against a model it has since moved off,
      and its chart and table have to name that one, not today's. */
@@ -128,12 +137,13 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
       </section>
 
       <Measurement w={w} busy={busy} onRan={load}
-        openRunId={openRun} onOpenRun={setOpenRun} />
+        openRunId={openRun} onOpenRun={setOpenRun} showingId={showingId} />
 
-      {cert && cert.results.length > 0 && (
+      {cert && (
         <section className="opt ovis">
           <div className="opthead">
             <h2>How the candidates compare</h2>
+            {compared && (
             <div className="trigwrap" ref={barRef}>
               <div className="trigrow">
                 <span className="pill go">Your bar · {(cert.floor ?? w.floor ?? 0).toFixed(2)}%</span>
@@ -157,14 +167,29 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                 </div>
               )}
             </div>
+            )}
           </div>
           <div className="cbody">
-            <CandidateChart results={cert.results} floor={cert.floor ?? 0} reference={measuredOn}
-              referenceCostMonth={cert.referenceCostMonth} />
-            {!plottable(cert, measuredOn) && (
-              <div className="optempty">
-                There is nothing to place on the chart yet: every model in this measurement
-                stopped before it had answered enough calls to be judged.
+            {compared ? (
+              <>
+                <CandidateChart results={cert.results} floor={cert.floor ?? 0} reference={measuredOn}
+                  referenceCostMonth={cert.referenceCostMonth} />
+                {!plottable(cert, measuredOn) && (
+                  <div className="optempty">
+                    There is nothing to place on the chart yet: every model in this measurement
+                    stopped before it had answered enough calls to be judged.
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="optempty mnone">
+                <p>{cert.nothing || 'No models were compared in this measurement.'}</p>
+                {earlier && (
+                  <button className="minig" onClick={() => setOpenRun(earlier.runId)}>
+                    Show the measurement from {timeIST(earlier.at)} IST, which
+                    compared {num(earlier.models)} {earlier.models === 1 ? 'model' : 'models'}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -175,9 +200,8 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         <div className="opthead">
           <h2>Candidates tested</h2>
           <span className="s">
-            {cert
-              ? `${cert.sampleSize} of your own calls replayed on every model.`
-              : 'Nothing has been tried yet.'}
+            {!cert ? 'Nothing has been tried yet.'
+              : compared ? `${cert.sampleSize} of your own calls replayed on every model.` : ''}
             {openRun && runData ? (
               <>
                 {' '}Showing the measurement from {dateIST(runData.at)} IST.{' '}
@@ -188,6 +212,8 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         </div>
         {!cert ? (
           <div className="optempty">Candidates appear here after the first run, once your bar is set.</div>
+        ) : !compared ? (
+          <div className="optempty">No models were tried in this measurement.</div>
         ) : (
           <>
             <div className="cdhrow">
@@ -248,6 +274,7 @@ const headline = (w, cand, switched) => {
   if (switched) return `${short(w.model)} is serving ${w.name}`;
   if (cand) return `${short(cand.model)} cleared your bar`;
   if (w.label === 'Measuring') return 'We are still learning your bar';
+  if (w.certificate?.outcome === 'unmeasurable') return 'We could not set a bar for this workload';
   return 'Nothing has cleared your bar yet';
 };
 
@@ -263,6 +290,9 @@ const blurb = (w, cand, switched) => {
   if (w.label === 'Measuring') {
     return 'Before we can recommend anything we measure how much your own model varies from itself. We replay your calls twice and compare the two answers, and that variation becomes the bar a cheaper model has to clear.';
   }
+  /* No model was tried at all, so "every model we tried drifted" would be untrue: say what the
+     measurement actually found. */
+  if (w.certificate?.outcome === 'unmeasurable' && w.certificate.nothing) return w.certificate.nothing;
   return 'Every model we tried drifted further from your own model than your bar allows. We keep trying as new models land.';
 };
 

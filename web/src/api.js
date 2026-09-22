@@ -32,6 +32,7 @@ export const api = {
   promote: (id, model) => send('POST', `/workloads/${id}/promote`, { model }),
   revert: (id) => send('POST', `/workloads/${id}/revert`),
   measure: (id) => send('POST', `/workloads/${id}/measure`),
+  stopMeasuring: (id) => send('POST', `/workloads/${id}/measure/stop`),
   models: () => send('GET', '/models'),
   setModel: (id, enabled) => send('POST', `/models/${id}/enabled`, { enabled }),
   settings: () => send('GET', '/settings'),

@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { signatureOf, shapeOf, normalizeSystem, nameFor } from '../src/classify.js';
 import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, canonical, barIsMeaningful } from '../src/eval/compare.js';
+import config, { MEASURE_CHOICES } from '../src/config.js';
+
+test('a workspace that never chose is measured every 30 days, a cadence Settings offers', () => {
+  // the default was 7 once, which is not a choice, so Settings showed nothing selected
+  assert.equal(config.MEASURE_EVERY_DAYS, 30);
+  assert.ok(MEASURE_CHOICES.includes(config.MEASURE_EVERY_DAYS));
+});
 
 const call = (system, extra = {}) => ({
   model: 'openai/gpt-5.4',

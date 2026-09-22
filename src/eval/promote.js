@@ -60,9 +60,15 @@ export async function revert(workload, { reason = 'you asked for it', actorUserI
 
 /** The certificate a switch was made on: the run, its bar, and every model tried. */
 export async function certificate(workloadId, runId = null) {
+  /* The newest finished measurement that found something: it compared models, or it found the
+     bar could not be set. One that ran out of balance before trying anything says nothing about
+     any model, so it does not replace what the last real measurement found; it is still in the
+     history for anybody who opens it. A row with no outcome predates the column and was a
+     finished comparison. */
   const run = runId
     ? await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(runId)
     : await db.prepare(`SELECT * FROM eval_runs WHERE workload_id = ? AND status = 'done'
+                   AND COALESCE(outcome, 'compared') IN ('compared', 'unmeasurable')
                    ORDER BY created_at DESC LIMIT 1`).get(workloadId);
   if (!run) return null;
   const results = await db.prepare(

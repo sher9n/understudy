@@ -8,17 +8,6 @@ const Sw = ({ on, onClick, busy }) => (
 
 const AMOUNTS = [10, 25, 50, 100];
 
-/* How often measuring happens by itself. "Only when I ask" is a real choice rather than an
-   off switch: everything else keeps working, and nothing is spent unasked. */
-const MEASURE_EVERY = [
-  { days: 0, label: 'Only when I ask' },
-  { days: 1, label: 'Every day' },
-  { days: 5, label: 'Every 5 days' },
-  { days: 10, label: 'Every 10 days' },
-  { days: 30, label: 'Every 30 days' },
-  { days: 90, label: 'Every 90 days' },
-];
-
 /* A few round numbers up to the ceiling, rather than every integer to twenty. */
 const modelChoices = (max) => [3, 5, 10, 15, 20].filter((n) => n <= max);
 
@@ -171,8 +160,12 @@ export default function Settings({ data, reload }) {
         <div className="kvrow">
           <span className="kvk">Measure</span>
           <span className="kvv">
+            {/* How often measuring happens by itself. "Only when I ask" is a real choice rather
+                than an off switch: everything else keeps working, and nothing is spent unasked.
+                The choices come from the server with the setting, so the default is always one
+                of them: this screen kept its own list once, and the default was not on it. */}
             <span className="seg">
-              {MEASURE_EVERY.map((c) => (
+              {data.measureChoices.map((c) => (
                 <button key={c.days} disabled={busy}
                   className={c.days === data.measureEveryDays ? 'segb on' : 'segb'}
                   onClick={run(() => api.setMeasureEvery(c.days))}>{c.label}</button>

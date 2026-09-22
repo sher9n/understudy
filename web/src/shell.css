@@ -269,3 +269,84 @@ a.wm:hover { text-decoration: none; }
    inline style on the wizard only, so the same button was 52x30 there and 57x35 on the
    in-app page. One rule, both screens. */
 .tabs .ghost { padding: 5px 10px; font-size: 12px; }
+
+/* The measurement section of a workload page: what a measurement would do, one while it runs,
+   and every measurement there has been. These rules are the app's own, so they live here. They
+   were written into app.css, which is regenerated from the design board and has none of them,
+   so the next lift would have taken the whole section's styling away without a word. */
+.measure .cardpad { padding: 16px 18px 18px; }
+.mtop { display: flex; align-items: flex-start; gap: 18px; flex-wrap: wrap; }
+.mtop > div { flex: 0 0 auto; }
+.mwhy { flex: 1 1 340px; margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--mut-read); }
+.mwhy.cannot { color: var(--mut-read); }
+.mpick { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.mpickh { font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--mut); font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.mpickp { margin: 8px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--mut-read); max-width: 74ch; }
+.mpicks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+.mpickm { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px 4px 5px; }
+.mpickn { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px;
+  border-radius: 5px; background: var(--raise); color: var(--mut); font-size: 10px; font-weight: 700; }
+
+/* While it runs. A number that moves, not a spinner that says nothing. */
+.mrun { display: block; }
+.mrunhead { display: flex; align-items: center; gap: 12px; }
+.mrunt { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.mruns { font-size: 11.5px; color: var(--mut-read); margin-top: 2px; }
+.mpct { margin-left: auto; font-size: 15px; font-weight: 700; color: var(--brand-read); }
+.mbar { margin-top: 12px; height: 5px; border-radius: 3px; background: var(--panel);
+  border: 1px solid var(--line); overflow: hidden; }
+.mbar span { display: block; height: 100%; background: var(--brand); transition: width 0.4s ease; }
+.mnote { margin: 11px 0 0; font-size: 12px; line-height: 1.55; color: var(--mut); max-width: 74ch; }
+.mspin { width: 15px; height: 15px; border-radius: 50%; flex: 0 0 auto;
+  border: 2px solid var(--line-strong); border-top-color: var(--brand);
+  animation: mspin 0.9s linear infinite; }
+@keyframes mspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .mspin { animation: none; border-top-color: var(--line-strong); }
+  .mbar span { transition: none; }
+}
+
+/* Stopping one: a button beside the percentage, then a single line that says what stopping
+   costs and keeps, before anything is stopped. */
+.mstopb { margin-left: 4px; padding: 7px 12px; font-size: 12.5px; }
+.mstopask { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); }
+.mstopask p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--mut-read); max-width: 74ch; }
+.mstopacts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.mstopacts .mini, .mstopacts .minig { padding: 7px 12px; font-size: 12.5px; }
+
+/* Every measurement there has been, and the one being shown.
+
+   A row's highlight reaches a little past its words on both sides, so the row being shown
+   reads as a band with room round what it says. It had no side padding, so the band ended
+   exactly where the text did and the words sat against both of its edges. The room is
+   borrowed from the card's own padding, which keeps the words lined up with the heading. A
+   rounded band does not sit well across ruled lines, so the rows are spaced rather than ruled.
+
+   The row being shown is .mshown, not .on: app.css styles a bare .on as a workload name. */
+.mhist { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.mrow { display: grid; grid-template-columns: 116px minmax(0, 1fr) 96px 72px 62px; gap: 12px;
+  align-items: baseline; width: calc(100% + 20px); margin: 0 -10px; padding: 9px 10px;
+  text-align: left; border: 0; border-radius: 8px; background: none; cursor: pointer; font: inherit; }
+.mhist .mpickh + .mrow { margin-top: 6px; }
+.mrow + .mrow { margin-top: 2px; }
+.mrow:hover { background: var(--panel); }
+.mrow.mshown { background: var(--brandq); }
+.mrow:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.mwhen { font-size: 11px; color: var(--mut-read); white-space: nowrap; }
+.mwhat { font-size: 12.5px; color: var(--ink); overflow-wrap: anywhere; }
+.mtrig, .mspend { font-size: 11px; color: var(--mut); white-space: nowrap; }
+.mspend { text-align: right; }
+.mopen { font-size: 11px; color: var(--brand-read); text-align: right; white-space: nowrap; }
+.mmore { display: inline-block; margin-top: 10px; background: none; border: 0; }
+@media (max-width: 900px) {
+  .mrow { grid-template-columns: 96px minmax(0, 1fr) 56px; }
+  .mrow > :nth-child(n+4) { display: none; }
+}
+
+/* A measurement that compared no models says why where the chart would be, with the way to
+   the newest one that did. The section used to vanish instead. */
+.mnone p { margin: 0 auto; max-width: 62ch; }
+.mnone .minig { margin-top: 14px; }
