@@ -1,6 +1,7 @@
 import { db, now, round8 } from '../db/index.js';
 import config from '../config.js';
 import { perCall, withFeeOn, callsPerMonth, projectSavings, cheaperPct } from './savings.js';
+import { OUTCOME_OF } from './outcome.js';
 
 /* Everything the switched card says about a workload we moved to a cheaper model, worked out
  * from the record rather than from whichever measurement happens to be newest.
@@ -72,11 +73,11 @@ export async function switchStory(w) {
   /* The newest finished measurement since the switch, and what it found about this model, if
      it tried it at all. */
   const latest = await db.prepare(
-    `SELECT r.id, COALESCE(r.finished_at, r.created_at) AS at, COALESCE(r.outcome, 'compared') AS outcome,
+    `SELECT r.id, COALESCE(r.finished_at, r.created_at) AS at, ${OUTCOME_OF('r.')} AS outcome,
             r.noise_pct, r.floor_pct, r.sample_size, e.gap_pct, e.verdict
        FROM eval_runs r LEFT JOIN eval_results e ON e.run_id = r.id AND e.model_id = ?
       WHERE r.workload_id = ? AND r.status = 'done' AND r.created_at > ?
-        AND COALESCE(r.outcome, 'compared') IN ('compared', 'unmeasurable')
+        AND ${OUTCOME_OF('r.')} IN ('compared', 'unmeasurable')
       ORDER BY r.created_at DESC LIMIT 1`).get(to, w.id, at);
 
   const ws = await db.prepare('SELECT measure_every_days FROM workspaces WHERE id = ?').get(w.workspace_id);
@@ -96,18 +97,33 @@ export async function switchStory(w) {
   const [fromPrice, toPrice] = [await priceOf(from), await priceOf(to)];
   const fromOut = await answerLength(w.id, from, window);
   const toOut = await answerLength(w.id, to, window);
-  const fromPerCall = perCall(fromPrice, { prompt: promptAll, completion: fromOut });
-  const toPerCall = withFeeOn(perCall(toPrice, { prompt: promptAll, completion: toOut }), fee);
+  /* A call of no known size cannot be priced. Copies sent without their token counts read as
+     calls of nothing, and pricing those printed "$0.00 a call" and "0% less" as though they
+     were findings. */
+  const sized = promptAll > 0 || fromOut > 0 || toOut > 0;
+  const fromPerCall = sized ? perCall(fromPrice, { prompt: promptAll, completion: fromOut }) : null;
+  const toPerCall = sized ? withFeeOn(perCall(toPrice, { prompt: promptAll, completion: toOut }), fee) : null;
 
   // how much traffic that is, from the customer's own calls over the last thirty days
   const days = prompt.c > 0 ? Math.max(1, Math.min(30, (t - prompt.first) / DAY)) : 30;
   const monthly = callsPerMonth(prompt.c, days);
   /* and how it reaches us. Only a routed call can be served by the new model; a copy has
-     already run on the original at the customer's own provider by the time we see it, so a
-     workload that only sends copies saves nothing yet, and the card must not say it does. */
-  const routedRecent = (await db.prepare(
-    `SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND source = 'routed' AND ${TRAFFIC} AND created_at >= ?`)
-    .get(w.id, window)).n;
+     already run on the original at the customer's own provider by the time we see it. So the
+     saving projected is the one on the calls that come through us, at the pace they have come
+     since they began. Projected from every call, 900 copies and 100 routed calls read as ten
+     times the saving that was happening. A workload that sends only copies has none yet, and its
+     figures are what routing all of it would save, said as that. */
+  const routed = await db.prepare(
+    `SELECT COUNT(*) AS n, MIN(created_at) AS first FROM calls
+      WHERE workload_id = ? AND source = 'routed' AND ${TRAFFIC} AND created_at >= ?`).get(w.id, window);
+  const routedDays = routed.n > 0 ? Math.max(1, Math.min(30, (t - routed.first) / DAY)) : days;
+  const monthlyRouted = callsPerMonth(routed.n, routedDays);
+  const basis = routed.n > 0 ? 'routed' : 'all';
+  const projection = projectSavings({ fromPerCall, toPerCall, monthly: basis === 'routed' ? monthlyRouted : monthly });
+  // with some calls still arriving as copies, what routing all of them would save in a month
+  const allMonth = basis === 'routed' && routed.n < prompt.c
+    ? projectSavings({ fromPerCall, toPerCall, monthly, months: [1] })[0] ?? null
+    : null;
 
   /* What it has actually saved: every call it has served for the customer since the switch.
      Paid is what they were charged, fee included. What those calls would have cost on the
@@ -144,8 +160,17 @@ export async function switchStory(w) {
       fromPerCall: fromPerCall == null ? null : round8(fromPerCall),
       toPerCall: toPerCall == null ? null : round8(toPerCall),
       cheaperPct: cheaperPct(fromPerCall, toPerCall),
+      // why a price may be missing: not in the price list, or no call of a known size to price
+      fromListed: !!fromPrice, toListed: !!toPrice, sized,
     },
-    volume: { calls: prompt.c, routed: routedRecent, copies: prompt.c - routedRecent, days, monthly: round8(monthly) },
+    volume: {
+      calls: prompt.c, routed: routed.n, copies: prompt.c - routed.n,
+      days, monthly: round8(monthly),
+      routedDays, monthlyRouted: round8(monthlyRouted),
+      // what the projection is built on: the routed calls, or every call if none are routed yet
+      basis,
+      allMonthSaved: allMonth ? allMonth.saved : null,
+    },
     soFar: {
       calls: served.n, copies,
       paid: round8(served.paid),
@@ -153,6 +178,6 @@ export async function switchStory(w) {
       saved: wouldHave == null ? null : round8(wouldHave - served.paid),
     },
     measuring: { spent: round8(withFeeOn(spent, fee)) },
-    projection: projectSavings({ fromPerCall, toPerCall, monthly }),
+    projection,
   };
 }

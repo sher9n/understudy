@@ -73,6 +73,11 @@ export const config = {
   ZDR_ONLY: bool('ZDR_ONLY', true),
   MODEL_MIN_GAP_MS: num('MODEL_MIN_GAP_MS', 3200),
   UPSTREAM_TIMEOUT_MS: num('UPSTREAM_TIMEOUT_MS', 120000),
+  /* The longest we wait before retrying when a provider says it is busy, whatever it asks for.
+     Uncapped, one call could wait out any Retry-After three times over and outlast the silence
+     a measurement is allowed (EVAL_STALE_MIN), so a slow but live run would be closed as
+     abandoned. Capped, the slowest call is four timeouts and three of these waits. */
+  UPSTREAM_RETRY_WAIT_MAX_MS: num('UPSTREAM_RETRY_WAIT_MAX_MS', 30000),
 
   // what we keep, and for how long
   RETENTION_DAYS: num('RETENTION_DAYS', 30),
@@ -134,8 +139,8 @@ export const config = {
   /* A running measurement writes a heartbeat just before every call it sends. One whose
      heartbeat is older than this has nothing running it any more, usually because a deploy or
      a restart took the process that was, and is closed so its workload can be measured again.
-     It has to outlast the slowest single call: up to UPSTREAM_TIMEOUT_MS, plus the waits
-     between the retries a busy provider asks for. */
+     It has to outlast the slowest single call: four tries of UPSTREAM_TIMEOUT_MS and three
+     waits of at most UPSTREAM_RETRY_WAIT_MAX_MS, which by default is nine and a half minutes. */
   EVAL_STALE_MIN: num('EVAL_STALE_MIN', 15),
 
   /* Email. Without a key nothing is sent, and the code is written to the log instead so

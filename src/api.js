@@ -406,7 +406,7 @@ api.get('/workloads/:id', async (req, res) => {
   const plan = await planFor(w, { canRoute: canRoute() });
   const running = await db.prepare(
     `SELECT id, steps_total, steps_done, phase, spend_usd, started_at, models_planned, sample_size,
-            stop_requested_at
+            stop_requested_at, heartbeat_at
        FROM eval_runs WHERE workload_id = ? AND status = 'running'
       ORDER BY created_at DESC LIMIT 1`).get(w.id);
   /* A measurement asked for and not started yet is a job waiting its turn, which can be a few
@@ -446,6 +446,10 @@ api.get('/workloads/:id', async (req, res) => {
       sample: running.sample_size,
       // asked to stop and not there yet: the call in flight is finishing first
       stopping: !!running.stop_requested_at,
+      /* when it was last heard from, and how long silence may last before it counts as having
+         nothing running it, so a stop waiting on a run whose process has gone can say so */
+      heartbeatAt: running.heartbeat_at ?? running.started_at,
+      staleMin: config.EVAL_STALE_MIN,
     } : waiting ? {
       queued: true, startsAt: waiting.run_after, total: 0, done: 0, spend: 0, phase: null,
     } : null,
@@ -457,9 +461,12 @@ api.get('/workloads/:id', async (req, res) => {
      means it can never get stuck again, whatever ends a run. It goes back to what the last
      measurement that found anything found, the same rule a stop uses, rather than guessing
      "ready to optimize" from whether a bar was ever set. */
-  /* "Ready to optimize" is read again too: the code before this set it from whether a bar had
-     ever been set, and some workloads still say it with no candidate behind them. */
-  if (((w.status === 'measuring' && !running && !waiting) || w.status === 'certified') && await rest(w.id)) {
+  /* "Ready to optimize" and "Nothing cleared yet" are read again too. The code before this set
+     the first from whether a bar had ever been set, so some say it with no candidate behind
+     them; and a run the old process finished during a deploy could set the second over a
+     candidate an earlier measurement found. */
+  if (((w.status === 'measuring' && !running && !waiting) || w.status === 'certified' || w.status === 'no_match')
+    && await rest(w.id)) {
     Object.assign(w, await db.prepare('SELECT status, status_note FROM workloads WHERE id = ?').get(w.id));
   }
 

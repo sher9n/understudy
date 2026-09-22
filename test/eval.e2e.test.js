@@ -339,6 +339,15 @@ test('the switched card is built from the switch and the calls since, and adds u
   const perDay = (0.2e-6 * 800 + 0.6e-6 * 60) * 200 / 14;
   assert.ok(Math.abs(steady.cost_month_usd - perDay * 30) < 1e-6, `a month on it is ${steady.cost_month_usd}`);
 
+  /* before any call has come through us, all 200 are copies, which already ran on the original
+     model: nothing is being saved, and the figures are what routing all of it would save */
+  const before = await switchStory(await load(workload.id));
+  assert.equal(before.volume.routed, 0);
+  assert.equal(before.volume.copies, 200);
+  assert.equal(before.volume.basis, 'all');
+  assert.ok(Math.abs(before.projection[0].saved
+    - (before.prices.fromPerCall - before.prices.toPerCall) * (200 / 14) * 30) < 1e-6);
+
   // twelve calls served by it since the switch, charged as routed calls are
   for (let i = 0; i < 12; i += 1) {
     await recordCall({
@@ -366,12 +375,120 @@ test('the switched card is built from the switch and the calls since, and adds u
   assert.ok(Math.abs(s.soFar.wouldHave - 12 * (2.5e-6 * 800 + 15e-6 * 60)) < 1e-7, `would have ${s.soFar.wouldHave}`);
   assert.ok(Math.abs(s.soFar.saved - (s.soFar.wouldHave - s.soFar.paid)) < 1e-9);
 
-  // volume is the customer's calls only: 212 over the fourteen days since the first of them
+  /* The saving projected is on the calls that come through us, at their own pace: twelve today
+     is 360 a month. It used to be projected from all 212, copies included, which is the saving
+     routing everything would bring, not the one that is happening; that is kept, labelled. */
+  const perCallSaving = s.prices.fromPerCall - s.prices.toPerCall;
   assert.equal(s.volume.calls, 212);
-  assert.ok(Math.abs(s.volume.monthly - (212 / 14) * 30) < 0.1, `a month is ${s.volume.monthly} calls`);
+  assert.equal(s.volume.routed, 12);
+  assert.equal(s.volume.copies, 200);
+  assert.equal(s.volume.basis, 'routed');
+  assert.ok(Math.abs(s.volume.monthlyRouted - 360) < 1e-6, `routed a month is ${s.volume.monthlyRouted}`);
   const [month] = s.projection;
-  assert.ok(Math.abs(month.saved - (s.prices.fromPerCall - s.prices.toPerCall) * s.volume.monthly) < 1e-6);
+  assert.ok(Math.abs(month.saved - perCallSaving * 360) < 1e-6, `a month saves ${month.saved}`);
+  assert.ok(Math.abs(s.volume.allMonthSaved - perCallSaving * (212 / 14) * 30) < 1e-6,
+    'and what routing the copies too would save is there, apart');
   assert.ok(s.measuring.spent > 0, 'and what measuring cost is there to be shown');
+
+  // calls of no known size cannot be priced: "$0.00 a call" and "0% less" were not findings
+  await db.prepare('UPDATE calls SET prompt_tokens = 0, completion_tokens = 0 WHERE workload_id = ?').run(workload.id);
+  const blind = await switchStory(await load(workload.id));
+  assert.equal(blind.prices.sized, false);
+  assert.equal(blind.prices.fromPerCall, null);
+  assert.equal(blind.prices.toPerCall, null);
+  assert.equal(blind.prices.cheaperPct, null);
+  assert.equal(blind.prices.fromListed, true, 'and it says why: the model is sold, the calls have no size');
+  assert.deepEqual(blind.projection, []);
+});
+
+test('a stop that lands while the last charge is being settled switches nothing', async () => {
+  // the guard on the ending itself: every call has been made and counted, the run is settling
+  // what it spent, and a stop arrives. It used to write "done" and switch the model.
+  const { workspace, workload } = await seed('settling');
+  held = 0;
+  holdAt = seen + 350; // 200 to set the bar, 100 on the first model, then half way through the second
+  const running = runEvaluation(workload.id);
+  await until(async () => held > 0, 20000);
+  // hold the balance while the rest of the calls run, so the run waits at its last settle
+  const lock = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  await lock.connect();
+  await lock.query('BEGIN');
+  await lock.query('SELECT 1 FROM billing_accounts WHERE workspace_id = $1 FOR UPDATE', [workspace.id]);
+  releaseAt();
+  await until(async () => {
+    const r = await db.prepare(`SELECT steps_done, steps_total FROM eval_runs WHERE workload_id = ? AND status = 'running'`)
+      .get(workload.id);
+    return r && r.steps_done === r.steps_total;
+  }, 20000);
+  const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_settle' });
+  assert.equal(asked.state, 'stopping');
+  await lock.query('ROLLBACK');
+  await lock.end();
+  const out = await running;
+  assert.equal(out.stopped, true, JSON.stringify(out));
+  const after = await load(workload.id);
+  assert.equal(after.routed_model, null, 'the steady model cleared, and was still not switched to');
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(workload.id)).n, 0);
+  const run = await db.prepare('SELECT status, outcome, spend_usd FROM eval_runs WHERE id = ?').get(out.runId);
+  assert.equal(run.status, 'stopped');
+  assert.equal(run.outcome, 'stopped');
+  const charged = (await db.prepare(`SELECT COALESCE(SUM(amount_usd), 0) AS s FROM ledger
+                               WHERE workspace_id = ? AND kind = 'eval'`).get(workspace.id)).s;
+  assert.ok(Math.abs(-charged - withFee(run.spend_usd)) < 1e-7, 'every call it made was charged, once, with the fee');
+});
+
+test('a stop that cancels a waiting measurement says so, even just after one finished', async () => {
+  const { workspace, workload } = await seed('justfinished');
+  const t = now();
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, steps_total, steps_done)
+              VALUES ('run_just_finished', ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 300)`)
+    .run(workspace.id, workload.id, t - 20000, t - 20000, t - 5000);
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' }, { unique: true });
+  const out = await stopMeasuring(await load(workload.id));
+  assert.equal(out.state, 'cancelled', 'the waiting one was stopped before it started; the earlier one is not the answer');
+  const quiet = await stopMeasuring(await load(workload.id));
+  assert.equal(quiet.state, 'finished', 'with nothing to cancel, a run that ended a moment ago is');
+});
+
+test('closing a dead run leaves alone a job a new run has picked up', async () => {
+  const { workspace, workload } = await seed('samejob');
+  const t = now();
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic' });
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE id = ?`).run(t - 1000, jobId);
+  // the run a restart killed, and the run the requeued job started under the same id
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, heartbeat_at, steps_total, steps_done, job_id)
+              VALUES ('run_dead_samejob', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 40, ?),
+                     ('run_live_samejob', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 5, ?)`)
+    .run(workspace.id, workload.id, t - 40 * MIN, t - 40 * MIN, t - 30 * MIN, jobId,
+         workspace.id, workload.id, t - 1000, t - 1000, t - 500, jobId);
+  assert.equal(await closeAbandoned(workload.id), 1);
+  assert.equal((await db.prepare(`SELECT status FROM eval_runs WHERE id = 'run_dead_samejob'`).get()).status, 'failed');
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'claimed',
+    'the job stays with the run that is using it');
+  await db.prepare(`UPDATE eval_runs SET status = 'failed' WHERE id = 'run_live_samejob'`).run();
+});
+
+test('a run the old code finished without an outcome is read from what it wrote', async () => {
+  const { restingStatus } = await import('../src/eval/run.js');
+  const { workspace, workload } = await seed('nooutcome');
+  const t = now();
+  // an earlier measurement found a candidate
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, floor_pct)
+              VALUES ('run_found', ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 3)`)
+    .run(workspace.id, workload.id, t - 3 * 86400000, t - 3 * 86400000, t - 3 * 86400000);
+  await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, verdict, created_at)
+              VALUES ('res_found', 'run_found', 'vendor/steady-small', 100, 1, 'cleared', ?)`).run(t);
+  // then the old process, during a deploy, finished one that ran out of balance, with no outcome
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, error)
+              VALUES ('run_old_nobalance', ?, ?, 'done', 'json', 'openai/gpt-5.4', 100, ?, ?, ?,
+                      'balance ran out after the bar was set')`)
+    .run(workspace.id, workload.id, t - 60000, t - 60000, t - 30000);
+  const r = await restingStatus(workload.id);
+  assert.equal(r.status, 'certified', 'it was a run that found nothing, not the newest comparison');
 });
 
 test('a stop on the very last call of a measurement switches nothing', async () => {

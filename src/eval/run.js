@@ -7,6 +7,7 @@ import { planFor } from './plan.js';
 import { judgePair, judgementsFor } from './judge.js';
 import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, barIsMeaningful } from './compare.js';
 import { promote } from './promote.js';
+import { OUTCOME_OF, OUTCOME_CASE } from './outcome.js';
 
 const DAY = 86400000;
 
@@ -385,12 +386,7 @@ export function isAbandoned(run, at = now()) {
    "compared", a run that ran out of balance would then stand in for the last real measurement.
    Run at boot and hourly, and it only ever touches rows that have no outcome yet. */
 export async function settleOutcomes() {
-  return (await db.prepare(`UPDATE eval_runs SET outcome = CASE
-      WHEN status = 'failed' THEN 'interrupted'
-      WHEN status = 'stopped' THEN 'stopped'
-      WHEN error LIKE 'reference disagreed with itself%' THEN 'unmeasurable'
-      WHEN error = 'balance ran out after the bar was set' THEN 'no_balance'
-      ELSE 'compared' END
+  return (await db.prepare(`UPDATE eval_runs SET outcome = ${OUTCOME_CASE()}
     WHERE outcome IS NULL AND status IN ('done', 'failed', 'stopped')`).run()).changes;
 }
 
@@ -403,8 +399,8 @@ export async function restingStatus(workloadId) {
   const w = await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(workloadId);
   if (w?.routed_model) return { status: 'promoted', note: null };
   const last = await db.prepare(
-    `SELECT id, COALESCE(outcome, 'compared') AS outcome FROM eval_runs WHERE workload_id = ?
-        AND status = 'done' AND COALESCE(outcome, 'compared') IN ('compared', 'unmeasurable')
+    `SELECT id, ${OUTCOME_OF()} AS outcome FROM eval_runs WHERE workload_id = ?
+        AND status = 'done' AND ${OUTCOME_OF()} IN ('compared', 'unmeasurable')
       ORDER BY created_at DESC LIMIT 1`).get(workloadId);
   if (!last) return { status: 'new', note: null };
   if (last.outcome === 'unmeasurable') return { status: 'no_match', note: 'We could not measure this workload' };
@@ -420,17 +416,18 @@ export async function restingStatus(workloadId) {
    run of it is going, or one is waiting in the queue. A claimed job does not count, because the
    one asking is usually that very job, and an abandoned run's job stays claimed for ever. */
 export async function rest(workloadId) {
-  const busy = await db.prepare(
-    `SELECT 1 FROM eval_runs WHERE workload_id = ? AND status = 'running'
-     UNION ALL
-     SELECT 1 FROM jobs WHERE kind = 'eval_run' AND status = 'queued'
-        AND (payload::jsonb ->> 'workloadId') = ?
-     LIMIT 1`).get(workloadId, workloadId);
-  if (busy) return false;
   const { status, note } = await restingStatus(workloadId);
-  await db.prepare('UPDATE workloads SET status = ?, status_note = ?, updated_at = ? WHERE id = ?')
-    .run(status, note, now(), workloadId);
-  return true;
+  /* The check and the write are one statement. As two, a run starting between them had the
+     "Measuring" it had just written overwritten, and the page said "Ready to optimize" for the
+     whole of a measurement it was in the middle of. */
+  const r = await db.prepare(
+    `UPDATE workloads SET status = ?, status_note = ?, updated_at = ?
+      WHERE id = ?
+        AND NOT EXISTS (SELECT 1 FROM eval_runs WHERE workload_id = ? AND status = 'running')
+        AND NOT EXISTS (SELECT 1 FROM jobs WHERE kind = 'eval_run' AND status = 'queued'
+                          AND (payload::jsonb ->> 'workloadId') = ?)`)
+    .run(status, note, now(), workloadId, workloadId, workloadId);
+  return r.changes > 0;
 }
 
 /* Close a run that nothing is running any more: stopped when somebody asked for that, and
@@ -448,7 +445,11 @@ async function closeRun(run, how) {
      Measure now was answered with it and started nothing, and a later boot revived it and ran
      a measurement nobody had asked for then. */
   if (run.job_id) {
-    await db.prepare(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ? AND status = 'claimed'`)
+    /* Unless another run holds it now. A restart puts a dead run's job back in the queue, and a
+       new run takes it under the same id; releasing it from under that run would leave its
+       ending unwritten and its retry skipped. */
+    await db.prepare(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ? AND status = 'claimed'
+                AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id AND r.status = 'running')`)
       .run(how === 'stopped' ? 'stopped by you' : 'interrupted', run.job_id);
   }
   await rest(run.workload_id);
@@ -509,13 +510,15 @@ export async function stopMeasuring(workload, { actorUserId = null } = {}) {
     `SELECT * FROM eval_runs WHERE workload_id = ? AND status = 'running'`).all(workload.id);
   if (!runs.length) {
     await rest(workload.id);
-    /* Nothing running. If one finished a moment ago, the stop came too late, and saying it was
-       "stopped before it started" would be untrue of a measurement that ran to the end. */
+    /* Nothing running. A measurement that was waiting and has been taken out of the queue was
+       stopped before it started, whatever finished earlier. Only with nothing cancelled does a
+       run that finished a moment ago mean the stop came too late. */
+    if (cancelled) return { ok: true, state: 'cancelled' };
     const recent = await db.prepare(
       `SELECT status FROM eval_runs WHERE workload_id = ? AND finished_at > ?
         ORDER BY created_at DESC LIMIT 1`).get(workload.id, now() - 60000);
     if (recent?.status === 'done') return { ok: true, state: 'finished' };
-    return { ok: true, state: cancelled ? 'cancelled' : 'idle' };
+    return { ok: true, state: 'idle' };
   }
   let live = 0;
   for (const run of runs) {

@@ -55,7 +55,8 @@ export async function chat(body, model, { signal, retries = 3 } = {}) {
     try { json = JSON.parse(text); } catch { /* upstream sent something unparseable */ }
     if (res.status === 429 && attempt < retries) {
       const after = Number(res.headers.get('retry-after')) * 1000;
-      await new Promise((r) => setTimeout(r, Number.isFinite(after) && after > 0 ? after : 2000 * 2 ** attempt));
+      const wait = Number.isFinite(after) && after > 0 ? after : 2000 * 2 ** attempt;
+      await new Promise((r) => setTimeout(r, Math.min(wait, config.UPSTREAM_RETRY_WAIT_MAX_MS)));
       continue;
     }
     if (!res.ok) throw new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });

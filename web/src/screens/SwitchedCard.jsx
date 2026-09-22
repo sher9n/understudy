@@ -62,19 +62,34 @@ const Saved = ({ v, fmt = usd }) => (v < 0
   ? <span className="num swmore">{fmt(-v)} more</span>
   : <span className="num swsaved">{fmt(v)}</span>);
 
-/** What the monthly figures are based on, in words: a day is "the last day", not "1 days". */
-const basisLine = (v) => {
+/* What the monthly figures are based on, in words: a day is "the last day", not "1 days". The
+   saving projected is the one on calls that come through Understudy, since a copy has already
+   run on the original model; with none of those yet, it is what routing all of it would save. */
+const over = (days, what) => (Math.round(days) <= 1
+  ? `At the pace of the last day`
+  : `At your ${what} over the last ${num(Math.round(days))} days`);
+
+const basisLine = (v, from) => {
   if (!v.monthly) return 'No calls in the last 30 days, so there is nothing to project.';
-  const d = Math.round(v.days);
-  const over = d <= 1 ? 'At the pace of the last day' : `At your volume over the last ${num(d)} days`;
-  return `${over}: about ${num(Math.round(v.monthly))} calls a month.`;
+  if (v.basis === 'all') {
+    return `If all of it ran through Understudy. ${over(v.days, 'volume')}: about ${num(Math.round(v.monthly))} calls a month.`;
+  }
+  const routedLine = `${over(v.routedDays, 'routed volume')}: about ${num(Math.round(v.monthlyRouted))} calls a month through Understudy.`;
+  if (!v.copies) return routedLine;
+  return `${routedLine} Another ${num(v.copies)} ${v.copies === 1 ? 'call' : 'calls'} in the last 30 days arrived as copies, `
+    + `which already ran on ${from} at your own provider, so they are not in these figures.`;
 };
+
+/** Why a model's call has no price: it is not sold, or there is no call of a known size yet. */
+const unpriced = (listed) => (listed
+  ? 'No call of a known size yet, so a call cannot be priced.'
+  : 'Not in the price list, so it cannot be priced.');
 
 export default function SwitchedCard({ s }) {
   const from = short(s.from);
   const to = short(s.to);
   const p = s.prices;
-  const priced = p.fromPerCall != null && p.toPerCall != null;
+  const priced = p.fromPerCall != null && p.toPerCall != null && p.cheaperPct != null;
   const month = s.projection.find((r) => r.months === 1);
   const so = s.soFar;
 
@@ -91,7 +106,7 @@ export default function SwitchedCard({ s }) {
           <div className="kk">Your original model</div>
           <div className="kv swmodel">{from}</div>
           <div className="ks">
-            {p.fromPerCall == null ? 'Not in the price list, so it cannot be priced.' : `${usd(p.fromPerCall)} a call at its list price`}
+            {p.fromPerCall == null ? unpriced(p.fromListed) : `${usd(p.fromPerCall)} a call at its list price`}
           </div>
         </div>
         <div className="swarrow" aria-hidden="true">→</div>
@@ -99,22 +114,27 @@ export default function SwitchedCard({ s }) {
           <div className="kk">Running now</div>
           <div className="kv swmodel">{to}</div>
           <div className="ks">
-            {p.toPerCall == null ? 'Not in the price list, so it cannot be priced.' : `${usd(p.toPerCall)} a call, our ${p.feePct}% fee included`}
+            {p.toPerCall == null ? unpriced(p.toListed) : `${usd(p.toPerCall)} a call, our ${p.feePct}% fee included`}
           </div>
         </div>
         <div className="kpi">
           <div className="kk">Saving</div>
+          {/* priced means both calls have a price and there is a percentage between them; a
+              missing percentage used to read as "0% less", because null >= 0 */}
           <div className="kv">
-            {!priced ? 'Not priced' : p.cheaperPct >= 0 ? `${Math.round(p.cheaperPct)}% less` : `${Math.round(-p.cheaperPct)}% more`}
+            {!priced || p.cheaperPct == null ? 'Not priced yet'
+              : p.cheaperPct >= 0 ? `${Math.round(p.cheaperPct)}% less` : `${Math.round(-p.cheaperPct)}% more`}
           </div>
           <div className="ks">
-            {!priced ? 'Both models need a price to compare them.'
+            {!priced || p.cheaperPct == null ? 'Both calls need a price to compare them.'
               : !s.volume.monthly ? 'per call. No calls in the last 30 days to put a monthly figure on.'
-                : month.saved < 0 ? `per call, about ${est(-month.saved)} a month more at your volume`
+                : month.saved < 0 ? `per call, about ${est(-month.saved)} a month more on the calls through Understudy`
                   /* copies have already run on the original model, so this is what routing would
                      save, not what is being saved */
-                  : !s.volume.routed ? `per call. About ${est(month.saved)} a month, once this workload runs through Understudy`
-                    : `per call, about ${est(month.saved)} a month at your volume`}
+                  : s.volume.basis === 'all' ? `per call. About ${est(month.saved)} a month, once this workload runs through Understudy`
+                    : `per call, about ${est(month.saved)} a month on the calls that come through Understudy`
+                      + (s.volume.allMonthSaved != null && s.volume.allMonthSaved > month.saved
+                        ? `, or ${est(s.volume.allMonthSaved)} if your copies came through as well` : '')}
           </div>
         </div>
       </div>
@@ -123,7 +143,7 @@ export default function SwitchedCard({ s }) {
         <div className="swcost">
           <div className="swhead">
             <span className="kk">Estimated cost over time</span>
-            <span className="swbasis">{basisLine(s.volume)}</span>
+            <span className="swbasis">{basisLine(s.volume, from)}</span>
           </div>
           <div className="swtable" role="table" aria-label={`What this workload costs on ${from} and on ${to}`}>
             <div className="swrow swth" role="row">

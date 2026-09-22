@@ -40,6 +40,13 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
      comes back saying nothing about it, and would otherwise put the Stop button back and lose
      the notice when the run ends. */
   const stopAsked = useRef(false);
+  /* What the server said to the stop, and whether it has itself reported a stop in progress.
+     A progress check leaves a notice only after one of those: a check sent just after Stop, for
+     a measurement that was only waiting, finds nothing running before the stop's own answer
+     arrives, and would otherwise put an earlier measurement's ending over "stopped before it
+     started". */
+  const stopReply = useRef(null);
+  const sawStopping = useRef(false);
   const poll = useRef(null);
 
   const loadRuns = useCallback(() => {
@@ -58,11 +65,15 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
     poll.current = setInterval(async () => {
       try {
         const d = await api.workload(w.id);
-        if (d.measure?.running) {
-          setLive(stopAsked.current ? { ...d.measure.running, stopping: true } : d.measure.running);
+        const now = d.measure?.running;
+        if (now) {
+          if (now.stopping) sawStopping.current = true;
+          setLive(stopAsked.current ? { ...now, stopping: true } : now);
         } else {
-          if (stopAsked.current || live?.stopping) setNotice(await stopOutcome(w.id));
+          if (stopReply.current === 'stopping' || sawStopping.current) setNotice(await stopOutcome(w.id));
           stopAsked.current = false;
+          stopReply.current = null;
+          sawStopping.current = false;
           setLive(null); loadRuns(); if (onRan) onRan();
         }
       } catch { /* the next tick tries again */ }
@@ -73,6 +84,8 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
   const start = async () => {
     setStarting(true); setErr(''); setNotice('');
     stopAsked.current = false;
+    stopReply.current = null;
+    sawStopping.current = false;
     try {
       await api.measure(w.id);
       const d = await api.workload(w.id);
@@ -90,13 +103,18 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
     try {
       const out = await api.stopMeasuring(w.id);
       setAsking(false);
+      stopReply.current = out?.state ?? null;
       if (out?.state === 'stopping') setLive((l) => (l ? { ...l, stopping: true } : l));
       else {
         stopAsked.current = false;
         setNotice(AFTER_STOP[out?.state] ?? '');
         setLive(null); loadRuns(); if (onRan) onRan();
       }
-    } catch (e) { stopAsked.current = false; setErr(e.message); } finally { setHalting(false); }
+    } catch (e) {
+      stopAsked.current = false;
+      stopReply.current = null;
+      setErr(e.message);
+    } finally { setHalting(false); }
   };
 
   const stopping = !!live?.stopping;
@@ -123,7 +141,7 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
               <span className="mspin" aria-hidden="true" />
               <div>
                 <div className="mrunt">
-                  {stopping ? 'Stopping once the call in flight comes back'
+                  {stopping ? stoppingLine(live)
                     : queued ? waitingLine(live.startsAt)
                       : (live.phase || 'Measuring')}
                 </div>
@@ -164,6 +182,9 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
               <p className="mnote">
                 {stopping
                   ? 'Nothing more is sent after the call in flight. It is charged like the rest, and nothing is switched.'
+                    + (quietFor(live) >= 60000
+                      ? ` If nothing is running it any more, it is closed ${num(live.staleMin || 15)} minutes after it was last heard from.`
+                      : '')
                   : `${whereTheCountComesFrom(live)} You can leave this page; it keeps going.`}
               </p>
             )}
@@ -297,6 +318,18 @@ async function stopOutcome(workloadId) {
   } catch { /* say what was asked for */ }
   return STOPPED;
 }
+
+/* How long since a running measurement was last heard from. It writes a heartbeat before every
+   call, so a long silence means a slow call or, rarely, a process that has gone: a stop then
+   waits for the silence to run out rather than for a call, and the panel says so. */
+const quietFor = (live) => (live?.heartbeatAt ? Math.max(0, Date.now() - live.heartbeatAt) : 0);
+
+const stoppingLine = (live) => {
+  const quiet = quietFor(live);
+  if (quiet < 60000) return 'Stopping once the call in flight comes back';
+  const mins = Math.max(1, Math.round(quiet / 60000));
+  return `Stopping. It has not been heard from for ${num(mins)} ${mins === 1 ? 'minute' : 'minutes'}`;
+};
 
 /* A measurement waiting its turn. One held back for a while, usually until the balance allows
    it, says until when, in IST, rather than leaving somebody watching a panel that never moves. */

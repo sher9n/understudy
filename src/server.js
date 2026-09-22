@@ -220,10 +220,13 @@ handle('recheck', async () => {
      somebody opens its page, so it cannot hold a workload in "Measuring" that nobody visits. */
   await closeAbandoned();
   await settleOutcomes();
-  /* A workload saying "Ready to optimize" is read again from what its measurements found. The
-     code before this set that from whether a bar had ever been set, so some say it with no
-     candidate behind them, and only a measurement ending ever corrected a status. */
-  for (const w of await db.prepare(`SELECT id FROM workloads WHERE status = 'certified'`).all()) await rest(w.id);
+  /* A workload saying "Ready to optimize" or "Nothing cleared yet" is read again from what its
+     measurements found. The code before this set the first from whether a bar had ever been
+     set, so some say it with no candidate behind them; a run the old process finished during a
+     deploy could set the second over an earlier candidate; and only a measurement ending ever
+     corrected a status. */
+  for (const w of await db.prepare(
+    `SELECT id FROM workloads WHERE status IN ('certified', 'no_match')`).all()) await rest(w.id);
   const spaces = await db.prepare('SELECT id, measure_every_days FROM workspaces').all();
   let queued = 0;
   for (const ws of spaces) {
