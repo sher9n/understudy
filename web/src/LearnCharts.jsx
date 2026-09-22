@@ -134,10 +134,16 @@ function rateAxis(rows) {
   return { min, ticks, at: (v) => `${((Math.max(min, Math.min(1, v)) - min) / span) * 100}%` };
 }
 
+/* A cost against the customer's own, to a tenth of a percent below one percent: a runner-up at a
+   fortieth of the price is not "0% of yours". */
+const ofYours = (r) => (r === null || r === undefined ? 'not priced yet' : r >= 0.995 ? 'yours'
+  : `${(r * 100).toFixed(r < 0.01 ? 1 : 0)}% of yours`);
+
 /**
- * How often each way of serving a workload worked on live calls: the dot is the rate, the band is
- * where the true rate most likely sits (a nine in ten chance), and it narrows as calls come in.
- * rows: [{ key, label, role, tone, mean, lo, hi, calls, ratio, note }]
+ * How often each way of serving a workload worked on live calls: the figure and the dot are what
+ * its calls did, the band is where the true rate most likely sits (a nine in ten chance), and it
+ * narrows as calls come in. A row can carry one action, such as switching to it.
+ * rows: [{ key, label, role, tone, rate, lo, hi, calls, ratio, bg, action }]
  */
 export function RateRows({ rows }) {
   if (!rows.length) return null;
@@ -158,25 +164,29 @@ export function RateRows({ rows }) {
            answers that matched them or not: drawn as a ring rather than a dot, and read as matched. */
         const bg = !r.calls && r.bg?.calls > 0;
         const known = r.calls > 0 || bg;
+        // what its calls did, as counted; the smoothed middle of the band only stands in when that is missing
+        const shown = r.rate ?? r.mean;
+        const bgShare = bg ? (r.bg.same ?? 0) / r.bg.calls : null;
         return (
         <div className={`rrow ${r.tone || ''}`} role="row" key={r.key}>
           <span role="cell" className="rname">
             <span className="rlabel">{r.label}</span>
             <span className={`rrole ${r.tone || ''}`}>{r.role}</span>
+            {r.action && <button className="minig rgo" disabled={r.action.busy} onClick={r.action.onClick}>{r.action.label}</button>}
           </span>
-          <span role="cell" className="rtrack" aria-label={r.calls ? `${pct(r.mean, 1)}, likely between ${pct(r.lo, 1)} and ${pct(r.hi, 1)}`
-            : bg ? `Matched ${pct(r.bg.rate, 1)} of ${r.bg.calls} background answers` : 'No calls yet'}>
+          <span role="cell" className="rtrack" aria-label={r.calls ? `${pct(shown, 1)} worked, likely between ${pct(r.lo, 1)} and ${pct(r.hi, 1)}`
+            : bg ? `The same answer on ${r.bg.same ?? 0} of ${r.bg.calls} background answers` : 'No calls yet'}>
             {ax.ticks.map((t) => <i key={t} className="rgrid" style={{ left: ax.at(t) }} />)}
             {known ? (
               <>
                 <b className={`rband${r.lo < ax.min ? ' past' : ''}${bg ? ' bg' : ''}`} style={{ left: ax.at(r.lo), width: `calc(${ax.at(r.hi)} - ${ax.at(r.lo)})` }} />
-                <b className={`rdot${r.mean < ax.min ? ' past' : ''}${bg ? ' ring' : ''}`} style={{ left: ax.at(bg ? r.bg.rate : r.mean) }} />
+                <b className={`rdot${(bg ? bgShare : shown) < ax.min ? ' past' : ''}${bg ? ' ring' : ''}`} style={{ left: ax.at(bg ? bgShare : shown) }} />
               </>
             ) : <em className="rnone">no calls yet</em>}
           </span>
-          <span role="cell" className="rnum rstrong">{r.calls > 0 ? pct(r.mean, 1) : bg ? <>{pct(r.bg.rate, 1)}<small>matched</small></> : '–'}</span>
-          <span role="cell" className="rnum">{bg ? <>{num(r.bg.calls)}<small>background</small></> : num(r.calls)}</span>
-          <span role="cell" className="rnum">{r.ratio === null || r.ratio === undefined ? '–' : r.ratio >= 0.995 ? 'yours' : `${pct(r.ratio)} of yours`}</span>
+          <span role="cell" className="rnum rstrong" data-label="worked">{r.calls > 0 ? pct(shown, 1) : bg ? <>{pct(bgShare, 1)}<small>the same</small></> : '–'}</span>
+          <span role="cell" className="rnum" data-label="calls">{bg ? <>{num(r.bg.calls)}<small>background</small></> : num(r.calls)}</span>
+          <span role="cell" className="rnum" data-label="cost">{ofYours(r.ratio)}</span>
         </div>
         );
       })}
@@ -192,13 +202,13 @@ export function SplitBar({ parts, empty = 'No calls yet.' }) {
     <div className="shares">
       <div className="sharebar" role="img"
         aria-label={parts.filter((p) => p.n).map((p) => `${p.label}: ${pct(p.n / total, 1)}`).join(', ')}>
-        {parts.filter((p) => p.n > 0).map((p) => (
-          <span key={p.label} className={`sp ${p.tone || ''}`} style={{ width: `${(p.n / total) * 100}%` }} />
+        {parts.filter((p) => p.n > 0).map((p, i) => (
+          <span key={i} className={`sp ${p.tone || ''}`} style={{ width: `${(p.n / total) * 100}%` }} />
         ))}
       </div>
       <div className="sharekey">
-        {parts.filter((p) => p.n > 0).map((p) => (
-          <span key={p.label}><i className={`sp ${p.tone || ''}`} />{p.label}
+        {parts.filter((p) => p.n > 0).map((p, i) => (
+          <span key={i}><i className={`sp ${p.tone || ''}`} />{p.label}
             <b>{pct(p.n / total, p.n / total < 0.1 ? 1 : 0)}</b><em>{num(p.n)} {p.n === 1 ? 'call' : 'calls'}</em></span>
         ))}
       </div>
@@ -211,8 +221,8 @@ export function DotStrip({ items }) {
   if (!items.length) return null;
   return (
     <div className="dots" role="img"
-      aria-label={`${items.filter((x) => x >= 0.5).length} of the last ${items.length} background answers matched the live answer`}>
-      {items.map((x, i) => <i key={i} className={x === null ? 'na' : x >= 0.5 ? 'yes' : 'no'} />)}
+      aria-label={`${items.filter((x) => x !== null && x >= 0.999).length} of the last ${items.length} background answers were the same as the live answer`}>
+      {items.map((x, i) => <i key={i} className={x === null ? 'na' : x >= 0.999 ? 'yes' : 'no'} />)}
     </div>
   );
 }

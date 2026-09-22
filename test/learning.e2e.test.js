@@ -56,6 +56,9 @@ const {
   chooseExplore, afterServed, reviewWorkload, markTrying, learningView, forgetState, exploreOf,
 } = await import('../src/learn/explore.js');
 const { rngFrom } = await import('../src/learn/bandit.js');
+const { upsertArm, referenceSpec } = await import('../src/learn/arms.js');
+const { saveDef } = await import('../src/learn/outcomes.js');
+const { outcomeSummary } = await import('../src/learn/views.js');
 const { default: v1 } = await import('../src/proxy.js');
 
 await migrate({ quiet: true });
@@ -68,11 +71,18 @@ const right = (i) => ({ total: 100 + i, currency: 'USD' });
 // the cheaper runner-up gets one call in four wrong, which a background answer shows
 const answerOf = (model, i) => (model === CHEAPER && i % 4 === 1 ? { total: 0, currency: 'EUR' } : right(i));
 
+// models the provider refuses, to see what an experiment that fails does
+const failing = new Set();
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
     const payload = JSON.parse(body || '{}');
+    if (failing.has(payload.model)) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Provider is overloaded' } }));
+      return;
+    }
     const text = payload.messages.find((m) => m.role === 'user')?.content || '';
     const i = Number((text.match(/#(\d+)/) || [])[1] || 0);
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -142,7 +152,8 @@ async function shop(tag, { optimize = 'auto', explore = 'normal', switched = tru
   }
   const results = [
     { model_id: STEADY, verdict: 'cleared', stopped: null, cost_month_usd: 20, cost_ratio: 0.2, gap_pct: 1.5, runs: 80, arm_json: null, recipe_json: null },
-    { model_id: CHEAPER, verdict: 'review', stopped: null, cost_month_usd: 5, cost_ratio: 0.05, gap_pct: 4.6, runs: 80, arm_json: null, recipe_json: null },
+    { model_id: CHEAPER, verdict: 'cleared', stopped: null, cost_month_usd: 5, cost_ratio: 0.05, gap_pct: 2.6, runs: 80, arm_json: null, recipe_json: null },
+    { model_id: 'vendor/close', verdict: 'review', stopped: null, cost_month_usd: 4, cost_ratio: 0.04, gap_pct: 4.6, runs: 80, arm_json: null, recipe_json: null },
     { model_id: 'vendor/wrong', verdict: 'missed', stopped: 'bar', cost_month_usd: 2, cost_ratio: 0.02, gap_pct: 40, runs: 9, arm_json: null, recipe_json: null },
   ];
   await markTrying(workload, { runId: null, results, refMonthly: 100, floor: 4 });
@@ -163,30 +174,39 @@ const send = async (secret, body) => {
 const armOf = async (workloadId, model) => db.prepare(
   `SELECT * FROM arms WHERE workload_id = ? AND spec_json LIKE ?`).get(workloadId, `%"model":"${model}"%`);
 
-/* Calls a strategy served, written directly and dated an hour ago, with how each turned out. */
-async function history(s, model, { n, failed = 0, armId = undefined }) {
-  const arm = armId === undefined ? await armOf(s.workload.id, model) : { id: armId };
+/* Calls a strategy served, written directly and dated an hour ago, with how each turned out.
+   `yardstick` writes them as the customer's own model answering beside the switch, chosen by chance;
+   `unread` as calls from before outcomes were kept, which could carry no signal at all. */
+let seq = 1000;
+async function history(s, model, { n, failed = 0, armId = undefined, yardstick = false, unread = false }) {
+  let arm = armId === undefined ? await armOf(s.workload.id, model) : { id: armId };
+  if (yardstick) arm = await upsertArm(s.workload, referenceSpec(s.workload), { status: 'baseline', offline: { ratio: 1 } });
+  const ids = [];
   for (let i = 0; i < n; i += 1) {
+    seq += 1;
     const callId = await recordCall({
       workspaceId: s.workspace.id, workloadId: s.workload.id, source: 'routed', requestedModel: REF, servedModel: model,
-      statusCode: 200, promptTokens: 500, completionTokens: 40, costUsd: COST[model], request: request(1000 + i),
-      response: { choices: [{ message: { content: JSON.stringify(right(1000 + i)) } }] },
-      armId: arm?.id ?? null, propensity: 1, explored: 0,
+      statusCode: 200, promptTokens: 500, completionTokens: 40, costUsd: COST[model], request: request(seq),
+      response: { choices: [{ message: { content: JSON.stringify(right(seq)) } }] },
+      armId: arm?.id ?? null, propensity: yardstick ? 0.01 : 1, explored: yardstick ? 1 : 0,
     });
+    ids.push(callId);
     // a failure the traffic showed: say the answer was not what the request asked for
     if (i < failed) await db.prepare('UPDATE calls SET reward = 0 WHERE id = ?').run(callId);
   }
   await learningSettled();
+  if (unread) await db.prepare('UPDATE calls SET request_hash = NULL WHERE id = ANY(?::text[])').run(ids);
   await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ? AND created_at > ?')
     .run(now() - 3600000, s.workload.id, now() - 3600000);
   forgetState(s.workload.id);
 }
 
-test('a measurement leaves its runners-up behind: close and cheaper ones are tried, the rest are not', async () => {
+test('a measurement leaves its runners-up behind: cleared and cheaper ones are tried, the rest are not', async () => {
   const s = await shop('marks');
   const cheaper = await armOf(s.workload.id, CHEAPER);
-  assert.equal(cheaper.status, 'trying', 'close and cheaper: worth trying');
+  assert.equal(cheaper.status, 'trying', 'cleared and cheaper: worth trying');
   assert.equal(JSON.parse(cheaper.offline_json).ratio, 0.05);
+  assert.equal(await armOf(s.workload.id, 'vendor/close'), undefined, 'one that only came close has not earned live calls');
   assert.equal(await armOf(s.workload.id, 'vendor/wrong'), undefined, 'a model that missed is not a runner-up');
   const steady = await armOf(s.workload.id, STEADY);
   assert.equal(steady.status, 'serving', 'what serves stays serving');
@@ -258,7 +278,7 @@ test('the hourly review moves to a cheaper runner-up once its live calls work as
   assert.equal(promo.to_model, CHEAPER);
   assert.match(promo.reason, /live results/);
   const act = await db.prepare(`SELECT * FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(s.workload.id);
-  assert.match(act.detail, /Switched on its own by live results: its calls worked 100\.0% of the time over 250 calls/);
+  assert.match(act.detail, /Switched on its own by live results: its calls worked 100\.0% of 250 calls/);
   assert.match(act.detail, /costs 75% less/, 'a quarter of the price: 0.05 against 0.2');
   // the readings are kept on each strategy for the page
   const arm = await armOf(s.workload.id, CHEAPER);
@@ -268,15 +288,18 @@ test('the hourly review moves to a cheaper runner-up once its live calls work as
 test('the hourly review switches back when what serves works less often than the customer\'s own model', async () => {
   const s = await shop('rollback');
   await history(s, STEADY, { n: 100, failed: 15 });
-  // the yardstick: the customer's own model on the same weeks, from before the switch and since
-  await history(s, REF, { n: 60, armId: null });
+  // the customer's own model's old calls, from before outcomes were kept: they decide nothing
+  await history(s, REF, { n: 300, armId: null, unread: true });
+  assert.deepEqual(await reviewWorkload(s.workload), [], 'no switch back on history that could never carry a signal');
+  // the yardstick: the customer's own model answering beside the switch, chosen by chance
+  await history(s, REF, { n: 60, yardstick: true });
   const decisions = await reviewWorkload(s.workload);
   assert.deepEqual(decisions.map((d) => d.kind), ['revert']);
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id);
   assert.equal(w.routed_model, null, 'back on the customer\'s own model');
   const r = await db.prepare(`SELECT * FROM promotions WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(s.workload.id);
   assert.equal(r.action, 'soft_revert', 'for a while, not for good: live results can change');
-  assert.match(r.reason, /worked 85\.0% of the time, against 100\.0% on gpt-5\.4 \(100 and 6\d calls\)/);
+  assert.match(r.reason, /since the switch, calls on steady worked 85\.0% of 100 calls, against 100\.0% of 60 calls on gpt-5\.4/);
 });
 
 test('a runner-up that clearly works less often is set aside', async () => {
@@ -332,8 +355,8 @@ test('a workload that waits for approval never has an answer changed; its runner
   // forty that only half matched: far outside the 4% bar, so nothing is put forward
   await bulk('half', 40, 0.5);
   assert.ok(!(await reviewWorkload(s.workload)).some((d) => d.armId === cheaperArm.id), 'half matching is not put forward');
-  // eight hundred that matched: about 2.6% different in all, inside the bar
-  await bulk('same', 800, 1);
+  // twelve hundred the same: under 4% different in all, inside the bar
+  await bulk('same', 1200, 1);
   const later = await reviewWorkload(s.workload);
   assert.ok(later.some((d) => d.kind === 'suggest' && d.armId === cheaperArm.id), JSON.stringify(later));
   const act = await db.prepare(`SELECT * FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(s.workload.id);
@@ -359,4 +382,64 @@ test('the page gets every strategy with its record, its share of the week, and t
   assert.equal(runner.role, 'runner-up');
   assert.equal(runner.live.calls, 10);
   assert.equal(runner.ratio, 0.05);
+});
+
+test('an experiment the provider fails is served the usual way, and the failure is kept against it', async () => {
+  const s = await shop('failover');
+  failing.add(REF);
+  try {
+    const ids = [];
+    for (let i = 0; i < 30; i += 1) ids.push(await send(s.secret, request(3000 + i)));
+    const served = await db.prepare('SELECT served_model, propensity, explored FROM calls WHERE id = ANY(?::text[])').all(ids);
+    assert.ok(served.every((r) => r.served_model !== REF), 'no answer came from the model that was failing');
+    const failed = await db.prepare(`SELECT * FROM calls WHERE workload_id = ? AND explored = 1 AND status_code = 503`).all(s.workload.id);
+    assert.ok(failed.length >= 1, `the failed experiments were kept: ${failed.length}`);
+    assert.equal(JSON.parse(failed[0].check_json).by, 'experiment failed');
+    // the call that stood in for it is what serves, as usual, and not an experiment
+    const stoodIn = served.filter((r) => r.propensity === null);
+    assert.equal(stoodIn.length, failed.length, 'one stand-in for each failed experiment');
+    assert.ok(stoodIn.every((r) => r.served_model === STEADY && Number(r.explored) === 0));
+  } finally {
+    failing.delete(REF);
+  }
+});
+
+test('nothing is tried while what serves has no known cost, and the page says why', async () => {
+  const s = await shop('unpriced');
+  const steady = await armOf(s.workload.id, STEADY);
+  await db.prepare('UPDATE arms SET offline_json = NULL WHERE id = ?').run(steady.id);
+  forgetState(s.workload.id);
+  const ids = [];
+  for (let i = 0; i < 20; i += 1) ids.push(await send(s.secret, request(4000 + i)));
+  const rows = await db.prepare('SELECT served_model, explored FROM calls WHERE id = ANY(?::text[])').all(ids);
+  assert.ok(rows.every((r) => r.served_model === STEADY && Number(r.explored) === 0), 'every call served as usual');
+  const v = await learningView(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id));
+  assert.match(v.explore.reason || '', /prices what serves/);
+  assert.equal(v.explore.servingCostKnown, false);
+});
+
+test('taking a meaning away from a reported event takes it off every call it was reported on', async () => {
+  const s = await shop('meaning');
+  await saveDef(s.workload.id, { events: [{ event: 'ticket_reopened', means: 'worked' }] });
+  const id = await send(s.secret, request(5000));
+  await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/outcomes`, { method: 'POST',
+    headers: { Authorization: `Bearer ${s.secret}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ call_id: id, event: 'ticket_reopened' }) });
+  await learningSettled();
+  assert.equal(Number((await db.prepare('SELECT reward FROM calls WHERE id = ?').get(id)).reward), 1, 'read as worked, as the meaning said');
+  await saveDef(s.workload.id, { events: [] });
+  const after = await db.prepare('SELECT reward FROM calls WHERE id = ?').get(id);
+  assert.equal(after.reward, null, 'with no meaning, the report says nothing either way');
+});
+
+test('a call the provider failed is listed with its reason, never breaks the list', async () => {
+  const s = await shop('failedcall');
+  await recordCall({ workspaceId: s.workspace.id, workloadId: s.workload.id, source: 'routed', requestedModel: REF, servedModel: STEADY,
+    statusCode: 503, latencyMs: 40, request: request(6000) });
+  await recordCall({ workspaceId: s.workspace.id, workloadId: s.workload.id, source: 'routed', requestedModel: REF, servedModel: STEADY,
+    statusCode: 0, latencyMs: 40, request: request(6001) });
+  const o = await outcomeSummary(s.workload.id);
+  assert.ok(o.failures.every((f) => Array.isArray(f.why)), 'every reason is a list');
+  assert.ok(o.failures.some((f) => f.why[0] === 'the provider failed the call (503)'));
+  assert.ok(o.failures.some((f) => f.why[0] === 'the provider could not be reached'));
 });

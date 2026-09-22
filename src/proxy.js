@@ -114,47 +114,88 @@ async function recordRefusal(wsId, body, status, json) {
   }).catch(() => { /* never let bookkeeping break the answer */ });
 }
 
+/* What a strategy serves a call with, before anything reaches the customer. */
+const leadOf = (strategy, ready) => {
+  if (!strategy) return { served: ready.served, recipe: ready.recipe };
+  const lead = leadModel(strategy.spec);
+  return { served: lead.model, recipe: lead.recipe ?? null };
+};
+const failureOf = (err) => ({
+  status: err instanceof UpstreamError ? err.status : 502,
+  json: err instanceof UpstreamError ? err.body : { error: { message: 'The provider could not be reached.' } },
+});
+
+/* An experiment's call that the provider failed, kept as its own row so what learning reads about
+   that strategy includes the failure, before the call is served the usual way instead. */
+async function keepFailedTry({ wsId, workload, requested, served, started, body, ref, source, strategy, err }) {
+  const f = failureOf(err);
+  await recordCall({
+    workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested, servedModel: served,
+    statusCode: f.status, latencyMs: Date.now() - started, request: body, ref, costUsd: Number(err?.spent) || 0,
+    ...(decisionOf(strategy) || {}), check: { by: 'experiment failed', status: f.status },
+  }).catch(() => { /* never let bookkeeping stand in the way of the answer */ });
+}
+
+/* The bookkeeping after an answer, apart from the provider's part: a slip in it is logged, and never
+   turns an answer the customer has already been sent, and paid for, into an error. */
+async function settle(args) {
+  try {
+    await finish(args);
+  } catch (err) {
+    console.error(`bookkeeping for ${args.callId} failed: ${err?.message || err}`);
+  }
+}
+
 export async function routeOnce(wsId, body, { source = 'routed', classify = true, ref = null } = {}) {
   const ready = await prepare(wsId, body, { classify });
   if (ready.error) {
     if (source === 'routed') await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return { ok: false, status: ready.error.status, json: ready.error.json };
   }
-  const { workload, requested, served, recipe, strategy } = ready;
+  const { workload, requested } = ready;
   // made up front, so the answer can carry it and the customer can report how this call went
   const callId = id('call');
   const started = Date.now();
-  try {
-    if (strategy && strategy.spec.kind !== 'model') {
-      const out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId });
-      // charged for everything the strategy spent on it: a cascade's check, and a call it sent on
-      await finish({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
-        started, body, response: out.json, status: 200, latencyMs: out.latencyMs, source, callId, ref,
-        decision: decisionOf(strategy, out) });
-      return { ok: true, status: 200, json: out.json, served: out.served, requested, callId,
-        latencyMs: out.latencyMs, costUsd: out.cost };
+  // the strategy for this call, and what serves as usual in case it was an experiment that failed
+  const tries = [ready.strategy, ready.strategy?.fallback].filter(Boolean);
+  if (!tries.length) tries.push(null);
+  for (const [k, strategy] of tries.entries()) {
+    const { served, recipe } = leadOf(strategy, ready);
+    let out;
+    try {
+      if (strategy && strategy.spec.kind !== 'model') {
+        out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId });
+      } else {
+        const r = await chat(body, served, { recipe });
+        out = { json: r.json, served, cost: Number(r.json?.usage?.cost ?? 0), latencyMs: r.latencyMs ?? Date.now() - started };
+      }
+    } catch (err) {
+      if (k < tries.length - 1) {
+        await keepFailedTry({ wsId, workload, requested, served, started, body, ref, source, strategy, err });
+        continue;
+      }
+      const f = failureOf(err);
+      reportCallFailure({
+        kind: source === 'test' ? 'test call' : 'routed call',
+        model: served, status: f.status, workspaceId: wsId,
+        message: f.json?.error?.message || err.message,
+      });
+      await recordCall({
+        id: callId, workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
+        servedModel: served, statusCode: f.status, latencyMs: Date.now() - started, request: body, ref,
+        // what a strategy had already spent on it before it failed, kept, though nobody is charged for it
+        costUsd: Number(err?.spent) || 0, ...(decisionOf(strategy) || {}),
+      }).catch(() => {});
+      return { ok: false, status: f.status, json: f.json, served, requested, callId };
     }
-    const { json, latencyMs } = await chat(body, served, { recipe });
-    await finish({ wsId, workload, requested, served, usage: json?.usage, started, body,
-      response: json, status: 200, latencyMs, source, callId, ref, decision: decisionOf(strategy) });
-    return { ok: true, status: 200, json, served, requested, callId,
-      latencyMs: latencyMs ?? Date.now() - started, costUsd: Number(json?.usage?.cost ?? 0) };
-  } catch (err) {
-    const status = err instanceof UpstreamError ? err.status : 502;
-    const json = err instanceof UpstreamError ? err.body
-      : { error: { message: 'The provider could not be reached.' } };
-    reportCallFailure({
-      kind: source === 'test' ? 'test call' : 'routed call',
-      model: served, status, workspaceId: wsId,
-      message: json?.error?.message || err.message,
-    });
-    await recordCall({
-      id: callId, workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
-      servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body, ref,
-      ...(decisionOf(strategy) || {}),
-    });
-    return { ok: false, status, json, served, requested, callId };
+    // charged for everything the strategy spent on it: a cascade's check, and a call it sent on
+    await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
+      started, body, response: out.json, status: 200, latencyMs: out.latencyMs, source, callId, ref,
+      decision: decisionOf(strategy, strategy && strategy.spec.kind !== 'model' ? out : null) });
+    return { ok: true, status: 200, json: out.json, served: out.served, requested, callId,
+      latencyMs: out.latencyMs, costUsd: out.cost };
   }
+  return { ok: false, status: 502, json: { error: { message: 'The provider could not be reached.' } }, callId };
 }
 
 /* The routed path. The customer's client is unchanged except for the base URL, and
@@ -173,38 +214,59 @@ v1.post('/chat/completions', async (req, res) => {
     await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return res.status(ready.error.status).json(ready.error.json);
   }
-  const { workload, requested, strategy } = ready;
-  let { served, recipe } = ready;
+  const { workload, requested } = ready;
   const callId = id('call');
   const started = Date.now();
+  const tries = [ready.strategy, ready.strategy?.fallback].filter(Boolean);
+  if (!tries.length) tries.push(null);
+  for (const [k, strategy] of tries.entries()) {
+    const last = k === tries.length - 1;
+    const r = await streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready });
+    if (r.ok || r.sent) return undefined;
+    // nothing has reached the customer yet: an experiment that failed is kept, and the call served as usual
+    if (!last) {
+      await keepFailedTry({ wsId, workload, requested, served: r.served, started, body, ref, source: 'routed', strategy, err: r.err });
+      continue;
+    }
+    const f = failureOf(r.err);
+    reportCallFailure({ kind: 'streamed call', model: r.served, status: f.status, workspaceId: wsId,
+      message: f.json?.error?.message || r.err?.message });
+    await recordCall({
+      id: callId, workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
+      servedModel: r.served, statusCode: f.status, latencyMs: Date.now() - started, request: body, ref,
+      costUsd: Number(r.err?.spent) || 0, ...(decisionOf(strategy) || {}),
+    }).catch(() => {});
+    return res.status(f.status).json(f.json);
+  }
+  return undefined;
+});
+
+/* One streamed call on one strategy. Answers { ok } once the whole answer has gone out; { sent } when
+   the provider failed part way, after the answer had started, which is ended as it stands; or the
+   failure, with nothing sent yet, so the caller can try again or say so. */
+async function streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready }) {
+  let { served, recipe } = leadOf(strategy, ready);
   let decision = decisionOf(strategy);
   if (strategy && strategy.spec.kind === 'cascade') {
     /* A cascade cannot stream its first answer before the check has read it, so the answer is
        worked out whole and then sent as a stream. The first word arrives when the whole answer
        would have; a measurement holds a cascade to the workload's speed setting on exactly that. */
+    let out;
     try {
-      const out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId });
-      res.status(200);
-      res.setHeader('x-understudy-call-id', callId);
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      writeAsStream(res, out.json);
-      res.end();
-      await finish({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
-        started, body, response: out.json, status: 200, latencyMs: out.latencyMs, ttftMs: out.latencyMs, callId, ref,
-        decision: decisionOf(strategy, out) });
+      out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId });
     } catch (err) {
-      const status = err instanceof UpstreamError ? err.status : 502;
-      const payload = err instanceof UpstreamError ? err.body : { error: { message: 'The provider could not be reached.' } };
-      reportCallFailure({ kind: 'streamed call', model: served, status, workspaceId: wsId, message: payload?.error?.message || err.message });
-      await recordCall({
-        id: callId, workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
-        servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body, ref, ...(decision || {}),
-      });
-      if (!res.headersSent) res.status(status).json(payload);
-      else res.end();
+      return { ok: false, err, served };
     }
-    return undefined;
+    res.status(200);
+    res.setHeader('x-understudy-call-id', callId);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    writeAsStream(res, out.json);
+    res.end();
+    await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
+      started, body, response: out.json, status: 200, latencyMs: out.latencyMs, ttftMs: out.latencyMs, callId, ref,
+      decision: decisionOf(strategy, out) });
+    return { ok: true };
   }
   if (strategy && strategy.spec.kind === 'router') {
     // picked before anything is sent, from what can be seen of the call, so it streams as ever
@@ -214,52 +276,57 @@ v1.post('/chat/completions', async (req, res) => {
     recipe = use.recipe ?? null;
     decision = { ...decision, escalated: use === strategy.spec.strong, check: { by: 'router', p: Math.round(p * 1000) / 1000 } };
   }
+  let upstream;
   try {
-    const upstream = await chatStream(body, served, { recipe });
-    res.status(200);
-    res.setHeader('x-understudy-call-id', callId);
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    let usage = null;
-    /* The answer, put back together from the pieces it streamed in. It used to be thrown
-       away, so a streamed call could be counted and charged but never read: the workload
-       page could show what was asked and nothing of what came back. */
-    let answer = '';
-    const toolCalls = [];
-    let finish_reason = null;
-    let model = null;
-    // when the first word reached the customer: what somebody watching a streamed answer waits for
-    let firstAt = null;
+    upstream = await chatStream(body, served, { recipe });
+  } catch (err) {
+    return { ok: false, err, served };
+  }
+  res.status(200);
+  res.setHeader('x-understudy-call-id', callId);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  let usage = null;
+  /* The answer, put back together from the pieces it streamed in. It used to be thrown
+     away, so a streamed call could be counted and charged but never read: the workload
+     page could show what was asked and nothing of what came back. */
+  let answer = '';
+  const toolCalls = [];
+  let finish_reason = null;
+  let model = null;
+  // when the first word reached the customer: what somebody watching a streamed answer waits for
+  let firstAt = null;
+  const read = (line) => {
+    const t = line.trim();
+    if (!t.startsWith('data:')) return;
+    const payload = t.slice(5).trim();
+    if (payload === '[DONE]') return;
+    try {
+      const j = JSON.parse(payload);
+      // the last chunk carries usage, which is what the customer is charged on
+      if (j.usage) usage = j.usage;
+      if (j.model) model = j.model;
+      const ch = j.choices?.[0];
+      if (typeof ch?.delta?.content === 'string') answer += ch.delta.content;
+      if (Array.isArray(ch?.delta?.tool_calls)) {
+        for (const tc of ch.delta.tool_calls) {
+          const at = Number.isInteger(tc.index) ? tc.index : toolCalls.length;
+          const c = toolCalls[at] || (toolCalls[at] = { id: tc.id, type: 'function', function: { name: '', arguments: '' } });
+          if (tc.id) c.id = tc.id;
+          if (tc.function?.name) c.function.name = tc.function.name;
+          if (typeof tc.function?.arguments === 'string') c.function.arguments += tc.function.arguments;
+        }
+      }
+      if (firstAt === null && ((typeof ch?.delta?.content === 'string' && ch.delta.content)
+        || (Array.isArray(ch?.delta?.tool_calls) && ch.delta.tool_calls.length))) firstAt = Date.now();
+      if (ch?.finish_reason) finish_reason = ch.finish_reason;
+    } catch { /* not a JSON line, which SSE comments and keep-alives are allowed to be */ }
+  };
+  try {
     const reader = upstream.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
-    const read = (line) => {
-      const t = line.trim();
-      if (!t.startsWith('data:')) return;
-      const payload = t.slice(5).trim();
-      if (payload === '[DONE]') return;
-      try {
-        const j = JSON.parse(payload);
-        // the last chunk carries usage, which is what the customer is charged on
-        if (j.usage) usage = j.usage;
-        if (j.model) model = j.model;
-        const ch = j.choices?.[0];
-        if (typeof ch?.delta?.content === 'string') answer += ch.delta.content;
-        if (Array.isArray(ch?.delta?.tool_calls)) {
-          for (const tc of ch.delta.tool_calls) {
-            const at = Number.isInteger(tc.index) ? tc.index : toolCalls.length;
-            const c = toolCalls[at] || (toolCalls[at] = { id: tc.id, type: 'function', function: { name: '', arguments: '' } });
-            if (tc.id) c.id = tc.id;
-            if (tc.function?.name) c.function.name = tc.function.name;
-            if (typeof tc.function?.arguments === 'string') c.function.arguments += tc.function.arguments;
-          }
-        }
-        if (firstAt === null && ((typeof ch?.delta?.content === 'string' && ch.delta.content)
-          || (Array.isArray(ch?.delta?.tool_calls) && ch.delta.tool_calls.length))) firstAt = Date.now();
-        if (ch?.finish_reason) finish_reason = ch.finish_reason;
-      } catch { /* not a JSON line, which SSE comments and keep-alives are allowed to be */ }
-    };
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -275,30 +342,25 @@ v1.post('/chat/completions', async (req, res) => {
     }
     if (buf) read(buf);
     res.end();
-    const calls = toolCalls.filter(Boolean);
-    const response = {
-      model, streamed: true, usage,
-      choices: [{ index: 0, message: { role: 'assistant', content: answer, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason }],
-    };
-    await finish({ wsId, workload, requested, served, usage, started, body, response, status: 200,
-      ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision });
-    return undefined;
   } catch (err) {
-    const status = err instanceof UpstreamError ? err.status : 502;
-    const payload = err instanceof UpstreamError ? err.body : { error: { message: 'The provider could not be reached.' } };
-    reportCallFailure({
-      kind: 'streamed call', model: served, status, workspaceId: wsId,
-      message: payload?.error?.message || err.message,
-    });
+    // the answer had started, so it cannot be tried again: it is ended where it stands
+    reportCallFailure({ kind: 'streamed call', model: served, status: 502, workspaceId: wsId, message: err?.message });
     await recordCall({
       id: callId, workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
-      servedModel: served, statusCode: status, latencyMs: Date.now() - started, request: body, ref, ...(decision || {}),
-    });
-    if (!res.headersSent) res.status(status).json(payload);
-    else res.end();
-    return undefined;
+      servedModel: served, statusCode: 502, latencyMs: Date.now() - started, request: body, ref, ...(decision || {}),
+    }).catch(() => {});
+    res.end();
+    return { ok: false, sent: true };
   }
-});
+  const calls = toolCalls.filter(Boolean);
+  const response = {
+    model, streamed: true, usage,
+    choices: [{ index: 0, message: { role: 'assistant', content: answer, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason }],
+  };
+  await settle({ wsId, workload, requested, served, usage, started, body, response, status: 200,
+    ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision });
+  return { ok: true };
+}
 
 async function finish({ wsId, workload, requested, served, usage, started, body, response, status,
   latencyMs, ttftMs = null, source = 'routed', callId = null, ref = null, decision = null }) {

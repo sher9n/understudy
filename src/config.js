@@ -190,6 +190,10 @@ export const config = {
   JEV_PRICE_PER_MTOK: num('JEV_PRICE_PER_MTOK', 0.042),
   JEV_CONCURRENCY: num('JEV_CONCURRENCY', 12),
   JEV_TIMEOUT_MS: num('JEV_TIMEOUT_MS', 20000),
+  /* A cascade's check on a live call: one try, this long at most, and never a wait behind other
+     questions. A check that does not come back in time sends the call on to the customer's own
+     model, which is always safe; a slow Jev then rests the live checks for a minute. */
+  JEV_LIVE_TIMEOUT_MS: num('JEV_LIVE_TIMEOUT_MS', 3000),
   /* Between these, Jev is not sure whether two answers mean the same thing, and the model in
      EVAL_JUDGE_MODEL is asked as well. */
   JEV_UNSURE_LOW: num('JEV_UNSURE_LOW', 0.3),

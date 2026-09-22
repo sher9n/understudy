@@ -245,7 +245,9 @@ export function chanceOf(model, ctx) {
   if (lived) {
     const lift = Math.max(-0.4, Math.min(0.15, 3 * (lived.rate - lived.fleet))) * Math.min(1, lived.n / 400);
     chance = Math.max(0.01, Math.min(0.97, chance * (1 + lift)));
-    parts.push({ source: 'live', p: lived.rate, w: 0, note: `${(lived.rate * 100).toFixed(1)}% of ${lived.n} live calls`, lift });
+    // said in words only: a count or a rate from other customers' calls never reaches a page
+    const note = lift > 0.02 ? 'above average' : lift < -0.02 ? 'below average' : 'about average';
+    parts.push({ source: 'live', p: null, w: 0, note });
   }
   return { chance, parts, family };
 }
@@ -452,13 +454,18 @@ export function selectCandidates(input) {
      answers, and a good share of the billed tokens gone, since thinking is billed like the answer.
      Its price is a guess until measured (six tenths of the model's own); the measurement finds the
      real one. It is raced under its own name, and served the way it was measured if it wins. */
-  if (refModel && refThinks === true && !profile.reasoningSet && refPrice) {
+  // never again once it was switched back, like any model: it has said something about itself
+  if (refModel && refThinks === true && !profile.reasoningSet && refPrice && !reverted.has(`${reference}#lighter`)) {
     const r = refModel.reasoning || {};
     const efforts = Array.isArray(r.supported_efforts) ? r.supported_efforts : [];
     let reasoning = null;
     if (r.mandatory !== true && efforts.includes('none')) reasoning = { effort: 'none' };
     else {
-      const lightest = ['minimal', 'low'].find((e) => efforts.includes(e) && e !== r.default_effort);
+      /* The lightest setting it offers that is lighter than the one it uses unasked: with "minimal"
+         as its own setting, "low" would have it think more, not less. */
+      const ladder = ['minimal', 'low', 'medium', 'high'];
+      const own = ladder.indexOf(r.default_effort ?? 'medium');
+      const lightest = ladder.find((e, i) => efforts.includes(e) && (own < 0 || i < own));
       if (lightest) reasoning = { effort: lightest };
     }
     if (reasoning) {

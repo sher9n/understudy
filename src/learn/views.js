@@ -9,9 +9,11 @@ const DAY = 86400000;
 const parse = (s, fallback) => { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } };
 const short = (m) => String(m || '').split('/').pop();
 
-/* How a call turned out, in the four groups every screen uses, and the same way the learning layer
-   reads them (see src/learn/explore.js): a problem was seen, it was confirmed to have worked, nothing
-   went wrong that anything could see, or it is too recent to say. A call only counts once a retry or
+/* How a call turned out, in the four groups every screen uses: a problem was seen, it was confirmed
+   to have worked, nothing went wrong that anything could see, or it is too recent to say. The
+   learning layer (src/learn/explore.js) agrees on what counts, silence as working and a failed call
+   as a problem, and differs in two ways: it keeps partial credit where these screens round each call
+   to worked or not, and it only reads calls that came through us, where these screens show copies too. A call only counts once a retry or
    a correction would have had time to arrive. Calls refused for the customer's own reasons, a
    malformed request or a spent balance, say nothing about how serving went and are left out. */
 const COUNTED = `(status_code IS NULL OR status_code = 200 OR status_code IN (0, 404, 408, 429) OR status_code >= 500)`;
@@ -49,17 +51,14 @@ export async function outcomeSummary(workloadId, days = 30) {
   const t0 = now();
   const first = t0 - (days - 1) * DAY;
   const series = Array.from({ length: days }, (_, i) => ({ at: first + i * DAY, calls: 0, problem: 0, confirmed: 0, quiet: 0, recent: 0 }));
-  const rows = await db.prepare(`SELECT created_at, reward, status_code FROM calls WHERE workload_id = ? AND source IN ('routed', 'trace')
-      AND created_at >= ? AND ${COUNTED}`).all(workloadId, since);
-  for (const r of rows) {
-    const b = Math.min(days - 1, Math.max(0, Math.ceil((Number(r.created_at) - first) / DAY)));
-    const d = series[b];
-    d.calls += 1;
-    const okay = r.status_code === null || r.status_code === undefined || Number(r.status_code) === 200;
-    if (!okay || (r.reward !== null && Number(r.reward) < 0.5)) d.problem += 1;
-    else if (r.reward !== null) d.confirmed += 1;
-    else if (Number(r.created_at) < at) d.quiet += 1;
-    else d.recent += 1;
+  // counted in the database a day at a time, rather than every call brought back to be counted here
+  const byDay = await db.prepare(`SELECT LEAST(${days - 1}, GREATEST(0, CEIL((created_at - ?) / 86400000.0)::int)) AS b, ${GROUPS}
+    FROM calls WHERE workload_id = ? AND source IN ('routed', 'trace') AND created_at >= ? AND ${COUNTED}
+    GROUP BY 1`).all(first, at, at, workloadId, since);
+  for (const r of byDay) {
+    const d = series[Number(r.b)];
+    if (!d) continue;
+    for (const k of ['calls', 'problem', 'confirmed', 'quiet', 'recent']) d[k] += Number(r[k]);
   }
 
   const signals = (await db.prepare(`SELECT kind, COUNT(*) AS n FROM outcomes WHERE workload_id = ? AND occurred_at >= ?
@@ -85,7 +84,10 @@ export async function outcomeSummary(workloadId, days = 30) {
       AND source IN ('routed', 'trace') AND created_at >= ? AND ${COUNTED} AND (reward < 0.5 OR NOT ${OKAY})
       ORDER BY created_at DESC LIMIT 5`)
     .all(workloadId, since)).map((r) => ({ id: r.id, at: r.created_at, model: r.served_model,
-    why: r.status_code && Number(r.status_code) !== 200 ? `the provider failed the call (${r.status_code})` : describe(parse(r.reward_json, [])) }));
+    // always a list, whatever went wrong: a failed call is one reason, a signal-read call has its own
+    why: r.status_code !== null && r.status_code !== undefined && Number(r.status_code) !== 200
+      ? [Number(r.status_code) === 0 ? 'the provider could not be reached' : `the provider failed the call (${r.status_code})`]
+      : describe(parse(r.reward_json, [])) }));
 
   return {
     days,
@@ -109,22 +111,35 @@ export async function outcomeSummary(workloadId, days = 30) {
 export async function tasksFor(workloadId, { limit = 6, days = 30 } = {}) {
   const since = now() - days * DAY;
   const like = `%"${workloadId}"%`;
-  const all = await db.prepare(`SELECT id, steps, tool_calls, tool_errors, retries, corrections, cost_usd, latency_ms, outcome,
-      started_at, ended_at, workloads_json FROM tasks WHERE workloads_json LIKE ? AND ended_at >= ? ORDER BY ended_at DESC LIMIT 400`)
-    .all(like, since);
-  const n = all.length;
-  const known = all.filter((t) => t.outcome !== null && t.outcome !== undefined);
+  /* Read through the workspace, which the tasks are kept under, so a page open never reads every
+     customer's tasks; and counted in the database, so a busy workload's figures are all of its tasks
+     rather than the newest few hundred. A task is two calls or more: one call on its own is not one. */
+  const w = await db.prepare('SELECT workspace_id FROM workloads WHERE id = ?').get(workloadId);
+  const ws = w?.workspace_id ?? '';
+  const agg = await db.prepare(`SELECT COUNT(*) AS n, AVG(steps) AS steps, AVG(cost_usd) AS cost, AVG(latency_ms) AS latency,
+      COUNT(*) FILTER (WHERE tool_errors > 0) AS tool_errors,
+      COUNT(*) FILTER (WHERE outcome IS NOT NULL) AS known,
+      COUNT(*) FILTER (WHERE outcome >= 0.5) AS worked,
+      COUNT(*) FILTER (WHERE steps = 2) AS s2, COUNT(*) FILTER (WHERE steps = 3) AS s3,
+      COUNT(*) FILTER (WHERE steps = 4) AS s4, COUNT(*) FILTER (WHERE steps = 5) AS s5,
+      COUNT(*) FILTER (WHERE steps >= 6) AS s6
+    FROM tasks WHERE workspace_id = ? AND workloads_json LIKE ? AND ended_at >= ? AND steps > 1`).get(ws, like, since);
+  const n = Number(agg?.n || 0);
+  const known = Number(agg?.known || 0);
   const overall = {
     tasks: n,
-    avgSteps: n ? all.reduce((a, t) => a + Number(t.steps), 0) / n : null,
-    avgCost: n ? all.reduce((a, t) => a + Number(t.cost_usd), 0) / n : null,
-    avgLatency: n ? all.reduce((a, t) => a + Number(t.latency_ms), 0) / n : null,
-    withToolErrors: all.filter((t) => Number(t.tool_errors) > 0).length,
-    rate: known.length ? known.filter((t) => Number(t.outcome) >= 0.5).length / known.length : null,
-    known: known.length,
+    avgSteps: n ? Number(agg.steps) : null,
+    avgCost: n ? Number(agg.cost) : null,
+    avgLatency: n ? Number(agg.latency) : null,
+    withToolErrors: Number(agg?.tool_errors || 0),
+    rate: known ? Number(agg.worked) / known : null,
+    known,
     // how many steps tasks take, for a small bar chart
-    steps: [1, 2, 3, 4, 5, 6].map((k) => ({ steps: k === 6 ? '6+' : String(k), n: all.filter((t) => (k === 6 ? Number(t.steps) >= 6 : Number(t.steps) === k)).length })),
+    steps: [2, 3, 4, 5, 6].map((k) => ({ steps: k === 6 ? '6+' : String(k), n: Number(agg?.[`s${k}`] || 0) })),
   };
+  const all = await db.prepare(`SELECT id, steps, tool_calls, tool_errors, retries, corrections, cost_usd, latency_ms, outcome,
+      started_at, ended_at, workloads_json FROM tasks WHERE workspace_id = ? AND workloads_json LIKE ? AND ended_at >= ? AND steps > 1
+      ORDER BY ended_at DESC LIMIT ?`).all(ws, like, since, limit);
   const recent = [];
   for (const t of all.slice(0, limit)) {
     const steps = await db.prepare(`SELECT c.id, c.step, c.workload_id, w.slug, c.served_model, c.latency_ms,

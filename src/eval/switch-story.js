@@ -187,6 +187,8 @@ export async function switchStory(w) {
       fromPerCall: fromPerCall == null ? null : round8(fromPerCall),
       toPerCall: toPerCall == null ? null : round8(toPerCall),
       cheaperPct: cheaperPct(fromPerCall, toPerCall),
+      // how the new strategy's call was priced: as measured, every check and call sent on in it, or at list price
+      toPricedBy: measuredRatio !== null ? 'measured' : 'list',
       // why a price may be missing: not in the price list, or no call of a known size to price
       fromListed: !!fromPrice, toListed: !!toPrice, sized,
     },

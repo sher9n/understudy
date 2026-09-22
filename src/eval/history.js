@@ -70,8 +70,12 @@ async function liveRates(shapeKind) {
   return rows;
 }
 
-/* Other workspaces' live rates, per model, where enough stands behind them that no one customer's
-   traffic can be read from the number: at least two workspaces and fifty calls. */
+/* Other workspaces' live rates, per model, only where so many stand behind a figure that no one
+   customer's traffic can be read from it: at least five workspaces, a hundred calls, and no single
+   workspace making up more than half of them. With two, a customer could watch the other one's
+   volume move from one reading to the next. The figure itself never leaves the server either: the
+   page is only told whether a model did better or worse than most, never a count or a rate. */
+export const LIVE_MIN_SPACES = 5;
 export function liveElsewhere(rows, workspaceId) {
   const theirs = rows.filter((r) => r.ws !== workspaceId);
   let allN = 0;
@@ -80,16 +84,19 @@ export function liveElsewhere(rows, workspaceId) {
   for (const r of theirs) {
     allN += r.n;
     allS += r.s;
-    const m = by.get(r.model) || { n: 0, s: 0, spaces: 0 };
+    const m = by.get(r.model) || { n: 0, s: 0, spaces: 0, top: 0 };
     m.n += r.n;
     m.s += r.s;
     m.spaces += 1;
+    m.top = Math.max(m.top, r.n);
     by.set(r.model, m);
   }
   const fleet = allN ? allS / allN : null;
   const out = new Map();
   for (const [model, m] of by) {
-    if (m.spaces >= 2 && m.n >= 50 && fleet !== null) out.set(model, { n: m.n, rate: m.s / m.n, fleet, spaces: m.spaces });
+    if (m.spaces >= LIVE_MIN_SPACES && m.n >= 100 && m.top <= m.n / 2 && fleet !== null) {
+      out.set(model, { n: m.n, rate: m.s / m.n, fleet, spaces: m.spaces });
+    }
   }
   return out;
 }

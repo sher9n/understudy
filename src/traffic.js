@@ -111,8 +111,7 @@ export async function workloadStats(workspaceId, days = 30) {
             (SELECT COUNT(*) FILTER (WHERE x.source = 'trace') FROM (SELECT source FROM calls c
                WHERE c.workload_id = w.id AND c.source IN ('routed', 'trace') ORDER BY c.created_at DESC LIMIT 100) x) AS recent_copies,
             (SELECT ws.mode FROM workspaces ws WHERE ws.id = w.workspace_id) AS ws_mode,
-            (SELECT a.label FROM arms a WHERE a.id = w.routed_arm_id) AS arm_label,
-            (SELECT a.kind FROM arms a WHERE a.id = w.routed_arm_id) AS arm_kind
+            (SELECT a.spec_json FROM arms a WHERE a.id = w.routed_arm_id) AS arm_spec
        FROM workloads w WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
       ORDER BY spend DESC, w.created_at`).all(since, since, workspaceId);
 }
@@ -168,7 +167,7 @@ export async function dailySpend(workspaceId, days = 30) {
 export async function recentCalls(workspaceId, limit = 40) {
   return await db.prepare(
     `SELECT c.id, c.source, c.requested_model, c.served_model, c.status_code,
-            c.latency_ms, c.cost_usd, c.charged_usd, c.created_at, c.escalated, c.explored,
+            c.latency_ms, c.cost_usd, c.charged_usd, c.created_at, c.escalated, c.explored, c.check_json,
             w.slug AS workload
        FROM calls c
        LEFT JOIN workloads w ON w.id = c.workload_id

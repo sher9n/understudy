@@ -58,7 +58,12 @@ export async function upsertArm(workload, spec, { status = 'resting', originRunI
   await db.prepare(`INSERT INTO arms (id, workspace_id, workload_id, kind, key, spec_json, label, status, origin_run_id,
         offline_json, stats_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-      ON CONFLICT (workload_id, key) DO UPDATE SET spec_json = excluded.spec_json, label = excluded.label,
+      ON CONFLICT (workload_id, key) DO UPDATE SET
+        /* what serves keeps the exact settings it was switched to: the key leaves out a cascade's
+           threshold and a router's weights, and a later measurement finding the same strategy at other
+           settings used to rewrite the live one with no switch recorded */
+        spec_json = CASE WHEN arms.status = 'serving' THEN arms.spec_json ELSE excluded.spec_json END,
+        label = CASE WHEN arms.status = 'serving' THEN arms.label ELSE excluded.label END,
         origin_run_id = COALESCE(excluded.origin_run_id, arms.origin_run_id),
         offline_json = COALESCE(excluded.offline_json, arms.offline_json), updated_at = excluded.updated_at`)
     .run(id('arm'), workload.workspace_id, workload.id, spec.kind, key, JSON.stringify(spec),

@@ -73,7 +73,7 @@ const tagOf = (part) => {
   }
   if (part.source === 'before') return part.note === 'cleared' ? 'cleared here before' : `${part.note} here before`;
   if (part.source === 'elsewhere') return `cleared ${part.note} similar workloads`;
-  if (part.source === 'live') return `worked on ${part.note} elsewhere`;
+  if (part.source === 'live') return `live results elsewhere: ${part.note}`;
   return SOURCE_WORDS[part.source] || part.source;
 };
 

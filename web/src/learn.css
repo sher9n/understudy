@@ -86,6 +86,8 @@
 .rdot.past { opacity: 0.35; }
 .rband.bg { opacity: 0.14; }
 .rdot.ring { background: var(--raise) !important; box-shadow: inset 0 0 0 2.4px var(--warn), 0 0 0 2px var(--raise); }
+.rgo { align-self: flex-start; margin-top: 5px; padding: 5px 10px; font-size: 11.5px; }
+.osig li.off { color: var(--mut); }
 .rnum small { display: block; font-size: 10px; font-weight: 500; color: var(--mut); font-family: 'Schibsted Grotesk', ui-sans-serif, system-ui, sans-serif; }
 .kring { width: 10px; height: 10px; border-radius: 50%; display: inline-block; box-shadow: inset 0 0 0 2px var(--warn); }
 .rdot { position: absolute; top: 5px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%;
@@ -115,7 +117,11 @@
   .rname { grid-column: 1 / -1; }
   .rtrack { grid-column: 1 / -1; }
   .rrow > .rnum:nth-child(4) { text-align: left; }
-  .rrow > .rnum:nth-child(5) { display: none; }
+  /* the column headings are hidden on a phone, so each figure carries its own */
+  .rrow:not(.rhead) > .rnum::after { content: ' ' attr(data-label); font-size: 10px; font-weight: 500; color: var(--mut);
+    font-family: 'Schibsted Grotesk', ui-sans-serif, system-ui, sans-serif; }
+  .rrow:not(.rhead) > .rnum { text-align: left; }
+  .rrow > .rnum small { display: inline; margin-left: 4px; }
 }
 
 .lnext { margin-top: 18px; padding: 14px 16px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); }

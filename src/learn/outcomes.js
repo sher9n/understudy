@@ -55,10 +55,13 @@ export async function defOf(workloadId) {
 }
 
 /** Save what "worked" means for a workload, and read every call it touches again. */
-export async function saveDef(workloadId, def) {
+export async function saveDef(workloadId, def, { reread = true } = {}) {
+  const before = await defOf(workloadId);
   const events = (Array.isArray(def.events) ? def.events : [])
+    .filter((e) => e && typeof e === 'object')
     .map((e) => ({ event: String(e.event || '').trim().slice(0, 80), means: e.means === 'failed' ? 'failed' : 'worked' }))
-    .filter((e) => e.event);
+    .filter((e) => e.event)
+    .slice(0, 100);
   const signals = Object.fromEntries(Object.keys(DEFAULT_DEF.signals).map((k) => [k, def.signals?.[k] !== false]));
   const windowDays = Math.max(1, Math.min(90, Math.round(Number(def.windowDays) || DEFAULT_DEF.windowDays)));
   await db.prepare(`INSERT INTO outcome_defs (workload_id, events_json, signals_json, window_days, updated_at)
@@ -71,8 +74,17 @@ export async function saveDef(workloadId, def) {
         AND (detail_json IS NULL OR detail_json NOT LIKE '%"given":true%')`)
       .run(e.means === 'worked' ? 1 : 0, workloadId, e.event);
   }
-  await rereadWorkload(workloadId);
-  return { events, signals, windowDays };
+  /* And one that has lost its meaning goes back to having none, unless the report carried its own
+     value: left as it was, a meaning given by mistake kept counting every report for it after it was
+     taken away, while the page said everything had been read again. */
+  for (const old of before.events) {
+    if (events.some((e) => e.event === old.event)) continue;
+    await db.prepare(`UPDATE outcomes SET value = NULL WHERE workload_id = ? AND kind = 'reported' AND event = ?
+        AND (detail_json IS NULL OR detail_json NOT LIKE '%"given":true%')`).run(workloadId, old.event);
+  }
+  const again = rereadWorkload(workloadId);
+  if (reread) await again;
+  return { events, signals, windowDays, reread: again };
 }
 
 /* One reading from a call's signals. Anything that failed for certain makes it a failure; a
@@ -116,7 +128,7 @@ export async function refreshReward(callId, def = null) {
   return r.reward;
 }
 
-async function rereadWorkload(workloadId) {
+export async function rereadWorkload(workloadId) {
   const def = await defOf(workloadId);
   const ids = await db.prepare(`SELECT DISTINCT call_id FROM outcomes WHERE workload_id = ? AND call_id IS NOT NULL
       AND occurred_at >= ?`).all(workloadId, now() - 90 * DAY);

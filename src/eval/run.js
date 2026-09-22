@@ -6,7 +6,7 @@ import { gateEval, chargeEval } from '../billing.js';
 import { planFor } from './plan.js';
 import { judgeBarPair, judgeCandidate } from './judge.js';
 import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, barIsMeaningful } from './compare.js';
-import { promote, revert, trafficOf } from './promote.js';
+import { promote, revert, trafficOf, everReverted } from './promote.js';
 import { replayOnce } from './replay.js';
 import { thinkingFit } from './select.js';
 import { loadFacts } from '../models/facts.js';
@@ -16,8 +16,8 @@ import { reportCallFailure } from '../alerts.js';
 import { jevUsable } from '../jev.js';
 import { structureOf, jevCheck, requestText, answerText as checkedText } from '../learn/check.js';
 import { simulateCascade, simulateRouter, bestOf } from '../learn/simulate.js';
-import { featuresOf, train, leaveOneOut } from '../learn/router.js';
-import { labelOf } from '../learn/arms.js';
+import { featuresOf, train, predict, leaveOneOutGently } from '../learn/router.js';
+import { labelOf, armById, leadModel } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
 import { markTrying } from '../learn/explore.js';
 
@@ -102,7 +102,7 @@ async function inParallel(items, n, fn) {
 async function paidForCalls(model, callIds) {
   if (!callIds.length) return new Set();
   const rows = await db.prepare(
-    `SELECT call_id FROM replay_cache WHERE model_id = ? AND status = 200 AND created_at >= ?
+    `SELECT call_id FROM replay_cache WHERE model_id = ? AND status = 200 AND created_at >= ? AND recipe_json IS NULL
         AND call_id = ANY(?) GROUP BY call_id HAVING COUNT(DISTINCT slot) >= 2`)
     .all(model, now() - config.REPLAY_REUSE_DAYS * DAY, callIds);
   return new Set(rows.map((r) => r.call_id));
@@ -217,6 +217,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const perCall = shape === 'free_text' ? 2 : 1;
   const finalists = Math.min(want, queue.length);
   const nominal = samples.length * 2 + (shape === 'free_text' ? samples.length : 0) + finalists * samples.length * perCall;
+  const runStartedAt = now();
   const run = {
     id: id('run'), workspace_id: workload.workspace_id, workload_id: workloadId,
     status: 'running', shape_kind: shape, reference_model: reference,
@@ -611,7 +612,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     };
     const key = keyOf(cand);
     // a model already serving this workload is re-checked on fresh answers, so a change in it shows
-    const reuse = !(trigger === 'automatic' && cand.model === workload.routed_model && !cand.key);
+    /* A model already serving this workload is re-checked on fresh answers, so a change in it shows:
+       it answers every call afresh, and when it is finished after being dropped, only the answers it
+       gave in this very run are used again, never ones from an earlier measurement. */
+    const recheck = trigger === 'automatic' && cand.model === workload.routed_model && !cand.key;
+    const reuse = noDrop || !recheck;
+    const reuseSince = recheck ? runStartedAt : 0;
     answered.set(key, 0);
     for (const [i, p] of kept.entries()) {
       if (halt) { st.stopped = halt === 'budget' ? 'budget' : 'user'; break; }
@@ -619,7 +625,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
          a few calls for each model dropped early, and a model can be dropped late. */
       if (spentTotal >= hardLimit) { halt = 'budget'; st.stopped = 'budget'; break; }
       if (await halted()) { halt = halt || 'stopped'; st.stopped = 'user'; break; }
-      const r = await replayOnce({ body: p.body, callId: p.s.id, model: cand.model, recipe: cand.recipe, slot: 0, workload, reuse });
+      const r = await replayOnce({ body: p.body, callId: p.s.id, model: cand.model, recipe: cand.recipe, slot: 0, workload, reuse, reuseSince });
       note(r);
       // our own account, not this model: the whole measurement stops, and nothing is held against anybody
       if (r.account) { halt = 'account'; accountHit = accountHit || { ...r, model: cand.model }; st.stopped = 'user'; break; }
@@ -917,23 +923,27 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return true;
   };
 
-  const routerFor = async (cand, st) => {
+  const routerFor = async (cand, st, { always = false } = {}) => {
     const usable = st.calls.filter((c) => c.ok && c.scored);
     const matched = usable.filter((c) => c.score === 0).length;
     // something to tell apart: some calls it gets right and some it does not
     if (usable.length < ROUTER_MIN_CALLS || matched < 5 || usable.length - matched < 5) return false;
     const samples = usable.map((c) => ({ x: featuresOf(kept[c.i].body), y: c.score === 0 ? 1 : 0, c }));
-    const loo = leaveOneOut(samples);
+    const loo = await leaveOneOutGently(samples);
     const byCall = new Map(samples.map((s, k) => [s.c.i, loo[k]]));
+    /* Every call is predicted, the ones the cheap model failed included: the router picks before it
+       sends, so it meets those calls too, and one it sends to the cheap model gets the failure. Left
+       out, they were always sent on in the sums and never charged, which is not what the router does. */
+    const model = train(samples);
     const calls = st.calls.map((c) => ({ ok: c.ok, score: c.scored ? c.score : (kept[c.i].noise ?? noiseMean), cost: c.cost,
-      latency: c.latency, ttft: c.ttft, p: byCall.get(c.i) ?? 0, ref: refOfPair(kept[c.i]) }));
+      latency: c.latency, ttft: c.ttft, p: byCall.get(c.i) ?? predict(model, featuresOf(kept[c.i].body)), ref: refOfPair(kept[c.i]) }));
     const readings = simulateRouter(calls);
     const best = bestOf(readings, { floor, reviewBand, fast: (r) => quickEnough(metric === 'ttft' ? r.ttft : r.latency) });
     /* A router is only worth keeping when it clears the bar on calls it did not learn from, and
        saves something doing it: one that sends every call to the customer's own model clears
-       the bar at no saving, and is the customer's own model with extra steps. */
-    if (!best.inside || best.ratio === null || best.ratio > 0.95) return false;
-    const model = train(samples);
+       the bar at no saving, and is the customer's own model with extra steps. The router serving
+       the workload is always written down, whatever it found, so a measurement can switch it back. */
+    if (!always && (!best.inside || best.ratio === null || best.ratio > 0.95)) return false;
     const spec = { kind: 'router', cheap: { model: cand.model, recipe: cand.recipe ?? null }, strong: { model: reference, recipe: null },
       threshold: best.threshold, ...model };
     await insertResult(strategyRow(cand, spec, best, verdictOf(best)));
@@ -941,6 +951,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   };
 
   let strategyLeft = 0;
+  /* The strategy serving this workload now is always worked out again, from its lead model's run,
+     whatever that model did on its own: otherwise a cascade or router whose answers had slipped was
+     never written down, and so never switched back. */
+  const servingArmNow = workload.routed_arm_id ? await armById(workload.routed_arm_id) : null;
+  const servingKind = ['cascade', 'router'].includes(servingArmNow?.spec?.kind) ? servingArmNow.spec.kind : null;
+  const leadPart = servingKind ? leadModel(servingArmNow.spec) : null;
+  const leadKey = leadPart ? (leadPart.model === reference && leadPart.recipe?.reasoning ? `${reference}#lighter` : leadPart.model) : null;
   if (!halt) {
     const cheaper = (r) => r.cost_month_usd !== null && (refMonthly === null || r.cost_month_usd < refMonthly);
     // one model, or the customer's own thinking less; never a strategy built on a strategy
@@ -956,7 +973,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const roomLeft = (r) => (r.cost_ratio === null ? 0 : 1 - (Number(r.cost_ratio) + Math.min(1, Number(r.gap_pct) / 100)));
     const close = plain.filter((r) => r.stopped === 'bar' && cheaper(r) && roomLeft(r) >= 0.25)
       .sort((a, b) => a.cost_month_usd - b.cost_month_usd).slice(0, 2);
-    const worth = [...pool, ...close].sort((a, b) => a.cost_month_usd - b.cost_month_usd).slice(0, 3);
+    const forced = leadKey ? plain.find((r) => r.model_id === leadKey) : null;
+    const worth = [...(forced ? [forced] : []),
+      ...[...pool, ...close].filter((r) => r !== forced).sort((a, b) => a.cost_month_usd - b.cost_month_usd).slice(0, 3)];
     if (worth.length && (jevUsable() || kept.length >= ROUTER_MIN_CALLS)) {
       strategyLeft = worth.length * kept.length;
       remaining = () => strategyLeft;
@@ -971,8 +990,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
             if (more.runs < kept.length || more.stopped) continue;
             st = more;
           }
-          if (jevUsable()) await cascadeFor(cand, st);
-          if (!halt) await routerFor(cand, st);
+          // the serving strategy's own kind for its lead model; both kinds for everything else
+          const isServing = r === forced;
+          if (jevUsable() && (!isServing || servingKind === 'cascade')) await cascadeFor(cand, st);
+          if (!halt && (!isServing || servingKind === 'router')) await routerFor(cand, st, { always: isServing });
         }
       } catch (err) {
         await interrupt(`Something went wrong here while trying strategies: ${String(err?.message || err).slice(0, 160)}.`, { retryMs: 0 });
@@ -1020,7 +1041,15 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   if (serving) {
     // the strategy serving it, by the name its result carries: a cascade's is its own row
     const servingAs = await servingKey(workload);
-    const mine = results.find((r) => r.model_id === servingAs);
+    let mine = results.find((r) => r.model_id === servingAs);
+    if (!mine && servingKind) {
+      /* A strategy that could not be worked out again is judged by what its lead model did alone,
+         where that says something about the strategy as well: a provider that refused it, or a model
+         too slow on its own, which a check or a pick can only make slower. */
+      const lead = results.find((r) => r.model_id === leadKey);
+      if (lead && lead.verdict === 'failed') mine = lead;
+      else if (lead && lead.verdict === 'slower') mine = { ...lead, stopped: null };
+    }
     const ruled = plan.excluded.find((e) => e.model === serving);
     let why = null;
     let soft = true;
@@ -1044,10 +1073,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     }
   }
 
-  // the cheapest model that cleared, and what we do about it
-  const cleared = results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd !== null)
+  /* The cheapest that cleared, and what we do about it. One switched back before is passed over
+     rather than chosen and refused, which used to stop the next cheapest from ever being switched to. */
+  const clearedAll = results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd !== null)
     .filter((r) => refMonthly === null || r.cost_month_usd < refMonthly)
     .sort((a, b) => a.cost_month_usd - b.cost_month_usd);
+  const cleared = [];
+  for (const r of clearedAll) if (!await everReverted(workloadId, r.model_id)) cleared.push(r);
   const best = cleared[0] || null;
   const dropped = results.filter((r) => r.stopped).length;
 

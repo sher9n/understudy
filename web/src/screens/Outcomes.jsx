@@ -18,6 +18,21 @@ const SIGNAL_WORDS = [
   ['correction', 'The next message said the answer was wrong'],
 ];
 
+/* A count of one signal, as a sentence that agrees with its number. */
+const plural = (n, one, many) => (n === 1 ? one : many);
+const SIGNAL_LINES = {
+  broken: (n) => `${n} ${plural(n, 'answer was', 'answers were')} not the JSON the request asked for`,
+  cut_off: (n) => `${n} ${plural(n, 'answer was', 'answers were')} cut off at the length limit`,
+  refused: (n) => `${n} ${plural(n, 'time', 'times')} the model refused to answer`,
+  tool_error: (n) => `${n} ${plural(n, 'tool', 'tools')} failed on what the model gave ${plural(n, 'it', 'them')}`,
+  tool_ok: (n) => `${n} ${plural(n, 'tool', 'tools')} worked on what the model gave ${plural(n, 'it', 'them')}`,
+  retry: (n) => `${n} ${plural(n, 'call was', 'calls were')} sent again straight away`,
+  correction: (n) => `${n} ${plural(n, 'time', 'times')} the next message said the answer was wrong`,
+  continued: (n) => `${n} ${plural(n, 'time', 'times')} the conversation moved on`,
+};
+// which setting in "what counts as working" a signal answers to
+const SETTING_OF = { tool_error: 'tool', tool_ok: 'tool', continued: 'correction' };
+
 const Tile = ({ k, v, s, tone = '' }) => (
   <div className={`tile ${tone}`}><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
 );
@@ -45,7 +60,7 @@ export default function Outcomes({ w }) {
           <div className="tiles otiles">
             <Tile k="Worked" v={o.rate === null ? '–' : pct(o.rate, 1)}
               s={judged ? `of ${num(judged)} calls old enough to tell` : 'no calls old enough yet'} tone="good" />
-            <Tile k="A problem was seen" v={num(o.problem)} s={o.problem ? 'listed below, with why' : 'none in this window'} tone={o.problem ? 'bad' : ''} />
+            <Tile k="A problem was seen" v={num(o.problem)} s={o.problem ? 'the latest are listed below, with why' : 'none in this window'} tone={o.problem ? 'bad' : ''} />
             <Tile k="Confirmed as working" v={num(o.confirmed)} s="a tool that worked, a conversation that moved on, or your report" />
             <Tile k="Too recent to tell" v={num(o.recent)} s={`calls from the last ${o.settleMin} minutes`} />
           </div>
@@ -72,10 +87,13 @@ export default function Outcomes({ w }) {
                 <div>
                   <div className="kk">What we noticed</div>
                   <ul className="osig">
-                    {o.signals.map((sg) => (
-                      <li key={sg.kind}><i className={`osw ${sg.worked ? 'good' : 'bad'}`} />
-                        <span>{num(sg.n)} {sg.n === 1 ? 'call' : 'calls'} {sg.words}</span></li>
-                    ))}
+                    {o.signals.map((sg) => {
+                      const counted = o.def.signals[SETTING_OF[sg.kind] || sg.kind] !== false;
+                      return (
+                        <li key={sg.kind} className={counted ? '' : 'off'}><i className={`osw ${!counted ? 'recent' : sg.worked ? 'good' : 'bad'}`} />
+                          <span>{(SIGNAL_LINES[sg.kind] || ((n) => `${n} × ${sg.words}`))(sg.n)}{counted ? '' : ' (not counted)'}</span></li>
+                      );
+                    })}
                   </ul>
                 </div>
               )}
@@ -85,7 +103,7 @@ export default function Outcomes({ w }) {
                   <ul className="osig">
                     {o.failures.map((f) => (
                       <li key={f.id}><i className="osw bad" />
-                        <span><b>{timeIST(f.at)} IST</b> on {String(f.model || '').split('/').pop()}: {(f.why || []).join('; ') || 'a problem'}</span></li>
+                        <span><b>{timeIST(f.at)} IST</b> on {String(f.model || '').split('/').pop()}: {(Array.isArray(f.why) ? f.why : [f.why].filter(Boolean)).join('; ') || 'a problem'}</span></li>
                     ))}
                   </ul>
                 </div>
@@ -121,7 +139,7 @@ function Definition({ w, o, onSaved }) {
     setMsg(null);
     try {
       await api.saveOutcomeDef(w.id, { signals, events: events.filter((e) => e.means).map((e) => ({ event: e.event, means: e.means })) });
-      setMsg('Saved. Every call these touch has been read again.');
+      setMsg('Saved. The calls it touches are being read again now, so the figures above may take a minute to move.');
       await onSaved();
     } catch (x) { setMsg(x.message); } finally { setBusy(false); }
   };
@@ -152,14 +170,14 @@ function Definition({ w, o, onSaved }) {
                 <code>{e.event}</code>
                 <div className="seg">
                   {[['worked', 'means it worked'], ['failed', 'means it did not'], [null, 'no meaning yet']].map(([m, label]) => (
-                    <button key={String(m)} className={`segb${e.means === m ? ' on' : ''}`}
+                    <button key={String(m)} className={`segb${e.means === m ? ' on' : ''}`} aria-pressed={e.means === m}
                       onClick={() => setEvents(events.map((x, k) => (k === i ? { ...x, means: m } : x)))}>{label}</button>
                   ))}
                 </div>
               </div>
             ))}
             <div className="oadd">
-              <input className="inp" placeholder="an event name, like ticket_resolved" value={add} onChange={(x) => setAdd(x.target.value)} />
+              <input className="inp" aria-label="A new event name" placeholder="an event name, like ticket_resolved" value={add} onChange={(x) => setAdd(x.target.value)} />
               <button className="minig" disabled={!add.trim() || events.some((e) => e.event === add.trim())}
                 onClick={() => { setEvents([...events, { event: add.trim().slice(0, 80), means: 'worked' }]); setAdd(''); }}>Add</button>
             </div>
@@ -178,9 +196,10 @@ function Definition({ w, o, onSaved }) {
 function Report({ o }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState('curl');
-  const curl = `# every answer carries its call id in a header:
+  const curl = `# every answer through us carries its call id in a header:
 #   ${o.callIdHeader}: call_...
-# or send your own id with the request, as the header ${o.refHeader}
+# or send your own id with the request, as the header ${o.refHeader},
+# and report with "ref": "<your id>" instead of "call_id" (copies can carry one too)
 
 curl ${o.endpoint} \\
   -H "Authorization: Bearer $UNDERSTUDY_KEY" \\
@@ -219,7 +238,7 @@ requests.post("${o.endpoint}",
           </p>
           <div className="tabs otabs">
             {[['curl', 'curl'], ['js', 'JavaScript'], ['py', 'Python']].map(([k, label]) => (
-              <button key={k} className={`segb${tab === k ? ' on' : ''}`} onClick={() => setTab(k)}>{label}</button>
+              <button key={k} className={`segb${tab === k ? ' on' : ''}`} aria-pressed={tab === k} onClick={() => setTab(k)}>{label}</button>
             ))}
             <button className="minig ocopy" onClick={() => navigator.clipboard?.writeText(code).catch(() => {})}>Copy</button>
           </div>

@@ -149,7 +149,8 @@ export async function maybeTopUp(workspaceId) {
   const acct = await account(workspaceId);
   if (!acct.auto_topup || !acct.payment_method || !canBill()) return false;
   if (acct.balance_usd >= config.TOPUP_THRESHOLD_USD) return false;
-  await enqueue('topup', { workspaceId }, { unique: true });
+  // ahead of anything already waiting: a balance about to run dry stops every routed call
+  await enqueue('topup', { workspaceId }, { unique: true, runAfter: now() - 3600000 });
   return true;
 }
 

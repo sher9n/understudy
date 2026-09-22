@@ -9,6 +9,7 @@ import SwitchedCard from './SwitchedCard.jsx';
 import Learning from './Learning.jsx';
 import Outcomes from './Outcomes.jsx';
 import { ServingFlow, inHundred } from '../LearnCharts.jsx';
+import SectionBoundary from '../SectionBoundary.jsx';
 
 const Tile = ({ k, v, s }) => (
   <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
@@ -75,9 +76,11 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
 
   // what live calls are teaching us: read beside the workload, and again whenever it changes
   const [learn, setLearn] = useState(null);
-  const loadLearn = () => api.learning(id).then(setLearn).catch(() => {});
+  const [learnErr, setLearnErr] = useState(null);
+  const loadLearn = () => api.learning(id).then((x) => { setLearn(x); setLearnErr(null); }).catch((e) => setLearnErr(e.message));
   const load = () => Promise.all([api.workload(id).then(setW).catch((e) => setErr(e.message)), loadLearn()]);
-  useEffect(() => { load(); }, [id]);
+  // another workload's records are never shown under this one's name while its own are read
+  useEffect(() => { setLearn(null); setLearnErr(null); load(); }, [id]);
   useEffect(() => {
     if (!openRun) { setRunData(null); return undefined; }
     let live = true;
@@ -150,7 +153,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
 
       <section className={`dcard${switched ? ' done' : hot ? ' hot' : ''}`}>
         {switched && w.switched ? (
-          <SwitchedCard s={w.switched} learn={learn} />
+          <SectionBoundary><SwitchedCard s={w.switched} learn={learn} /></SectionBoundary>
         ) : (
           <>
             {switched && <span className="eyebrow eyeok">Switched automatically</span>}
@@ -229,7 +232,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           {/* The live watch looks at a switched model's calls every hour, and each measurement on
               the workspace's schedule checks its answers again; either switches it back. */}
           {[['auto', 'Optimize automatically', 'We switch as soon as a candidate clears your bar, and switch back on our own if it stops clearing it, starts failing calls or slows down. You can switch back yourself at any time.'],
-            ['ask', 'Ask me first', 'We test and recommend. Nothing changes until you approve it.']].map(([mode, t, s]) => (
+            ['ask', 'Ask me first', 'We test and recommend. Nothing is switched until you approve it.']].map(([mode, t, s]) => (
             <button key={mode} className={`choicebox${w.optimizeMode === mode ? ' picked' : ''}`}
               disabled={busy} onClick={act(() => api.setMode(w.id, mode))}>
               <span className="cbt">{t}</span><span className="cbs">{s}</span>
@@ -386,8 +389,12 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         )}
       </section>
 
-      <Learning w={w} d={learn} onReload={loadLearn} />
-      <Outcomes w={w} />
+      <SectionBoundary title="What live calls are teaching us">
+        <Learning w={w} d={learn} err={learnErr} onReload={loadLearn} onSwitched={async () => { await load(); onChanged?.(); }} />
+      </SectionBoundary>
+      <SectionBoundary title="How calls turned out">
+        <Outcomes key={w.id} w={w} />
+      </SectionBoundary>
 
       <WorkloadCalls workloadId={w.id} />
     </>
@@ -436,6 +443,11 @@ const blurb = (w, cand, switched) => {
   if (switched) {
     // only when the switch's own record is missing; the card above is the ordinary case
     return `We switched it because it cleared your bar. Switch back at any time and your calls go to ${short(w.reference)} again from the next one.`;
+  }
+  if (cand && cand.name && cand.name.kind !== 'model' && w.traffic && !w.traffic.carries) {
+    return `It stayed inside your bar across your own calls. It checks answers, or picks the model call by call, here at `
+      + `Understudy, so it can only run on calls that come through us, not by changing the model your code asks for: that `
+      + `is one change of base URL. Your calls reach us as copies today, so nothing changes until they do.`;
   }
   if (cand && w.traffic && !w.traffic.carries) {
     return `It stayed inside your bar across your own calls, replayed and compared answer by answer. Your calls `

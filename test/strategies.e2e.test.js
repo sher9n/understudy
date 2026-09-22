@@ -41,6 +41,8 @@ process.env.JOBS_ENABLED = 'false';
 process.env.JEV_VIA = 'openrouter';
 process.env.TYPESAFE_API_KEY = '';
 process.env.ALERTS_ENABLED = 'false';
+// a live check that takes longer than this sends the call on
+process.env.JEV_LIVE_TIMEOUT_MS = '400';
 
 const { db, now } = await import('../src/db/index.js');
 const { default: migrate } = await import('../src/db/migrate.js');
@@ -51,6 +53,7 @@ const { saveCatalog } = await import('../src/openrouter.js');
 const { runEvaluation } = await import('../src/eval/run.js');
 const { move, withFee } = await import('../src/billing.js');
 const { default: v1 } = await import('../src/proxy.js');
+const { wakeLiveChecks } = await import('../src/learn/check.js');
 
 await migrate({ quiet: true });
 
@@ -64,12 +67,16 @@ const JEV_COST = 0.00001;
 /* The customer's model is right and a touch unstable with itself, which sets the bar; the cheap
    one is wrong in every field on the hard calls; the drifting one is wrong on all of them. */
 let refCalls = 0;
+// the cheap model can go bad, and Jev can be fooled, to see a measurement catch a cascade that slipped
+let cheapBroken = false;
+let jevFooled = false;
+let jevDelay = 0;
 const answerOf = (model, i) => {
   if (model === REF) {
     refCalls += 1;
     return i % 20 === 0 && refCalls % 2 === 0 ? { ...right(i), lines: 9 } : right(i);
   }
-  if (model === CHEAP) return hard(i) ? { total: 0, currency: 'EUR', lines: 0 } : right(i);
+  if (model === CHEAP) return hard(i) || cheapBroken ? { total: 0, currency: 'EUR', lines: 0 } : right(i);
   return { total: 999, currency: 'EUR', lines: 0 };
 };
 
@@ -82,7 +89,7 @@ const jevReading = (state) => {
   let ans = null;
   try { ans = JSON.parse(state.answer); } catch { ans = null; }
   const ok = ans && ans.total === 100 + i && ans.currency === 'USD';
-  const fine = ok ? (i % 16 === 5 ? 0.55 : 0.93) : 0.15;
+  const fine = jevFooled ? 0.93 : ok ? (i % 16 === 5 ? 0.55 : 0.93) : 0.15;
   return { type: 'choice', choice: fine >= 0.5 ? 'fine' : 'doubtful', confidence: Math.max(fine, 1 - fine),
     probabilities: { fine, doubtful: Math.round((0.99 - fine) * 100) / 100, fails: 0.01 } };
 };
@@ -100,9 +107,11 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ error: { message: 'Insufficient credits' } }));
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ model: 'typesafe/jev-1.13', answers: { check: jevReading(payload.state) },
-        usage: { input_tokens: 240, cost: JEV_COST } }));
+      setTimeout(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ model: 'typesafe/jev-1.13', answers: { check: jevReading(payload.state) },
+          usage: { input_tokens: 240, cost: JEV_COST } }));
+      }, jevDelay);
       return;
     }
     const model = payload.model;
@@ -295,6 +304,56 @@ test('the cascade serves live calls: keeps the sure answers, sends the doubtful 
   const streamedRow = await callRow(streamed.callId);
   assert.equal(Number(streamedRow.escalated), 1);
   assert.equal(streamedRow.served_model, REF);
+});
+
+test('a check that is slow sends the call on at once, and rests the live checks rather than making every call wait', async () => {
+  const { secret } = cascadeShop;
+  jevDelay = 1500;
+  try {
+    const t0 = Date.now();
+    const slow = await send(secret, request(541));
+    assert.equal(slow.status, 200);
+    assert.ok(Date.now() - t0 < 1400, `waited ${Date.now() - t0} ms, not the check's 1500`);
+    assert.deepEqual(JSON.parse(slow.content), right(541));
+    assert.equal(JSON.parse((await callRow(slow.callId)).check_json).by, 'check failed');
+    // resting now: the next call goes straight to the customer's own model, and the cheap model is not even asked
+    const asked = jevAsked;
+    const next = await send(secret, request(549));
+    const row = await callRow(next.callId);
+    assert.equal(JSON.parse(row.check_json).by, 'unavailable');
+    assert.equal(row.served_model, REF);
+    assert.equal(jevAsked, asked);
+  } finally {
+    jevDelay = 0;
+    wakeLiveChecks();
+  }
+});
+
+test('a measurement re-checks the serving cascade on fresh answers, and switches it back when it slips', async () => {
+  const shop = await seed('recheck');
+  const first = await runEvaluation(shop.workload.id);
+  assert.equal(first.ok, true);
+  let w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(shop.workload.id);
+  const arm = await db.prepare('SELECT * FROM arms WHERE id = ?').get(w.routed_arm_id);
+  assert.equal(arm.kind, 'cascade', 'switched to the cascade');
+  // the cheap model goes bad and the check no longer sees it: the answers the cascade keeps are now wrong
+  cheapBroken = true;
+  jevFooled = true;
+  try {
+    const again = await runEvaluation(shop.workload.id, { trigger: 'automatic' });
+    assert.equal(again.ok, true, JSON.stringify(again));
+    const row = await db.prepare('SELECT * FROM eval_results WHERE run_id = ? AND model_id = ?').get(again.runId, `cascade:${CHEAP}`);
+    assert.ok(row, 'the serving cascade was worked out again');
+    assert.equal(row.verdict, 'missed', `${row.gap_pct}%`);
+    w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(shop.workload.id);
+    assert.equal(w.routed_model, null, 'switched back to the customer\'s own model');
+    const r = await db.prepare(`SELECT * FROM promotions WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(shop.workload.id);
+    assert.equal(r.action, 'auto_revert', 'for good: its answers stopped matching');
+    assert.equal(r.from_model, `cascade:${CHEAP}`);
+  } finally {
+    cheapBroken = false;
+    jevFooled = false;
+  }
 });
 
 test('when Jev cannot answer, a cascade sends the call on rather than serving an answer nobody checked', async () => {

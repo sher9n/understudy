@@ -65,7 +65,9 @@ export function simulateCascade(calls, { thresholds = THRESHOLDS, checkCost = ()
 
 /**
  * The same for a router: each call goes to the cheap model when its predicted chance of matching
- * is at least the threshold, and to the customer's own otherwise. No check, no second call.
+ * is at least the threshold, and to the customer's own otherwise. No check, no second call, and so
+ * nothing to catch a cheap answer that failed: a call the router sends to the cheap model gets
+ * whatever the cheap model gave it, a broken answer or an error included, and that counts as a miss.
  * calls: { ok, score, cost, latency, ttft, p, ref: {...} }
  */
 export function simulateRouter(calls, { thresholds = THRESHOLDS } = {}) {
@@ -78,8 +80,8 @@ export function simulateRouter(calls, { thresholds = THRESHOLDS } = {}) {
     const ttft = [];
     for (const c of calls) {
       refCost += c.ref.cost;
-      if (c.p >= t && c.ok) {
-        sum += c.score;
+      if (c.p >= t) {
+        sum += c.ok ? c.score : 1;
         cost += c.cost || 0;
         latency.push(c.latency || 0);
         ttft.push(c.ttft ?? c.latency ?? 0);
@@ -97,13 +99,19 @@ export function simulateRouter(calls, { thresholds = THRESHOLDS } = {}) {
   });
 }
 
-/** The reading to keep: the cheapest inside the bar and quick enough, or the closest to the bar. */
+/**
+ * The reading to keep: the cheapest inside the bar and quick enough; else, when the answers were
+ * inside the bar and only the time was not, the cheapest of those, marked slow, so it is called
+ * slower rather than missed; else the one closest to the bar, marked near when it is within the
+ * review band. Near is the most careful such reading, never the least: it is what gets looked at.
+ */
 export function bestOf(readings, { floor, reviewBand = 1.25, fast = () => true } = {}) {
-  const inside = readings.filter((r) => r.gap <= floor && fast(r) && r.ratio !== null)
-    .sort((a, b) => a.ratio - b.ratio || a.gap - b.gap);
-  if (inside.length) return { ...inside[0], inside: true };
-  const near = readings.filter((r) => r.gap <= floor * reviewBand && fast(r) && r.ratio !== null)
-    .sort((a, b) => a.ratio - b.ratio);
+  const priced = readings.filter((r) => r.ratio !== null);
+  const inside = priced.filter((r) => r.gap <= floor).sort((a, b) => a.ratio - b.ratio || a.gap - b.gap);
+  const quick = inside.filter(fast);
+  if (quick.length) return { ...quick[0], inside: true };
+  if (inside.length) return { ...inside[0], inside: true, slow: true };
+  const near = priced.filter((r) => r.gap <= floor * reviewBand && fast(r)).sort((a, b) => a.gap - b.gap || a.ratio - b.ratio);
   if (near.length) return { ...near[0], inside: false, near: true };
   return { ...[...readings].sort((a, b) => a.gap - b.gap)[0], inside: false };
 }

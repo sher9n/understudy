@@ -103,8 +103,20 @@ handle('read_followup', async (payload) => {
   const p = await readFollowUp(payload, { ask: askJev });
   return { ok: true, p };
 });
+/* A person's next message, read by Jev for whether it says the answer before was wrong. At most
+   thirty a workload an hour: a busy chat would otherwise queue one job per message, faster than
+   they can be read, and hold up every job behind them. The text kept for reading is clipped, and a
+   read waits half a minute so work that cannot wait goes first. */
+const followUpsRead = new Map();
 onFollowUp(async (payload) => {
-  await enqueue('read_followup', payload);
+  const hour = Math.floor(Date.now() / 3600000);
+  const k = `${payload.workloadId}|${hour}`;
+  const n = followUpsRead.get(k) || 0;
+  if (n >= 30) return;
+  followUpsRead.set(k, n + 1);
+  if (followUpsRead.size > 5000) for (const key of followUpsRead.keys()) if (!key.endsWith(`|${hour}`)) followUpsRead.delete(key);
+  const clip = (t) => (typeof t === 'string' && t.length > 1500 ? `${t.slice(0, 1500)} [cut]` : t);
+  await enqueue('read_followup', { ...payload, answer: clip(payload.answer), reply: clip(payload.reply) }, { runAfter: now() + 30000 });
 });
 
 onMissingFits((workloadId) => {
@@ -267,6 +279,10 @@ handle('purge', async () => {
   /* Each workspace chooses its own window in Settings, so this runs per workspace rather
      than against one deployment-wide cutoff. A window of 0 means keep indefinitely, and
      those workspaces are skipped entirely: nothing of theirs is ever blanked. */
+  /* Finished jobs are kept a week, to see what ran, and no longer: some carry a customer's text, such
+     as a follow-up waiting to be read, which must not outlive the workspace's own retention. */
+  const jobsGone = (await db.prepare(`DELETE FROM jobs WHERE status IN ('done', 'failed') AND created_at < ?`)
+    .run(now() - 7 * 86400000)).changes;
   let a = 0;
   let b = 0;
   const spaces = await db.prepare('SELECT id, retention_days FROM workspaces').all();
@@ -283,7 +299,7 @@ handle('purge', async () => {
           SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`)
       .run(now(), ws.id, cutoff)).changes;
   }
-  return { ok: true, calls: a, samples: b };
+  return { ok: true, calls: a, samples: b, jobs: jobsGone };
 });
 
 /* Measuring again, on the workspace's own schedule.

@@ -64,14 +64,15 @@ const fromRow = (r) => ({
 async function remember(key, row) {
   await db.prepare(
     `INSERT INTO replay_cache (key, model_id, call_id, slot, status, error, response_json, latency_ms, ttft_ms,
-            prompt_tokens, completion_tokens, reasoning_tokens, cost_usd, provider, created_at)
+            prompt_tokens, completion_tokens, reasoning_tokens, cost_usd, provider, created_at, recipe_json)
      VALUES (@key, @model_id, @call_id, @slot, @status, @error, @response_json, @latency_ms, @ttft_ms,
-            @prompt_tokens, @completion_tokens, @reasoning_tokens, @cost_usd, @provider, @created_at)
+            @prompt_tokens, @completion_tokens, @reasoning_tokens, @cost_usd, @provider, @created_at, @recipe_json)
      ON CONFLICT (key) DO UPDATE SET status = excluded.status, error = excluded.error,
             response_json = excluded.response_json, latency_ms = excluded.latency_ms, ttft_ms = excluded.ttft_ms,
             prompt_tokens = excluded.prompt_tokens, completion_tokens = excluded.completion_tokens,
             reasoning_tokens = excluded.reasoning_tokens, cost_usd = excluded.cost_usd,
-            provider = excluded.provider, created_at = excluded.created_at`).run({ key, ...row, created_at: now() });
+            provider = excluded.provider, created_at = excluded.created_at, recipe_json = excluded.recipe_json`)
+    .run({ recipe_json: null, key, ...row, created_at: now() });
 }
 
 /**
@@ -79,11 +80,12 @@ async function remember(key, row) {
  * completionTokens, reasoningTokens, provider, transient }. `cost` is what this call spent now,
  * which is nothing when an earlier answer was reused; `savedUsd` is what reusing it saved.
  */
-export async function replayOnce({ body, callId = null, model, recipe = null, slot = 0, workload, reuse = true }) {
+export async function replayOnce({ body, callId = null, model, recipe = null, slot = 0, workload, reuse = true, reuseSince = 0 }) {
   const key = replayKey(workload.workspace_id, body, model, recipe, slot);
   if (reuse) {
     const hit = await db.prepare('SELECT * FROM replay_cache WHERE key = ?').get(key);
-    if (hit) {
+    // an answer from before reuseSince is not reused: a re-check wants what the model answers now
+    if (hit && Number(hit.created_at) >= reuseSince) {
       const life = hit.status === 200 ? config.REPLAY_REUSE_DAYS * DAY : config.REPLAY_FAILURE_REUSE_HOURS * HOUR;
       if (now() - hit.created_at < life) {
         const r = fromRow(hit);
@@ -139,6 +141,8 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
       latency_ms: out.latencyMs, ttft_ms: out.ttftMs, prompt_tokens: out.promptTokens,
       completion_tokens: out.completionTokens, reasoning_tokens: out.reasoningTokens,
       cost_usd: out.cost, provider: out.provider,
+      // how it was asked, when that was not the customer's own way
+      recipe_json: recipe ? JSON.stringify(recipe) : null,
     });
   }
   await recordCall({

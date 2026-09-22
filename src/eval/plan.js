@@ -54,7 +54,7 @@ async function enabledSet(workspaceId) {
 async function cachedBarShare(workload, sample) {
   const n = (await db.prepare(
     `SELECT COUNT(*) AS n FROM replay_cache r
-      WHERE r.model_id = ? AND r.status = 200 AND r.created_at >= ?
+      WHERE r.model_id = ? AND r.status = 200 AND r.created_at >= ? AND r.recipe_json IS NULL
         AND r.call_id IN (SELECT id FROM calls WHERE workload_id = ? AND created_at >= ?)`)
     .get(workload.reference_model, now() - config.REPLAY_REUSE_DAYS * DAY, workload.id, now() - 30 * DAY)).n;
   return Math.min(1, Number(n) / Math.max(1, sample * 2));

@@ -1,6 +1,6 @@
 import { chat, UpstreamError } from '../openrouter.js';
 import { jevUsable } from '../jev.js';
-import { checkAnswer } from './check.js';
+import { checkAnswer, liveCheckUsable } from './check.js';
 import { featuresOf, predict } from './router.js';
 
 /* Serving one call with a strategy.
@@ -38,22 +38,30 @@ export async function serveWith(spec, given, { shape, scope = null, check = chec
   }
   if (spec.kind === 'cascade') {
     const toFallback = async (why, spent = 0, readings = {}) => {
-      const r = await chat(body, spec.fallback.model, { recipe: spec.fallback.recipe ?? null });
+      let r;
+      try {
+        r = await chat(body, spec.fallback.model, { recipe: spec.fallback.recipe ?? null });
+      } catch (err) {
+        // what was already spent on this call is kept on the failure, so it is recorded
+        err.spent = (err.spent || 0) + spent;
+        throw err;
+      }
       const cost = spent + usd(r.json);
       return { json: costing(r.json, cost), served: spec.fallback.model, recipe: spec.fallback.recipe ?? null, cost,
         latencyMs: Date.now() - started, escalated: true, check: { ...readings, by: why } };
     };
-    if (!jevUsable()) return toFallback('unavailable');
+    if (!jevUsable() || !liveCheckUsable()) return toFallback('unavailable');
     let first;
     try {
-      first = await chat(body, spec.first.model, { recipe: spec.first.recipe ?? null });
+      // once, with no retries: a cheap model that is busy hands the call on at once, not after waiting
+      first = await chat(body, spec.first.model, { recipe: spec.first.recipe ?? null, retries: 0 });
     } catch (err) {
       if (err instanceof UpstreamError && (err.status === 401 || err.status === 402)) throw err;
       return toFallback('first failed', 0, { status: err?.status ?? 0 });
     }
     let c;
     try {
-      c = await check(body, first.json, shape, { threshold: spec.threshold, scope });
+      c = await check(body, first.json, shape, { threshold: spec.threshold, scope, live: true });
     } catch (err) {
       return toFallback('check failed', usd(first.json), { reason: String(err?.message || err).slice(0, 120) });
     }

@@ -2,6 +2,7 @@ import { db, id, now } from '../db/index.js';
 import { addActivity } from '../traffic.js';
 import { OUTCOME_OF, RECENT_CALLS, carriesOf } from './outcome.js';
 import { upsertArm, armById, leadModel, specOfResult, setStatus } from '../learn/arms.js';
+import { forgetState } from '../learn/memo.js';
 
 const record = async (workload, row, x = db) =>
   await x.prepare(`INSERT INTO promotions (id, workload_id, action, from_model, to_model, reason, run_id,
@@ -71,15 +72,21 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
      cleared: one measured with its thinking off, sent live with it on, can spend a short answer
      cap thinking and answer nothing. */
   let spec = given;
-  if (!spec) {
-    const row = (runId ? await db.prepare('SELECT model_id, recipe_json, arm_json FROM eval_results WHERE run_id = ? AND model_id = ?')
-      .get(runId, modelId) : null) || await db.prepare(
-      `SELECT r.model_id, r.recipe_json, r.arm_json FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
-        WHERE e.workload_id = ? AND r.model_id = ? ORDER BY e.created_at DESC LIMIT 1`).get(workload.id, modelId);
-    spec = row ? specOfResult(row) : { kind: 'model', model: modelId, recipe: null };
-  }
+  const cols = 'r.model_id, r.recipe_json, r.arm_json, r.cost_ratio, r.verdict, r.gap_pct, r.runs, r.escalated_pct, r.run_id';
+  const row = (runId ? await db.prepare(`SELECT ${cols} FROM eval_results r WHERE r.run_id = ? AND r.model_id = ?`)
+    .get(runId, modelId) : null) || await db.prepare(
+    `SELECT ${cols} FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
+      WHERE e.workload_id = ? AND r.model_id = ? ORDER BY e.created_at DESC LIMIT 1`).get(workload.id, modelId);
+  if (!spec) spec = row ? specOfResult(row) : { kind: 'model', model: modelId, recipe: null };
   if (recipe !== undefined && spec.kind === 'model') spec = { ...spec, recipe };
-  const arm = await upsertArm(workload, spec, { status: 'serving', originRunId: runId });
+  /* What the measurement said about it travels with the switch, its cost against the customer's
+     own model above all: learning cannot price or budget an experiment against a switch whose cost
+     it does not know. */
+  const offline = row ? {
+    verdict: row.verdict, gap: row.gap_pct, ratio: row.cost_ratio ?? null, escalatedPct: row.escalated_pct ?? null,
+    runs: row.runs, runId: row.run_id, at: now(),
+  } : null;
+  const arm = await upsertArm(workload, spec, { status: 'serving', originRunId: runId, offline });
   const lead = leadModel(spec);
   await db.tx(async (tx) => {
     await tx.prepare(`UPDATE workloads SET routed_model = ?, routed_recipe = ?, routed_arm_id = ?, promoted_at = ?, promoted_run_id = ?,
@@ -89,6 +96,7 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
   });
   if (workload.routed_arm_id && workload.routed_arm_id !== arm.id) await setStatus(workload.routed_arm_id, 'resting');
   await setStatus(arm.id, 'serving');
+  forgetState(workload.id);
   // said as it is for a workload whose calls arrive as copies: set up, and waiting for them
   const traffic = await trafficOf(workload);
   await addActivity(workload.workspace_id, {
@@ -125,6 +133,7 @@ export async function revert(workload, { reason = 'you asked for it', actorUserI
   });
   if (moved) return { ok: false, code: 'moved' };
   if (workload.routed_arm_id) await setStatus(workload.routed_arm_id, soft ? 'resting' : 'retired');
+  forgetState(workload.id);
   await addActivity(workload.workspace_id, {
     kind: 'revert',
     title: `${workload.slug} is back on ${workload.reference_model}`,

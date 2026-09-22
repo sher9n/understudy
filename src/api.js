@@ -6,7 +6,7 @@ import { createAccount, checkPassword, startSession, endSession, session, requir
   requestLoginCode, verifyLoginCode, verifyLoginLink } from './auth.js';
 import send, { signInEmail } from './email.js';
 import { issueKey, listKeys, revokeKey, revealKey } from './keys.js';
-import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity } from './traffic.js';
+import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity, track } from './traffic.js';
 import { account, ledger, gateRouting, stripe } from './billing.js';
 import { planFor, forgetPlan } from './eval/plan.js';
 import { recipeKind } from './eval/select.js';
@@ -334,6 +334,31 @@ const statusLabel = (w, carries = true) => {
   return { label: 'Not optimized yet', tone: 'q' };
 };
 
+/* The dashboard reads itself again every few seconds; how calls turned out over a month moves far more
+   slowly than that, so it is worked out at most once a minute per workspace and window. */
+const outcomeMemo = new Map();
+async function outcomesFor(workspaceId, days, since) {
+  const k = `${workspaceId}|${days}`;
+  const hit = outcomeMemo.get(k);
+  if (hit && Date.now() - hit.at < 60000) return hit.v;
+  const v = await outcomeTotals(workspaceId, since);
+  outcomeMemo.set(k, { at: Date.now(), v });
+  if (outcomeMemo.size > 2000) outcomeMemo.clear();
+  return v;
+}
+
+/* What a switch is called in the list of workloads, when it is more than one model asked the usual way. */
+function shortStrategy(w) {
+  if (!w.routed_model || !w.arm_spec) return null;
+  let spec = null;
+  try { spec = JSON.parse(w.arm_spec); } catch { return null; }
+  const s = (m) => String(m || '').split('/').pop();
+  if (spec.kind === 'cascade') return `${s(spec.first.model)}, checked`;
+  if (spec.kind === 'router') return `${s(spec.cheap.model)}, picked per call`;
+  if (spec.kind === 'model' && spec.model === w.reference_model && spec.recipe?.reasoning) return `${s(spec.model)}, thinking less`;
+  return null;
+}
+
 async function overview(workspaceId, days = 30) {
   const since = now() - days * DAY;
   const rows = await workloadStats(workspaceId, days);
@@ -358,14 +383,13 @@ async function overview(workspaceId, days = 30) {
     measuring: rows.filter((w) => w.status === 'measuring').length,
     series,
     // how calls turned out over the window, in the same four groups each workload page shows
-    outcomes: await outcomeTotals(workspaceId, since),
+    outcomes: await outcomesFor(workspaceId, days, since),
     rows: rows.map((w) => ({
       id: w.id, name: w.slug, calls: w.calls,
       shape: shapeLabel[w.shape_kind] || w.shape_kind,
       cost: round8(w.spend),
-      // a strategy by its short name: a cascade is its cheap model, checked
-      model: w.routed_model && (w.arm_kind === 'cascade' || w.arm_kind === 'router') && w.arm_label
-        ? w.arm_label : w.routed_model || w.reference_model || 'not set',
+      // a strategy by its short name: a cascade is its cheap model, checked; the customer's model thinking less says so
+      model: shortStrategy(w) || w.routed_model || w.reference_model || 'not set',
       ...statusLabel(w, carriesOf({ mode: w.ws_mode, routed: w.recent_routed, copies: w.recent_copies })),
     })),
     activity: await liveFeed(workspaceId, 40),
@@ -395,9 +419,17 @@ function callLine(c) {
     return { kind: 'bad', text: `A call did not get through, on ${model} (${c.status_code})` };
   }
   /* Why a call ran where it did, when that is not what serves it: the check sent it on to the
-     customer's own model, or it was one of the few calls an experiment answers. Without it, a
-     switched workload's feed showed its old model now and then, which read as the switch failing. */
-  const why = Number(c.escalated) === 1 ? ', sent on by the check' : Number(c.explored) === 1 ? ', an experiment' : '';
+     customer's own model, the router picked that model, or it was one of the few calls an experiment
+     answers. Without it, a switched workload's feed showed its old model now and then, which read as
+     the switch failing. */
+  let by = null;
+  try { by = c.check_json ? JSON.parse(c.check_json).by : null; } catch { by = null; }
+  const why = Number(c.explored) === 1 ? ', an experiment'
+    : Number(c.escalated) !== 1 ? ''
+      : by === 'router' ? ', picked for the harder calls'
+        : by === 'unavailable' || by === 'check failed' ? ', sent on because the check could not answer'
+          : by === 'first failed' ? ', sent on because the cheaper model failed'
+            : ', sent on by the check';
   const head = job ? `${job} ran on ${model}${why}` : `A call arrived, on ${model}`;
   return { kind: 'call', text: ms ? `${head}, ${ms}` : head };
 }
@@ -734,8 +766,16 @@ api.post('/workloads/:id/outcomes/def', async (req, res) => {
   if (!w) return fail(res, 404, 'No such workload.');
   const b = req.body || {};
   if (b.events !== undefined && !Array.isArray(b.events)) return fail(res, 400, 'events has to be a list.');
-  const def = await saveDef(w.id, b);
-  return res.json({ ok: true, def });
+  if ((b.events || []).length > 100) return fail(res, 400, 'At most 100 events can be given a meaning.');
+  const bad = (b.events || []).find((e) => !e || typeof e !== 'object' || typeof e.event !== 'string' || !e.event.trim()
+    || e.event.length > 80 || !['worked', 'failed'].includes(e.means));
+  if (bad !== undefined) return fail(res, 400, 'Each event needs a name of up to 80 characters and a meaning: worked or failed.');
+  if (b.signals !== undefined && (typeof b.signals !== 'object' || b.signals === null)) return fail(res, 400, 'signals has to be an object.');
+  /* Saved at once; the calls it touches are read again behind the answer, since on a busy workload
+     that is every call with a signal in three months, far longer than anybody should wait on Save. */
+  const def = await saveDef(w.id, b, { reread: false });
+  track(def.reread, `reading ${w.id} again under its new meaning of worked`);
+  return res.json({ ok: true, def: { events: def.events, signals: def.signals, windowDays: def.windowDays }, rereading: true });
 });
 
 /** The multi-step tasks this workload's calls were part of. */
@@ -765,9 +805,12 @@ api.post('/workloads/:id/explore', async (req, res) => {
   }
   let budget = w.explore_budget_usd;
   if (b.budgetUsd !== undefined) {
-    const v = b.budgetUsd === null ? null : Number(b.budgetUsd);
-    if (v !== null && (!Number.isFinite(v) || v < 0 || v > 1000)) return fail(res, 400, 'The budget has to be between $0 and $1,000 a day.');
-    budget = v === null ? null : Math.round(v * 100) / 100;
+    // a number of dollars or null for the default; nothing else, so an empty box never saves as $0
+    if (b.budgetUsd !== null && (typeof b.budgetUsd !== 'number' || !Number.isFinite(b.budgetUsd) || b.budgetUsd < 0 || b.budgetUsd > 1000)) {
+      return fail(res, 400, 'The budget has to be between $0 and $1,000 a day.');
+    }
+    if (b.budgetUsd !== null && b.budgetUsd > 0 && b.budgetUsd < 0.01) return fail(res, 400, 'The smallest budget is one cent a day, or $0 to stop experiments.');
+    budget = b.budgetUsd === null ? null : Math.round(b.budgetUsd * 100) / 100;
   }
   await db.prepare('UPDATE workloads SET explore_mode = ?, explore_budget_usd = ?, updated_at = ? WHERE id = ?')
     .run(mode, budget, now(), w.id);

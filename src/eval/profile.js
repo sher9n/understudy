@@ -73,7 +73,7 @@ export async function refThinkingOf(workload) {
   const since = now() - 30 * DAY;
   const replayed = await db.prepare(
     `SELECT reasoning_tokens AS t FROM replay_cache
-      WHERE model_id = ? AND status = 200 AND reasoning_tokens IS NOT NULL
+      WHERE model_id = ? AND status = 200 AND reasoning_tokens IS NOT NULL AND recipe_json IS NULL
         AND call_id IN (SELECT id FROM calls WHERE workload_id = ? AND created_at >= ?)
       ORDER BY created_at DESC LIMIT 60`).all(workload.reference_model, workload.id, since);
   let xs = replayed.map((r) => Number(r.t)).filter(Number.isFinite);

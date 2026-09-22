@@ -49,6 +49,11 @@ const acquire = () => new Promise((resolve) => {
   if (active < config.JEV_CONCURRENCY) { active += 1; resolve(); return; }
   waiting.push(resolve);
 });
+// a place now or not at all, for a question somebody's call is waiting on
+const tryAcquire = () => {
+  if (active < config.JEV_CONCURRENCY) { active += 1; return true; }
+  return false;
+};
 const release = () => {
   const next = waiting.shift();
   if (next) next(); else active -= 1;
@@ -101,11 +106,14 @@ const restingReason = (status) => {
  * Returns { answers, model, usage, costUsd, ms }. Throws JevError when it cannot answer, so a
  * caller always knows the difference between "Jev said no" and "Jev said nothing".
  */
-export async function ask(state, questions, { retries = 3, model = config.JEV_MODEL } = {}) {
+export async function ask(state, questions, { retries = 3, model = config.JEV_MODEL, timeoutMs = config.JEV_TIMEOUT_MS, wait = true } = {}) {
   if (!canJev()) throw new JevError(0, `Jev is not set up (JEV_VIA is ${config.JEV_VIA}).`);
   const to = route();
   if (Date.now() < restingUntil) throw new JevError(503, restingWhy || 'Jev is resting after a refusal');
-  await acquire();
+  /* A question a live call is waiting on does not queue behind a measurement's: with no place free
+     it is answered "busy" at once, and the call goes on without it. */
+  if (wait) await acquire();
+  else if (!tryAcquire()) throw new JevError(503, 'busy');
   try {
     for (let attempt = 0; ; attempt += 1) {
       const started = Date.now();
@@ -115,7 +123,7 @@ export async function ask(state, questions, { retries = 3, model = config.JEV_MO
           method: 'POST',
           headers: to.headers,
           body: JSON.stringify({ model, state, questions, ...to.extra }),
-          signal: AbortSignal.timeout(config.JEV_TIMEOUT_MS),
+          signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (err) {
         if (attempt < retries) { await pause(500 * 2 ** attempt); continue; }

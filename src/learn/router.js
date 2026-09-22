@@ -67,3 +67,14 @@ export function predict(m, x) {
 export function leaveOneOut(samples, opts) {
   return samples.map((s, i) => predict(train(samples.filter((_, k) => k !== i), opts), s.x));
 }
+
+/* The same, giving way between calls: a measurement runs in the process that serves the customer's
+   calls, and a hundred of these back to back held it for a third of a second. */
+export async function leaveOneOutGently(samples, opts) {
+  const out = [];
+  for (const [i, s] of samples.entries()) {
+    out.push(predict(train(samples.filter((_, k) => k !== i), opts), s.x));
+    if (i % 10 === 9) await new Promise((r) => setImmediate(r));
+  }
+  return out;
+}

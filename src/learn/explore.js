@@ -9,6 +9,8 @@ import { upsertArm, armsFor, setStatus, referenceSpec, armKey, specOfResult, lab
 import { posterior, probAtLeast, explorePlan, pickFrom, thompsonShares } from './bandit.js';
 import { serveWith } from './serve.js';
 import { requestText } from './check.js';
+import { memo, forgetState } from './memo.js';
+import { account } from '../billing.js';
 
 /* Learning, from what live calls show, which way of serving a workload works best.
  *
@@ -49,9 +51,8 @@ export function exploreOf(workload) {
 
 /* What is known about each of a workload's strategies, read at most once a minute per workload:
    the proxy asks on every call, and a record moves by one call in thousands. */
-const memo = new Map();
 const MEMO_MS = 60000;
-export const forgetState = (workloadId = null) => { if (workloadId) memo.delete(workloadId); else memo.clear(); };
+export { forgetState };
 
 export async function stateOf(workload, { fresh = false } = {}) {
   const hit = memo.get(workload.id);
@@ -79,6 +80,17 @@ export function peekState(workload) {
 /* Failures that are the serving side's doing: a provider that failed or could not be reached, or
    a model nobody would serve. A request the customer got wrong, or our own account, is nobody's. */
 const COUNTED = `(status_code = 200 OR status_code IN (0, 404, 408, 429) OR status_code >= 500)`;
+/* And only calls whose outcomes could be read at all: those recorded since outcomes were kept, which
+   carry their fingerprint. An older call has no signals, so it can only ever read as having worked,
+   and counted in, the customer's own model's months of history outvoted the serving strategy's first
+   weeks, whose failures were being seen, and switched workloads back on no real difference. */
+const READABLE = `request_hash IS NOT NULL`;
+const IST = 5.5 * 3600000;
+// the start of today, as the day is counted in India, where this product's days are told
+const istDayStart = (t) => Math.floor((t + IST) / DAY) * DAY - IST;
+const modelsOf = (spec) => (!spec ? []
+  : spec.kind === 'cascade' ? [spec.first.model, spec.fallback.model]
+    : spec.kind === 'router' ? [spec.cheap.model, spec.strong.model] : [spec.model]);
 
 async function readState(workload) {
   const t = now();
@@ -103,7 +115,7 @@ async function readState(workload) {
             SUM(CASE WHEN status_code = 200 AND reward IS NOT NULL THEN 1 ELSE 0 END) AS known,
             SUM(CASE WHEN status_code <> 200 OR reward < 0.5 THEN 1 ELSE 0 END) AS failed
        FROM calls
-      WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND created_at < ? AND ${COUNTED}
+      WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND created_at < ? AND ${COUNTED} AND ${READABLE}
       GROUP BY 1, 2, 3`)
     .all(t, workload.id, since, settled);
   const live = new Map();
@@ -128,14 +140,34 @@ async function readState(workload) {
     k.failed += Number(r.failed);
     tally.set(armId, k);
   }
+  /* The fair comparison, for decisions: only calls since the switch, each held to the strategy that
+     answered it by the chance it was given. What serves and the runners-up and the customer's own
+     model then answered calls of the same days, picked by chance, so a difference between them is the
+     strategies' and not the season's. */
+  const switchedAt = Number(workload.promoted_at) || 0;
+  const fairRows = switchedAt ? await db.prepare(
+    `SELECT arm_id, FLOOR((? - created_at) / 86400000.0) AS age, COUNT(*) AS n,
+            SUM(CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) AS s
+       FROM calls
+      WHERE workload_id = ? AND source = 'routed' AND arm_id IS NOT NULL AND created_at >= ? AND created_at < ?
+        AND ${COUNTED} AND ${READABLE}
+      GROUP BY 1, 2`).all(t, workload.id, Math.max(switchedAt, since), settled) : [];
+  const fair = new Map();
+  for (const r of fairRows) {
+    if (!fair.has(r.arm_id)) fair.set(r.arm_id, []);
+    fair.get(r.arm_id).push({ ageDays: Number(r.age), n: Number(r.n), s: Number(r.s) });
+  }
   const shadowRows = await db.prepare(
-    `SELECT arm_id, FLOOR((? - created_at) / 86400000.0) AS age, COUNT(*) AS n, SUM(agreement) AS s
+    `SELECT arm_id, FLOOR((? - created_at) / 86400000.0) AS age, COUNT(*) AS n, SUM(agreement) AS s,
+            SUM(CASE WHEN agreement >= 0.999 THEN 1 ELSE 0 END) AS same
        FROM shadow_runs WHERE workload_id = ? AND created_at >= ? AND agreement IS NOT NULL
       GROUP BY 1, 2`).all(t, workload.id, since);
   const shadow = new Map();
+  const same = new Map();
   for (const r of shadowRows) {
     if (!shadow.has(r.arm_id)) shadow.set(r.arm_id, []);
     shadow.get(r.arm_id).push({ ageDays: Number(r.age), n: Number(r.n), s: Number(r.s) });
+    same.set(r.arm_id, (same.get(r.arm_id) || 0) + Number(r.same));
   }
 
   // the workload's own rate across everything, as the starting point for a strategy with few calls
@@ -146,10 +178,14 @@ async function readState(workload) {
     const r = a.offline?.ratio;
     return r === null || r === undefined || !Number.isFinite(Number(r)) ? null : Number(r);
   };
+  // the fair record counts only calls that were used: background answers are a stand-in, kept apart
+  const fairOpts = { ...opts, surrogateWeight: 0 };
   const record = (a) => ({
     ...a,
     ratio: ratioOf(a),
     post: posterior({ live: live.get(a.id) || [], shadow: shadow.get(a.id) || [] }, opts),
+    fair: posterior({ live: fair.get(a.id) || [] }, fairOpts),
+    same: same.get(a.id) || 0,
     failed: tally.get(a.id)?.failed ?? 0,
     known: tally.get(a.id)?.known ?? 0,
   });
@@ -160,31 +196,63 @@ async function readState(workload) {
       id: 'baseline', virtual: true, key: baseKey, kind: 'model', status: 'baseline', spec: referenceSpec(workload),
       label: `${short(workload.reference_model)} (yours)`, ratio: 1,
       post: posterior({ live: live.get('baseline') || [] }, opts),
+      fair: posterior({}, fairOpts), same: 0,
       failed: tally.get('baseline')?.failed ?? 0, known: tally.get('baseline')?.known ?? 0,
     };
   const serving = workload.routed_arm_id ? recById.get(workload.routed_arm_id) || null : null;
 
-  // what the day's experiments have added to the bill: the rest of the day's budget is what is left
-  const day = t - DAY;
+  /* A switch made before costs were kept on its strategy learns its cost from the measurement it
+     rests on. Without one, nothing is tried on the workload: an experiment could be neither priced
+     against what serves nor held to a budget. */
+  if (serving && serving.ratio === null) {
+    const key = keyOfSpec(serving.spec, workload.reference_model);
+    const m = await db.prepare(
+      `SELECT r.cost_ratio FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
+        WHERE e.workload_id = ? AND r.model_id = ? AND r.cost_ratio IS NOT NULL
+        ORDER BY e.created_at DESC LIMIT 1`).get(workload.id, key);
+    if (m && Number.isFinite(Number(m.cost_ratio))) {
+      serving.ratio = Number(m.cost_ratio);
+      await db.prepare('UPDATE arms SET offline_json = ? WHERE id = ?')
+        .run(JSON.stringify({ ...(serving.offline || {}), ratio: serving.ratio }), serving.id);
+    }
+  }
+
+  /* What can be tried at all: strategies whose models are still offered and not switched off in this
+     workspace, and the customer's own model only while it can still be reached through us. */
+  const enabled = new Set((await db.prepare(
+    `SELECT c.model_id FROM models_catalog c
+       LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
+      WHERE COALESCE(wm.enabled, 1) = 1`).all(workload.workspace_id)).map((r) => r.model_id));
+  const offered = !!await db.prepare('SELECT 1 FROM models_catalog WHERE model_id = ?').get(workload.reference_model);
+  for (const a of recs) a.usable = modelsOf(a.spec).every((m) => enabled.has(m) || (m === workload.reference_model && offered));
+  baseline.usable = offered;
+
+  /* What today's experiments have added to the bill, today counted in IST: a runner-up cheaper than
+     what serves adds nothing, anything dearer adds the difference, a background answer adds all of
+     it, and our fee on each. With no known cost for what serves, a call tried elsewhere counts in full. */
+  const dayStart = istDayStart(t);
   const explored = await db.prepare(
     `SELECT arm_id, COALESCE(SUM(cost_usd), 0) AS cost FROM calls
-      WHERE workload_id = ? AND explored = 1 AND created_at >= ? GROUP BY arm_id`).all(workload.id, day);
-  const servingRatio = serving?.ratio ?? 1;
+      WHERE workload_id = ? AND explored = 1 AND created_at >= ? GROUP BY arm_id`).all(workload.id, dayStart);
+  const servingRatio = serving ? serving.ratio : 1;
   let extra = 0;
   for (const e of explored) {
     const r = recById.get(e.arm_id)?.ratio ?? (e.arm_id === baseline.id ? 1 : null);
-    // a runner-up cheaper than what serves added nothing; one dearer added the difference
-    extra += r === null ? Number(e.cost) : Number(e.cost) * Math.max(0, 1 - servingRatio / r);
+    extra += r === null || servingRatio === null ? Number(e.cost) : Number(e.cost) * Math.max(0, 1 - servingRatio / r);
   }
   const sh = await db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS cost FROM shadow_runs WHERE workload_id = ? AND created_at >= ?')
-    .get(workload.id, day);
+    .get(workload.id, dayStart);
   extra += Number(sh.cost);
-  return { arms: recs, byId: recById, serving, baseline, prior, extraToday: extra, at: t };
+  extra *= 1 + config.ROUTING_FEE_PCT / 100;
+  return { arms: recs, byId: recById, serving, baseline, prior, extraToday: extra, dayStart, at: t };
 }
 
-/* The runners-up worth trying: found by the last measurement to match, or come close, and cheaper
-   than what serves now. Something dearer than what serves has nothing to offer an experiment. */
-const cheaperThan = (st, ratio) => st.arms.filter((a) => a.status === 'trying' && a.ratio !== null && a.ratio < ratio);
+/* The runners-up worth trying: ones the last measurement found inside the bar, still offered, and
+   cheaper than what serves now. One that only came close has not earned a customer's live calls, and
+   one dearer than what serves has nothing to offer an experiment. */
+const cheaperThan = (st, ratio) => (ratio === null || ratio === undefined ? []
+  : st.arms.filter((a) => a.status === 'trying' && a.usable !== false && a.ratio !== null && a.ratio < ratio
+    && (a.offline?.verdict ?? 'cleared') === 'cleared'));
 
 /**
  * Which strategy answers one call, when the workload experiments: { armId, spec, propensity,
@@ -195,9 +263,11 @@ export async function chooseExplore(workload, servingArm, { rng = Math.random } 
   if (!s.live || !servingArm || s.share <= 0) return null;
   const st = peekState(workload);
   if (!st || st.extraToday >= s.budgetUsd) return null;
-  const serving = st.byId.get(servingArm.id) || { ...servingArm, post: { a: 1, b: 1 }, ratio: null };
-  const candidates = serving.ratio === null ? [] : cheaperThan(st, serving.ratio);
-  const plan = explorePlan({ share: s.share, serving, candidates, baseline: st.baseline });
+  // until what serves has a known cost, nothing is tried (see readState)
+  const serving = st.byId.get(servingArm.id);
+  if (!serving || serving.ratio === null) return null;
+  const candidates = cheaperThan(st, serving.ratio);
+  const plan = explorePlan({ share: s.share, serving, candidates, baseline: st.baseline.usable ? st.baseline : null });
   if (plan.length === 1) return null;
   const pick = pickFrom(plan, rng());
   if (pick.arm.id === serving.id) {
@@ -217,7 +287,11 @@ export async function chooseExplore(workload, servingArm, { rng = Math.random } 
       m.state.arms.push(rec);
     }
   }
-  return { armId: arm.id, spec: arm.spec, propensity: pick.p, explored: true, shadow: null, why: pick.why };
+  return {
+    armId: arm.id, spec: arm.spec, propensity: pick.p, explored: true, shadow: null, why: pick.why,
+    // an experiment is never worth a failed call: if it cannot be answered, the call is served as usual
+    fallback: { armId: serving.id, spec: serving.spec, propensity: null, explored: false, shadow: null },
+  };
 }
 
 /* How closely a background answer matched the one that was used: 1 the same, 0 different. Free
@@ -230,6 +304,8 @@ async function agreementOf(body, used, other, shape, scope) {
     if (!a.ok) return { agreement: null, cost: 0 };
     if (!b.ok) return { agreement: 0, cost: 0, judgedBy: 'no answer' };
     const j = await judgeBarPair(requestText(body), a.value, b.value, { scope });
+    // a judge that could not judge says nothing about whether the answers matched
+    if (j.transient || !j.judgedBy) return { agreement: null, cost: j.cost || 0, judgedBy: 'not judged' };
     return { agreement: 1 - j.score, cost: j.cost || 0, judgedBy: j.judgedBy };
   }
   const a = extract(used, shape);
@@ -248,10 +324,16 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   const s = exploreOf(workload);
   if (s.mode !== 'shadow' || s.share <= 0 || !response) return null;
   if (rng() >= s.share) return null;
+  // an answer that cannot be read has nothing to be compared with, so nothing is spent on it
+  if (!extract(response, workload.shape_kind).ok) return null;
   const st = await stateOf(workload);
   if (st.extraToday >= s.budgetUsd) return null;
-  const candidates = cheaperThan(st, st.serving?.ratio ?? 1);
+  // what answered the call: the serving strategy, or the customer's own model when nothing is switched
+  const candidates = cheaperThan(st, st.serving ? st.serving.ratio : 1);
   if (!candidates.length) return null;
+  // paid for like a measurement, so only while the balance can pay for it
+  const acct = await account(workload.workspace_id);
+  if (!(Number(acct?.balance_usd) > 0.05)) return null;
   const shares = thompsonShares(candidates.map((c) => ({ id: c.id, a: c.post.a, b: c.post.b })));
   const arm = pickFrom(candidates.map((c) => ({ arm: c, p: shares.get(c.id) })), rng()).arm;
   const started = Date.now();
@@ -260,11 +342,19 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   let reading = { agreement: null, cost: 0 };
   try {
     out = await serve(arm.spec, body, { shape: workload.shape_kind, scope: workload.workspace_id });
-    reading = await agreementOf(body, response, out.json, workload.shape_kind, workload.workspace_id);
   } catch (err) {
     status = Number(err?.status) || 0;
-    // our own account is nobody's answer; any other failure is a runner-up that did not answer
-    reading = { agreement: status === 401 || status === 402 ? null : 0, cost: 0, judgedBy: 'failed' };
+    // our own account is nobody's answer; a provider that failed is a runner-up that did not answer
+    reading = { agreement: err?.status && status !== 401 && status !== 402 ? 0 : null, cost: 0, judgedBy: 'failed' };
+    if (err?.spent) out = { cost: err.spent };
+  }
+  if (out?.json) {
+    try {
+      reading = await agreementOf(body, response, out.json, workload.shape_kind, workload.workspace_id);
+    } catch {
+      // a reading that went wrong on our side says nothing about the runner-up
+      reading = { agreement: null, cost: 0, judgedBy: 'not read' };
+    }
   }
   const cost = (out?.cost || 0) + (reading.cost || 0);
   const row = {
@@ -278,7 +368,7 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   if (cost > 0) await chargeEval(workload.workspace_id, cost, `Background answer for ${workload.slug} on ${arm.label}`);
   // counted against the day's budget straight away, not when the record is next read
   const m = memo.get(workload.id);
-  if (m) m.state.extraToday += cost;
+  if (m) m.state.extraToday += cost * (1 + config.ROUTING_FEE_PCT / 100);
   return row;
 }
 
@@ -291,8 +381,9 @@ function countSpend(workload, armId, costUsd) {
   const st = m.state;
   // a strategy this record does not know yet counts in full, which can only pause experiments early
   const r = st.byId.get(armId)?.ratio ?? (armId === st.baseline.id ? 1 : null);
-  const servingRatio = st.serving?.ratio ?? 1;
-  st.extraToday += r === null ? costUsd : costUsd * Math.max(0, 1 - servingRatio / r);
+  const servingRatio = st.serving ? st.serving.ratio : 1;
+  const extra = r === null || servingRatio === null ? costUsd : costUsd * Math.max(0, 1 - servingRatio / r);
+  st.extraToday += extra * (1 + config.ROUTING_FEE_PCT / 100);
 }
 
 /** Told about every answered call: counts an experiment's spend, and maybe answers it again in the background. */
@@ -306,7 +397,8 @@ export function readingOf(a) {
   const p = a.post;
   return {
     live: { mean: p.mean, lo: p.lo, hi: p.hi, calls: p.nLive, rate: p.liveRate, failed: a.failed, known: a.known },
-    shadow: { calls: p.nShadow, rate: p.shadowRate },
+    // background answers: how many there were, how many were the same answer, and how close they were on average
+    shadow: { calls: p.nShadow, same: a.same ?? 0, rate: p.shadowRate },
     readAt: now(),
   };
 }
@@ -331,15 +423,17 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
   const ref = workload.reference_model;
   const serving = st.serving;
   const base = st.baseline;
+  const said = (x) => `${pctOf(x.fair.liveRate)} of ${x.fair.nLive} calls`;
 
-  if (s.live && serving) {
-    // what serves, against the customer's own model on the same weeks
-    if (base.post.nLive >= Math.ceil(min / 2) && serving.post.nLive >= min) {
-      const worse = 1 - probAtLeast(serving.post, base.post, delta);
+  /* Every decision is made on the fair record: calls since the switch, served by chance, so each side
+     answered calls of the same days (see readState). */
+  if (serving && serving.ratio !== null) {
+    // what serves, against the customer's own model answering beside it
+    if (base.fair.nLive >= min && serving.fair.nLive >= min) {
+      const worse = 1 - probAtLeast(serving.fair, base.fair, delta);
       if (worse >= conf) {
-        const reason = `Live results: calls on ${serving.label} worked ${pctOf(serving.post.liveRate)} of the time, `
-          + `against ${pctOf(base.post.liveRate)} on ${short(ref)} (${serving.post.nLive} and ${base.post.nLive} calls). `
-          + `Switched back to ${ref}.`;
+        const reason = `Live results: since the switch, calls on ${serving.label} worked ${said(serving)}, `
+          + `against ${said(base)} on ${short(ref)}. Switched back to ${ref}.`;
         const r = await revertFn(workload, { auto: true, soft: true, reason });
         if (r?.ok) {
           forgetState(workload.id);
@@ -348,51 +442,64 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
         }
       }
     }
-    // a cheaper runner-up that works as often, once there is enough of it to be sure
-    const ready = cheaperThan(st, serving.ratio ?? 1).filter((a) => a.post.nLive >= min)
-      .sort((x, y) => x.ratio - y.ratio);
+    /* A cheaper runner-up that cleared the bar in its measurement and has been shown on live calls to
+       work as often as what serves, and as often as the customer's own model where there is enough of
+       it to say. On a workload that waits for approval it is put in front of whoever approves, once. */
+    const ready = cheaperThan(st, serving.ratio).filter((a) => a.fair.nLive >= min).sort((x, y) => x.ratio - y.ratio);
     for (const a of ready) {
-      const asGood = probAtLeast(a.post, serving.post, delta);
-      if (asGood < conf || workload.optimize_mode !== 'auto') continue;
-      const key = keyOfSpec(a.spec, ref);
-      const reason = `live results: ${a.post.nLive} calls worked ${pctOf(a.post.liveRate)} of the time, `
-        + `against ${pctOf(serving.post.liveRate)} on ${serving.label}`;
-      const detail = `Switched on its own by live results: its calls worked ${pctOf(a.post.liveRate)} of the time over `
-        + `${a.post.nLive} calls, against ${pctOf(serving.post.liveRate)} on ${serving.label}, and it costs `
-        + `${Math.round((1 - a.ratio / (serving.ratio || 1)) * 100)}% less.`;
-      const r = await promoteFn(workload, key, { auto: true, reason, spec: a.spec, runId: a.origin_run_id ?? null, detail });
+      const asServing = probAtLeast(a.fair, serving.fair, delta);
+      const asYours = base.fair.nLive >= min ? probAtLeast(a.fair, base.fair, delta) : 1;
+      if (asServing < conf || asYours < conf) continue;
+      const cheaper = Math.round((1 - a.ratio / (serving.ratio || 1)) * 100);
+      if (workload.optimize_mode !== 'auto') {
+        if (a.stats?.suggestedAt) continue;
+        await addActivity(workload.workspace_id, {
+          kind: 'ok',
+          title: `${a.label} is ready to approve on ${workload.slug}`,
+          detail: `Its calls worked ${said(a)}, against ${said(serving)} on ${serving.label}, and it costs ${cheaper}% less. `
+            + 'Nothing was switched: approve it on the workload\'s page.',
+          workloadId: workload.id,
+        });
+        await db.prepare('UPDATE arms SET stats_json = ? WHERE id = ?')
+          .run(JSON.stringify({ ...(a.stats || {}), ...readingOf(a), suggestedAt: now() }), a.id);
+        decisions.push({ kind: 'suggest', armId: a.id });
+        continue;
+      }
+      const reason = `live results: ${a.fair.nLive} calls worked ${pctOf(a.fair.liveRate)} of the time, `
+        + `against ${pctOf(serving.fair.liveRate)} on ${serving.label}`;
+      const detail = `Switched on its own by live results: its calls worked ${said(a)}, against ${said(serving)} on `
+        + `${serving.label}, and it costs ${cheaper}% less.`;
+      const r = await promoteFn(workload, keyOfSpec(a.spec, ref), { auto: true, reason, spec: a.spec, runId: a.origin_run_id ?? null, detail });
       if (r?.ok && !r.already) {
         forgetState(workload.id);
-        decisions.push({ kind: 'promote', armId: a.id, chance: asGood });
+        decisions.push({ kind: 'promote', armId: a.id, chance: asServing });
         return decisions;
       }
     }
-  }
-  // a runner-up that clearly works less often than what serves is not tried any more
-  if (serving) {
-    for (const a of st.arms.filter((x) => x.status === 'trying' && x.post.nLive >= Math.ceil(min / 2))) {
-      const worse = 1 - probAtLeast(a.post, serving.post, delta);
+    // a runner-up that clearly works less often than what serves is not tried any more
+    for (const a of st.arms.filter((x) => x.status === 'trying' && x.fair.nLive >= Math.ceil(min / 2))) {
+      const worse = 1 - probAtLeast(a.fair, serving.fair, delta);
       if (worse < conf) continue;
       await setStatus(a.id, 'resting');
       await addActivity(workload.workspace_id, {
         kind: 'floor',
         title: `Stopped trying ${a.label} on ${workload.slug}`,
-        detail: `Its calls worked ${pctOf(a.post.liveRate)} of the time over ${a.post.nLive} calls, against `
-          + `${pctOf(serving.post.liveRate)} on ${serving.label}.`,
+        detail: `Its calls worked ${said(a)}, against ${said(serving)} on ${serving.label}.`,
         workloadId: workload.id,
       });
       decisions.push({ kind: 'rest', armId: a.id, chance: worse });
     }
   }
-  // for approval: background answers that matched the live ones inside the workload's bar
+  // for approval: background answers that were the same as the live ones, inside the workload's bar
   if (s.mode === 'shadow') {
     const floor = Number(workload.floor_pct) || config.EVAL_FLOOR_MIN_PCT;
-    for (const a of st.arms.filter((x) => x.status === 'trying' && x.post.nShadow >= min && !x.stats?.suggestedAt)) {
-      if ((1 - a.post.shadowRate) * 100 > floor) continue;
+    for (const a of cheaperThan(st, serving ? serving.ratio : 1).filter((x) => x.post.nShadow >= min && !x.stats?.suggestedAt)) {
+      const sameShare = a.same / a.post.nShadow;
+      if ((1 - sameShare) * 100 > floor) continue;
       await addActivity(workload.workspace_id, {
         kind: 'ok',
         title: `${a.label} matched your live answers on ${workload.slug}`,
-        detail: `In the background it answered ${a.post.nShadow} of your live calls and matched ${pctOf(a.post.shadowRate)} of them, `
+        detail: `In the background it answered ${a.post.nShadow} of your live calls and gave the same answer on ${a.same} of them, `
           + `inside your ${floor.toFixed(1)}% bar. Nothing was changed: approve it on the workload's page to switch.`,
         workloadId: workload.id,
       });
@@ -401,6 +508,7 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
       decisions.push({ kind: 'suggest', armId: a.id });
     }
   }
+  if (decisions.length) forgetState(workload.id);
   return decisions;
 }
 
@@ -428,7 +536,8 @@ export async function reviewAll() {
 export async function markTrying(workload, { runId, results, refMonthly, floor }) {
   const keep = new Set();
   for (const r of results) {
-    if (r.verdict === 'reference' || r.stopped || !['cleared', 'review'].includes(r.verdict)) continue;
+    // only what cleared the bar is tried on live calls; one that came close has not earned them
+    if (r.verdict === 'reference' || r.stopped || r.verdict !== 'cleared') continue;
     if (refMonthly !== null && (r.cost_month_usd === null || r.cost_month_usd >= refMonthly)) continue;
     if (await everReverted(workload.id, r.model_id)) continue;
     const ratio = r.cost_ratio ?? (refMonthly ? r.cost_month_usd / refMonthly : null);
@@ -476,8 +585,10 @@ export async function learningView(workload) {
     week.set(armId, w);
     weekCalls += Number(r.n);
   }
+  // what can be tried against what answers now: the serving strategy, or the customer's own model
+  const tryableIds = new Set(cheaperThan(st, st.serving ? st.serving.ratio : 1).map((a) => a.id));
   const shape = (a, role) => ({
-    id: a.virtual ? null : a.id, key: a.spec ? keyOfSpec(a.spec, ref) : null,
+    id: a.virtual ? null : a.id, key: a.spec ? keyOfSpec(a.spec, ref) : null, tryable: tryableIds.has(a.id),
     role, label: a.label || labelOf(a.spec, ref), kind: a.kind || a.spec?.kind, status: a.status,
     spec: a.spec, ratio: a.ratio, offline: a.offline ?? null, ...readingOf(a),
     week: week.get(a.id) || { calls: 0, explored: 0, escalated: 0, cost: 0 },
@@ -491,7 +602,12 @@ export async function learningView(workload) {
       ORDER BY s.created_at DESC LIMIT 40`).all(workload.id);
   const spent = await db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS c FROM shadow_runs WHERE workload_id = ?').get(workload.id);
   return {
-    explore: { ...s, spentToday: st.extraToday, reason: whyNot(workload, s, st) },
+    explore: {
+      ...s, spentToday: st.extraToday, reason: whyNot(workload, s, st),
+      // the shares each setting means, from the settings themselves, so the page never says a number the server does not use
+      shares: { careful: config.EXPLORE_SHARE_CAREFUL, normal: config.EXPLORE_SHARE_NORMAL, shadow: config.SHADOW_SHARE },
+      servingCostKnown: !st.serving || st.serving.ratio !== null,
+    },
     tolerance: config.LEARN_TOLERANCE, confidence: config.LEARN_CONFIDENCE, minCalls: config.LEARN_MIN_CALLS,
     halfLifeDays: config.LEARN_HALF_LIFE_DAYS, weekCalls, weekSince, weekFromSwitch: weekSince > now() - 7 * DAY + 60000,
     serving, baseline, others,
@@ -502,9 +618,12 @@ export async function learningView(workload) {
 /* Why a workload is not experimenting right now, in words for its page, or null when it is. */
 function whyNot(workload, s, st) {
   if (s.mode === 'off') return 'Experiments are off for this workload.';
-  if (st.extraToday >= s.budgetUsd) return `Today's experiments have used the $${s.budgetUsd.toFixed(2)} budget, so they pause until tomorrow.`;
+  if (st.extraToday >= s.budgetUsd) return `Today's experiments have used the $${s.budgetUsd.toFixed(2)} budget, so they pause until midnight IST.`;
   if (s.live && !workload.routed_model) return 'Live experiments start once this workload is switched to something cheaper.';
-  if (s.mode === 'shadow' && !cheaperThan(st, st.serving?.ratio ?? 1).length) {
+  if (st.serving && st.serving.ratio === null) {
+    return 'Nothing is tried until the next measurement prices what serves now against your own model: without that, an experiment could not be held to a budget.';
+  }
+  if (s.mode === 'shadow' && !cheaperThan(st, st.serving ? st.serving.ratio : 1).length) {
     return 'Background answers start once a measurement finds a runner-up that is cheaper than what answers now.';
   }
   return null;

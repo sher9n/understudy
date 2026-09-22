@@ -55,6 +55,30 @@ test('the kept strictness is the cheapest inside the bar, and only if it is quic
   assert.equal(none.threshold, 0.9, 'the closest to the bar, to show how near it came');
 });
 
+test('a router that sends a call to a cheap model that fails it gets the failure, with nothing to catch it', () => {
+  const failing = [
+    { ok: false, score: 1, cost: 0, latency: 50, p: 0.9, ref },
+    { ok: true, score: 0, cost: 0.0002, latency: 400, p: 0.9, ref },
+  ];
+  const r = simulateRouter(failing, { thresholds: [0.5] })[0];
+  assert.equal(r.gap, 50, 'the failed call counts as a miss, not as sent on for free');
+  assert.equal(r.escalated, 0);
+  assert.ok(Math.abs(r.cost - 0.0002) < 1e-12);
+});
+
+test('a cascade whose answers are inside the bar but too slow is slow, not missed', () => {
+  const slow = bestOf([{ threshold: 0.5, gap: 1, ratio: 0.3, latency: [9000], ttft: [9000] }], { floor: 3, fast: () => false });
+  assert.equal(slow.inside, true);
+  assert.equal(slow.slow, true);
+  // near the bar, the most careful reading is kept, not the cheapest
+  const near = bestOf([
+    { threshold: 0.5, gap: 3.6, ratio: 0.2, latency: [1], ttft: [1] },
+    { threshold: 0.9, gap: 3.1, ratio: 0.4, latency: [1], ttft: [1] },
+  ], { floor: 3 });
+  assert.equal(near.near, true);
+  assert.equal(near.threshold, 0.9);
+});
+
 test('a router sends the calls its small model trusts to the cheap model', () => {
   const rcalls = calls.map((c, i) => ({ ...c, p: i < 8 ? 0.9 : 0.1 }));
   const r = simulateRouter(rcalls, { thresholds: [0.5] })[0];
@@ -119,4 +143,11 @@ test('the customer model thinking less is offered when it thinks, and only then'
   assert.equal(lighter.model, 'x/thinker', 'the same model, asked differently');
   const plain = selectCandidates({ ...base, refThinks: false }).order;
   assert.equal(plain.find((r) => r.key), undefined, 'a model that answers straight away has nothing to think less about');
+  // already on the lightest setting it offers, below "none": there is nothing lighter to ask for
+  const minimal = model('x/thinker', { reasoning: { mandatory: true, default_enabled: true, supported_efforts: ['minimal', 'low'], default_effort: 'minimal' } });
+  const onMinimal = selectCandidates({ ...base, facts: { models: new Map([[minimal.id, minimal], [cheap.id, cheap]]), zdrKnown: true }, refThinks: true }).order;
+  assert.equal(onMinimal.find((r) => r.key), undefined, '"low" would be more thinking, not less');
+  // and never again once it was switched back
+  const back = selectCandidates({ ...base, refThinks: true, reverted: new Set(['x/thinker#lighter']) }).order;
+  assert.equal(back.find((r) => r.key), undefined);
 });

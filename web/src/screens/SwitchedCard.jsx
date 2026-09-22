@@ -55,7 +55,7 @@ function whyLine(s) {
 /** What the newest measurement since the switch found about it, or when the next one is due. */
 function checkLine(s) {
   const from = short(s.from);
-  const to = short(s.to);
+  const to = nameOf(s);
   const c = s.latest;
   if (!c) {
     if (!s.cadenceDays) return 'It has not been checked again since. It is only re-measured when you press Measure now.';
@@ -114,9 +114,10 @@ export default function SwitchedCard({ s, learn = null }) {
   const sentOn = liveShare !== null ? liveShare
     : s.evidence?.escalated !== null && s.evidence?.escalated !== undefined ? s.evidence.escalated / 100 : null;
   const e = learn?.explore;
-  const experiments = !e || e.mode === 'off' ? null
-    : e.live ? ` Also, ${inHundred(e.share)} calls are experiments: half go to ${from} to compare, half to a cheaper runner-up when there is one.`
-      : e.mode === 'shadow' ? ` Runners-up answer ${inHundred(e.share)} calls again in the background; your app never sees those answers.` : null;
+  // said only while it is happening: nothing is tried while the budget is spent or anything else holds it back
+  const experiments = !e || e.mode === 'off' || e.reason ? null
+    : e.live ? ` Also, up to ${inHundred(e.share)} calls are experiments: half go to ${from} to compare, half to a cheaper runner-up when there is one.`
+      : e.mode === 'shadow' ? ` Runners-up answer about ${inHundred(e.share)} calls again in the background; your app never sees those answers.` : null;
   const p = s.prices;
   const priced = p.fromPerCall != null && p.toPerCall != null && p.cheaperPct != null;
   const month = s.projection.find((r) => r.months === 1);
@@ -151,9 +152,11 @@ export default function SwitchedCard({ s, learn = null }) {
           <div className="kv swmodel">{to}</div>
           <div className="ks">
             {p.toPerCall == null ? unpriced(p.toListed)
-              : kind === 'cascade' || kind === 'router'
+              : (kind === 'cascade' || kind === 'router') && p.toPricedBy === 'measured'
                 ? `${usd(p.toPerCall)} a call on average, counting every check and every call sent on, our ${p.feePct}% fee included`
-                : `${usd(p.toPerCall)} a call, our ${p.feePct}% fee included`}
+                : kind === 'cascade' || kind === 'router'
+                  ? `${usd(p.toPerCall)} a call at the cheaper model's list price, before any check or call sent on, our ${p.feePct}% fee included`
+                  : `${usd(p.toPerCall)} a call, our ${p.feePct}% fee included`}
           </div>
         </div>
         <div className="kpi">

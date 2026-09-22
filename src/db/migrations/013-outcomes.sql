@@ -115,6 +115,10 @@ CREATE TABLE IF NOT EXISTS shadow_runs (
 CREATE INDEX IF NOT EXISTS ix_shadow_workload ON shadow_runs (workload_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_shadow_arm ON shadow_runs (arm_id, created_at);
 
+-- how a replay asked its model, when not the customer's way: the customer's own model asked to think
+-- less is replayed under its own name, and those answers must not stand for its usual ones
+ALTER TABLE replay_cache ADD COLUMN IF NOT EXISTS recipe_json TEXT;
+
 -- a measured strategy that is not a single model, and how often it sent a call on
 ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS arm_json TEXT;
 ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS escalated_pct DOUBLE PRECISION;

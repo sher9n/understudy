@@ -31,7 +31,15 @@ export async function servingArm(workload) {
   }
   let recipe = null;
   try { recipe = workload.routed_recipe ? JSON.parse(workload.routed_recipe) : null; } catch { recipe = null; }
-  const arm = await upsertArm(workload, { kind: 'model', model: workload.routed_model, recipe }, { status: 'serving', originRunId: workload.promoted_run_id ?? null });
+  /* with what its measurement said, its cost against the customer's own model above all, which the
+     learning layer needs before it can price anything against this switch */
+  const row = await db.prepare(
+    `SELECT r.cost_ratio, r.verdict, r.gap_pct, r.runs, r.run_id FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
+      WHERE e.workload_id = ? AND r.model_id = ? AND r.cost_ratio IS NOT NULL
+      ORDER BY (r.run_id = ?) DESC, e.created_at DESC LIMIT 1`).get(workload.id, workload.routed_model, workload.promoted_run_id ?? '');
+  const offline = row ? { verdict: row.verdict, gap: row.gap_pct, ratio: Number(row.cost_ratio), runs: row.runs, runId: row.run_id } : null;
+  const arm = await upsertArm(workload, { kind: 'model', model: workload.routed_model, recipe },
+    { status: 'serving', originRunId: workload.promoted_run_id ?? null, offline });
   await db.prepare('UPDATE workloads SET routed_arm_id = ? WHERE id = ? AND routed_model = ? AND routed_arm_id IS NULL')
     .run(arm.id, workload.id, workload.routed_model);
   return arm;
