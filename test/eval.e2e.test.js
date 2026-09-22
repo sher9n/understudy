@@ -330,6 +330,37 @@ test('a stop that lands while a measurement is being picked up ends it before an
   assert.equal((await load(workload.id)).status, 'new');
 });
 
+test('a job cancelled while it runs stays cancelled, even when it asks to be tried again', async () => {
+  const { handle, runOnce } = await import('../src/jobs.js');
+  // the measurement's job is stopped while its handler is running, and the handler then asks
+  // to wait for balance, which used to put the stopped job straight back in the queue
+  handle('test_cancelled_mid_run', async (_payload, job) => {
+    await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE id = ?`).run(job.id);
+    return { snoozeMs: 30 * MIN, note: 'waiting for balance' };
+  });
+  const jobId = await enqueue('test_cancelled_mid_run', {}, { runAfter: 0 });
+  await runOnce();
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'cancelled');
+});
+
+test('stopping a workload asks every run of it to stop, not only the newest', async () => {
+  const { workspace, workload } = await seed('tworuns');
+  const t = now();
+  // one asked for and one on schedule, both alive
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, heartbeat_at, steps_total, steps_done, trigger)
+              VALUES ('run_two_a', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 30, 'manual'),
+                     ('run_two_b', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 10, 'automatic')`)
+    .run(workspace.id, workload.id, t - 60000, t - 60000, t - 1000,
+         workspace.id, workload.id, t - 30000, t - 30000, t - 2000);
+  const out = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_two' });
+  assert.equal(out.state, 'stopping');
+  const asked = await db.prepare(`SELECT id FROM eval_runs WHERE workload_id = ? AND stop_requested_at IS NOT NULL
+                ORDER BY id`).all(workload.id);
+  assert.deepEqual(asked.map((r) => r.id), ['run_two_a', 'run_two_b']);
+  await db.prepare(`UPDATE eval_runs SET status = 'failed' WHERE workload_id = ?`).run(workload.id);
+});
+
 test('stopping a measurement that has not started takes it out of the queue', async () => {
   const { workload } = await seed('queued');
   await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' }, { unique: true });

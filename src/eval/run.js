@@ -425,17 +425,21 @@ export async function stopMeasuring(workload, { actorUserId = null } = {}) {
     `UPDATE jobs SET status = 'cancelled', error = 'stopped by you'
       WHERE kind = 'eval_run' AND status IN ('queued', 'claimed')
         AND (payload::jsonb ->> 'workloadId') = ?`).run(workload.id)).changes;
-  const run = await db.prepare(
-    `SELECT * FROM eval_runs WHERE workload_id = ? AND status = 'running'
-      ORDER BY created_at DESC LIMIT 1`).get(workload.id);
-  if (!run) {
+  /* Every run of it, not only the newest: one asked for and one on schedule can be running at
+     once, and stopping the workload means stopping both. */
+  const runs = await db.prepare(
+    `SELECT * FROM eval_runs WHERE workload_id = ? AND status = 'running'`).all(workload.id);
+  if (!runs.length) {
     await rest(workload.id);
     return { ok: true, state: cancelled ? 'cancelled' : 'idle' };
   }
-  await db.prepare(`UPDATE eval_runs SET stop_requested_at = COALESCE(stop_requested_at, ?),
-              stopped_by = COALESCE(stopped_by, ?) WHERE id = ?`).run(now(), actorUserId, run.id);
-  if (isAbandoned(run) && await closeRun(run, 'stopped')) return { ok: true, state: 'stopped' };
-  return { ok: true, state: 'stopping' };
+  let live = 0;
+  for (const run of runs) {
+    await db.prepare(`UPDATE eval_runs SET stop_requested_at = COALESCE(stop_requested_at, ?),
+                stopped_by = COALESCE(stopped_by, ?) WHERE id = ?`).run(now(), actorUserId, run.id);
+    if (!(isAbandoned(run) && await closeRun(run, 'stopped'))) live += 1;
+  }
+  return { ok: true, state: live ? 'stopping' : 'stopped' };
 }
 
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);

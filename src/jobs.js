@@ -41,19 +41,22 @@ export async function runOnce() {
       .run(`no handler for ${job.kind}`, job.id);
     return true;
   }
+  /* A job goes back in the queue only if it is still this runner's. One cancelled while it ran,
+     because somebody stopped the measurement it was about to start, stays cancelled: putting
+     it back would start the very thing they stopped, half an hour later, with nobody asking. */
   try {
     const out = await fn(JSON.parse(job.payload || '{}'), job);
     if (out && out.snoozeMs) {
-      await db.prepare(`UPDATE jobs SET status = 'queued', run_after = ?, error = ? WHERE id = ?`)
+      await db.prepare(`UPDATE jobs SET status = 'queued', run_after = ?, error = ? WHERE id = ? AND status = 'claimed'`)
         .run(now() + out.snoozeMs, out.note ?? null, job.id);
     } else {
-      await db.prepare(`UPDATE jobs SET status = 'done', error = NULL WHERE id = ?`).run(job.id);
+      await db.prepare(`UPDATE jobs SET status = 'done', error = NULL WHERE id = ? AND status = 'claimed'`).run(job.id);
     }
   } catch (err) {
     const msg = String(err && err.message ? err.message : err).slice(0, 500);
     if (job.attempts < 5) {
       const backoff = Math.min(60000 * 2 ** job.attempts, 900000);
-      await db.prepare(`UPDATE jobs SET status = 'queued', run_after = ?, error = ? WHERE id = ?`)
+      await db.prepare(`UPDATE jobs SET status = 'queued', run_after = ?, error = ? WHERE id = ? AND status = 'claimed'`)
         .run(now() + backoff, msg, job.id);
     } else {
       await db.prepare(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`).run(msg, job.id);
