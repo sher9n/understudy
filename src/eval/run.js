@@ -7,7 +7,7 @@ import { planFor } from './plan.js';
 import { judgePair, judgementsFor } from './judge.js';
 import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, barIsMeaningful } from './compare.js';
 import { promote } from './promote.js';
-import { OUTCOME_OF, OUTCOME_CASE } from './outcome.js';
+import { OUTCOME_OF, OUTCOME_CASE, cheaperCleared } from './outcome.js';
 
 const DAY = 86400000;
 
@@ -397,36 +397,43 @@ export async function settleOutcomes() {
  * finished run makes. */
 export async function restingStatus(workloadId) {
   const w = await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(workloadId);
-  if (w?.routed_model) return { status: 'promoted', note: null };
+  const routed = w?.routed_model ?? null;
+  if (routed) return { status: 'promoted', note: null, routed };
   const last = await db.prepare(
     `SELECT id, ${OUTCOME_OF()} AS outcome FROM eval_runs WHERE workload_id = ?
         AND status = 'done' AND ${OUTCOME_OF()} IN ('compared', 'unmeasurable')
       ORDER BY created_at DESC LIMIT 1`).get(workloadId);
-  if (!last) return { status: 'new', note: null };
-  if (last.outcome === 'unmeasurable') return { status: 'no_match', note: 'We could not measure this workload' };
-  const verdicts = (await db.prepare(
-    `SELECT verdict FROM eval_results WHERE run_id = ? AND verdict <> 'reference'`).all(last.id))
-    .map((r) => r.verdict);
-  if (verdicts.includes('cleared')) return { status: 'certified', note: null };
-  if (verdicts.includes('review')) return { status: 'certified', note: 'A candidate is close and needs a look' };
-  return { status: 'no_match', note: 'Nothing cleared your bar yet' };
+  if (!last) return { status: 'new', note: null, routed };
+  if (last.outcome === 'unmeasurable') return { status: 'no_match', note: 'We could not measure this workload', routed };
+  const results = await db.prepare(
+    `SELECT verdict, cost_month_usd FROM eval_results WHERE run_id = ?`).all(last.id);
+  // the run's own rule, so a status read again always says what the run said at its end
+  if (cheaperCleared(results).length) return { status: 'certified', note: null, routed };
+  if (results.some((r) => r.verdict === 'review')) {
+    return { status: 'certified', note: 'A candidate is close and needs a look', routed };
+  }
+  return { status: 'no_match', note: 'Nothing cleared your bar yet', routed };
 }
 
 /* Put a workload back to its resting status, unless it is about to be measured anyway: another
    run of it is going, or one is waiting in the queue. A claimed job does not count, because the
    one asking is usually that very job, and an abandoned run's job stays claimed for ever. */
 export async function rest(workloadId) {
-  const { status, note } = await restingStatus(workloadId);
-  /* The check and the write are one statement. As two, a run starting between them had the
-     "Measuring" it had just written overwritten, and the page said "Ready to optimize" for the
-     whole of a measurement it was in the middle of. */
+  const readAt = now();
+  const { status, note, routed } = await restingStatus(workloadId);
+  /* The check and the write are one statement, and the write only lands if nothing it was read
+     from has moved since: no run is going or waiting, none has finished since the reading, and
+     the model serving it is the one it was read with. As separate steps, a run starting in
+     between had its "Measuring" overwritten, and one finishing in between, or a switch, had its
+     ending replaced by the older reading. */
   const r = await db.prepare(
     `UPDATE workloads SET status = ?, status_note = ?, updated_at = ?
-      WHERE id = ?
-        AND NOT EXISTS (SELECT 1 FROM eval_runs WHERE workload_id = ? AND status = 'running')
+      WHERE id = ? AND routed_model IS NOT DISTINCT FROM ?
+        AND NOT EXISTS (SELECT 1 FROM eval_runs WHERE workload_id = ?
+                          AND (status = 'running' OR COALESCE(finished_at, 0) > ?))
         AND NOT EXISTS (SELECT 1 FROM jobs WHERE kind = 'eval_run' AND status = 'queued'
                           AND (payload::jsonb ->> 'workloadId') = ?)`)
-    .run(status, note, now(), workloadId, workloadId, workloadId);
+    .run(status, note, now(), workloadId, routed, workloadId, readAt, workloadId);
   return r.changes > 0;
 }
 
@@ -500,10 +507,17 @@ export async function closeAbandoned(workloadId = null) {
  * start measuring again, which is the one thing somebody pressing Stop has said they do not
  * want. Answers with what happened: stopping, stopped, cancelled, or idle for nothing at all. */
 export async function stopMeasuring(workload, { actorUserId = null } = {}) {
+  /* Only the jobs no run belongs to yet: waiting in the queue, or picked up a moment ago and not
+     started. Those really are stopped before they start. A job whose run exists is that run's,
+     and the run is stopped through its own row below; cancelling it too made a stop in a run's
+     last moments, after it had finished and while it was tidying up, answer "stopped before it
+     started, so nothing was spent" about a measurement that had spent money and may have been
+     switching a model. */
   const cancelled = (await db.prepare(
     `UPDATE jobs SET status = 'cancelled', error = 'stopped by you'
       WHERE kind = 'eval_run' AND status IN ('queued', 'claimed')
-        AND (payload::jsonb ->> 'workloadId') = ?`).run(workload.id)).changes;
+        AND (payload::jsonb ->> 'workloadId') = ?
+        AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id)`).run(workload.id)).changes;
   /* Every run of it, not only the newest: one asked for and one on schedule can be running at
      once, and stopping the workload means stopping both. */
   const runs = await db.prepare(

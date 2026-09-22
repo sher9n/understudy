@@ -451,6 +451,37 @@ test('a stop that cancels a waiting measurement says so, even just after one fin
   assert.equal(quiet.state, 'finished', 'with nothing to cancel, a run that ended a moment ago is');
 });
 
+test('a stop in a run\'s last moments says it had finished, not that nothing was spent', async () => {
+  const { workspace, workload } = await seed('tail');
+  const t = now();
+  // it has written its ending and is tidying up: its job is still claimed, and belongs to it
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE id = ?`).run(t - 30000, jobId);
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, heartbeat_at, steps_total, steps_done, spend_usd, job_id)
+              VALUES ('run_tail', ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, ?, 300, 300, 0.62, ?)`)
+    .run(workspace.id, workload.id, t - 30000, t - 30000, t - 500, t - 600, jobId);
+  const out = await stopMeasuring(await load(workload.id));
+  assert.equal(out.state, 'finished');
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'claimed',
+    'the run\'s own job is left to it');
+});
+
+test('a model that cleared but costs more a month is not a candidate', async () => {
+  const { restingStatus } = await import('../src/eval/run.js');
+  const { workspace, workload } = await seed('dearer');
+  const t = now();
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model,
+              sample_size, created_at, started_at, finished_at, floor_pct)
+              VALUES ('run_dearer', ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 3)`)
+    .run(workspace.id, workload.id, t - 60000, t - 60000, t - 30000);
+  await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict, created_at)
+              VALUES ('res_dearer_ref', 'run_dearer', 'openai/gpt-5.4', 200, 0, 2.00, 'reference', ?),
+                     ('res_dearer_c', 'run_dearer', 'vendor/steady-small', 100, 1, 2.50, 'cleared', ?)`).run(t, t);
+  const r = await restingStatus(workload.id);
+  assert.equal(r.status, 'no_match', 'what the run said at its end: nothing cleared that would save anything');
+});
+
 test('closing a dead run leaves alone a job a new run has picked up', async () => {
   const { workspace, workload } = await seed('samejob');
   const t = now();
@@ -479,8 +510,9 @@ test('a run the old code finished without an outcome is read from what it wrote'
               sample_size, created_at, started_at, finished_at, floor_pct)
               VALUES ('run_found', ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 3)`)
     .run(workspace.id, workload.id, t - 3 * 86400000, t - 3 * 86400000, t - 3 * 86400000);
-  await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, verdict, created_at)
-              VALUES ('res_found', 'run_found', 'vendor/steady-small', 100, 1, 'cleared', ?)`).run(t);
+  await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict, created_at)
+              VALUES ('res_found_ref', 'run_found', 'openai/gpt-5.4', 200, 0, 2.00, 'reference', ?),
+                     ('res_found', 'run_found', 'vendor/steady-small', 100, 1, 0.50, 'cleared', ?)`).run(t, t);
   // then the old process, during a deploy, finished one that ran out of balance, with no outcome
   await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
               sample_size, created_at, started_at, finished_at, error)

@@ -128,10 +128,11 @@ export default function SwitchedCard({ s }) {
           <div className="ks">
             {!priced || p.cheaperPct == null ? 'Both calls need a price to compare them.'
               : !s.volume.monthly ? 'per call. No calls in the last 30 days to put a monthly figure on.'
-                : month.saved < 0 ? `per call, about ${est(-month.saved)} a month more on the calls through Understudy`
-                  /* copies have already run on the original model, so this is what routing would
-                     save, not what is being saved */
-                  : s.volume.basis === 'all' ? `per call. About ${est(month.saved)} a month, once this workload runs through Understudy`
+                /* with nothing routed yet, copies have already run on the original model, so this
+                   is what routing would save or cost, not what is happening */
+                : s.volume.basis === 'all'
+                  ? `per call. About ${est(Math.abs(month.saved))} a month${month.saved < 0 ? ' more' : ''}, once this workload runs through Understudy`
+                  : month.saved < 0 ? `per call, about ${est(-month.saved)} a month more on the calls through Understudy`
                     : `per call, about ${est(month.saved)} a month on the calls that come through Understudy`
                       + (s.volume.allMonthSaved != null && s.volume.allMonthSaved > month.saved
                         ? `, or ${est(s.volume.allMonthSaved)} if your copies came through as well` : '')}

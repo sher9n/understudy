@@ -11,6 +11,7 @@ import { account, ledger, gateRouting, stripe } from './billing.js';
 import { planFor } from './eval/plan.js';
 import { certificate, promote, revert } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
+import { outcomeOf, cheaperCleared } from './eval/outcome.js';
 import { switchStory } from './eval/switch-story.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
@@ -232,7 +233,8 @@ const callRow = (c) => {
 const runRow = (r) => ({
   id: r.id,
   status: r.status,
-  outcome: r.outcome ?? null,
+  // read from its error when the old process finished it without one, as everywhere else
+  outcome: outcomeOf(r),
   trigger: r.trigger,
   sample: r.sample_size,
   models: r.models_planned,
@@ -259,7 +261,7 @@ function nothingCompared(r) {
   if (r.status === 'running') {
     return 'This measurement is still running. Each model appears here once it has answered every call.';
   }
-  switch (r.outcome) {
+  switch (outcomeOf(r)) {
     case 'unmeasurable':
       return `${ref} gave a different answer to the same call ${Number(r.noise_pct ?? 0).toFixed(1)}% of the `
         + `time when we asked it each of ${r.sample_size} of your calls twice, so there was no steady bar `
@@ -449,6 +451,8 @@ api.get('/workloads/:id', async (req, res) => {
       /* when it was last heard from, and how long silence may last before it counts as having
          nothing running it, so a stop waiting on a run whose process has gone can say so */
       heartbeatAt: running.heartbeat_at ?? running.started_at,
+      // as a duration, worked out here: the browser's clock is not the server's
+      quietMs: Math.max(0, now() - (running.heartbeat_at ?? running.started_at ?? now())),
       staleMin: config.EVAL_STALE_MIN,
     } : waiting ? {
       queued: true, startsAt: waiting.run_after, total: 0, done: 0, spend: 0, phase: null,
@@ -471,7 +475,10 @@ api.get('/workloads/:id', async (req, res) => {
   }
 
   const cert = await certificate(w.id);
-  const best = cert?.results.find((r) => r.verdict === 'cleared' && r.model_id !== w.routed_model);
+  /* A candidate is what the run itself would switch to: cleared, priced, and cheaper a month.
+     Any cleared model used to be offered, so one that cleared but cost more showed "-25% lower",
+     "You keep -$2.50" and, in auto mode, "switches on its own", which it never would. */
+  const best = cert ? cheaperCleared(cert.results).find((r) => r.model_id !== w.routed_model) : null;
   const refCost = cert?.referenceCostMonth ?? null;
   const compared = cert ? cert.results.filter((r) => r.verdict !== 'reference') : [];
   /* The newest measurement that compared any model. It can be older than the one shown, and
@@ -495,7 +502,7 @@ api.get('/workloads/:id', async (req, res) => {
     measure,
     ...statusLabel(w),
     certificate: cert && {
-      runId: cert.run.id, outcome: cert.run.outcome ?? null,
+      runId: cert.run.id, outcome: outcomeOf(cert.run),
       rounds: cert.rounds, sampleSize: cert.run.sample_size, floor: cert.run.floor_pct,
       noise: cert.run.noise_pct, reference: cert.run.reference_model,
       finishedAt: cert.run.finished_at,

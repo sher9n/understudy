@@ -3,7 +3,8 @@
 Point your OpenAI-compatible client at Understudy instead of your provider. We group your
 calls into workloads by the job they do, measure how much your own model disagrees with
 itself, and move a workload to a cheaper model only when that model stays inside the same
-bar. If it stops clearing, it goes back.
+bar. Switching back is one click. Switching back by itself, when a model stops clearing, is
+not built yet: a re-check says so on the workload, and nothing moves until you do.
 
 Nothing here pretends. Where a key is missing, the screen says so instead of showing a zero
 as though it were a fact.

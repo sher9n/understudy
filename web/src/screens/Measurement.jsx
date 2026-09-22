@@ -321,8 +321,10 @@ async function stopOutcome(workloadId) {
 
 /* How long since a running measurement was last heard from. It writes a heartbeat before every
    call, so a long silence means a slow call or, rarely, a process that has gone: a stop then
-   waits for the silence to run out rather than for a call, and the panel says so. */
-const quietFor = (live) => (live?.heartbeatAt ? Math.max(0, Date.now() - live.heartbeatAt) : 0);
+   waits for the silence to run out rather than for a call, and the panel says so. Measured by
+   the server as a duration; subtracting its time from this browser's clock was wrong by however
+   far apart the two clocks are. */
+const quietFor = (live) => Math.max(0, Number(live?.quietMs) || 0);
 
 const stoppingLine = (live) => {
   const quiet = quietFor(live);

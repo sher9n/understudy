@@ -16,3 +16,26 @@ export const OUTCOME_CASE = (r = '') => `CASE
     ELSE 'compared' END`;
 
 export const OUTCOME_OF = (r = '') => `COALESCE(${r}outcome, ${OUTCOME_CASE(r)})`;
+
+/** The same reading for a row already fetched, for the page. Keep it in step with the SQL above. */
+export function outcomeOf(r) {
+  if (!r) return null;
+  if (r.outcome) return r.outcome;
+  if (r.status === 'failed') return 'interrupted';
+  if (r.status === 'stopped') return 'stopped';
+  if (r.status !== 'done') return null;
+  if (String(r.error || '').startsWith('reference disagreed with itself')) return 'unmeasurable';
+  if (r.error === 'balance ran out after the bar was set') return 'no_balance';
+  return 'compared';
+}
+
+/* Whether a measurement found a model to switch to, by the rule the run itself switches on:
+   cleared the bar, has a monthly price, and costs less a month than the customer's model. A
+   model that cleared but costs more is not a candidate; counting it as one put "Ready to
+   optimize" over a workload the run had said nothing cleared, and offered a saving of minus. */
+export function cheaperCleared(results) {
+  const ref = results.find((r) => r.verdict === 'reference');
+  const refCost = ref?.cost_month_usd ?? null;
+  return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null
+    && (refCost == null || r.cost_month_usd < refCost));
+}
