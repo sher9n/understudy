@@ -11,6 +11,7 @@ import { account, ledger, gateRouting, stripe } from './billing.js';
 import { planFor } from './eval/plan.js';
 import { certificate, promote, revert } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
+import { switchStory } from './eval/switch-story.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
 
@@ -500,6 +501,10 @@ api.get('/workloads/:id', async (req, res) => {
     lastComparison: lastComparison
       ? { runId: lastComparison.id, at: lastComparison.at, models: lastComparison.models }
       : null,
+    /* For a workload we moved to a cheaper model: from what, to what, why, what it saves and
+       what that comes to over time. Read from the switch's own record, never from whichever
+       measurement is newest, which may not have tried the model serving it at all. */
+    switched: w.routed_model ? await switchStory(w) : null,
     candidate: best && {
       model: best.model_id, gap: best.gap_pct, costMonth: best.cost_month_usd,
       accuracy: round8(100 - best.gap_pct),

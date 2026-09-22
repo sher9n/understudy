@@ -11,12 +11,14 @@ import { promote } from './promote.js';
 const DAY = 86400000;
 
 /** Models this workspace is willing to try, cheapest first, never the reference itself. */
-/** What a month of this workload would cost on a given model, from its own observed tokens. */
+/** What a month of this workload would cost on a given model, from its own observed tokens.
+ *  The customer's traffic only: our own replays counted here once, and a workload measured a
+ *  few times was projected from ten times more calls than it had ever made. */
 async function monthlyOn(workloadId, modelId) {
   const t = await db.prepare(
     `SELECT COALESCE(SUM(prompt_tokens), 0) AS pin, COALESCE(SUM(completion_tokens), 0) AS pout,
             COUNT(*) AS n, MIN(created_at) AS first
-       FROM calls WHERE workload_id = ? AND created_at >= ?`)
+       FROM calls WHERE workload_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`)
     .get(workloadId, now() - 30 * DAY);
   if (!t.n) return null;
   const per = await priceCall(modelId, t.pin, t.pout);

@@ -314,6 +314,56 @@ test('a measurement nothing is running any more is closed without anybody asking
   await db.prepare(`UPDATE eval_runs SET status = 'failed' WHERE id = 'run_alive_sweep'`).run();
 });
 
+test('the switched card is built from the switch and the calls since, and adds up by hand', async () => {
+  const { switchStory } = await import('../src/eval/switch-story.js');
+  const { workspace, workload } = await seed('switched');
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true);
+  const w = await load(workload.id);
+  assert.equal(w.routed_model, 'vendor/steady-small', 'the cheaper steady model was switched to');
+
+  // "cost a month" is the customer's own traffic only: 200 calls of 800 in and 60 out over 14
+  // days, never the replays the measurement made (it used to count those as traffic too)
+  const steady = await db.prepare(`SELECT cost_month_usd FROM eval_results WHERE run_id = ? AND model_id = ?`)
+    .get(out.runId, 'vendor/steady-small');
+  const perDay = (0.2e-6 * 800 + 0.6e-6 * 60) * 200 / 14;
+  assert.ok(Math.abs(steady.cost_month_usd - perDay * 30) < 1e-6, `a month on it is ${steady.cost_month_usd}`);
+
+  // twelve calls served by it since the switch, charged as routed calls are
+  for (let i = 0; i < 12; i += 1) {
+    await recordCall({
+      workspaceId: workspace.id, workloadId: workload.id, source: 'routed',
+      requestedModel: 'openai/gpt-5.4', servedModel: 'vendor/steady-small', statusCode: 200,
+      promptTokens: 800, completionTokens: 60, costUsd: 0.000196, chargedUsd: withFee(0.000196),
+    });
+  }
+  const s = await switchStory(await load(workload.id));
+  assert.equal(s.from, 'openai/gpt-5.4');
+  assert.equal(s.to, 'vendor/steady-small');
+  assert.equal(s.how, 'automatic');
+  assert.equal(s.evidence.verdict, 'cleared', 'why it switched comes from the measurement it switched on');
+  assert.equal(s.evidence.runId, out.runId);
+  assert.equal(s.latest, null, 'nothing has measured it again yet');
+  assert.ok(s.nextCheckAt > now(), 'and the next check is due on the 30 day default');
+
+  // a call on each: 800 in at its price, and each model's own answer length
+  assert.ok(Math.abs(s.prices.fromPerCall - (2.5e-6 * 800 + 15e-6 * 60)) < 1e-9, `${s.prices.fromPerCall}`);
+  assert.ok(Math.abs(s.prices.toPerCall - (0.2e-6 * 800 + 0.6e-6 * 60) * 1.01) < 1e-9, 'the fee is on the new model');
+
+  // the twelve served calls, actual: what was paid, and the same prompts on the original
+  assert.equal(s.soFar.calls, 12);
+  assert.ok(Math.abs(s.soFar.paid - 12 * withFee(0.000196)) < 1e-7, `paid ${s.soFar.paid}`);
+  assert.ok(Math.abs(s.soFar.wouldHave - 12 * (2.5e-6 * 800 + 15e-6 * 60)) < 1e-7, `would have ${s.soFar.wouldHave}`);
+  assert.ok(Math.abs(s.soFar.saved - (s.soFar.wouldHave - s.soFar.paid)) < 1e-9);
+
+  // volume is the customer's calls only: 212 over the fourteen days since the first of them
+  assert.equal(s.volume.calls, 212);
+  assert.ok(Math.abs(s.volume.monthly - (212 / 14) * 30) < 0.1, `a month is ${s.volume.monthly} calls`);
+  const [month] = s.projection;
+  assert.ok(Math.abs(month.saved - (s.prices.fromPerCall - s.prices.toPerCall) * s.volume.monthly) < 1e-6);
+  assert.ok(s.measuring.spent > 0, 'and what measuring cost is there to be shown');
+});
+
 test('a stop that lands while a measurement is being picked up ends it before anything is sent', async () => {
   const { workload } = await seed('pickup');
   // claimed by the runner, then cancelled by a stop, before the run existed to be asked

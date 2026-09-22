@@ -5,6 +5,7 @@ import { api, usd, num, dateIST, timeIST } from '../api.js';
 import { CandidateChart, chartPoints } from '../Charts.jsx';
 import WorkloadCalls from './WorkloadCalls.jsx';
 import Measurement from './Measurement.jsx';
+import SwitchedCard from './SwitchedCard.jsx';
 
 const Tile = ({ k, v, s }) => (
   <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
@@ -91,27 +92,37 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
       </div>
 
       <section className={`dcard${switched ? ' done' : hot ? ' hot' : ''}`}>
-        {switched && <span className="eyebrow eyeok">Switched automatically</span>}
-        {hot && <span className="eyebrow">A candidate is ready</span>}
+        {switched && w.switched ? (
+          <SwitchedCard s={w.switched} />
+        ) : (
+          <>
+            {switched && <span className="eyebrow eyeok">Switched automatically</span>}
+            {hot && <span className="eyebrow">A candidate is ready</span>}
 
-        <h2>{headline(w, cand, switched)}</h2>
-        <p>{blurb(w, cand, switched)}</p>
+            <h2>{headline(w, cand, switched)}</h2>
+            <p>{blurb(w, cand, switched)}</p>
 
-        {(switched || cand) && (
-          <div className="kpis">
-            <div className="kpi">
-              <div className="kk">Accuracy</div>
-              <div className="kv">{accuracy(w, cand, switched)}</div>
-              <div className="ks">
-                of answers matched {short(w.reference)}. Your bar is {(100 - (w.floor ?? 0)).toFixed(1)}%.
+            {/* A candidate's figures come from the measurement that found it, and so does the
+                bar it is held to: the workload's own bar is cleared by a measurement that
+                could not set one, and read as 0 it made this say "your bar is 100%". */}
+            {hot && (
+              <div className="kpis">
+                <div className="kpi">
+                  <div className="kk">Accuracy</div>
+                  <div className="kv">{accuracy(w, cand, switched)}</div>
+                  <div className="ks">
+                    of answers matched {short(w.reference)}.
+                    {w.certificate?.floor != null ? ` Your bar is ${(100 - w.certificate.floor).toFixed(1)}%.` : ''}
+                  </div>
+                </div>
+                <div className="kpi">
+                  <div className="kk">Cost</div>
+                  <div className="kv">{costLine(w, cand, switched)}</div>
+                  <div className="ks">{costSub(w, cand, switched)}</div>
+                </div>
               </div>
-            </div>
-            <div className="kpi">
-              <div className="kk">Cost</div>
-              <div className="kv">{costLine(w, cand, switched)}</div>
-              <div className="ks">{costSub(w, cand, switched)}</div>
-            </div>
-          </div>
+            )}
+          </>
         )}
 
         <div className="dacts">
@@ -280,7 +291,8 @@ const headline = (w, cand, switched) => {
 
 const blurb = (w, cand, switched) => {
   if (switched) {
-    return `We switched it because it cleared your bar. We re-test it on fresh calls and put you back on ${short(w.reference)} the moment it stops clearing.`;
+    // only when the switch's own record is missing; the card above is the ordinary case
+    return `We switched it because it cleared your bar. Switch back at any time and your calls go to ${short(w.reference)} again from the next one.`;
   }
   if (cand) {
     return w.optimizeMode === 'ask'
