@@ -37,6 +37,15 @@ export async function learningSettled() {
   while (learning.size) await Promise.allSettled([...learning]);
 }
 
+/** Keep hold of some background learning, such as a background answer, until it settles. */
+export function track(work, what = 'background learning') {
+  const p = Promise.resolve(work)
+    .catch((err) => { console.error(`${what} failed: ${err?.message || err}`); })
+    .finally(() => { learning.delete(p); });
+  learning.add(p);
+  return p;
+}
+
 /** One call, recorded. Everything the screens and the measurement need comes from here. */
 export async function recordCall({
   id: givenId = null, workspaceId, workloadId = null, source, requestedModel = null, servedModel = null,

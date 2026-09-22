@@ -10,7 +10,7 @@ import { gateRouting, chargeCall, grantStarterCredit } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
 import { report } from './learn/outcomes.js';
-import { chooseStrategy } from './learn/choose.js';
+import { chooseStrategy, served as noteServed } from './learn/choose.js';
 import { serveWith, writeAsStream } from './learn/serve.js';
 import { leadModel } from './learn/arms.js';
 import { featuresOf, predict } from './learn/router.js';
@@ -313,6 +313,8 @@ async function finish({ wsId, workload, requested, served, usage, started, body,
     request: body, response, ref, ...(decision || {}),
   });
   if (workload) await considerMeasuring(wsId, workload);
+  // a customer's answered call, which the learning layer may answer again in the background
+  if (workload && source === 'routed' && status === 200) noteServed({ workload, body, response, callId, decision, costUsd: cost });
 }
 
 /** Once a workload has enough calls to be trusted, it measures itself without being asked. */

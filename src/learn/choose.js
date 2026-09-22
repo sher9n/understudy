@@ -1,4 +1,5 @@
 import { db } from '../db/index.js';
+import { track } from '../traffic.js';
 import { upsertArm, armById } from './arms.js';
 
 /* Which strategy serves one call.
@@ -12,6 +13,14 @@ import { upsertArm, armById } from './arms.js';
 let tryInstead = null;
 /** Set by the learning layer: given a workload and its serving strategy, maybe one to try instead. */
 export const onChoose = (fn) => { tryInstead = fn; };
+
+let afterServe = null;
+/** Set by the learning layer: told about every answered call, to answer a few again in the background. */
+export const onServed = (fn) => { afterServe = fn; };
+/** A routed call was answered. Never holds up the answer, and never fails it. */
+export function served(info) {
+  if (afterServe && info?.workload) track(afterServe(info), `a background answer for ${info.workload.slug}`);
+}
 
 /** The serving strategy, or null when the workload runs on the customer's own model untouched. */
 export async function servingArm(workload) {
@@ -35,7 +44,12 @@ export async function servingArm(workload) {
 export async function chooseStrategy(workload) {
   const serving = await servingArm(workload);
   if (tryInstead) {
-    const pick = await tryInstead(workload, serving);
+    /* An experiment is never worth a failed call: if choosing one goes wrong, the call is served
+       the way it would have been without it. */
+    let pick = null;
+    try { pick = await tryInstead(workload, serving); } catch (err) {
+      console.error(`choosing an experiment for ${workload.slug} failed: ${err?.message || err}`);
+    }
     if (pick) return pick;
   }
   return serving ? { armId: serving.id, spec: serving.spec, propensity: 1, explored: false, shadow: null } : null;

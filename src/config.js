@@ -195,6 +195,32 @@ export const config = {
   JEV_UNSURE_LOW: num('JEV_UNSURE_LOW', 0.3),
   JEV_UNSURE_HIGH: num('JEV_UNSURE_HIGH', 0.7),
 
+  /* Learning from live calls, within limits each workload sets.
+
+     A measurement compares answers; what the customer cares about is whether they work, which
+     only live calls show. So a small share of a switched workload's calls can go to something
+     other than what serves it: half of that share to the customer's own model, as the yardstick
+     the serving strategy is held against, and half to runners-up that are cheaper still. "Careful"
+     and "normal" are those shares. "Shadow" never changes an answer: a runner-up answers a copy of
+     that share of calls in the background, and only how closely it matched is kept. Whatever the
+     setting, a day's experiments never add more than the workload's budget to the bill. */
+  EXPLORE_SHARE_CAREFUL: num('EXPLORE_SHARE_CAREFUL', 0.02),
+  EXPLORE_SHARE_NORMAL: num('EXPLORE_SHARE_NORMAL', 0.05),
+  SHADOW_SHARE: num('SHADOW_SHARE', 0.05),
+  EXPLORE_BUDGET_USD: num('EXPLORE_BUDGET_USD', 0.5),
+  /* How the evidence is weighed: a call counts half as much after this many days; an answer given
+     in the background counts this much of one that was used; a call is only read once this many
+     minutes have passed, since a retry or a correction takes a moment to arrive. */
+  LEARN_HALF_LIFE_DAYS: num('LEARN_HALF_LIFE_DAYS', 14),
+  LEARN_SURROGATE_WEIGHT: num('LEARN_SURROGATE_WEIGHT', 0.3),
+  LEARN_SETTLE_MIN: num('LEARN_SETTLE_MIN', 10),
+  /* What it takes to act on live evidence alone: this many calls on what is being judged, and this
+     much certainty that it works at least as often as what it is compared with, give or take this
+     tolerance (0.02 is two calls in a hundred). */
+  LEARN_MIN_CALLS: num('LEARN_MIN_CALLS', 30),
+  LEARN_CONFIDENCE: num('LEARN_CONFIDENCE', 0.95),
+  LEARN_TOLERANCE: num('LEARN_TOLERANCE', 0.02),
+
   /* How long what we learn stays true. Models improve, providers are added and dropped,
      prices and speeds move, so every fact is read again once it is this old. */
   HEALTH_TTL_MIN: num('HEALTH_TTL_MIN', 60),          // which providers keep nothing, and their uptime

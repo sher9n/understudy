@@ -19,6 +19,7 @@ import { simulateCascade, simulateRouter, bestOf } from '../learn/simulate.js';
 import { featuresOf, train, leaveOneOut } from '../learn/router.js';
 import { labelOf } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
+import { markTrying } from '../learn/explore.js';
 
 /* A measurement, run as a race.
  *
@@ -1087,6 +1088,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       workloadId,
     });
   }
+  /* What cleared or came close, and costs less than the customer's own model, is kept as a runner-up
+     live experiments can try; what this measurement no longer vouches for is set aside. */
+  await markTrying(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId),
+    { runId: run.id, results, refMonthly, floor });
   return { ok: true, runId: run.id, floor, results: results.length, partial: halt === 'balance', reused: reusedCount };
 }
 

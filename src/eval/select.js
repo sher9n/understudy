@@ -237,6 +237,16 @@ export function chanceOf(model, ctx) {
     : 0.3;
   const family = vendorOf(model.id) === vendorOf(ctx.reference);
   if (family) chance = Math.min(0.97, chance + 0.08);
+  /* Live calls elsewhere: a model whose calls worked less often than most on this kind of task,
+     for other customers, is a little less likely to suit this one, and one that worked more often
+     a little more. A nudge rather than a vote, so it can never drag every model to the middle, and
+     it grows with the calls behind it. */
+  const lived = ctx.history?.live?.get(model.id);
+  if (lived) {
+    const lift = Math.max(-0.4, Math.min(0.15, 3 * (lived.rate - lived.fleet))) * Math.min(1, lived.n / 400);
+    chance = Math.max(0.01, Math.min(0.97, chance * (1 + lift)));
+    parts.push({ source: 'live', p: lived.rate, w: 0, note: `${(lived.rate * 100).toFixed(1)}% of ${lived.n} live calls`, lift });
+  }
   return { chance, parts, family };
 }
 

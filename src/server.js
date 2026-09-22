@@ -16,6 +16,8 @@ import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.
 import { runTopUp } from './billing.js';
 import { revert, watchLive } from './eval/promote.js';
 import { onFollowUp, readFollowUp } from './learn/outcomes.js';
+import { onChoose, onServed } from './learn/choose.js';
+import { chooseExplore, afterServed, reviewAll } from './learn/explore.js';
 import { ask as askJev, jevUsable } from './jev.js';
 import api from './api.js';
 import v1 from './proxy.js';
@@ -245,6 +247,19 @@ handle('name_workload', async ({ workloadId }) => {
   return { ok: true, was: w.slug, now: finalSlug, model };
 });
 
+/* Learning from live calls: a small share of a switched workload's calls tries something else,
+   within the workload's own limits, and a few answered calls are answered again in the background
+   where a workload waits for approval (see src/learn/explore.js). */
+onChoose((workload, serving) => chooseExplore(workload, serving));
+onServed((info) => afterServed(info));
+
+/* And every hour, what the live calls show is read again and acted on. */
+handle('learn', async () => {
+  // the next one is booked first, so one that fails still leaves the next one coming
+  await enqueue('learn', {}, { runAfter: now() + 3600000, unique: true });
+  return { ok: true, ...(await reviewAll()) };
+});
+
 /** Content ages out; the numbers the charts need do not. */
 handle('purge', async () => {
   // the next one is booked first, so one that fails still leaves the next one coming
@@ -378,6 +393,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   await enqueue('arena_sync', {}, { unique: true });
   await enqueue('purge', {}, { unique: true });
   await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
+  await enqueue('learn', {}, { runAfter: now() + 10 * 60000, unique: true });
   startJobs();
   const server = app.listen(config.PORT, () => {
     console.log(`Understudy on http://localhost:${config.PORT}`);

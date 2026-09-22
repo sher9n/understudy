@@ -43,7 +43,55 @@ export async function historyFor(workload) {
     `SELECT DISTINCT from_model FROM promotions WHERE workload_id = ?
         AND (action IN ('revert', 'auto_revert') OR (action = 'soft_revert' AND created_at >= ?))`)
     .all(workload.id, now() - WATCH_COOL_OFF_DAYS * DAY)).map((r) => r.from_model));
-  return { own, shape, reverted };
+  return { own, shape, reverted, live: liveElsewhere(await liveRates(workload.shape_kind), workload.workspace_id) };
+}
+
+/* How often each model's live calls worked, on the same kind of answer, for everybody.
+ *
+ * A measurement asks whether a model gives the customer's own answers; live calls show whether
+ * answers worked (see src/learn/outcomes.js). Across customers that is the best evidence there is
+ * about a model on a kind of task, so it nudges the next measurement's order. Only counts are kept,
+ * never anybody's content, per model and workspace, so one customer's own calls can be left out of
+ * what they are shown. Read at most every ten minutes. */
+const liveMemo = new Map();
+async function liveRates(shapeKind) {
+  const hit = liveMemo.get(shapeKind);
+  if (hit && Date.now() - hit.at < 10 * 60000) return hit.rows;
+  const rows = (await db.prepare(
+    `SELECT c.served_model AS model_id, c.workspace_id, COUNT(*) AS n,
+            SUM(CASE WHEN c.status_code = 200 THEN COALESCE(c.reward, 1) ELSE 0 END) AS s
+       FROM calls c JOIN workloads w ON w.id = c.workload_id
+      WHERE w.shape_kind = ? AND c.source = 'routed' AND c.served_model IS NOT NULL
+        AND c.created_at >= ? AND c.created_at < ?
+        AND (c.status_code = 200 OR c.status_code IN (0, 404, 408, 429) OR c.status_code >= 500)
+      GROUP BY 1, 2`).all(shapeKind, now() - 30 * DAY, now() - 10 * 60000))
+    .map((r) => ({ model: r.model_id, ws: r.workspace_id, n: Number(r.n), s: Number(r.s) }));
+  liveMemo.set(shapeKind, { at: Date.now(), rows });
+  return rows;
+}
+
+/* Other workspaces' live rates, per model, where enough stands behind them that no one customer's
+   traffic can be read from the number: at least two workspaces and fifty calls. */
+export function liveElsewhere(rows, workspaceId) {
+  const theirs = rows.filter((r) => r.ws !== workspaceId);
+  let allN = 0;
+  let allS = 0;
+  const by = new Map();
+  for (const r of theirs) {
+    allN += r.n;
+    allS += r.s;
+    const m = by.get(r.model) || { n: 0, s: 0, spaces: 0 };
+    m.n += r.n;
+    m.s += r.s;
+    m.spaces += 1;
+    by.set(r.model, m);
+  }
+  const fleet = allN ? allS / allN : null;
+  const out = new Map();
+  for (const [model, m] of by) {
+    if (m.spaces >= 2 && m.n >= 50 && fleet !== null) out.set(model, { n: m.n, rate: m.s / m.n, fleet, spaces: m.spaces });
+  }
+  return out;
 }
 
 const median = (xs) => {

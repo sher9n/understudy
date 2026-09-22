@@ -12,6 +12,7 @@ import { planFor, forgetPlan } from './eval/plan.js';
 import { recipeKind } from './eval/select.js';
 import { outcomeSummary, tasksFor } from './learn/views.js';
 import { saveDef } from './learn/outcomes.js';
+import { learningView, exploreOf, forgetState, EXPLORE_MODES } from './learn/explore.js';
 import { certificate, promote, revert, trafficOf } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
 import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
@@ -725,6 +726,37 @@ api.get('/workloads/:id/tasks', async (req, res) => {
   const w = await db.prepare('SELECT id FROM workloads WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
   return res.json(await tasksFor(w.id));
+});
+
+/** What live calls are teaching about this workload's strategies, and how much it may experiment. */
+api.get('/workloads/:id/learning', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  return res.json(await learningView(w));
+});
+
+/* How much a workload may experiment: off, in the background only, or on a small share of its
+   calls, and the most a day's experiments may add to the bill. */
+api.post('/workloads/:id/explore', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  const b = req.body || {};
+  let mode = w.explore_mode;
+  if (b.mode !== undefined) {
+    if (b.mode !== 'auto' && !EXPLORE_MODES.includes(b.mode)) return fail(res, 400, 'That is not one of the choices.');
+    mode = b.mode === 'auto' ? null : b.mode;
+  }
+  let budget = w.explore_budget_usd;
+  if (b.budgetUsd !== undefined) {
+    const v = b.budgetUsd === null ? null : Number(b.budgetUsd);
+    if (v !== null && (!Number.isFinite(v) || v < 0 || v > 1000)) return fail(res, 400, 'The budget has to be between $0 and $1,000 a day.');
+    budget = v === null ? null : Math.round(v * 100) / 100;
+  }
+  await db.prepare('UPDATE workloads SET explore_mode = ?, explore_budget_usd = ?, updated_at = ? WHERE id = ?')
+    .run(mode, budget, now(), w.id);
+  forgetState(w.id);
+  const saved = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(w.id);
+  return res.json({ ok: true, explore: exploreOf(saved) });
 });
 
 /* How much slower than the customer's own model a switched-to model may be on this workload.

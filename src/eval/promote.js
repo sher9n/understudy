@@ -57,7 +57,7 @@ export async function servingKey(workload) {
   return workload.routed_model;
 }
 
-export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined, spec: given = null } = {}) {
+export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined, spec: given = null, detail = null } = {}) {
   if (auto && await everReverted(workload.id, modelId)) {
     return { ok: false, code: 'previously_reverted' };
   }
@@ -95,9 +95,9 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
     kind: 'ok',
     title: traffic.carries ? `${workload.slug} now runs on ${arm.label}`
       : `${workload.slug} will run on ${arm.label} once its calls come through Understudy`,
-    detail: (auto
+    detail: (detail || (auto
       ? 'Switched on its own, because this workload optimizes automatically.'
-      : 'Switched because you approved it.')
+      : 'Switched because you approved it.'))
       + (traffic.carries ? '' : ' Its calls reach us as copies, so the switch starts with the first one that comes through Understudy.'),
     workloadId: workload.id,
   });

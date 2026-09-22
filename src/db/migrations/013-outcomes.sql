@@ -97,6 +97,24 @@ ALTER TABLE workloads ADD COLUMN IF NOT EXISTS routed_arm_id TEXT;
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS explore_mode TEXT;          -- off | shadow | careful | normal; null follows the optimize mode
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS explore_budget_usd DOUBLE PRECISION;  -- a day
 
+-- answers a runner-up gave in the background to live calls, never seen by anybody, and how
+-- closely each matched the answer that was used
+CREATE TABLE IF NOT EXISTS shadow_runs (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workload_id   TEXT NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+  arm_id        TEXT NOT NULL,
+  call_id       TEXT,
+  agreement     DOUBLE PRECISION, -- 1 the same answer, 0 a different one or none; null when it says nothing
+  cost_usd      DOUBLE PRECISION NOT NULL DEFAULT 0,
+  latency_ms    BIGINT,
+  status        INTEGER,
+  detail_json   TEXT,
+  created_at    BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_shadow_workload ON shadow_runs (workload_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_shadow_arm ON shadow_runs (arm_id, created_at);
+
 -- a measured strategy that is not a single model, and how often it sent a call on
 ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS arm_json TEXT;
 ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS escalated_pct DOUBLE PRECISION;

@@ -33,6 +33,7 @@ const SOURCE_WORDS = {
   elsewhere: 'on similar workloads',
   jev: 'Jev',
   arena: 'Arena',
+  live: 'live calls elsewhere',
 };
 
 const short = (m) => String(m || '').split('/').pop();
@@ -72,6 +73,7 @@ const tagOf = (part) => {
   }
   if (part.source === 'before') return part.note === 'cleared' ? 'cleared here before' : `${part.note} here before`;
   if (part.source === 'elsewhere') return `cleared ${part.note} similar workloads`;
+  if (part.source === 'live') return `worked on ${part.note} elsewhere`;
   return SOURCE_WORDS[part.source] || part.source;
 };
 
