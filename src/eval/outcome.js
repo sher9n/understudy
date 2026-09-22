@@ -39,3 +39,15 @@ export function cheaperCleared(results) {
   return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null
     && (refCost == null || r.cost_month_usd < refCost));
 }
+
+/* Whether a switch changes anything yet. Only calls that come through Understudy can be sent to
+   another model: a copy arrives after the customer's own provider has already answered it. A
+   switch on a workload whose calls all arrive as copies is set up and waiting, and starts with
+   its first routed call; until then it is not "optimized", and nothing on it is saved. Read from
+   the latest hundred calls, so a workload that starts coming through us counts within days. */
+export const RECENT_CALLS = 100;
+export function carriesOf({ mode, routed = 0, copies = 0 }) {
+  if (mode === 'observe') return false;
+  return Number(routed) > 0;
+}
+

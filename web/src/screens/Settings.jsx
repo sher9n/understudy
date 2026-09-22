@@ -174,11 +174,11 @@ export default function Settings({ data, reload }) {
             <span className="segnote">
               {data.measureEveryDays
                 ? `Every workload is measured again on this cadence, and you are charged for the calls it replays. `
-                  /* it said a switched model "goes back if it stops clearing your bar", which
-                     nothing does yet; said as it is until it does */
-                  + 'A model we switched you to stays in place until you switch it back.'
+                  + 'A model we switched you to is checked again each time, and watched on your live calls every hour: '
+                  + 'it goes back on its own if it stops clearing your bar, starts failing calls or slows down.'
                 : 'Nothing is measured, and nothing is spent on measuring, until you press Measure now on a workload. '
-                  + 'A model we already switched you to stays where it is.'}
+                  + 'A model we already switched you to is still watched on your live calls every hour, and goes back '
+                  + 'on its own if it starts failing calls or slows down.'}
             </span>
           </span>
         </div>

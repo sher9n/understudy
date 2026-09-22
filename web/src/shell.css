@@ -392,3 +392,10 @@ a.wm:hover { text-decoration: none; }
   .swth span { overflow-wrap: anywhere; }
   .swrow .num { font-size: 12px; }
 }
+
+/* A recommendation for a workload whose calls reach us as copies: the exact model name to put in
+   their code, copyable, beside the way to route instead. */
+.recmodel { font-size: 13px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); color: var(--ink); align-self: center; overflow-wrap: anywhere; }
+a.mini { text-decoration: none; display: inline-flex; align-items: center; }
+.dcard .choicenote { margin: 16px 0 0; font-size: 12.5px; line-height: 1.55; color: var(--mut-read); max-width: 70ch; }

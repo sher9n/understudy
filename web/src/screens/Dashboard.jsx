@@ -38,7 +38,7 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
           s={!data.priced ? 'waiting on prices' : data.saved > 0 ? 'against your own models' : 'nothing optimized yet'} />
         <Tile k="Workloads" v={num(data.workloads)}
           s={data.workloads
-            ? `${data.optimized} optimized, ${data.ready} ready, ${data.measuring} measuring`
+            ? `${data.optimized} optimized${data.waiting ? `, ${data.waiting} waiting for routing` : ''}, ${data.ready} ready, ${data.measuring} measuring`
             : 'found automatically from your calls'} />
         <Tile k="Calls" v={num(data.calls)} s="since you connected" />
       </div>

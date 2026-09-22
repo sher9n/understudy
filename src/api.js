@@ -10,9 +10,9 @@ import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity } f
 import { account, ledger, gateRouting, stripe } from './billing.js';
 import { planFor, forgetPlan } from './eval/plan.js';
 import { recipeKind } from './eval/select.js';
-import { certificate, promote, revert } from './eval/promote.js';
+import { certificate, promote, revert, trafficOf } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
-import { outcomeOf, cheaperCleared } from './eval/outcome.js';
+import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
 import { switchStory } from './eval/switch-story.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
@@ -315,8 +315,11 @@ const CALL_COLUMNS = `id, source, requested_model, served_model, status_code, pr
   completion_tokens, charged_usd, cost_usd, latency_ms, created_at, request_json, response_json,
   content_purged_at`;
 
-const statusLabel = (w) => {
-  if (w.routed_model) return { label: 'Optimized', tone: 'ok' };
+/* `carries` says whether any of this workload's latest calls come through us. A switch on one
+   that only sends copies is set up and waiting: it changes nothing until calls are routed, so it
+   is not called optimized. */
+const statusLabel = (w, carries = true) => {
+  if (w.routed_model) return carries ? { label: 'Optimized', tone: 'ok' } : { label: 'Waiting for routing', tone: 'wait' };
   if (w.status === 'certified') return { label: 'Ready to optimize', tone: 'go' };
   if (w.status === 'measuring') return { label: 'Measuring', tone: 'wait' };
   if (w.status === 'no_match') return { label: 'Nothing cleared yet', tone: 'q' };
@@ -340,7 +343,9 @@ async function overview(workspaceId, days = 30) {
     saved,
     calls: spend.n,
     workloads: rows.length,
-    optimized: rows.filter((w) => w.routed_model).length,
+    // switched, and some calls come through us to be switched; a switch on copies alone is waiting
+    optimized: rows.filter((w) => w.routed_model && carriesOf({ mode: w.ws_mode, routed: w.recent_routed })).length,
+    waiting: rows.filter((w) => w.routed_model && !carriesOf({ mode: w.ws_mode, routed: w.recent_routed })).length,
     ready: rows.filter((w) => !w.routed_model && w.status === 'certified').length,
     measuring: rows.filter((w) => w.status === 'measuring').length,
     series,
@@ -349,7 +354,7 @@ async function overview(workspaceId, days = 30) {
       shape: shapeLabel[w.shape_kind] || w.shape_kind,
       cost: round8(w.spend),
       model: w.routed_model || w.reference_model || 'not set',
-      ...statusLabel(w),
+      ...statusLabel(w, carriesOf({ mode: w.ws_mode, routed: w.recent_routed, copies: w.recent_copies })),
     })),
     activity: await liveFeed(workspaceId, 40),
   };
@@ -436,6 +441,8 @@ api.get('/workloads/:id', async (req, res) => {
      running, so a deploy in the middle of one cannot leave a bar here that never moves. */
   await closeAbandoned(w.id);
   const plan = await planFor(w, { canRoute: canRoute(), memo: true });
+  // whether its calls come through us, so the page offers a switch or a recommendation
+  const traffic = await trafficOf(w);
   const running = await db.prepare(
     `SELECT id, steps_total, steps_done, phase, spend_usd, started_at, models_planned, sample_size,
             stop_requested_at, heartbeat_at
@@ -566,7 +573,7 @@ api.get('/workloads/:id', async (req, res) => {
     /* What a measurement would do, and whether it can. The button reads this rather than
        finding out the hard way after somebody presses it. */
     measure,
-    ...statusLabel(w),
+    ...statusLabel(w, traffic.carries),
     certificate: cert && {
       runId: cert.run.id, outcome: outcomeOf(cert.run),
       rounds: cert.rounds, sampleSize: cert.run.sample_size, floor: cert.run.floor_pct,
@@ -593,6 +600,7 @@ api.get('/workloads/:id', async (req, res) => {
       model: best.model_id, gap: best.gap_pct, costMonth: best.cost_month_usd,
       accuracy: round8(100 - best.gap_pct),
     },
+    traffic: { routed: traffic.routed, copies: traffic.copies, carries: traffic.carries, observe: traffic.observe },
   });
 });
 

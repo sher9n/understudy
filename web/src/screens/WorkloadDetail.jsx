@@ -121,6 +121,9 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
   const cand = w.candidate;
   const switched = !!w.promotedAt;
   const hot = !switched && !!cand;
+  /* Its calls reach us as copies, after the customer's own provider has answered them: a switch
+     here is set up and waits for the first call that comes through Understudy. */
+  const copiesOnly = !!w.traffic && !w.traffic.carries;
 
   return (
     <>
@@ -182,12 +185,26 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                 onClick={act(() => api.promote(w.id, cand.model))}>Approve switch</button>
             </>
           )}
+          {hot && copiesOnly && (
+            <>
+              <a className="minig lnk" href={href('connect')}>Send calls through Understudy</a>
+              <code className="recmodel m">{cand.model}</code>
+              <button className="minig" onClick={() => { navigator.clipboard?.writeText(cand.model).catch(() => {}); }}>
+                Copy model name
+              </button>
+            </>
+          )}
         </div>
 
+        {copiesOnly && (
+          <p className="choicenote">
+            Either way, a switch here is set up and waits: it starts with the first call that comes through Understudy.
+          </p>
+        )}
         <div className="choices">
-          {/* It said "and switch back if it slips", which nothing does yet: a model that stops
-              clearing is not switched back automatically. Said as it is until it does. */}
-          {[['auto', 'Optimize automatically', 'We switch as soon as a candidate clears your bar. Switching back is one click, at any time.'],
+          {/* The live watch looks at a switched model's calls every hour, and each measurement on
+              the workspace's schedule checks its answers again; either switches it back. */}
+          {[['auto', 'Optimize automatically', 'We switch as soon as a candidate clears your bar, and switch back on our own if it stops clearing it, starts failing calls or slows down. You can switch back yourself at any time.'],
             ['ask', 'Ask me first', 'We test and recommend. Nothing changes until you approve it.']].map(([mode, t, s]) => (
             <button key={mode} className={`choicebox${w.optimizeMode === mode ? ' picked' : ''}`}
               disabled={busy} onClick={act(() => api.setMode(w.id, mode))}>
@@ -370,6 +387,12 @@ const blurb = (w, cand, switched) => {
   if (switched) {
     // only when the switch's own record is missing; the card above is the ordinary case
     return `We switched it because it cleared your bar. Switch back at any time and your calls go to ${short(w.reference)} again from the next one.`;
+  }
+  if (cand && w.traffic && !w.traffic.carries) {
+    return `It stayed inside your bar across your own calls, replayed and compared answer by answer. Your calls `
+      + `reach us as copies, after your own provider has answered them, so a switch here starts with the first `
+      + `call that comes through Understudy: that is one change of base URL in your code. If you call OpenRouter `
+      + `yourself, you can instead change the model your code asks for to the one below.`;
   }
   if (cand) {
     return w.optimizeMode === 'ask'

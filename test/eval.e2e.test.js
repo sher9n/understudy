@@ -135,6 +135,7 @@ test.after(async () => {
 });
 
 test('a full measurement run sets a bar, scores every candidate, and switches', async () => {
+  const source = 'trace';
   const { workspace } = await createAccount({
     email: `e2e-${process.pid}@understudy.dev`, password: 'correct-horse', name: 'E2E',
   });
@@ -160,7 +161,7 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
     };
     workload = workload || await workloadFor(workspace.id, request);
     await recordCall({
-      workspaceId: workspace.id, workloadId: workload.id, source: 'trace',
+      workspaceId: workspace.id, workloadId: workload.id, source,
       requestedModel: 'openai/gpt-5.4', servedModel: 'openai/gpt-5.4', statusCode: 200,
       promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0.002,
       request, response: { choices: [{ message: { content: '{}' } }] },
@@ -218,7 +219,7 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
 const MIN = 60000;
 
 /** A workspace of its own with one measurable workload, the same shape as the one above. */
-async function seed(tag) {
+async function seed(tag, { source = 'trace' } = {}) {
   const { workspace } = await createAccount({
     email: `e2e-${tag}-${process.pid}@understudy.dev`, password: 'correct-horse', name: tag,
   });
@@ -235,7 +236,7 @@ async function seed(tag) {
     };
     workload = workload || await workloadFor(workspace.id, request);
     await recordCall({
-      workspaceId: workspace.id, workloadId: workload.id, source: 'trace',
+      workspaceId: workspace.id, workloadId: workload.id, source,
       requestedModel: 'openai/gpt-5.4', servedModel: 'openai/gpt-5.4', statusCode: 200,
       promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0.002,
       request, response: { choices: [{ message: { content: '{}' } }] },
@@ -762,3 +763,31 @@ test('a switch back only undoes the model it was decided about', async () => {
   assert.equal((await load(workload.id)).routed_model, 'vendor/drifty-small', 'the newer switch stands');
 });
 
+test('a switch on copies waits for routed calls, and copies are never counted as saved', async () => {
+  const { dailySpend } = await import('../src/traffic.js');
+  const { trafficOf } = await import('../src/eval/promote.js');
+  const { workspace, workload } = await seed('copies');
+  // two hundred copies: a month of them, and none came through us
+  const before = await dailySpend(workspace.id, 30);
+  assert.equal(before.reduce((a, d) => a + Math.max(0, d.would - d.paid), 0), 0,
+    'a copy ran on the customer\'s own model at their own provider, so nothing was saved on it');
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const after = await load(workload.id);
+  assert.equal(after.routed_model, 'vendor/steady-small', 'set up in advance, as the workload optimizes automatically');
+  assert.equal((await trafficOf(after)).carries, false, 'and waiting: no call comes through us yet');
+  const said = await db.prepare(`SELECT title, detail FROM activity WHERE workload_id = ? AND kind = 'ok' ORDER BY created_at`).all(workload.id);
+  assert.ok(said.some((a) => /cleared your bar/.test(a.title) && /copies, so a switch starts with the first call that comes through Understudy/.test(a.detail)),
+    JSON.stringify(said));
+  assert.ok(said.some((a) => /will run on vendor\/steady-small once its calls come through Understudy/.test(a.title)), JSON.stringify(said));
+  // the first routed call is served by the new model, and from then on it counts
+  await recordCall({
+    workspaceId: workspace.id, workloadId: workload.id, source: 'routed', requestedModel: 'openai/gpt-5.4',
+    servedModel: 'vendor/steady-small', statusCode: 200, promptTokens: 800, completionTokens: 60,
+    costUsd: 0.000196, chargedUsd: withFee(0.000196),
+  });
+  assert.equal((await trafficOf(await load(workload.id))).carries, true);
+  const saved = (await dailySpend(workspace.id, 30)).reduce((a, d) => a + Math.max(0, d.would - d.paid), 0);
+  const expected = (2.5e-6 * 800 + 15e-6 * 60) * 1.01 - withFee(0.000196);
+  assert.ok(Math.abs(saved - expected) < 1e-7, `saved ${saved}, the one routed call against gpt-5.4 for the same tokens`);
+});

@@ -1,6 +1,6 @@
 import { db, id, now } from '../db/index.js';
 import { addActivity } from '../traffic.js';
-import { OUTCOME_OF } from './outcome.js';
+import { OUTCOME_OF, RECENT_CALLS, carriesOf } from './outcome.js';
 
 const record = async (workload, row, x = db) =>
   await x.prepare(`INSERT INTO promotions (id, workload_id, action, from_model, to_model, reason, run_id,
@@ -20,6 +20,18 @@ export async function everReverted(workloadId, modelId) {
     `SELECT 1 FROM promotions WHERE workload_id = ? AND from_model = ?
       AND (action IN ('revert', 'auto_revert') OR (action = 'soft_revert' AND created_at >= ?))`)
     .get(workloadId, modelId, now() - WATCH_COOL_OFF_DAYS * 86400000);
+}
+
+/** How a workload's latest calls reach us, and whether switching it would change anything. */
+export async function trafficOf(workload) {
+  const ws = await db.prepare('SELECT mode FROM workspaces WHERE id = ?').get(workload.workspace_id);
+  const r = await db.prepare(
+    `SELECT COUNT(*) FILTER (WHERE source = 'routed') AS routed, COUNT(*) FILTER (WHERE source = 'trace') AS copies
+       FROM (SELECT source FROM calls WHERE workload_id = ? AND source IN ('routed', 'trace')
+              ORDER BY created_at DESC LIMIT ?) x`).get(workload.id, RECENT_CALLS);
+  const routed = Number(r?.routed ?? 0);
+  const copies = Number(r?.copies ?? 0);
+  return { routed, copies, observe: ws?.mode === 'observe', carries: carriesOf({ mode: ws?.mode, routed, copies }) };
 }
 
 export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined } = {}) {
@@ -50,15 +62,19 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
       .run(modelId, how ? JSON.stringify(how) : null, now(), runId, now(), workload.id);
     await record(workload, { action: 'promote', from_model: from, to_model: modelId, reason, run_id: runId, actor_user_id: actorUserId }, tx);
   });
+  // said as it is for a workload whose calls arrive as copies: set up, and waiting for them
+  const traffic = await trafficOf(workload);
   await addActivity(workload.workspace_id, {
     kind: 'ok',
-    title: `${workload.slug} now runs on ${modelId}`,
-    detail: auto
+    title: traffic.carries ? `${workload.slug} now runs on ${modelId}`
+      : `${workload.slug} will run on ${modelId} once its calls come through Understudy`,
+    detail: (auto
       ? 'Switched on its own, because this workload optimizes automatically.'
-      : 'Switched because you approved it.',
+      : 'Switched because you approved it.')
+      + (traffic.carries ? '' : ' Its calls reach us as copies, so the switch starts with the first one that comes through Understudy.'),
     workloadId: workload.id,
   });
-  return { ok: true, from, to: modelId };
+  return { ok: true, from, to: modelId, waiting: !traffic.carries };
 }
 
 /** Back to the customer's own model, from the next call onwards. */

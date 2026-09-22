@@ -11,6 +11,7 @@ process.env.ALERTS_ENABLED = 'false';
 const { thinkingFit, eligibility, chanceOf, selectCandidates, refThinksOf, speedChanceOf, recipeKind } = await import('../src/eval/select.js');
 const { slowEndCount } = await import('../src/eval/run.js');
 const { failingClearly, tailAtLeast } = await import('../src/eval/promote.js');
+const { carriesOf } = await import('../src/eval/outcome.js');
 const { thinkingAsked, profileFromRows } = await import('../src/eval/profile.js');
 const { callPrice, routedCallPrice, healthOf } = await import('../src/models/facts.js');
 const { numbersOf, numbersDiffer } = await import('../src/eval/judge.js');
@@ -412,5 +413,13 @@ test('price windows that end at midnight, or name no days, are read', () => {
   const wrap = { priceIn: 1e-6, priceOut: 0, overrides: [{ utc_days: ['monday'], utc_start: 2200, utc_end: 200, prompt: '0.0000005', completion: '0' }] };
   assert.ok(Math.abs(callPrice(wrap, 1e6, 0, at(1, 23)) - 0.5) < 1e-9, 'a window past midnight');
   assert.ok(Math.abs(callPrice(wrap, 1e6, 0, at(1, 12)) - 1) < 1e-9);
+});
+
+test('a switch changes something only once some calls come through us', () => {
+  assert.equal(carriesOf({ mode: 'route', routed: 40, copies: 0 }), true);
+  assert.equal(carriesOf({ mode: 'route', routed: 0, copies: 100 }), false, 'copies only: waiting');
+  assert.equal(carriesOf({ mode: 'route', routed: 10, copies: 90 }), true, 'some come through us, and those are switched');
+  assert.equal(carriesOf({ mode: 'observe', routed: 100, copies: 0 }), false, 'a workspace that only observes');
+  assert.equal(carriesOf({ mode: 'route', routed: 0, copies: 0 }), false, 'nothing yet');
 });
 

@@ -63,7 +63,13 @@ export async function workloadStats(workspaceId, days = 30) {
             (SELECT COUNT(*) FROM calls c WHERE c.workload_id = w.id AND c.created_at >= ?
                 AND c.source NOT IN ('replay', 'test')) AS calls,
             (SELECT COALESCE(SUM(c.charged_usd), 0) FROM calls c
-              WHERE c.workload_id = w.id AND c.created_at >= ? AND c.source NOT IN ('replay', 'test')) AS spend
+              WHERE c.workload_id = w.id AND c.created_at >= ? AND c.source NOT IN ('replay', 'test')) AS spend,
+            -- how its latest calls reach us: through us, or as copies (see carriesOf)
+            (SELECT COUNT(*) FILTER (WHERE x.source = 'routed') FROM (SELECT source FROM calls c
+               WHERE c.workload_id = w.id AND c.source IN ('routed', 'trace') ORDER BY c.created_at DESC LIMIT 100) x) AS recent_routed,
+            (SELECT COUNT(*) FILTER (WHERE x.source = 'trace') FROM (SELECT source FROM calls c
+               WHERE c.workload_id = w.id AND c.source IN ('routed', 'trace') ORDER BY c.created_at DESC LIMIT 100) x) AS recent_copies,
+            (SELECT ws.mode FROM workspaces ws WHERE ws.id = w.workspace_id) AS ws_mode
        FROM workloads w WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
       ORDER BY spend DESC, w.created_at`).all(since, since, workspaceId);
 }
@@ -72,9 +78,13 @@ export async function workloadStats(workspaceId, days = 30) {
 export async function dailySpend(workspaceId, days = 30) {
   const since = now() - days * DAY;
   const rows = await db.prepare(
+    /* Only calls that came through us. A copy was paid to the customer's own provider and could
+       not have been sent anywhere cheaper, so it is neither spend here nor a saving: counted, it
+       read as paid nothing against what it would have cost, and every copy showed as saved in
+       full ($6.60 on one workspace that had saved nothing). */
     `SELECT c.created_at, c.charged_usd, c.cost_usd, c.served_model, c.requested_model,
             c.prompt_tokens, c.completion_tokens
-       FROM calls c WHERE c.workspace_id = ? AND c.created_at >= ? AND c.source NOT IN ('replay', 'test')`)
+       FROM calls c WHERE c.workspace_id = ? AND c.created_at >= ? AND c.source = 'routed'`)
     .all(workspaceId, since);
   const price = new Map(await (await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all())
     .map((m) => [m.model_id, m]));

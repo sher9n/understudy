@@ -6,7 +6,7 @@ import { gateEval, chargeEval } from '../billing.js';
 import { planFor } from './plan.js';
 import { judgeBarPair, judgeCandidate } from './judge.js';
 import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, barIsMeaningful } from './compare.js';
-import { promote, revert } from './promote.js';
+import { promote, revert, trafficOf } from './promote.js';
 import { replayOnce } from './replay.js';
 import { thinkingFit } from './select.js';
 import { loadFacts } from '../models/facts.js';
@@ -879,6 +879,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
 
   if (best) {
     const saving = refMonthly === null ? null : round8(refMonthly - best.cost_month_usd);
+    // calls that reach us as copies cannot be switched by us, so for them this is advice
+    const traffic = await trafficOf(workload);
     await db.prepare(`UPDATE workloads SET status = 'certified', status_note = NULL, updated_at = ? WHERE id = ?`)
       .run(now(), workloadId);
     await addActivity(workload.workspace_id, {
@@ -886,7 +888,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       title: `${best.model_id} cleared your bar on ${workload.slug}`,
       detail: `${best.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar`
         + (saving ? `, about $${saving.toFixed(2)} a month less` : '')
-        + (reusedCount ? `. ${reusedCount} answers were reused from earlier measurements` : ''),
+        + (reusedCount ? `. ${reusedCount} answers were reused from earlier measurements` : '')
+        + (traffic.carries ? '' : '. Your calls reach us as copies, so a switch starts with the first call that comes through Understudy'),
       workloadId,
     });
     if (workload.optimize_mode === 'auto') {

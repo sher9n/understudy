@@ -16,7 +16,8 @@ export default function Workloads({ data, onOpen, onPeriod, busy }) {
       <div className="tiles">
         <Tile k="Workloads" v={num(data.workloads)} s="found automatically" />
         <Tile k="Optimized" v={num(data.optimized)}
-          s={data.ready ? `${data.ready} more ready to switch` : 'nothing else ready yet'} />
+          s={data.waiting ? `${data.waiting} more switched, waiting for routed calls`
+            : data.ready ? `${data.ready} more ready to switch` : 'nothing else ready yet'} />
         <Tile k={`Saved · last ${data.days} days`} v={data.priced && data.saved > 0 ? usd(data.saved) : '—'}
           s={data.priced ? 'against your own models' : 'waiting on prices'} />
         <Tile k={`Spend · last ${data.days} days`} v={data.priced ? usd(data.spend) : '—'}
