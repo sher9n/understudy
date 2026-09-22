@@ -29,7 +29,12 @@ export class JevError extends Error {
    is told, the same way a failing provider is. */
 let restingUntil = 0;
 let restingWhy = null;
-const REST_MS = 10 * 60000;
+/* Credit and keys are fixed by a person, not by waiting a few seconds, so after such a refusal
+   Jev is left alone for half an hour and asked again once; the half hour is what a top-up can
+   take to be noticed. Only the first refusal of an outage is reported: while the account stays
+   empty, every retry would otherwise be another email saying the same thing. */
+const REST_MS = 30 * 60000;
+let outage = false;
 
 /** True while Jev can be asked: a key is set and it is not resting after a lasting refusal. */
 export const jevUsable = () => canJev() && Date.now() >= restingUntil;
@@ -92,10 +97,12 @@ export async function ask(state, questions, { retries = 3, model = config.JEV_MO
           restingWhy = res.status === 402
             ? 'The TypeSafe account has no credit left, so Jev cannot answer until more is added.'
             : 'TypeSafe refused the key, so Jev cannot answer until it is fixed.';
-          reportCallFailure({ kind: 'Jev (TypeSafe)', model, status: res.status, message: msg });
+          if (!outage) reportCallFailure({ kind: 'Jev (TypeSafe)', model, status: res.status, message: msg });
+          outage = true;
         }
         throw new JevError(res.status, msg);
       }
+      outage = false;
       return {
         answers: body.answers,
         model: body.model || model,

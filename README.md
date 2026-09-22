@@ -128,6 +128,45 @@ A workspace is measured again every 30 days until it chooses otherwise on Settin
 the choices are only when asked, or every 1, 5, 10, 30 or 90 days. The default comes from
 `MEASURE_EVERY_DAYS` and has to be one of those.
 
+## How the models to test are chosen
+
+Every model switched on in Models is a possible replacement, and there are hundreds, so a
+measurement starts by deciding which few are worth paying to test. It works in three steps.
+
+**Rule out what cannot do this job.** A model is left out, with the reason in words, when
+it has no provider that keeps nothing (every routed call requires one); cannot handle what
+the workload's requests use (tools, a JSON schema, images, their length); has to think
+before every answer when the answers are capped too short for that; is being retired within
+`EVAL_EXPIRY_DAYS`; has not been answering reliably over the last day
+(`EVAL_MIN_UPTIME_PCT`); or costs as much as the current model at the price that would
+really be paid: through providers that keep nothing, weighted the way OpenRouter spreads
+calls between them, at the hours this workload's calls arrive.
+
+**Rank the rest by what each is expected to save.** What a model would save a month if it
+could replace the current one, times the chance that it can. That takes two things: its
+answers have to match, and it has to be quick enough for the workload's speed setting. The
+chance its answers match comes from how it did on this workload before, from Jev's reading
+of how well it suits a few of the workload's requests, from its Arena leaderboard rating
+against the current model, and from belonging to the same family. The chance it is quick
+enough comes from how fast it was against the customer's kind of model in recent
+measurements, and from its providers' published speeds. A model whose provider was too busy
+to answer in the last few hours waits behind the rest for a while.
+
+Models that think before answering are asked to work the way the current model does. When
+it answers straight away, a candidate is asked not to think, or to think as little as it
+allows, and if it wins it is routed that way too. The measurement checks how the current
+model actually worked on the first calls and corrects this if the guess was wrong.
+
+**Race them.** Several models run side by side on the same calls, in ranked order. One is
+dropped as soon as it can no longer reach the bar, is clearly slower than the speed setting
+allows, or its provider refuses it, and the next in line takes its place. On the first few
+calls a model has to be clearly slow to be dropped, and a single slow call is never enough.
+
+Everything learned is kept only as long as it stays true: model facts for hours
+(`CATALOG_SYNC_HOURS`, `HEALTH_TTL_MIN`), Jev's readings and the leaderboard for days
+(`FIT_TTL_DAYS`, `ARENA_TTL_DAYS`). An answer already paid for is used again for
+`REPLAY_REUSE_DAYS` instead of being paid for twice, whichever measurement asks for it.
+
 ## Stopping a measurement
 
 A running measurement has a Stop button. It stops at its next step: the call in flight comes
@@ -160,7 +199,17 @@ src/openrouter.js    the provider client, the catalogue, per-call pricing
 src/proxy.js         /v1/chat/completions and /v1/traces, and routeOnce, the one path
                      every routed call takes, the Connect test call included
 src/eval/compare.js  extraction, disagreement, gates, the bar, sampling (all pure)
-src/eval/run.js      one measurement run end to end
+src/eval/select.js   which models to test: rule-outs, thinking, ranking (all pure)
+src/eval/plan.js     what a measurement would do, shown on the page and used by the run
+src/eval/profile.js  what a workload needs, read from its own requests
+src/eval/fit.js      Jev's reading of how each model suits a workload
+src/eval/history.js  what earlier measurements found, as evidence for the next
+src/eval/replay.js   one replay, and the answers already paid for
+src/eval/judge.js    whether two written answers mean the same: Jev, then a language model
+src/eval/run.js      one measurement run end to end, as a race
+src/models/facts.js  model facts, providers that keep nothing, prices as really charged
+src/models/arena.js  the Arena leaderboard, matched to model names
+src/jev.js           the Jev client, with a rest after a refusal
 src/eval/promote.js  switching, switching back, and the certificate
 src/billing.js       balance, ledger, gates, automatic top up
 src/jobs.js          the background runner, claimed one row at a time

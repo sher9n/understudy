@@ -156,7 +156,8 @@ export const config = {
   EVAL_MIN_UPTIME_PCT: num('EVAL_MIN_UPTIME_PCT', 99),
   /* A model that thinks before it answers needs room to think. When a workload caps its
      answers below this, a thinking model is measured with its thinking switched off, or
-     left out when it cannot be switched off. */
+     left out when it cannot be switched off. (Without a cap, it is asked to think the way
+     the customer's own model does: see thinkingFit in src/eval/select.js.) */
   EVAL_THINKING_ROOM_TOKENS: num('EVAL_THINKING_ROOM_TOKENS', 4000),
   /* A model retiring within this many days is not worth switching anybody to. */
   EVAL_EXPIRY_DAYS: num('EVAL_EXPIRY_DAYS', 30),
