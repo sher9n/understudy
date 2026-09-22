@@ -399,3 +399,35 @@ a.wm:hover { text-decoration: none; }
   background: var(--panel); color: var(--ink); align-self: center; overflow-wrap: anywhere; }
 a.mini { text-decoration: none; display: inline-flex; align-items: center; }
 .dcard .choicenote { margin: 16px 0 0; font-size: 12.5px; line-height: 1.55; color: var(--mut-read); max-width: 70ch; }
+
+/* The landing page's card rows. Four steps in a row on a wide screen, two by two on a narrower
+   one, one after another on a phone; the lifted sheet only had the four across, which left four
+   cards squeezed side by side on a phone. And a pair of cards the same way. */
+/* Two by two: four across shrank each drawing until its labels were six pixels high. Each drawing
+   is kept to a size its words can be read at, centred in its card. */
+.lp-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.lp-cards .art svg, .lp-two .art svg { display: block; max-width: 440px; margin: 0 auto; }
+@media (max-width: 640px) { .lp-cards { grid-template-columns: minmax(0, 1fr); } }
+.lp-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 760px) { .lp-two { grid-template-columns: minmax(0, 1fr); } }
+/* a panel's picture keeps its words legible on a phone by losing some of its padding */
+@media (max-width: 720px) {
+  .lp .panel.split { padding: 24px 20px !important; }
+  .lp .panel.split > div[style*="padding: 26px 24px"] { padding: 16px 12px !important; }
+}
+/* The headline keeps each half on one line where there is room for it; on a phone "Continuously
+   optimize" alone is wider than the screen, and holding it together pushed the whole page sideways. */
+@media (max-width: 560px) { .hero-h1 span { white-space: normal !important; } }
+/* The page column is centred with automatic side margins inside a flex column, and an item with
+   automatic margins is not stretched to the column's width: it takes its content's width, which on
+   a phone was the code sample's longest line, and held the whole page 53px wider than the screen.
+   A width of its own keeps it to the screen, still no wider than its maximum and still centred, and
+   the code sample scrolls inside its box as it was meant to. */
+.lp { width: 100%; box-sizing: border-box; min-width: 0; }
+/* A panel with its picture on the left keeps that order only where there is room for two columns.
+   The lifted sheet's rule for it came after its own single-column rule for narrow screens, so on a
+   phone the words were squeezed into a sliver beside a tiny picture. There, the words come first. */
+@media (max-width: 1020px) {
+  .split.rev { grid-template-columns: minmax(0, 1fr); }
+  .split.rev > :first-child { order: 2; }
+}
