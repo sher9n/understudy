@@ -15,7 +15,7 @@ const fmtDays = (d) => (d === 0 ? 'only when you ask' : d === 1 ? 'every day' : 
 const whatHappened = (r) => {
   if (r.status === 'running') return 'Running now';
   if (r.status === 'stopped') {
-    return r.total ? `Stopped by you at ${num(r.done)} of ${num(r.total)} replays` : 'Stopped by you';
+    return r.total ? `Stopped by you at ${num(r.done)} of ${num(r.total)} model calls` : 'Stopped by you';
   }
   if (r.status === 'failed') return 'Interrupted before it finished';
   if (r.error) return r.error;
@@ -130,7 +130,10 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
                 <div className="mruns m">
                   {queued ? 'Nothing has been sent yet, so nothing has been spent.' : (
                     <>
-                      {num(live.done)} of {num(live.total)} replays
+                      {/* "model calls", not "replays": for written answers most of the count is
+                          a judge comparing them, and calling those replays made 132 replays
+                          read as 363 */}
+                      {num(live.done)} of {num(live.total)} model calls
                       {live.spend ? ` · ${usd(live.spend)} spent so far` : ''}
                     </>
                   )}
@@ -161,8 +164,7 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
               <p className="mnote">
                 {stopping
                   ? 'Nothing more is sent after the call in flight. It is charged like the rest, and nothing is switched.'
-                  : 'Your own model answers each sampled call twice to set the bar, then every candidate '
-                    + 'answers the same calls once. You can leave this page; it keeps going.'}
+                  : `${whereTheCountComesFrom(live)} You can leave this page; it keeps going.`}
               </p>
             )}
           </div>
@@ -177,7 +179,11 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
               <p className="mwhy">
                 {num(m.sample)} of this workload&rsquo;s {num(m.pool)} calls are replayed:
                 twice on {shortName(w.reference)} to set the bar, then once on each of{' '}
-                {num(m.models)} cheaper models. You are charged for every one of those
+                {num(m.models)} cheaper models.
+                {w.shape === 'free text'
+                  ? ' Written answers cannot be compared word for word, so a judge model also compares each pair.'
+                  : ''}{' '}
+                You are charged for every one of those
                 calls{m.estimateUsd != null ? `, about ${usd(m.estimateUsd)} for this measurement` : ''}.
               </p>
             ) : (
@@ -254,6 +260,24 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
 const shortName = (m) => (m ? String(m).split('/').pop() : 'your model');
 
 const STOPPED = 'Stopped. You were charged only for the calls it made, and nothing was switched.';
+
+/* What the count on a running measurement is made of, in numbers. Your own model answers each
+   sampled call twice, each candidate answers it once, and for written answers a judge model
+   compares the pairs: the count is all of those, and the judge is usually most of it. */
+function whereTheCountComesFrom(live) {
+  const sample = Number(live.sample) || 0;
+  const models = Number(live.models) || 0;
+  const replays = sample * (2 + models);
+  const judged = (Number(live.total) || 0) - replays;
+  if (!sample || !replays) {
+    return 'Your own model answers each sampled call twice to set the bar, then every candidate answers the same calls once.';
+  }
+  const base = `Your own model answers each of ${num(sample)} sampled calls twice to set the bar, then each of `
+    + `${num(models)} ${models === 1 ? 'candidate' : 'candidates'} answers them once: ${num(replays)} replays.`;
+  if (judged <= 0) return base;
+  return `${base} Written answers cannot be compared word for word, so a judge model also compares each pair: `
+    + `${num(judged)} comparisons, which is why the count is ${num(live.total)}.`;
+}
 const FINISHED = 'It had already finished when the stop reached it, so it was not stopped. What it found is below.';
 
 /* What each answer to a stop means, in the words the panel leaves behind. */

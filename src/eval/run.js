@@ -150,7 +150,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await addActivity(workload.workspace_id, {
       kind: 'floor',
       title: `Measuring ${workload.slug} stopped`,
-      detail: `Stopped at ${done} of ${stepsTotal} replays, as you asked. You were charged only for `
+      detail: `Stopped at ${done} of ${stepsTotal} model calls, as you asked. You were charged only for `
         + 'the calls it made, and nothing was switched.',
       workloadId,
     });
@@ -458,7 +458,7 @@ async function closeRun(run, how) {
     kind: 'floor',
     title: how === 'stopped' ? `Measuring ${slug} stopped` : `Measuring ${slug} was interrupted`,
     detail: how === 'stopped'
-      ? `Stopped at ${run.steps_done} of ${run.steps_total} replays, as you asked. You were charged only `
+      ? `Stopped at ${run.steps_done} of ${run.steps_total} model calls, as you asked. You were charged only `
         + 'for the calls it made, and nothing was switched.'
       : 'It stopped moving part way through, usually because the service restarted. Nothing was '
         + 'switched, and it can be measured again.',
