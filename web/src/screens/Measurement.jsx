@@ -91,9 +91,7 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId }) {
             <div className="mtop">
               <div>
                 <button className="mini" disabled={!m.canRun || busy || starting} onClick={start}>
-                  {starting ? 'Starting…' : m.estimateUsd != null && m.canRun
-                    ? `Measure now, about ${usd(m.estimateUsd)}`
-                    : 'Measure now'}
+                  {starting ? 'Starting…' : 'Measure now'}
                 </button>
               </div>
               {m.canRun ? (
@@ -101,7 +99,7 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId }) {
                   {num(m.sample)} of this workload&rsquo;s {num(m.pool)} calls are replayed:
                   twice on {shortName(w.reference)} to set the bar, then once on each of{' '}
                   {num(m.models)} cheaper models. You are charged for every one of those
-                  calls, which is what the figure on the button is.
+                  calls{m.estimateUsd != null ? `, about ${usd(m.estimateUsd)} for this measurement` : ''}.
                 </p>
               ) : (
                 <p className="mwhy cannot">{m.reason}</p>

@@ -684,6 +684,12 @@
     .tipdot { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
     .tipdot.paid { background: var(--brand); }
     .tipdot.would { background: var(--line-strong); }
+    /* The same card on the candidates chart, beside the dot it describes rather than pinned
+       to the top, because a dot can be anywhere on the drawing. */
+    .charttip.dotcard { transform: translate(18px, -50%); max-width: 320px; }
+    .charttip.dotcard.left { transform: translate(calc(-100% - 18px), -50%); }
+    .charttip.dotcard .tipday { overflow-wrap: anywhere; }
+    .cchartnote { margin: 6px 4px 0; font-size: 12.5px; line-height: 1.55; color: var(--mut-read); }
 
     /* The calls in a workload. Same shape as the candidates table above it, so the page
        reads as one thing, with the asked-for text given the room because that column is the

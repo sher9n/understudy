@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { href } from '../router.js';
 import { plainClick } from '../nav.jsx';
 import { api, usd, num, dateIST } from '../api.js';
-import { CandidateChart } from '../Charts.jsx';
+import { CandidateChart, chartPoints } from '../Charts.jsx';
 import WorkloadCalls from './WorkloadCalls.jsx';
 import Measurement from './Measurement.jsx';
 
@@ -56,6 +56,10 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
     reference: runData.reference, finishedAt: runData.finishedAt,
     referenceCostMonth: runData.referenceCostMonth, results: runData.results,
   } : w.certificate;
+  /* The model this measurement's bar came from. Usually the workload's own, but an older run
+     opened from the history may have been measured against a model it has since moved off,
+     and its chart and table have to name that one, not today's. */
+  const measuredOn = cert?.reference || w.reference;
   const cand = w.candidate;
   const switched = !!w.promotedAt;
   const hot = !switched && !!cand;
@@ -126,13 +130,13 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
       <Measurement w={w} busy={busy} onRan={load}
         openRunId={openRun} onOpenRun={setOpenRun} />
 
-      {cert && cert.results.length > 1 && (
+      {cert && cert.results.length > 0 && (
         <section className="opt ovis">
           <div className="opthead">
             <h2>How the candidates compare</h2>
             <div className="trigwrap" ref={barRef}>
               <div className="trigrow">
-                <span className="pill go">Your bar · {(w.floor ?? 0).toFixed(2)}%</span>
+                <span className="pill go">Your bar · {(cert.floor ?? w.floor ?? 0).toFixed(2)}%</span>
                 <button className="whyb" onClick={() => setBarOpen((v) => !v)}>
                   <span className="whyi">?</span> How is this set?
                 </button>
@@ -143,18 +147,26 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                     <h3>How your bar is set</h3>
                     <button className="popx" onClick={() => setBarOpen(false)} aria-label="Close">×</button>
                   </div>
-                  <p>We take {cert.sampleSize} of your real calls and run each one twice on {w.reference}.</p>
+                  <p>We take {cert.sampleSize} of your real calls and run each one twice on {measuredOn}.</p>
                   <p>Your own model did not give the same answer both times on {(cert.noise ?? 0).toFixed(2)}% of them.</p>
                   <p><b>That is where your {(cert.floor ?? 0).toFixed(2)}% bar comes from.</b> A candidate is measured
                     the same way on the same calls, and has to stay inside it.</p>
-                  <p>No model is judged on fewer than 100 runs.</p>
+                  <p>Every model is judged on the same {num(cert.sampleSize)} calls. That is half of this
+                    workload&rsquo;s recent traffic, between ten and a hundred, so there is always
+                    fresh traffic left to re-check a model we switch you to.</p>
                 </div>
               )}
             </div>
           </div>
           <div className="cbody">
-            <CandidateChart results={cert.results} floor={cert.floor ?? 0} reference={w.reference}
+            <CandidateChart results={cert.results} floor={cert.floor ?? 0} reference={measuredOn}
               referenceCostMonth={cert.referenceCostMonth} />
+            {!plottable(cert, measuredOn) && (
+              <div className="optempty">
+                There is nothing to place on the chart yet: every model in this measurement
+                stopped before it had answered enough calls to be judged.
+              </div>
+            )}
           </div>
         </section>
       )}
@@ -186,11 +198,11 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
               <span>Verdict</span>
             </div>
             <div className="cdrow cur">
-              <div className="mdl">{w.reference}</div>
+              <div className="mdl">{measuredOn}</div>
               <div className="num">{num(cert.sampleSize * 2 * cert.rounds)}</div>
               <div className="num">baseline</div>
               <div className="num">{cert.referenceCostMonth === null ? '—' : usd(cert.referenceCostMonth)}</div>
-              <div><span className="pill q">{switched ? 'Previous model' : 'Current model'}</span></div>
+              <div><span className="pill q">{measuredOn !== w.reference ? 'Your model then' : switched ? 'Previous model' : 'Current model'}</span></div>
             </div>
             {cert.results.map((r) => {
               const [label, tone] = VERDICT[r.verdict] || ['—', 'q'];
@@ -218,6 +230,9 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
     </>
   );
 }
+
+/* Asked through the chart's own rule, so the page never draws an empty box above it. */
+const plottable = (cert, reference) => chartPoints(cert?.results, reference, cert?.referenceCostMonth).length >= 2;
 
 const short = (m) => (m ? String(m).split('/').pop() : 'not set');
 const vendor = (m) => (m && m.includes('/') ? `${m.split('/')[0]}, your own choice` : 'your own choice');
