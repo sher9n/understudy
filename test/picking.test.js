@@ -5,7 +5,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 process.env.JOBS_ENABLED = 'false';
-const { thinkingFit, eligibility, chanceOf, selectCandidates } = await import('../src/eval/select.js');
+const { thinkingFit, eligibility, chanceOf, selectCandidates, refThinksOf, speedChanceOf, recipeKind } = await import('../src/eval/select.js');
+const { slowEndCount } = await import('../src/eval/run.js');
 const { callPrice, routedCallPrice, healthOf } = await import('../src/models/facts.js');
 const { numbersOf, numbersDiffer } = await import('../src/eval/judge.js');
 const { replayKey } = await import('../src/eval/replay.js');
@@ -207,4 +208,97 @@ test('a sample prefers calls already paid for, without changing its spread acros
   assert.equal(preferring.filter((c) => paid.has(c.id)).length, 12, 'every paid call is used');
   const bands = (xs) => [0, 1, 2, 3].map((q) => xs.filter((c) => c.quartile === q).length);
   assert.deepEqual(bands(preferring), bands(plain), 'the same number from each length band');
+});
+
+test('a thinking model is asked to think the way the customer model does', () => {
+  const plain = profile();
+  const r = { mandatory: false, default_enabled: true, supported_efforts: ['none', 'low', 'high'], default_effort: 'high' };
+  // the customer model answers straight away: this one is told not to think
+  assert.deepEqual(thinkingFit(model('x/a', { reasoning: r }), plain, 4000, false).recipe, { reasoning: { effort: 'none' } });
+  // not known yet is treated the same, and the measurement corrects it once it has timed the customer model
+  assert.deepEqual(thinkingFit(model('x/a', { reasoning: r }), plain, 4000, null).recipe, { reasoning: { effort: 'none' } });
+  // the customer model thinks too: left as it comes
+  assert.equal(thinkingFit(model('x/a', { reasoning: r }), plain, 4000, true).recipe, null);
+  // the customer's own requests say how much to think: sent as they are
+  assert.equal(thinkingFit(model('x/a', { reasoning: r }), profile({ reasoningSet: true }), 4000, false).recipe, null);
+  // has to think: as little as it allows
+  const must = thinkingFit(model('x/b', { reasoning: { mandatory: true, supported_efforts: ['high', 'medium', 'low'], default_effort: 'medium' } }), plain, 4000, false);
+  assert.deepEqual(must.recipe, { reasoning: { effort: 'low' } });
+  assert.equal(must.mustThink, true);
+  assert.equal(recipeKind(must.recipe), 'light');
+  // has to think and says nothing about how much: left as it comes
+  assert.equal(thinkingFit(model('x/c', { reasoning: { mandatory: true } }), plain, 4000, false).recipe, null);
+  // already at its lightest: nothing to change
+  assert.equal(thinkingFit(model('x/d', { reasoning: { mandatory: true, supported_efforts: ['low', 'high'], default_effort: 'low' } }), plain, 4000, false).recipe, null);
+  // a tight cap still decides first
+  assert.deepEqual(thinkingFit(model('x/a', { reasoning: r }), profile({ outCap: 180 }), 4000, true).recipe, { reasoning: { effort: 'none' } });
+  // a model that does not think by default is never touched
+  assert.equal(thinkingFit(model('x/e', { reasoning: { mandatory: false, default_enabled: false } }), plain, 4000, false).recipe, null);
+});
+
+test('whether the customer model thinks is measured first and read second', () => {
+  const gpt41 = model('openai/gpt-4.1');
+  assert.equal(refThinksOf(gpt41), false, 'no reasoning block: answers straight away');
+  assert.equal(refThinksOf(model('x/r', { reasoning: { mandatory: false, default_enabled: false, default_effort: 'medium' } })), false);
+  assert.equal(refThinksOf(model('x/r', { reasoning: { mandatory: false, default_effort: 'high' } })), true);
+  assert.equal(refThinksOf(model('x/r', { reasoning: { mandatory: true } })), true);
+  assert.equal(refThinksOf(model('x/r', { reasoning: { mandatory: false } })), null, 'says nothing either way');
+  assert.equal(refThinksOf(null), null, 'not in the catalogue');
+  // what it did on the calls beats what its entry says
+  assert.equal(refThinksOf(gpt41, { share: 0.9, n: 10 }), true);
+  assert.equal(refThinksOf(model('x/r', { reasoning: { mandatory: true } }), { share: 0, n: 10 }), false);
+  // two answers are too few to go on
+  assert.equal(refThinksOf(gpt41, { share: 1, n: 2 }), false);
+});
+
+test('the chance of being quick enough comes from measurements first and published speeds second', () => {
+  const sp = { factor: 1.5, metric: 'latency' };
+  const base = { speed: sp, refHealth: healthOf(model('ref')), profile: profile({ refLatencyP50: 1400 }), config };
+  const m = model('x/m');
+  const hist = (latency, n = 4) => new Map([['x/m|default', { latency, ttft: latency, n }]]);
+  const unknown = speedChanceOf(m, null, base);
+  const fast = speedChanceOf(m, null, { ...base, speedHistory: hist(0.7) });
+  const slow = speedChanceOf(m, null, { ...base, speedHistory: hist(3) });
+  assert.ok(fast.p > unknown.p && unknown.p > slow.p, `${fast.p} ${unknown.p} ${slow.p}`);
+  assert.ok(fast.p > 0.9, `measured quicker than the customer model: ${fast.p}`);
+  assert.ok(slow.p < 0.2, `measured three times slower, four times over: ${slow.p}`);
+  // one measurement is less sure than four
+  assert.ok(speedChanceOf(m, null, { ...base, speedHistory: hist(3, 1) }).p > slow.p);
+  // timings taken while it thought say nothing about it with its thinking off
+  const off = speedChanceOf(m, { reasoning: { effort: 'none' } }, { ...base, speedHistory: hist(3) });
+  assert.equal(off.measured, null);
+  // when speed does not matter there is nothing to weigh
+  assert.equal(speedChanceOf(m, null, { ...base, speed: { factor: null } }), null);
+  // timed to the first word for streamed calls
+  const ttft = speedChanceOf(m, null, { ...base, speed: { factor: 1.2, metric: 'ttft' }, speedHistory: new Map([['x/m|default', { latency: 0.8, ttft: 4, n: 4 }]]) });
+  assert.ok(ttft.p < 0.2, 'a quick finish does not make up for a slow start');
+});
+
+test('a model likely to be too slow, or whose provider was busy lately, waits behind the rest', () => {
+  const models = new Map();
+  const ref = model('openai/gpt-5.4', { endpoints: [ep({ price_in: 2.5e-6, price_out: 1.5e-5 })] });
+  models.set(ref.id, ref);
+  for (const id of ['a/quick', 'b/slow', 'c/busy', 'd/plain']) models.set(id, model(id));
+  const facts = { models, zdrKnown: true };
+  const input = {
+    facts, profile: profile({ refLatencyP50: 1400 }), reference: 'openai/gpt-5.4', enabled: null, want: 4, tryMultiple: 1,
+    speed: { factor: 1.5, metric: 'latency' }, config, at: Date.now(),
+    speedHistory: new Map([['a/quick|default', { latency: 0.8, n: 3 }], ['b/slow|default', { latency: 3.5, n: 3 }]]),
+    busy: new Map([['c/busy', { n: 2, at: Date.now() }]]),
+  };
+  const order = selectCandidates(input).order.map((r) => r.model);
+  assert.equal(order[0], 'a/quick');
+  assert.ok(order.indexOf('b/slow') > order.indexOf('d/plain'), order.join(' '));
+  assert.ok(order.indexOf('c/busy') > order.indexOf('d/plain'), order.join(' '));
+  // with speed not mattering, a slow model is ranked on its answers and saving alone
+  const any = selectCandidates({ ...input, speed: { factor: null }, busy: null }).order;
+  const chances = new Set(any.map((r) => r.chance.toFixed(6)));
+  assert.equal(chances.size, 1, 'the same price and the same evidence rank the same');
+});
+
+test('one slow call is never enough to call a model slow', () => {
+  assert.equal(slowEndCount(3), 2);
+  assert.equal(slowEndCount(6), 3);
+  assert.equal(slowEndCount(12), 4);
+  for (let n = 1; n <= 40; n += 1) assert.ok(slowEndCount(n) >= 2, `n=${n}`);
 });

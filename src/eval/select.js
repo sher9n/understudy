@@ -12,38 +12,94 @@ import { routedCallPrice, callPrice, healthOf } from '../models/facts.js';
  * and three think before they answer and ran out of the 180 tokens the customer allows.
  *
  * Then rank what is left by what each model is expected to save: what it would save a month if
- * it matched, times the chance that it matches. The chance is estimated from Jev's reading of
- * how well the model suits the task, the model's rating against the customer's own model on
- * the public Arena leaderboard, and how it did on this customer's calls before. */
+ * it worked out, times the chance that it does. Working out means two things, and both have to
+ * happen: its answers match, and it is quick enough for the workload's speed setting. The first
+ * is estimated from how it did on this customer's calls before, Jev's reading of how well it
+ * suits the task, and its rating against the customer's own model on the public Arena
+ * leaderboard; the second from how fast it has been against the customer's kind of model in
+ * recent measurements, and from its providers' published speeds. */
 
 const vendorOf = (id) => String(id).split('/')[0];
 
-/* How a model thinks, and whether that fits a workload whose answers are capped.
- *
- * A thinking model writes hidden notes before its answer, and on most providers those notes
- * count against the answer's length limit. With a tight cap it runs out of room before it
- * answers. When its thinking can be switched off it is measured that way, and routed that way
- * if it wins. When it cannot, it is left out. */
-export function thinkingFit(model, profile, room) {
-  const r = model.reasoning;
-  if (!r) return { ok: true, recipe: null };
-  const efforts = Array.isArray(r.supported_efforts) ? r.supported_efforts : [];
-  /* "Off unless asked" is stated either as default_enabled false or as a default effort of none.
-     When neither is stated, a model with a reasoning block does think: on production,
-     deepseek-v4-pro and gpt-5.3-codex both say nothing and both thought. */
-  const thinksByDefault = r.mandatory === true || r.default_enabled === true
+/* Whether a model thinks before it answers when nobody says otherwise. "Off unless asked" is
+   stated either as default_enabled false or as a default effort of none. When neither is
+   stated, a model with a reasoning block is taken to think: on production, deepseek-v4-pro and
+   gpt-5.3-codex both said nothing and both thought, and mimo-v2.5 says nothing and thinks. */
+export function thinksByDefault(r) {
+  if (!r) return false;
+  return r.mandatory === true || r.default_enabled === true
     || (r.default_enabled !== false && r.default_effort !== 'none');
-  if (!thinksByDefault) return { ok: true, recipe: null };
+}
+
+/* Whether the customer's own model thinks on these calls: true, false, or null when nothing
+ * says. What was measured comes first, because every answer carries a count of the thinking
+ * behind it; then what its catalogue entry states. A model whose entry says nothing either way
+ * is not assumed to think here, unlike a candidate, because the two mistakes cost differently:
+ * a candidate wrongly assumed not to think can be cut off mid-answer, while this guess only
+ * decides how the candidates are asked, and a measurement corrects it as soon as it has timed
+ * the customer's model on the calls. */
+export function refThinksOf(refModel, measured = null) {
+  if (measured && measured.n >= 3) return measured.share >= 0.3;
+  if (!refModel) return null;
+  const r = refModel.reasoning;
+  if (!r) return false;
+  if (r.mandatory === true || r.default_enabled === true) return true;
+  if (r.default_enabled === false || r.default_effort === 'none') return false;
+  if (r.default_effort) return true;
+  return null;
+}
+
+/** How a recipe asks a model to think: switched off, kept light, or left as it comes. */
+export function recipeKind(recipe) {
+  const r = recipe?.reasoning;
+  if (!r) return 'default';
+  return r.enabled === false || r.effort === 'none' ? 'off' : 'light';
+}
+
+// lightest first; "none" is not among them, because that is off rather than light
+const LIGHT = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+/* How a model is asked to think, and whether it can do the job at all.
+ *
+ * A thinking model writes hidden notes before its answer. They are billed like the answer, and
+ * they are slow: on the four measurements that first tested racing, models left to think wrote
+ * far more than the customer's model did for the whole answer (hy3 176 tokens of thinking
+ * against 17, glm-5.3-flash 108), and every one of them was then dropped as too slow. So a
+ * model is measured the way the customer's own model works. When that one answers straight
+ * away, a candidate that can be told not to think is told so, and one that has to think is
+ * asked to think as little as it allows. When the customer's model thinks too, or the
+ * customer's own requests say how much to think, the candidate is left as it comes. Whatever
+ * it is measured with, it is routed with if it wins, because that is the model that cleared.
+ *
+ * A tight cap on the answer decides first: on most providers the notes count against it, so a
+ * model that thinks runs out of room before it answers. If it cannot be told not to think, it
+ * is left out. */
+export function thinkingFit(model, profile, room, refThinks = null) {
+  const r = model.reasoning;
+  if (!r || !thinksByDefault(r)) return { ok: true, recipe: null };
+  const efforts = Array.isArray(r.supported_efforts) ? r.supported_efforts : [];
+  const off = { reasoning: efforts.includes('none') ? { effort: 'none' } : { enabled: false } };
   const tight = profile.outCap !== null && profile.outCap !== undefined && profile.outCap < room;
-  if (!tight) return { ok: true, recipe: null, thinks: true };
-  if (r.mandatory === true) {
-    return { ok: false, reason: `thinks before every answer and cannot be told not to, and your answers are capped at ${profile.outCap} tokens` };
+  if (tight) {
+    if (r.mandatory === true) {
+      return { ok: false, reason: `thinks before every answer and cannot be told not to, and your answers are capped at ${profile.outCap} tokens` };
+    }
+    return { ok: true, thinks: true, recipe: off, note: 'measured with its thinking switched off, because your answers are capped' };
   }
+  // the customer's requests say how much to think, and they are sent as they are
+  if (profile.reasoningSet) return { ok: true, recipe: null, thinks: true };
+  // the customer's model thinks as well, so this one is measured thinking: like for like
+  if (refThinks === true) return { ok: true, recipe: null, thinks: true };
+  if (r.mandatory !== true) {
+    return { ok: true, thinks: true, recipe: off, note: 'measured with its thinking switched off, like your model' };
+  }
+  const lightest = LIGHT.find((e) => efforts.includes(e)) || null;
   return {
     ok: true,
     thinks: true,
-    recipe: { reasoning: efforts.includes('none') ? { effort: 'none' } : { enabled: false } },
-    note: 'measured with its thinking switched off, because your answers are capped',
+    mustThink: true,
+    recipe: lightest && lightest !== r.default_effort ? { reasoning: { effort: lightest } } : null,
+    note: 'has to think before every answer, so it is measured thinking as little as it allows',
   };
 }
 
@@ -79,7 +135,7 @@ export function eligibility(model, ctx) {
   if (model.maxOutput && outNeed > model.maxOutput) {
     return { ok: false, step: 'features', reason: `writes at most ${model.maxOutput.toLocaleString('en-US')} tokens, and your answers can run to ${outNeed.toLocaleString('en-US')}` };
   }
-  const think = thinkingFit(model, profile, room);
+  const think = thinkingFit(model, profile, room, ctx.refThinks ?? null);
   if (!think.ok) return { ok: false, step: 'thinking', reason: think.reason };
   if (model.expiresAt && model.expiresAt - at < expiryMs) {
     return { ok: false, step: 'retiring', reason: 'is being retired soon' };
@@ -93,7 +149,7 @@ export function eligibility(model, ctx) {
       return { ok: false, step: 'health', reason: 'has no provider answering reliably right now' };
     }
   }
-  return { ok: true, recipe: think.recipe, note: think.note || null, thinks: !!think.thinks };
+  return { ok: true, recipe: think.recipe, note: think.note || null, thinks: !!think.thinks, mustThink: !!think.mustThink };
 }
 
 /* The chance a model gives answers the customer would accept in place of their own model's.
@@ -108,10 +164,14 @@ export function chanceOf(model, ctx) {
   const parts = [];
   const hist = ctx.history?.own?.get(model.id);
   if (hist) {
-    // "slower" is about speed, and the same speed setting will most likely drop it again
-    const p = { cleared: 0.95, review: 0.6, slower: 0.25, missed: 0.1, failed: 0.05 }[hist.verdict];
+    /* Only what the verdict says about its answers. "Slower" at the end means they matched and
+       the time did not, and speed is weighed on its own below; "slower" in the first calls, or
+       "failed" because its provider was busy or refused it, says nothing about the answers. */
+    const p = hist.verdict === 'slower'
+      ? (hist.stopped ? undefined : 0.9)
+      : { cleared: 0.95, review: 0.6, missed: 0.1 }[hist.verdict];
     // measured on these very calls, so it outweighs everything else put together
-    if (p !== undefined) parts.push({ source: 'before', p, w: 6, note: hist.verdict });
+    if (p !== undefined) parts.push({ source: 'before', p, w: 6, note: hist.verdict === 'slower' ? 'matched' : hist.verdict });
   }
   const shape = ctx.history?.shape?.get(model.id);
   if (shape && shape.n) {
@@ -140,6 +200,43 @@ export function chanceOf(model, ctx) {
   return { chance, parts, family };
 }
 
+/* The chance a model keeps to the workload's speed setting, or null when speed does not matter.
+ *
+ * Measured first: in recent measurements of any workload, how long it took against the
+ * customer's model in the same measurement, asked to think the same way. A ratio travels
+ * between workloads far better than a time does, because a long answer is slow on every model.
+ * Its providers' published speeds come next, against the customer's model's, over the last
+ * half hour; they come from everybody's traffic, and they describe a model left to think, so
+ * they count for less, and for less again when it will be asked not to. With neither, a
+ * middling 0.7. The allowance is the setting's own: one and a half times, or one and a fifth,
+ * plus the fixed slack every measurement gives. */
+export function speedChanceOf(model, recipe, ctx) {
+  const { speed, speedHistory, refHealth, profile, config } = ctx;
+  if (!speed || !speed.factor) return null;
+  const refMs = speed.metric === 'ttft' ? (refHealth?.ttftP50 || 900) : (profile.refLatencyP50 || 1500);
+  const allowed = speed.factor + config.SPEED_SLACK_MS / Math.max(300, refMs);
+  const curve = (ratio) => 1 / (1 + (ratio / allowed) ** 6);
+  const parts = [];
+  const kind = recipeKind(recipe);
+  const h = speedHistory?.get(`${model.id}|${kind}`);
+  const measuredRatio = h ? (speed.metric === 'ttft' ? h.ttft ?? h.latency : h.latency) : null;
+  // each measurement is a few calls timed side by side with the customer's model: real evidence
+  if (measuredRatio) parts.push({ source: 'measured', p: curve(measuredRatio), w: Math.min(8, 2 * h.n), ratio: measuredRatio, n: h.n });
+  const mine = healthOf(model);
+  let pub = null;
+  if (refHealth?.ttftP50 && mine.ttftP50) {
+    if (speed.metric === 'ttft') pub = mine.ttftP50 / refHealth.ttftP50;
+    else if (mine.tpsP50 && refHealth.tpsP50) {
+      const out = Math.max(1, profile.outP50 || 50);
+      pub = (mine.ttftP50 + (out / mine.tpsP50) * 1000) / (refHealth.ttftP50 + (out / refHealth.tpsP50) * 1000);
+    }
+  }
+  if (pub) parts.push({ source: 'published', p: curve(pub), w: kind === 'default' ? 0.5 : 0.2, ratio: pub });
+  parts.push({ source: 'prior', p: 0.7, w: 1 });
+  const p = parts.reduce((a, x) => a + x.p * x.w, 0) / parts.reduce((a, x) => a + x.w, 0);
+  return { p, measured: measuredRatio ?? null, n: h?.n ?? 0, published: pub };
+}
+
 /**
  * The whole choice. `want` is how many models the workspace wants measured to the end; a
  * measurement may try up to `want * tryMultiple`, because models are dropped as soon as they
@@ -149,13 +246,14 @@ export function selectCandidates(input) {
   const {
     facts, profile, reference, enabled, want, tryMultiple = 3, reverted = new Set(), serving = null,
     history = null, fits = null, arena = null, difficulty = null, speed = null,
+    refThinks = null, speedHistory = null, busy = null,
     config, at = Date.now(),
   } = input;
   const zdrOnly = config.ZDR_ONLY;
   const ctx = {
     profile, reference, zdrKnown: facts.zdrKnown, zdrOnly, room: config.EVAL_THINKING_ROOM_TOKENS,
     expiryMs: config.EVAL_EXPIRY_DAYS * 86400000, at, minUptime: config.EVAL_MIN_UPTIME_PCT,
-    history, fits, arena, difficulty,
+    history, fits, arena, difficulty, refThinks,
   };
   const refModel = facts.models.get(reference) || null;
   const pin = profile.promptAvg || 0;
@@ -186,7 +284,7 @@ export function selectCandidates(input) {
       byStep.set(e.step, (byStep.get(e.step) || 0) + 1);
       continue;
     }
-    kept.push({ m, recipe: e.recipe, note: e.note, thinks: e.thinks });
+    kept.push({ m, recipe: e.recipe, note: e.note, thinks: e.thinks, mustThink: e.mustThink });
   }
   let left = pool.length;
   for (const [step, label] of [
@@ -228,7 +326,10 @@ export function selectCandidates(input) {
     if (!speed || !speed.factor || !refHealth) return true;
     const h = healthOf(k.m);
     const x = config.SPEED_PREFILTER_X;
-    if (speed.metric === 'ttft' && h.ttftP50 && refHealth.ttftP50 && h.ttftP50 > x * refHealth.ttftP50) {
+    /* The published time to a first word is of a model left to think. One that will be asked
+       not to, or to think less, starts sooner than that, so it is not ruled out on it. */
+    const asPublished = recipeKind(k.recipe) === 'default';
+    if (asPublished && speed.metric === 'ttft' && h.ttftP50 && refHealth.ttftP50 && h.ttftP50 > x * refHealth.ttftP50) {
       excluded.push({ model: k.m.id, step: 'speed', reason: `usually takes ${sec(h.ttftP50)} to start answering, against ${sec(refHealth.ttftP50)} for ${short(reference)}` });
       return false;
     }
@@ -240,24 +341,36 @@ export function selectCandidates(input) {
   });
   count('speed', 'quick enough for your speed setting', quick.length);
 
-  // rank by expected saving
+  /* Rank by expected saving: what it saves if it works out, times the chance that it does.
+     Its answers have to match and it has to be quick enough, so the two chances multiply. A
+     model whose provider was too busy to answer a measurement in the last few hours is likely
+     to be busy again, so it waits behind the rest for a while; that says nothing about its
+     answers, and it is forgotten once the providers have had time to recover. */
   const ranked = quick.map((k) => {
     const c = chanceOf(k.m, { ...ctx, reference });
+    const sp = speedChanceOf(k.m, k.recipe, { speed, speedHistory, refHealth, profile, config });
+    const wasBusy = busy?.get(k.m.id) || null;
+    const reach = wasBusy ? 0.35 : 1;
+    const overall = c.chance * (sp ? sp.p : 1) * reach;
     const saving = refPrice === null ? null : refPrice - k.price;
-    const perCall = saving;
     return {
       model: k.m.id,
       name: k.m.name,
       price: k.price,
       refPrice,
       savingShare: refPrice ? saving / refPrice : null,
-      chance: c.chance,
-      expected: perCall === null ? c.chance : perCall * c.chance,
+      chance: overall,
+      answerChance: c.chance,
+      speedChance: sp ? sp.p : null,
+      speedMeasured: sp ? sp.measured : null,
+      busy: !!wasBusy,
+      expected: saving === null ? overall : saving * overall,
       parts: c.parts,
       family: c.family,
       recipe: k.recipe,
       note: k.note,
       thinks: k.thinks,
+      mustThink: !!k.mustThink,
       health: healthOf(k.m),
     };
   }).sort((a, b) => b.expected - a.expected || a.price - b.price);

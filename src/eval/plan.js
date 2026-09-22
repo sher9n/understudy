@@ -5,9 +5,9 @@ import { account } from '../billing.js';
 import { loadFacts, routedCallPrice, callPrice } from '../models/facts.js';
 import { ratingsFor } from '../models/arena.js';
 import { profileOf, speedRule } from './profile.js';
-import { selectCandidates } from './select.js';
+import { selectCandidates, refThinksOf } from './select.js';
 import { fitsFor } from './fit.js';
-import { historyFor } from './history.js';
+import { historyFor, fleetHistory } from './history.js';
 import { judgementsFor, judgementCost } from './judge.js';
 
 /* What a measurement WOULD do, worked out before anything is spent.
@@ -76,7 +76,7 @@ export async function planFor(workload, { canRoute, forRun = false } = {}) {
     pool, sample, models, candidates: [], order: [], funnel: [], excluded: [], waiting: 0,
     estimateUsd: null, canRun: false, reason: null, reference: workload.reference_model,
     judge: jevUsable() ? 'jev' : 'llm', jevResting: jevResting(), factsAt: {}, speed: null, profile: null, pendingJev: 0,
-    difficulty: null, cachedBar: 0,
+    difficulty: null, cachedBar: 0, refThinks: null,
   };
 
   if (!canRoute) {
@@ -97,14 +97,18 @@ export async function planFor(workload, { canRoute, forRun = false } = {}) {
   const profile = await profileOf(workload);
   const speed = speedRule(workload, profile, config);
   const history = await historyFor(workload);
+  const fleet = await fleetHistory();
   const enabled = await enabledSet(workload.workspace_id);
+  // whether the customer's model thinks, so candidates are asked the same way; the run checks it
+  const refThinks = refThinksOf(facts.models.get(workload.reference_model) || null, profile.refThinking);
   plan.factsAt = facts.syncedAt;
   plan.profile = profile;
   plan.speed = speed;
+  plan.refThinks = refThinks;
   const base = {
     facts, profile, reference: workload.reference_model, enabled, want: models,
     tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, serving: workload.routed_model,
-    history, speed, config, at: now(),
+    history, speed, refThinks, speedHistory: fleet.speed, busy: fleet.busy, config, at: now(),
   };
 
   // who survives the rules, before anything is ranked

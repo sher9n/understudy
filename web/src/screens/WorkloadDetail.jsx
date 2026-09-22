@@ -19,17 +19,30 @@ const VERDICT = {
 
 const secs = (ms) => (ms === null || ms === undefined ? null : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
 
+/* Streamed calls are timed to the first word, because that is what somebody watching them
+   waits for; everything else to the whole answer. The table shows the one the run held
+   models to, so a model marked slower is slower in the column beside it. */
+const timedToFirstWord = (cert) => cert?.plan?.speed?.metric === 'ttft' && !!cert?.refSpeed?.ttftP50;
+const typical = (x, cert) => (timedToFirstWord(cert) ? x?.ttftP50 : x?.latencyP50);
+
 /* Why a model got the verdict it did, in a few words under the verdict. */
 function whyOf(r, refSpeed, cert) {
-  if (r.verdict === 'failed') return r.errorText ? `Provider said: ${r.errorText}` : 'Its provider refused the calls';
+  if (r.verdict === 'failed') {
+    if (r.stopped === 'errors') {
+      return 'Its provider was too busy to answer, so its answers were never judged. It can be tried again later.';
+    }
+    return r.errorText ? `Provider said: ${r.errorText}` : 'Its provider refused the calls';
+  }
   if (r.verdict === 'slower') {
-    const mine = r.latencyP50;
-    const theirs = refSpeed?.latencyP50;
-    return mine && theirs ? `Typically ${secs(mine)}, against ${secs(theirs)} for yours` : 'Slower than your speed setting allows';
+    const mine = typical(r, cert);
+    const theirs = typical(refSpeed, cert);
+    const what = timedToFirstWord(cert) ? 'Starts answering in' : 'Typically';
+    return mine && theirs ? `${what} ${secs(mine)}, against ${secs(theirs)} for yours` : 'Slower than your speed setting allows';
   }
   if (r.stopped === 'bar') return `Stopped after ${r.runs} of ${cert.sampleSize} calls, once it could not reach your bar`;
   if (r.verdict === 'missed' && r.difference) return `Mostly ${r.difference}`;
-  if (r.thinkingOff) return 'Measured with its thinking switched off';
+  if (r.thinking === 'off') return 'Measured with its thinking switched off, like your model';
+  if (r.thinking === 'light') return 'Has to think, so it was measured thinking as little as it allows';
   if (r.difference && r.gap > 0) return `Where it differed: ${r.difference}`;
   return null;
 }
@@ -269,7 +282,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
               <span>Model</span>
               <span style={{ textAlign: 'right' }}>Calls</span>
               <span style={{ textAlign: 'right' }}>Disagreement</span>
-              <span style={{ textAlign: 'right' }}>Typical time</span>
+              <span style={{ textAlign: 'right' }}>{timedToFirstWord(cert) ? 'First word' : 'Typical time'}</span>
               <span style={{ textAlign: 'right' }}>Cost a month</span>
               <span>Verdict</span>
             </div>
@@ -277,21 +290,21 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
               <div className="mdl">{measuredOn}</div>
               <div className="num">{num(cert.sampleSize * 2)}</div>
               <div className="num">baseline</div>
-              <div className="num">{secs(cert.refSpeed?.latencyP50) ?? '—'}</div>
-              <div className="num">{cert.referenceCostMonth === null ? '—' : usd(cert.referenceCostMonth)}</div>
+              <div className="num">{secs(typical(cert.refSpeed, cert)) ?? 'not timed'}</div>
+              <div className="num">{cert.referenceCostMonth === null ? 'not priced' : usd(cert.referenceCostMonth)}</div>
               <div><span className="pill q">{measuredOn !== w.reference ? 'Your model then' : switched ? 'Previous model' : 'Current model'}</span></div>
             </div>
             {cert.results.map((r) => {
-              const [label, tone] = VERDICT[r.verdict] || ['—', 'q'];
+              const [label, tone] = VERDICT[r.verdict] || [r.verdict, 'q'];
               const serving = r.model === w.model;
               const why = whyOf(r, cert.refSpeed, cert);
               return (
                 <div className="cdrow cd6" key={r.model}>
                   <div className="mdl">{r.model}</div>
                   <div className="num">{num(r.runs)}</div>
-                  <div className="num">{r.gap === null || r.verdict === 'failed' ? '—' : `${r.gap.toFixed(2)}%`}</div>
-                  <div className={`num cdspeed${r.verdict === 'slower' ? ' slow' : ''}`}>{secs(r.latencyP50) ?? '—'}</div>
-                  <div className="num">{r.costMonth === null ? '—' : usd(r.costMonth)}</div>
+                  <div className="num">{r.gap === null || r.verdict === 'failed' ? 'not judged' : `${r.gap.toFixed(2)}%`}</div>
+                  <div className={`num cdspeed${r.verdict === 'slower' ? ' slow' : ''}`}>{secs(typical(r, cert)) ?? 'not timed'}</div>
+                  <div className="num">{r.costMonth === null ? 'not priced' : usd(r.costMonth)}</div>
                   <div>
                     <span className={`pill ${serving ? 'ok' : tone}`}>{serving ? 'Serving now' : label}</span>
                     {why && <span className="cdwhy">{why}</span>}

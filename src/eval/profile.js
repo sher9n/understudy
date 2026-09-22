@@ -34,8 +34,36 @@ export async function profileOf(workload, { fresh = false } = {}) {
        FROM calls WHERE workload_id = ? AND source NOT IN ('replay', 'test') AND created_at >= ?
       ORDER BY created_at DESC LIMIT 600`).all(workload.id, now() - 30 * DAY);
   const profile = profileFromRows(workload, rows);
+  profile.refThinking = await refThinkingOf(workload);
   memo.set(workload.id, { at: Date.now(), profile });
   return profile;
+}
+
+/* Whether the customer's own model thought before answering these calls, as measured: the
+ * share of its answers that carried any thinking, and how many answers that is from. Our own
+ * replays of these calls come first, because they went the way a candidate's will; the usage
+ * its provider reported on the calls themselves fills in when there are too few. Null when
+ * nothing says either way. */
+export async function refThinkingOf(workload) {
+  if (!workload.reference_model) return null;
+  const since = now() - 30 * DAY;
+  const replayed = await db.prepare(
+    `SELECT reasoning_tokens AS t FROM replay_cache
+      WHERE model_id = ? AND status = 200 AND reasoning_tokens IS NOT NULL
+        AND call_id IN (SELECT id FROM calls WHERE workload_id = ? AND created_at >= ?)
+      ORDER BY created_at DESC LIMIT 60`).all(workload.reference_model, workload.id, since);
+  let xs = replayed.map((r) => Number(r.t)).filter(Number.isFinite);
+  if (xs.length < 3) {
+    // only the one number, read out of the stored response without parsing all of it
+    const own = await db.prepare(
+      `SELECT substring(response_json from '"reasoning_tokens"[[:space:]]*:[[:space:]]*([0-9]+)') AS t
+         FROM calls WHERE workload_id = ? AND served_model = ? AND source NOT IN ('replay', 'test')
+          AND response_json IS NOT NULL AND created_at >= ?
+        ORDER BY created_at DESC LIMIT 60`).all(workload.id, workload.reference_model, since);
+    xs = xs.concat(own.map((r) => (r.t === null || r.t === undefined ? NaN : Number(r.t))).filter(Number.isFinite));
+  }
+  if (!xs.length) return null;
+  return { share: xs.filter((x) => x > 0).length / xs.length, n: xs.length };
 }
 
 /** The same profile from calls already in hand, newest first. Pure, so a backtest can use it. */

@@ -8,6 +8,9 @@ import { judgeBarPair, judgeCandidate } from './judge.js';
 import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, barIsMeaningful } from './compare.js';
 import { promote, revert } from './promote.js';
 import { replayOnce } from './replay.js';
+import { thinkingFit } from './select.js';
+import { loadFacts } from '../models/facts.js';
+import { forgetFleet } from './history.js';
 import { OUTCOME_OF, OUTCOME_CASE, cheaperCleared } from './outcome.js';
 
 /* A measurement, run as a race.
@@ -50,6 +53,19 @@ const pct = (xs, p) => {
   return s[Math.min(s.length - 1, Math.floor(p * (s.length - 1) + 0.5))];
 };
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+
+/* The fewest of n calls past the slow end that chance would give less than one time in twenty,
+   when one call in ten runs past it anyway. Never fewer than two: one slow call is never enough. */
+export function slowEndCount(n, share = 0.1, alpha = 0.05) {
+  let choose = 1;
+  let tail = 1;
+  for (let k = 0; k <= n; k += 1) {
+    if (k >= 2 && tail < alpha) return k;
+    tail -= choose * share ** k * (1 - share) ** (n - k);
+    choose = (choose * (n - k)) / (k + 1);
+  }
+  return n + 1;
+}
 
 /* Run tasks with at most `n` going at once. */
 async function inParallel(items, n, fn) {
@@ -435,6 +451,37 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return { ok: true, runId: run.id, floor, results: 0, spend: 0, partial: true };
   }
 
+  /* Whether the customer's model thought on these very calls, now that it has answered them.
+     Candidates are asked to think the way it does, and the plan could only go on its catalogue
+     entry or on earlier answers; where they disagree, what it just did wins. The model serving
+     the workload now is measured exactly as it is served, because that is what is being checked. */
+  const thought = kept.flatMap((p) => [p.ra, p.rb])
+    .filter((r) => r.ok && r.reasoningTokens !== null && r.reasoningTokens !== undefined);
+  const refThinks = thought.length >= 3
+    ? thought.filter((r) => r.reasoningTokens > 0).length / thought.length >= 0.3
+    : plan.refThinks;
+  const served = (() => {
+    try { return workload.routed_recipe ? JSON.parse(workload.routed_recipe) : null; } catch { return null; }
+  })();
+  let reasked = false;
+  if (refThinks !== plan.refThinks) {
+    const facts = await loadFacts();
+    for (const cand of queue) {
+      if (cand.model === workload.routed_model) continue;
+      const m = facts.models.get(cand.model);
+      const t = m ? thinkingFit(m, plan.profile, config.EVAL_THINKING_ROOM_TOKENS, refThinks) : null;
+      if (t?.ok) { cand.recipe = t.recipe; cand.note = t.note || null; reasked = true; }
+    }
+  }
+  for (const cand of queue) {
+    if (cand.model === workload.routed_model) cand.recipe = served;
+  }
+  if (reasked) {
+    planRecord.refThinks = { planned: plan.refThinks, measured: refThinks };
+    planRecord.order = planRecord.order.map((o) => ({ ...o, recipe: queue.find((c) => c.model === o.model)?.recipe ?? null }));
+    await db.prepare('UPDATE eval_runs SET plan_json = ? WHERE id = ?').run(JSON.stringify(planRecord), run.id);
+  }
+
   /* The speed a model has to keep: the workload's setting against the customer's own model's
      times on these calls. Typical and slow end both, because a model that is quick most of the
      time and very slow one call in ten is slow to whoever waits on that call. */
@@ -444,11 +491,22 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const slack = config.SPEED_SLACK_MS;
   const limit = speed.factor && refP50
     ? { p50: speed.factor * refP50 + slack, p90: speed.slowEnd * (refP90 ?? refP50) + slack } : null;
-  const tooSlow = (st) => {
+  /* Too slow on the evidence so far. On the first few calls the typical time has to be clearly
+     over the limit, by a margin that shrinks as calls come in, because three calls cannot tell
+     ten percent over from chance, and one slow call among a few happens to every model, the
+     customer's included: on the first four measurements gpt-oss-20b started answering in about
+     a second five times and then took seven seconds once, and was dropped for it. At the end,
+     over every call, the typical time only has to be over. The slow end is judged by how many
+     calls ran past it: about one in ten does for any model that keeps to the limit, so a model
+     is slow at the end only when so many more do that chance would explain it less than one
+     time in twenty. */
+  const tooSlow = (st, { final = false } = {}) => {
     if (!limit) return false;
     const xs = metric === 'ttft' ? st.ttft : st.lat;
     if (xs.length < Math.min(config.EVAL_SCREEN_CALLS, kept.length)) return false;
-    return pct(xs, 0.5) > limit.p50 || (xs.length >= 5 && pct(xs, 0.9) > limit.p90);
+    const margin = final ? 1 : 1 + 1.5 / xs.length;
+    if (pct(xs, 0.5) > limit.p50 * margin) return true;
+    return xs.filter((x) => x > limit.p90).length >= slowEndCount(xs.length);
   };
 
   const refMonthly = await monthlyOn(workloadId, reference);
@@ -556,7 +614,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     else if (st.stopped === 'bar') verdict = 'missed';
     else {
       verdict = verdictFor(gap, floor, st.runs, { minRuns, reviewBand });
-      if ((verdict === 'cleared' || verdict === 'review') && tooSlow(st)) verdict = 'slower';
+      if ((verdict === 'cleared' || verdict === 'review') && tooSlow(st, { final: true })) verdict = 'slower';
       // one refusal along the way is worth a look before anything is switched
       if (verdict === 'cleared' && st.errors > 0) verdict = 'review';
     }
@@ -594,6 +652,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
                 @latency_p50, @latency_p90, @ttft_p50, @ttft_p90, @errors, @stopped, @error_text, @difference, @reused,
                 @rank_json, @recipe_json, @cost_ratio)`).run(row);
     results.push(row);
+    // the next plan, for any workload, should see how fast this model was and whether it was busy
+    forgetFleet();
     return finished;
   };
 
@@ -674,7 +734,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     let why = null;
     if (mine && mine.verdict === 'missed') {
       why = `it no longer clears your bar: ${mine.gap_pct.toFixed(1)}% against a ${floor.toFixed(1)}% bar`;
-    } else if (mine && mine.verdict === 'failed') {
+    } else if (mine && mine.verdict === 'failed' && mine.stopped === 'refused') {
+      /* Refused for a reason that will be repeated. A provider that was only busy during the
+         re-check is not a reason: that passes, a switch back is for good, and the live watch
+         already switches back when errors on the customer's own traffic climb. */
       why = `its provider refused it when it was re-checked${mine.error_text ? `, saying "${mine.error_text}"` : ''}`;
     } else if (mine && mine.verdict === 'slower') {
       why = 'it is now slower than your speed setting allows';

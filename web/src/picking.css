@@ -49,6 +49,7 @@
 .hwptags { display: flex; flex-wrap: wrap; gap: 4px; }
 .hwptag { font-size: 10.5px; color: var(--mut-read); background: var(--panel); border: 1px solid var(--line);
   border-radius: 999px; padding: 1px 7px; white-space: nowrap; }
+.hwptag.warn { color: var(--warn); background: var(--warnq); border-color: transparent; }
 
 /* How fast a replacement must be: one choice in four, said in words. */
 .hwpspeed { margin-top: 10px; display: grid; gap: 7px; }

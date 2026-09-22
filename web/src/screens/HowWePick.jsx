@@ -36,6 +36,20 @@ const SOURCE_WORDS = {
 };
 
 const short = (m) => String(m || '').split('/').pop();
+
+/* How the models that think are asked to, for this workload, in one or two sentences. */
+function thinkingText(s, w) {
+  const yours = short(w.reference);
+  if (s.outCap && s.outCap < 4000) {
+    return `Your answers are capped at ${num(s.outCap)} tokens, and the notes count against that, so a model is asked not to think wherever it can be, and one that cannot is ruled out above.`;
+  }
+  if (s.reasoningSet) return 'Your requests say how much to think, and every model is sent them as they are.';
+  if (s.refThinks === true) return `${yours} thinks too, so they are measured thinking the way they normally do: like for like.`;
+  if (s.refThinks === false) {
+    return `${yours} answers straight away, so they are asked not to think, or to think as little as they allow, and measured that way: like for like. If one wins, it is switched to working the same way.`;
+  }
+  return `We check how ${yours} works on the first calls of a measurement, and ask them to work the same way: like for like.`;
+}
 const pct = (x) => `${Math.round((x || 0) * 100)}%`;
 const inTen = (p) => `${Math.max(0, Math.min(10, Math.round(p * 10)))} in 10`;
 
@@ -141,12 +155,27 @@ export default function HowWePick({ w, m, onChanged }) {
         <li>
           <div className="hwpt">Rank the rest by what each is expected to save</div>
           <p>
-            For every model that is left, what it would save you each month if its answers matched,
-            multiplied by the chance that they do. The chance comes from four things, strongest first:
-            how the model did on your own calls before; <b>Jev</b>, a judging model from TypeSafe, which
-            reads a few of your requests beside the model&rsquo;s own description and says how well it
-            suits them; how people rate it against {short(w.reference)} on the public Arena leaderboard;
-            and whether it is a smaller model from the same family as yours.
+            For every model that is left, we work out what it would save you each month if it could
+            replace {short(w.reference)}, and multiply that by the chance that it can. Replacing it
+            takes two things, and both have to be true: its answers match, and it is quick enough for
+            the speed you choose below. A model that would save a lot but probably cannot do the job
+            ranks below one that saves a little less and probably can.
+          </p>
+          <p>
+            <b>Will its answers match?</b> Four things say, strongest first: how it did on your own
+            calls before; <b>Jev</b>, a judging model from TypeSafe, which reads a few of your requests
+            beside the model&rsquo;s own description and says how well it suits them; how people rate
+            it against {short(w.reference)} on the public Arena leaderboard; and whether it comes from
+            the same family as yours.
+          </p>
+          <p>
+            <b>Will it be quick enough?</b> How fast it was, against models like yours, in our own
+            recent measurements, and how fast its providers say it is. A model whose provider was too
+            busy to answer in the last few hours waits at the back for a while.
+          </p>
+          <p>
+            <b>Thinking.</b> Some models write hidden notes before they answer. That makes them slower,
+            and the notes are paid for like the answer. {thinkingText(s, w)}
           </p>
           {tested.length > 0 && (
             <div className="hwprank">
@@ -229,7 +258,11 @@ function RankRow({ r, i, dim = false }) {
       <span className="hwprs">saves about {pct(r.savingShare)}</span>
       <span className="hwprc">chance {inTen(r.chance)}</span>
       <span className="hwptags">
-        {r.thinkingOff && <span className="hwptag">thinking off</span>}
+        {r.thinking === 'off' && <span className="hwptag">thinking off</span>}
+        {r.thinking === 'light' && <span className="hwptag">thinking kept light</span>}
+        {r.busy && <span className="hwptag warn">provider busy lately</span>}
+        {r.speedChance !== null && r.speedChance !== undefined && r.speedChance < 0.45 && <span className="hwptag warn">may be too slow</span>}
+        {r.speedMeasured !== null && r.speedMeasured !== undefined && r.speedChance >= 0.75 && <span className="hwptag">quick in past tests</span>}
         {r.family && <span className="hwptag">same family</span>}
         {(r.parts || []).map((p) => <span className="hwptag" key={p.source}>{tagOf(p)}</span>)}
       </span>

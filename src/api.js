@@ -9,6 +9,7 @@ import { issueKey, listKeys, revokeKey, revealKey } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity } from './traffic.js';
 import { account, ledger, gateRouting, stripe } from './billing.js';
 import { planFor } from './eval/plan.js';
+import { recipeKind } from './eval/select.js';
 import { certificate, promote, revert } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
 import { outcomeOf, cheaperCleared } from './eval/outcome.js';
@@ -263,7 +264,8 @@ const resultRow = (r, runs = r.runs) => ({
   difference: r.difference ?? null, reused: r.reused ?? 0,
   latencyP50: r.latency_p50 ?? null, latencyP90: r.latency_p90 ?? null,
   ttftP50: r.ttft_p50 ?? null, ttftP90: r.ttft_p90 ?? null,
-  thinkingOff: !!parseJson(r.recipe_json)?.reasoning,
+  thinking: recipeKind(parseJson(r.recipe_json)),
+  thinkingOff: recipeKind(parseJson(r.recipe_json)) === 'off',
   rank: parseJson(r.rank_json),
   gates: { structure: r.gate_structure, accuracy: r.gate_accuracy, coverage: r.gate_coverage, complete: r.gate_complete },
 });
@@ -478,7 +480,9 @@ api.get('/workloads/:id', async (req, res) => {
       order: plan.order.slice(0, plan.models + 5).map((r) => ({
         model: r.model, savingShare: r.savingShare, chance: r.chance,
         parts: (r.parts || []).map((x) => ({ source: x.source, p: x.p, note: x.note })),
-        family: r.family, thinkingOff: !!r.recipe,
+        family: r.family, thinking: recipeKind(r.recipe), thinkingOff: recipeKind(r.recipe) === 'off',
+        speedChance: r.speedChance ?? null, answerChance: r.answerChance ?? null,
+        speedMeasured: r.speedMeasured ?? null, busy: !!r.busy, mustThink: !!r.mustThink,
       })),
       queued: plan.order.length,
       beyond: plan.waiting,
@@ -491,6 +495,8 @@ api.get('/workloads/:id', async (req, res) => {
       speed: plan.speed ? { pref: plan.speed.pref, auto: !!plan.speed.auto, factor: plan.speed.factor, metric: plan.speed.metric } : null,
       streamed: !!plan.profile?.streamed,
       outCap: plan.profile?.outCap ?? null,
+      refThinks: plan.refThinks ?? null,
+      reasoningSet: !!plan.profile?.reasoningSet,
     },
     runs: runCount,
     last: last ? runRow(last) : null,
