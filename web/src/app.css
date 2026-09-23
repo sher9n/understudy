@@ -86,6 +86,10 @@
     .lp-more { transition: color 0.13s ease; }
     .top { display: flex; align-items: center; gap: 28px; padding: 20px 44px; border-bottom: 1px solid var(--line); }
     .foot { border-top: 1px solid var(--line); padding: 28px 44px; display: flex; gap: 18px; align-items: center; }
+    /* the home page footer's one row of links to pricing and the small print */
+    .footlinks { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+    .footlinks a { font-size: 12px; color: var(--mut); cursor: pointer; transition: color 0.13s ease; }
+    .footlinks a:hover { color: var(--ink); text-decoration: none; }
 
     .hero-h1 { font-size: clamp(34px, 5.2vw, 64px); }
     .hero-sub { font-size: clamp(16px, 1.5vw, 18px); }
