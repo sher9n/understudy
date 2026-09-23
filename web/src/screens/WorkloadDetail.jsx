@@ -9,6 +9,7 @@ import Measurement from './Measurement.jsx';
 import SwitchedCard from './SwitchedCard.jsx';
 import Learning from './Learning.jsx';
 import Outcomes from './Outcomes.jsx';
+import ValuePipeline from './ValuePipeline.jsx';
 import { ServingFlow, inHundred } from '../LearnCharts.jsx';
 import SectionBoundary from '../SectionBoundary.jsx';
 
@@ -167,10 +168,15 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         <Tile k="Current cost" v={usd(w.cost)} s="last 30 days" />
       </div>
 
+      {/* what Understudy is doing for this workload, before the detail of how it got there */}
+      <SectionBoundary title="What Understudy is doing for this workload">
+        <ValuePipeline key={w.id} w={w} learn={learn} waitsForPerson={waitsForPerson} />
+      </SectionBoundary>
+
       <section className={`dcard${switched ? ' done' : hot ? ' hot' : ''}`}>
         {w.rollout && <Rollout w={w} busy={busy} onAll={act(() => more.finishRollout(w.id))} />}
         {switched && w.switched ? (
-          <SectionBoundary><SwitchedCard s={w.switched} learn={learn} /></SectionBoundary>
+          <SectionBoundary><SwitchedCard s={w.switched} /></SectionBoundary>
         ) : (
           <>
             {switched && <span className="eyebrow eyeok">Switched</span>}
@@ -497,6 +503,7 @@ function kindWords(r) {
   const on = r.escalated === null || r.escalated === undefined ? null : inHundred(r.escalated / 100);
   if (r.name.kind === 'cascade') return `A cheaper model, checked${on ? `: ${on} calls sent on` : ''}`;
   if (r.name.kind === 'router') return `Picked call by call${on ? `: ${on} calls to ${String(r.name.fallback).split('/').pop()}` : ''}`;
+  if (r.name.kind === 'cheapest') return 'Your own model, from the provider that sells it most cheaply';
   return 'Your own model, asked to think less';
 }
 
@@ -518,6 +525,7 @@ const headline = (w, cand, switched) => {
   if (cand && cand.name?.kind === 'cascade') return `A checked cheaper model cleared your bar`;
   if (cand && cand.name?.kind === 'router') return `Picking a model call by call cleared your bar`;
   if (cand && cand.name?.kind === 'lighter') return `${short(w.reference)} thinking less cleared your bar`;
+  if (cand && cand.name?.kind === 'cheapest') return `${short(w.reference)} from its cheapest provider cleared your bar`;
   if (cand && !confirmedLook(cand.confirm)) return `${short(cand.model)} cleared your bar once, and needs a second look`;
   if (cand) return `${short(cand.model)} cleared your bar`;
   if (w.label === 'Measuring') return 'We are still learning your bar';
@@ -546,7 +554,9 @@ const blurb = (w, cand, switched) => {
       ? `${short(cand.name.first)} answers each call and a quick check reads the answer; when the check is unsure, ${short(cand.name.fallback)} answers instead.`
       : cand.name.kind === 'router'
         ? `A small model learned from your own calls sends each one either to ${short(cand.name.first)} or to ${short(cand.name.fallback)}.`
-        : `The same model, asked to think less before it answers.`;
+        : cand.name.kind === 'cheapest'
+          ? 'The same model, bought from the provider that sells it most cheaply.'
+          : `The same model, asked to think less before it answers.`;
     return `${lead} Worked out on your own calls, it stayed inside your bar. ${whatNext(w, cand)}`;
   }
   if (cand && !confirmedLook(cand.confirm)) {

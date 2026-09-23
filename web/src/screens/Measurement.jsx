@@ -125,7 +125,7 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
   const shown = showAll ? history : history.slice(0, 4);
 
   return (
-    <section className="opt measure">
+    <section className="opt measure" id="measure">
       <div className="opthead">
         <h2>Measuring this workload</h2>
         <span className="s">

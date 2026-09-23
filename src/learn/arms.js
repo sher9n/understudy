@@ -44,7 +44,8 @@ export function labelOf(spec, reference = null) {
     if (same(spec.cheap, spec.strong)) return `${short(spec.cheap.model)} thinking less or fully, picked call by call`;
     return `${short(spec.cheap.model)} or ${short(spec.strong.model)}, picked call by call`;
   }
-  if (reference && spec.model === reference && lighter(spec.recipe)) return `${short(spec.model)}, thinking less`;
+  // any way of thinking set on the customer's own model is a lighter one: the lightest it offers can be "medium"
+  if (reference && spec.model === reference && spec.recipe?.reasoning) return `${short(spec.model)}, thinking less`;
   if (reference && spec.model === reference && spec.recipe?.pinned) return `${short(spec.model)}, from its cheapest provider`;
   if (reference && spec.model === reference) return `${short(spec.model)} (yours)`;
   return short(spec.model);
@@ -97,7 +98,9 @@ export async function setStatus(armId, status) {
 /**
  * What a screen calls a measurement's result: the plain model, or a strategy in words, long and
  * short, with what kind of thing it is so a chart can draw it differently.
- *   kind: model | lighter | cascade | router
+ *   kind: model | lighter | cheapest | cascade | router
+ * The customer's own model bought from the provider that sells it most cheaply is "cheapest": it
+ * used to be named as thinking less, which it does not.
  */
 export function nameOfResult(row) {
   const spec = parse(row?.arm_json, null);
@@ -112,7 +115,16 @@ export function nameOfResult(row) {
     return { kind: 'router', label: labelOf(spec), short: `${short(spec.cheap.model)}, picked per call`,
       first: spec.cheap.model, fallback: spec.strong.model, threshold: spec.threshold ?? null };
   }
-  return { kind: 'lighter', label: `${short(spec.model)}, thinking less`, short: `${short(spec.model)}, thinking less`, first: spec.model };
+  /* Read the way the key was made (keyOfSpec in src/eval/promote.js): a way of thinking is "#lighter"
+     whatever effort it names, since the lightest a model offers can be "medium", and a provider pinned
+     on purpose is "#cheapest". */
+  if (id.endsWith('#lighter') || (!id.endsWith('#cheapest') && spec.recipe?.reasoning)) {
+    return { kind: 'lighter', label: `${short(spec.model)}, thinking less`, short: `${short(spec.model)}, thinking less`, first: spec.model };
+  }
+  if (id.endsWith('#cheapest') || spec.recipe?.pinned) {
+    return { kind: 'cheapest', label: `${short(spec.model)}, from its cheapest provider`, short: `${short(spec.model)}, cheapest provider`, first: spec.model };
+  }
+  return { kind: 'model', label: short(spec.model), short: short(spec.model), first: spec.model };
 }
 
 /** The strategy a measurement's result row stands for: its own, or the plain model it names. */

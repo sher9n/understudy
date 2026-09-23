@@ -25,6 +25,7 @@ import { certificate, promote, revert, trafficOf, servingKey, heldBack } from '.
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
 import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
 import { switchStory } from './eval/switch-story.js';
+import { valueOf } from './eval/value.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
 import { forgetWorkspace } from './workspace.js';
@@ -841,6 +842,16 @@ api.get('/workloads/:id', async (req, res) => {
     },
     traffic: { routed: traffic.routed, copies: traffic.copies, carries: traffic.carries, observe: traffic.observe },
   });
+});
+
+/* What Understudy is doing for one workload, in the figures its page leads with: what its calls cost
+   against the customer's own model alone, whether answers work as often and come as fast, how many calls
+   were rescued, how its calls are served, and what has happened since it was first seen (src/eval/value.js). */
+api.get('/workloads/:id/value', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  res.json(await valueOf(w));
 });
 
 /* The calls in a workload, a page at a time, optionally narrowed by a search.

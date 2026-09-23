@@ -16,16 +16,16 @@ const short = (m) => String(m || '').split('/').pop();
    to worked or not, and it only reads calls that came through us, where these screens show copies too. A call only counts once a retry or
    a correction would have had time to arrive. Calls refused for the customer's own reasons, a
    malformed request or a spent balance, say nothing about how serving went and are left out. */
-const COUNTED = `(status_code IS NULL OR status_code = 200 OR status_code IN (0, 404, 408, 429) OR status_code >= 500)`;
-const OKAY = `(status_code IS NULL OR status_code = 200)`;
-const GROUPS = `COUNT(*) AS calls,
+export const COUNTED = `(status_code IS NULL OR status_code = 200 OR status_code IN (0, 404, 408, 429) OR status_code >= 500)`;
+export const OKAY = `(status_code IS NULL OR status_code = 200)`;
+export const GROUPS = `COUNT(*) AS calls,
       COUNT(*) FILTER (WHERE NOT ${OKAY} OR reward < 0.5) AS problem,
       COUNT(*) FILTER (WHERE ${OKAY} AND reward >= 0.5) AS confirmed,
       COUNT(*) FILTER (WHERE ${OKAY} AND reward IS NULL AND created_at < ?) AS quiet,
       COUNT(*) FILTER (WHERE ${OKAY} AND reward IS NULL AND created_at >= ?) AS recent,
       COUNT(*) FILTER (WHERE reward IS NOT NULL) AS known`;
-const settledAt = () => now() - config.LEARN_SETTLE_MIN * 60000;
-const grouped = (r) => {
+export const settledAt = () => now() - config.LEARN_SETTLE_MIN * 60000;
+export const grouped = (r) => {
   const g = { calls: Number(r.calls), problem: Number(r.problem), confirmed: Number(r.confirmed), quiet: Number(r.quiet),
     recent: Number(r.recent), known: Number(r.known) };
   const judged = g.calls - g.recent;
