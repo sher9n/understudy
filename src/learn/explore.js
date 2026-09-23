@@ -285,6 +285,8 @@ async function readState(workload) {
       ratio: a.key === baseKey ? 1 : (liveRatio ?? ratioOf(a)),
       post: posterior({ live: live.get(a.id) || [], shadow: shadow.get(a.id) || [] }, opts),
       fair,
+      // how long its fair record has been gathering: since it was kept, or since learning began if later
+      ageDays: began ? Math.max(0, (t - Math.max(Number(a.created_at) || t, began)) / DAY) : 0,
       same: same.get(a.id) || 0,
       failed: tally.get(a.id)?.failed ?? 0,
       known: tally.get(a.id)?.known ?? 0,
@@ -297,7 +299,7 @@ async function readState(workload) {
       id: 'baseline', virtual: true, key: baseKey, kind: 'model', status: 'baseline', spec: referenceSpec(workload),
       label: `${short(workload.reference_model)} (yours)`, ratio: 1,
       post: posterior({ live: live.get('baseline') || [] }, opts),
-      fair: fairRecord({}, { prior }), same: 0,
+      fair: fairRecord({}, { prior }), ageDays: 0, same: 0,
       failed: tally.get('baseline')?.failed ?? 0, known: tally.get('baseline')?.known ?? 0,
     };
   const serving = workload.routed_arm_id ? recById.get(workload.routed_arm_id) || null : null;
@@ -758,10 +760,14 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
 
   /* Every decision is made by one pure rule (src/learn/decide.js) on the fair record: calls since
      learning began, served by chance in matched hours, with time for their outcomes to arrive. The
-     rule's false-switch rates are measured by the harness (scripts/harness.mjs). */
+     rule's false-switch rates are measured by the harness (scripts/harness.mjs), and over a year of
+     hourly looks on this very record by src/learn/horizon.js. */
   if (serving && serving.ratio !== null) {
-    const runners = cheaperThan(st, serving.ratio).map((a) => ({ id: a.id, fair: a.fair, graded: a.graded, ratio: a.ratio, verdict: a.offline?.verdict ?? 'cleared' }));
-    const ruling = decide({ serving: { id: serving.id, fair: serving.fair, graded: serving.graded }, base: { id: base.id, fair: base.fair, graded: base.graded },
+    // each with how long its record has been gathering, which is what the chance of being wrong is spent over
+    const runners = cheaperThan(st, serving.ratio).map((a) => ({ id: a.id, fair: a.fair, graded: a.graded, ratio: a.ratio,
+      verdict: a.offline?.verdict ?? 'cleared', ageDays: a.ageDays }));
+    const ruling = decide({ serving: { id: serving.id, fair: serving.fair, graded: serving.graded, ageDays: serving.ageDays },
+      base: { id: base.id, fair: base.fair, graded: base.graded, ageDays: base.ageDays },
       runners, detection: st.detection, hasEvents: st.hasEvents },
     { minCalls: config.LEARN_MIN_CALLS, tolerance: config.LEARN_TOLERANCE, minDetection: config.LEARN_MIN_DETECTION, alpha: config.LEARN_ALPHA });
     for (const d of ruling) {

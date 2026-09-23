@@ -35,7 +35,30 @@ export const DEFAULTS = {
   rho: 20,              // calls: where the ranges are tightest (small, so a large difference is caught early)
   minDetection: 0.02,   // at least one call in fifty has ever shown a signal, or what was seen decides nothing
   minGraded: 30,        // graded calls a side before grades decide anything
+  spendDays: 91,        // the chance of being wrong is spent over a comparison's life, a quarter at a time
 };
+
+/* The chance of being wrong a comparison may spend at `days` into its life.
+ *
+ * A record is decayed (older calls count for less), so after a few half-lives it stops growing, while it
+ * is still looked at every hour for as long as the workload runs. A range that holds at every look for a
+ * record that keeps growing does not for one that has stopped: each look is then much like the one a few
+ * weeks before it, and the chance of a wrong decision keeps adding up. Measured over a year of hourly
+ * looks on the record the product keeps (src/learn/horizon.js, 1,000 runs), a runner-up exactly at the
+ * tolerance, at a thousand calls a day with two in a hundred tried another way, was promoted in 0.7% of
+ * runs by day 30, 2.1% by day 180 and 3.6% by day 365: still rising, and past the half of alpha each kind
+ * of evidence may spend.
+ *
+ * So the chance is spent over time: half of it in a comparison's first `spendDays`, a sixth in the next,
+ * a twelfth in the next, alpha / (k (k + 1)) in the k-th, which adds up to alpha however long the
+ * workload runs. A quarter at a time, the same runner-up was promoted in 1.0% of 400 runs over the year;
+ * windows of four or eight weeks spent the chance faster and promoted runners-up as good as what serves
+ * far less often, for no fewer wrong decisions. A comparison is as old as the younger of its two records. */
+export function alphaAt(days, { alpha = DEFAULTS.alpha, spendDays = DEFAULTS.spendDays } = {}) {
+  if (!(spendDays > 0)) return alpha;
+  const k = Math.floor(Math.max(0, Number(days) || 0) / spendDays) + 1;
+  return alpha / (k * (k + 1));
+}
 
 /* The failure rate a record says, and how uncertain it is. A record with no failure yet is read as
    having half of one, so it is still uncertain rather than exact; a record's own prior already holds
@@ -73,8 +96,9 @@ function gradedRec(g) {
 }
 
 /**
- * @param {object} st  { serving, base, runners: [{ id, fair, graded?, ratio, verdict }], detection, hasEvents }
- *                     serving and base are { id, fair, graded? }
+ * @param {object} st  { serving, base, runners: [{ id, fair, graded?, ratio, verdict, ageDays? }], detection, hasEvents, days? }
+ *                     serving and base are { id, fair, graded?, ageDays? }: ageDays is how long a record has
+ *                     been gathering evidence; without it, `days` is how long the workload has
  * @returns [{ kind: 'revert' | 'promote' | 'rest', armId, by, range }]
  */
 export function decide(st, opts = {}) {
@@ -82,8 +106,15 @@ export function decide(st, opts = {}) {
   const out = [];
   const { serving, base } = st;
   if (!serving || !base) return out;
-  // two kinds of evidence share the chance of being wrong, so together they are wrong no more often than one
-  const seqOpts = { alpha: o.alpha / 2, rho: o.rho };
+  /* How long two records have been compared: since the younger of them began. Two kinds of evidence
+     share the chance of being wrong that the comparison may spend now (alphaAt), so together they are
+     wrong no more often than one. */
+  const ageOf = (A, B) => {
+    const ages = [A?.ageDays, B?.ageDays].filter((x) => Number.isFinite(x));
+    if (ages.length === 2) return Math.min(...ages);
+    return Number.isFinite(st.days) ? st.days : 0;
+  };
+  const seqOf = (A, B) => ({ alpha: alphaAt(ageOf(A, B), o) / 2, rho: o.rho });
   /* Enough evidence is counted in tasks where a record says how many it holds: the steps of one
      conversation were given to one strategy together, and one forty step task is not forty calls'
      worth of evidence (see src/learn/fair.js). A record that only counts calls is read as it was. */
@@ -93,8 +124,8 @@ export function decide(st, opts = {}) {
   const seen = st.hasEvents ? 1 : Math.max(0, Math.min(1, st.detection ?? 0));
   const useSeen = st.hasEvents || seen >= o.minDetection;
   const margin = o.tolerance * Math.max(seen, o.minDetection);
-  const seenRange = (A, B) => (useSeen && enough(A) && enough(B) ? diffRange(A.fair, B.fair, seqOpts) : null);
-  const gradedRange = (A, B) => (graded(A) && graded(B) ? diffRange(gradedRec(A.graded), gradedRec(B.graded), seqOpts) : null);
+  const seenRange = (A, B) => (useSeen && enough(A) && enough(B) ? diffRange(A.fair, B.fair, seqOf(A, B)) : null);
+  const gradedRange = (A, B) => (graded(A) && graded(B) ? diffRange(gradedRec(A.graded), gradedRec(B.graded), seqOf(A, B)) : null);
 
   // what serves, against the customer's own model
   {

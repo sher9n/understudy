@@ -134,6 +134,57 @@ test('the fair record reads every strategy over the same traffic: each task weig
   close(none.mean, 3.6 / (3.6 + 0.5), 1e-12, 'held at the workload\'s own rate, never surer than half a failure allows');
 });
 
+test('looked at every hour for a year, a comparison spends its chance of being wrong over time, and still switches back what is worse', async () => {
+  const { alphaAt, DEFAULTS } = await import('../src/learn/decide.js');
+  const { liveRates } = await import('../src/learn/horizon.js');
+  // half of it in the first window, a sixth in the next, and never more than all of it however long it runs
+  close(alphaAt(0), DEFAULTS.alpha / 2, 1e-15, 'the first window');
+  close(alphaAt(DEFAULTS.spendDays - 1), DEFAULTS.alpha / 2, 1e-15, 'still the first');
+  close(alphaAt(DEFAULTS.spendDays), DEFAULTS.alpha / 6, 1e-15, 'the second');
+  let total = 0;
+  for (let k = 0; k < 100000; k += 1) total += alphaAt(k * DEFAULTS.spendDays);
+  assert.ok(total <= DEFAULTS.alpha && total > 0.9999 * DEFAULTS.alpha, `${total}`);
+  assert.equal(alphaAt(400, { spendDays: 0 }), DEFAULTS.alpha, 'with no spending, the whole of it at every look');
+  /* A year of hourly looks on the record the product keeps (src/learn/horizon.js): a thousand calls a day,
+     two in a hundred tried another way, a runner-up exactly at the tolerance, two points worse than what
+     serves. Seeded, so these are the numbers measured: without spending, a decayed record that has
+     stopped growing kept being looked at, and the runner-up was promoted in 5 of 150 years (more than the
+     half of alpha its kind of evidence may spend) and set aside, also wrongly, in 2 more. */
+  const year = { volume: 1000, share: 0.02, days: 365 };
+  const boundary = { ...year, rates: { base: 0.97, serving: 0.97, runner: 0.95 } };
+  const unspent = liveRates({ ...boundary, decideOpts: { spendDays: 0 } }, { trials: 150 });
+  assert.equal(Math.round(unspent.promote * 150), 5);
+  assert.ok(unspent.promote > DEFAULTS.alpha / 2, `${unspent.promote}`);
+  const spent = liveRates(boundary, { trials: 150 });
+  assert.equal(Math.round((spent.promote + spent.rest) * 150), 0, 'spent over time: never, in the same 150 years');
+  // and a strategy three points worse than the customer's own model is still switched back, nearly always within the year
+  const worse = liveRates({ ...year, rates: { base: 0.97, serving: 0.94, runner: null } }, { trials: 150, byDays: [180] });
+  assert.ok(worse.revert >= 0.98, `${worse.revert}`);
+  assert.ok(worse.by[180].revert >= 0.96, `${worse.by[180].revert}`);
+});
+
+test('the same evidence decides in a young comparison and waits in an old one, which has spent more of its chance', async () => {
+  const { decide, DEFAULTS } = await import('../src/learn/decide.js');
+  const rec = (n, s) => posterior({ live: [{ ageDays: 0, n, s }] }, { prior: { mean: 0.97, strength: 4 }, quantiles: false });
+  const base = { id: 'b', fair: rec(400, 392) };
+  // the fewest failures of what serves that switch it back in a young comparison
+  let failed = null;
+  for (let k = 8; k < 200 && failed === null; k += 1) {
+    const young = decide({ serving: { id: 's', fair: rec(600, 600 - k), ageDays: 1 }, base: { ...base, ageDays: 1 }, runners: [], detection: 1 });
+    if (young[0]?.kind === 'revert') failed = k;
+  }
+  assert.ok(failed, 'some number of failures is enough');
+  const serving = { id: 's', fair: rec(600, 600 - failed) };
+  assert.equal(decide({ serving: { ...serving, ageDays: 1 }, base: { ...base, ageDays: 1 }, runners: [], detection: 1 })[0]?.kind, 'revert');
+  assert.deepEqual(decide({ serving: { ...serving, ageDays: 4 * DEFAULTS.spendDays }, base: { ...base, ageDays: 400 }, runners: [], detection: 1 }), [],
+    'a year in, the same difference is not yet enough');
+  // a comparison is as old as the younger of its two records
+  assert.equal(decide({ serving: { ...serving, ageDays: 1 }, base: { ...base, ageDays: 400 }, runners: [], detection: 1 })[0]?.kind, 'revert');
+  // records that do not say how old they are fall back to how long the workload has been learning
+  assert.deepEqual(decide({ serving, base, runners: [], detection: 1, days: 400 }), []);
+  assert.equal(decide({ serving, base, runners: [], detection: 1, days: 1 })[0]?.kind, 'revert');
+});
+
 test('careful stays at the share it promises, normal grows on a quiet workload, and "never switch" tries nothing unless asked', async () => {
   const { exploreOf } = await import('../src/learn/explore.js');
   const { default: config } = await import('../src/config.js');

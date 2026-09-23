@@ -701,6 +701,16 @@ test('a task stays where an experiment put it only while that experiment could s
   assert.ok(!(old.task === true) && old.propensity !== 0.37, 'begun a day and an hour ago, its next step is drawn again');
 });
 
+test('the review tells the rule how long each record has been gathering, which its chance of being wrong is spent over', async () => {
+  const s = await shop('ages');
+  const steady = await armOf(s.workload.id, STEADY);
+  await db.prepare('UPDATE arms SET created_at = ? WHERE id = ?').run(now() - 40 * 86400000, steady.id);
+  // learning began two days ago, with the switch, so nothing was compared before that
+  close((await stateOf(s.workload, { fresh: true })).byId.get(steady.id).ageDays, 2, 0.01, 'since learning began');
+  await db.prepare('UPDATE promotions SET created_at = ? WHERE workload_id = ?').run(now() - 60 * 86400000, s.workload.id);
+  close((await stateOf(s.workload, { fresh: true })).byId.get(steady.id).ageDays, 40, 0.01, 'since it was first kept, where that is later');
+});
+
 test('evidence is counted in tasks: one forty step task is one piece of evidence, not forty', async () => {
   const s = await shop('one-task');
   await history(s, STEADY, { n: 120 });
