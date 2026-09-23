@@ -173,9 +173,9 @@ export default function Models({ data }) {
                   {makers.map((mk) => <option key={mk.key} value={mk.key}>{mk.name} ({num(mk.n)})</option>)}
                 </select>
               </label>
-              <div className="seg catlseg" role="radiogroup" aria-label="Which models">
+              <div className="seg catlseg" role="group" aria-label="Which models">
                 {[['all', 'All'], ['on', 'Enabled'], ['off', 'Not enabled']].map(([k, label]) => (
-                  <button key={k} type="button" role="radio" aria-checked={which === k}
+                  <button key={k} type="button" aria-pressed={which === k}
                     className={which === k ? 'segb on' : 'segb'} onClick={() => setWhich(k)}>{label}</button>
                 ))}
               </div>
