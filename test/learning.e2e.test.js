@@ -191,6 +191,8 @@ const send = async (secret, body) => {
   return res.headers.get('x-understudy-call-id');
 };
 
+const close = (x, y, eps, what) => assert.ok(Math.abs(x - y) <= eps, `${what}: ${x} is not within ${eps} of ${y}`);
+
 const armOf = async (workloadId, model) => db.prepare(
   `SELECT * FROM arms WHERE workload_id = ? AND spec_json LIKE ?`).get(workloadId, `%"model":"${model}"%`);
 
@@ -219,6 +221,22 @@ async function history(s, model, { n, failed = 0, armId = undefined, yardstick =
   if (unread) await db.prepare('UPDATE calls SET request_hash = NULL WHERE id = ANY(?::text[])').run(ids);
   await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ? AND created_at > ?')
     .run(now() - 3600000, s.workload.id, now() - 3600000);
+  forgetState(s.workload.id);
+}
+
+/* Thousands of calls at once, spread evenly from `from` to `to`, written as recordCall writes them, of
+   which `failPer100` in every hundred were seen to fail. */
+let bulkSeq = 0;
+async function bulk(s, { armId, model, n, propensity, explored = 0, from, to, failPer100 = 0, cost = COST[model] }) {
+  bulkSeq += 1;
+  const tag = `call_bulk${bulkSeq}_${process.pid}_`;
+  const step = Math.max(1, Math.floor((to - from) / n));
+  await db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model, status_code, prompt_tokens,
+        completion_tokens, cost_usd, charged_usd, created_at, request_hash, task_id, step, arm_id, propensity, explored, reward)
+      SELECT ? || g, ?, ?, 'routed', ?, ?, 200, 500, 40, ?, 0, ?::bigint - (g - 1)::bigint * ?::bigint, md5(? || g), ? || g, 1, ?, ?, ?,
+             CASE WHEN g % 100 < ? THEN 0 ELSE NULL END
+        FROM generate_series(1, ?) g`)
+    .run(tag, s.workspace.id, s.workload.id, REF, model, cost, to, step, tag, tag, armId, propensity, explored, failPer100, n);
   forgetState(s.workload.id);
 }
 
@@ -555,4 +573,67 @@ test('a router serving a live call waits on a busy provider as a live call does,
   } finally {
     alwaysBusy.clear();
   }
+});
+
+test('a drift in how often calls fail after a switch reads the same on both sides, and a real gap is still switched back', async () => {
+  const DAYMS = 86400000;
+  /* Twenty days of one switch: its first ten taking over on five calls in a hundred while the customer's
+     own model kept ninety five, when one call in a hundred failed everywhere; then ten with the customer's
+     own model as the yardstick on three in a hundred, when six in a hundred failed everywhere. What serves
+     fails `servingFail` in each hundred in each half. */
+  const twentyDays = async (tag, servingFail) => {
+    const s = await shop(tag);
+    await saveDef(s.workload.id, { events: [{ event: 'ticket_reopened', means: 'failed' }] });
+    await db.prepare(`UPDATE promotions SET created_at = ? WHERE workload_id = ? AND action = 'promote'`).run(now() - 21 * DAYMS, s.workload.id);
+    await db.prepare('UPDATE workloads SET promoted_at = ? WHERE id = ?').run(now() - 21 * DAYMS, s.workload.id);
+    const steady = await armOf(s.workload.id, STEADY);
+    const yours = await upsertArm(s.workload, referenceSpec(s.workload), { status: 'baseline', offline: { ratio: 1 } });
+    const t = now() - 3600000;
+    const early = { from: t - 20 * DAYMS, to: t - 10 * DAYMS };
+    const late = { from: t - 10 * DAYMS, to: t };
+    await bulk(s, { armId: yours.id, model: REF, n: 9500, propensity: 0.95, ...early, failPer100: 1 });
+    await bulk(s, { armId: steady.id, model: STEADY, n: 500, propensity: 0.05, ...early, failPer100: servingFail[0] });
+    await bulk(s, { armId: yours.id, model: REF, n: 300, propensity: 0.03, explored: 1, ...late, failPer100: 6 });
+    await bulk(s, { armId: steady.id, model: STEADY, n: 9700, propensity: 0.97, ...late, failPer100: servingFail[1] });
+    return { s, decisions: await reviewWorkload(s.workload) };
+  };
+  const drift = await twentyDays('drift', [1, 6]);
+  assert.deepEqual(drift.decisions, [], 'the same drift on both sides is neither strategy\'s doing');
+  const worse = await twentyDays('drift-worse', [6, 11]);
+  assert.deepEqual(worse.decisions.map((d) => d.kind), ['revert'], 'five points worse all along is still switched back');
+});
+
+test('a strategy that fails and is answered another way is priced on the calls it answered, and each call is counted once', async () => {
+  const { routedSavings } = await import('../src/eval/actual.js');
+  const s = await shop('priced', { explore: 'off' });
+  const steady = await armOf(s.workload.id, STEADY);
+  const yours = await upsertArm(s.workload, referenceSpec(s.workload), { status: 'baseline', offline: { ratio: 1 } });
+  const write = (i, extra) => recordCall({ workspaceId: s.workspace.id, workloadId: s.workload.id, source: 'routed', requestedModel: REF,
+    promptTokens: 500, completionTokens: 40, request: request(9000 + i), response: { choices: [{ message: { content: JSON.stringify(right(i)) } }] },
+    ...extra });
+  // a hundred calls given to what serves by chance: ninety answered, ten failed and answered by the customer's own model instead
+  for (let i = 0; i < 100; i += 1) {
+    if (i % 10) {
+      await write(i, { servedModel: STEADY, statusCode: 200, costUsd: COST[STEADY], armId: steady.id, propensity: 0.98, explored: 0 });
+    } else {
+      await write(i, { servedModel: STEADY, statusCode: 503, costUsd: 0, armId: steady.id, propensity: 0.98, explored: 0,
+        check: { by: 'fell back', status: 503, why: 'Provider is overloaded' } });
+      await write(i + 1000, { servedModel: REF, statusCode: 200, costUsd: COST[REF], armId: null, propensity: 1, explored: 0 });
+    }
+  }
+  // and sixty on the customer's own model as the yardstick
+  for (let i = 0; i < 60; i += 1) {
+    await write(2000 + i, { servedModel: REF, statusCode: 200, costUsd: COST[REF], armId: yours.id, propensity: 0.01, explored: 1 });
+  }
+  await learningSettled();
+  await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ? AND created_at > ?').run(now() - 3600000, s.workload.id, now() - 3600000);
+  forgetState(s.workload.id);
+  await reviewWorkload(s.workload);
+  const ratio = JSON.parse((await armOf(s.workload.id, STEADY)).stats_json).liveRatio;
+  close(ratio, COST[STEADY] / COST[REF], 1e-9, 'what one of its answered calls costs against one of yours, failures left out');
+  // every call the customer made is counted once, at what it would have cost on their own model
+  const saved = await routedSavings({ workspaceId: s.workspace.id, workloadId: s.workload.id, days: 1, at: now() });
+  const customerCalls = 3 + 100 + 60;
+  assert.equal(saved.calls, customerCalls, 'the ten failed tries are not calls of the customer\'s: the answers that stood in are');
+  close(saved.would, customerCalls * COST[REF], 1e-9, 'each of them once, at the customer\'s own price');
 });

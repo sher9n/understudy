@@ -13,6 +13,7 @@ import { decide } from './decide.js';
 import { serveWith } from './serve.js';
 import { requestText } from './check.js';
 import { graderFor, gradedBy } from './grade.js';
+import { combineDays, fairRecord } from './fair.js';
 import { memo, forgetState } from './memo.js';
 import { account, optimizeLeft } from '../billing.js';
 
@@ -215,34 +216,31 @@ async function readState(workload) {
      model keeps its record across switches: it is the same yardstick throughout. */
   const began = Number((await db.prepare(
     `SELECT MIN(created_at) AS at FROM promotions WHERE workload_id = ? AND action = 'promote'`).get(workload.id))?.at) || 0;
-  /* Each call is weighted by one over the chance it had of being served that way, so a strategy that
-     was given more of the calls in some hours and fewer in others is read over the traffic as a whole,
-     not over the hours it happened to get more of. The record then counts the calls the weights are
-     worth (fewer than the calls, where the chances varied). */
+  /* Each task is weighted by one over the chance it had of being served that way, and every strategy's
+     record is one reading of the whole of the traffic, day for day, decayed by age (src/learn/fair.js):
+     a strategy that was given more of the calls in some days and fewer in others is read over the
+     traffic as a whole, not over the days it happened to get more of. The steps of one conversation
+     are one task, chosen once, and count as one piece of evidence. What a call costs is read the same
+     way, over the calls that were answered: a try that failed and was answered another way cost nothing
+     here and was paid for there, and counted in it made a strategy that fails look cheaper than it is. */
   const fairRows = began ? await db.prepare(
-    `SELECT arm_id, FLOOR((? - created_at) / 86400000.0) AS age, COUNT(*) AS n,
-            SUM(CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) AS s,
-            SUM(1.0 / GREATEST(COALESCE(propensity, 1), 0.001)) AS w,
-            SUM(1.0 / POWER(GREATEST(COALESCE(propensity, 1), 0.001), 2)) AS w2,
-            SUM((CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) / GREATEST(COALESCE(propensity, 1), 0.001)) AS ws,
-            COALESCE(SUM(cost_usd), 0) AS cost
-       FROM calls
-      WHERE workload_id = ? AND source = 'routed' AND arm_id IS NOT NULL AND created_at >= ? AND created_at < ?
-        AND ${COUNTED} AND ${READABLE} AND (explored = 1 OR propensity < 1)
-      GROUP BY 1, 2`).all(t, workload.id, Math.max(began, since), settledAt) : [];
-  const fair = new Map();
-  const fairCost = new Map();
+    `SELECT arm_id, FLOOR((? - started) / 86400000.0) AS age, COUNT(*) AS tasks, SUM(n) AS n,
+            SUM(w * n) AS wn, SUM(w * s) AS ws, SUM(w * w * n * n) AS q,
+            SUM(ok) AS ok, SUM(w * ok) AS wok, SUM(w * cost) AS wcost
+       FROM (SELECT arm_id, MIN(created_at) AS started, COUNT(*) AS n,
+                    SUM(CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) AS s,
+                    AVG(1.0 / GREATEST(COALESCE(propensity, 1), 0.001)) AS w,
+                    SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) AS ok,
+                    COALESCE(SUM(CASE WHEN status_code = 200 THEN cost_usd ELSE 0 END), 0) AS cost
+               FROM calls
+              WHERE workload_id = ? AND source = 'routed' AND arm_id IS NOT NULL AND created_at >= ? AND created_at < ?
+                AND ${COUNTED} AND ${READABLE} AND (explored = 1 OR propensity < 1)
+              GROUP BY arm_id, COALESCE(task_id, id)) t
+      GROUP BY arm_id, 2`).all(t, workload.id, Math.max(began, since), settledAt) : [];
+  const fairDays = new Map();
   for (const r of fairRows) {
-    if (!fair.has(r.arm_id)) fair.set(r.arm_id, []);
-    const w = Number(r.w);
-    // rounded, so equal chances count every call exactly rather than 249.9999
-    const nEff = w > 0 && Number(r.w2) > 0 ? Math.min(Number(r.n), Math.round(((w * w) / Number(r.w2)) * 1000) / 1000) : Number(r.n);
-    const rate = w > 0 ? Number(r.ws) / w : (Number(r.n) ? Number(r.s) / Number(r.n) : 0);
-    fair.get(r.arm_id).push({ ageDays: Number(r.age), n: nEff, s: Math.max(0, Math.min(nEff, rate * nEff)) });
-    const c = fairCost.get(r.arm_id) || { n: 0, cost: 0 };
-    c.n += Number(r.n);
-    c.cost += Number(r.cost);
-    fairCost.set(r.arm_id, c);
+    if (!fairDays.has(r.arm_id)) fairDays.set(r.arm_id, []);
+    fairDays.get(r.arm_id).push({ ageDays: Number(r.age), tasks: r.tasks, n: r.n, wn: r.wn, ws: r.ws, q: r.q, ok: r.ok, wok: r.wok, wcost: r.wcost });
   }
   const shadowRows = await db.prepare(
     `SELECT arm_id, FLOOR((? - created_at) / 86400000.0) AS age, COUNT(*) AS n, SUM(agreement) AS s,
@@ -266,27 +264,32 @@ async function readState(workload) {
     return r === null || r === undefined || !Number.isFinite(Number(r)) ? null : Number(r);
   };
   // the fair record counts only calls that were used: background answers are a stand-in, kept apart
-  const fairOpts = { ...opts, surrogateWeight: 0 };
+  const fairOf = (armId) => fairRecord(combineDays(fairDays.get(armId) || [], { halfLifeDays: config.LEARN_HALF_LIFE_DAYS }), { prior });
   /* What a strategy costs a call against the customer's own model, from calls each answered by chance
-     in the same hours: a cascade that sends more calls on than it did when measured costs more than its
-     measurement said, and a promotion or an experiment's price should know. */
-  const baseCost = baselineArm ? fairCost.get(baselineArm.id) : null;
-  const liveRatioOf = (a) => {
-    const c = fairCost.get(a.id);
-    if (!c || !baseCost || c.n < 50 || baseCost.n < 50 || !(baseCost.cost > 0)) return null;
-    return (c.cost / c.n) / (baseCost.cost / baseCost.n);
+     in the same days: a cascade that sends more calls on than it did when measured costs more than its
+     measurement said, and a promotion or an experiment's price should know. Both sides are read over the
+     calls they answered (see the fair record above), so a strategy that fails and is answered another
+     way is not made to look cheaper by its failures. */
+  const baseFair = baselineArm ? fairOf(baselineArm.id) : null;
+  const liveRatioOf = (f) => {
+    if (!f || !baseFair || f.okCalls < 50 || baseFair.okCalls < 50 || !(baseFair.costPerCall > 0) || f.costPerCall === null) return null;
+    return f.costPerCall / baseFair.costPerCall;
   };
-  const record = (a) => ({
-    ...a,
-    graded: graded.get(a.id) || null,
-    liveRatio: a.key === baseKey ? 1 : liveRatioOf(a),
-    ratio: a.key === baseKey ? 1 : (liveRatioOf(a) ?? ratioOf(a)),
-    post: posterior({ live: live.get(a.id) || [], shadow: shadow.get(a.id) || [] }, opts),
-    fair: posterior({ live: fair.get(a.id) || [] }, fairOpts),
-    same: same.get(a.id) || 0,
-    failed: tally.get(a.id)?.failed ?? 0,
-    known: tally.get(a.id)?.known ?? 0,
-  });
+  const record = (a) => {
+    const fair = a.id === baselineArm?.id ? baseFair : fairOf(a.id);
+    const liveRatio = a.key === baseKey ? 1 : liveRatioOf(fair);
+    return {
+      ...a,
+      graded: graded.get(a.id) || null,
+      liveRatio,
+      ratio: a.key === baseKey ? 1 : (liveRatio ?? ratioOf(a)),
+      post: posterior({ live: live.get(a.id) || [], shadow: shadow.get(a.id) || [] }, opts),
+      fair,
+      same: same.get(a.id) || 0,
+      failed: tally.get(a.id)?.failed ?? 0,
+      known: tally.get(a.id)?.known ?? 0,
+    };
+  };
   const recs = arms.map(record);
   const recById = new Map(recs.map((a) => [a.id, a]));
   const baseline = baselineArm ? recById.get(baselineArm.id)
@@ -294,17 +297,16 @@ async function readState(workload) {
       id: 'baseline', virtual: true, key: baseKey, kind: 'model', status: 'baseline', spec: referenceSpec(workload),
       label: `${short(workload.reference_model)} (yours)`, ratio: 1,
       post: posterior({ live: live.get('baseline') || [] }, opts),
-      fair: posterior({}, fairOpts), same: 0,
+      fair: fairRecord({}, { prior }), same: 0,
       failed: tally.get('baseline')?.failed ?? 0, known: tally.get('baseline')?.known ?? 0,
     };
   const serving = workload.routed_arm_id ? recById.get(workload.routed_arm_id) || null : null;
   /* What the switch saves a day: the day's calls, at what a call on the customer's own model costs,
      less what they cost on what serves. For sizing what keeping it honest may spend. */
   const dailySavingOf = () => {
-    const sc = serving ? fairCost.get(serving.id) : null;
+    const perCall = serving?.fair?.costPerCall;
     const r = serving?.ratio;
-    if (!sc || !(sc.n > 0) || !(r > 0) || r >= 1) return null;
-    const perCall = sc.cost / sc.n;
+    if (!(perCall > 0) || !(r > 0) || r >= 1) return null;
     return perDay * (perCall / r - perCall);
   };
 
@@ -667,7 +669,9 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
   const ref = workload.reference_model;
   const serving = st.serving;
   const base = st.baseline;
-  const said = (x) => `${pctOf(x.fair.liveRate)} of ${Math.round(x.fair.nLive)} calls`;
+  // the calls, and the tasks they were steps of where there were fewer: what the evidence is counted in
+  const said = (x) => `${pctOf(x.fair.liveRate)} of ${Math.round(x.fair.nLive)} calls`
+    + (x.fair.tasks && x.fair.tasks < x.fair.nLive ? ` in ${x.fair.tasks} tasks` : '');
   // what the grader found, for a decision it made
   const read = (x) => (x.graded ? `${x.graded.n - x.graded.bad} of ${x.graded.n} answers right` : 'no answers read');
   const why = (d, a, b, bLabel) => (d.by === 'graded'

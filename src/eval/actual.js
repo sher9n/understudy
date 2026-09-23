@@ -13,7 +13,16 @@ import { db, round8 } from '../db/index.js';
  *   otherwise                                    the customer's model's list price for the same tokens,
  *                                                with the prompt tokens the provider had cached priced
  *                                                as cached, where the model says what that costs.
- * The customer's own model is never priced with our fee on it: without us, they would not pay it. */
+ * The customer's own model is never priced with our fee on it: without us, they would not pay it.
+ *
+ * Each call the customer made is counted once. A try that failed and was answered another way (an
+ * experiment, or a switch sent on to the customer's own model) is a row of its own, beside the row of
+ * what answered it; it is not a call of the customer's, and nothing it would have cost is counted. The
+ * row that answered it carries the call. A call that failed outright was never answered, so nothing is
+ * said to have been saved on it. A strategy's measured cost is only ever applied to calls it answered,
+ * and it is read from them too (see the fair record in src/learn/fair.js): read with its failures at
+ * nothing, and applied to every try as well as to the answer that stood in for each failure, a failed
+ * call was counted twice and a switch that failed one call in twenty read one in twenty cheaper. */
 
 const DAY = 86400000;
 
@@ -53,13 +62,15 @@ export async function routedSavings({ workspaceId, workloadId = null, days = 30,
   const rows = await db.prepare(
     `SELECT LEAST(?::int, GREATEST(0, CEIL((c.created_at - ?::bigint) / 86400000.0)))::int AS b,
             c.workload_id, c.requested_model, c.served_model, c.arm_id, COALESCE(c.hinted, 0) AS hinted,
+            COALESCE(c.status_code = 200, FALSE) AS ok,
+            COALESCE(c.check_json LIKE '%"by":"fell back"%' OR c.check_json LIKE '%"by":"experiment failed"%', FALSE) AS tried,
             COUNT(*) AS n, COALESCE(SUM(c.charged_usd), 0) AS paid, COALESCE(SUM(c.cost_usd), 0) AS cost,
             COALESCE(SUM(c.prompt_tokens), 0) AS pin, COALESCE(SUM(c.completion_tokens), 0) AS pout,
             COALESCE(SUM(c.cached_tokens), 0) AS cached
        FROM calls c
       WHERE c.workspace_id = ? AND c.created_at >= ? AND c.source = 'routed'
         ${workloadId ? 'AND c.workload_id = ?' : ''}
-      GROUP BY 1, 2, 3, 4, 5, 6`)
+      GROUP BY 1, 2, 3, 4, 5, 6, 7, 8`)
     .all(...[days - 1, first, workspaceId, since, ...(workloadId ? [workloadId] : [])]);
   const prices = new Map((await db.prepare('SELECT model_id, price_in, price_out, price_cache_read FROM models_catalog').all())
     .map((m) => [m.model_id, m]));
@@ -74,6 +85,13 @@ export async function routedSavings({ workspaceId, workloadId = null, days = 30,
     if (!slot) continue;
     const cost = Number(r.cost);
     const paid = Number(r.paid);
+    /* A try answered another way is not a call of the customer's, and a call that failed outright was
+       never answered: whatever either was charged is still counted as paid, and nothing as saved. */
+    if (r.tried || !r.ok) {
+      if (!r.tried) calls += Number(r.n);
+      slot.paid = round8(slot.paid + paid);
+      continue;
+    }
     const asked = r.requested_model;
     const same = !asked || !r.served_model || r.served_model === asked;
     let would = cost;

@@ -84,7 +84,10 @@ export function decide(st, opts = {}) {
   if (!serving || !base) return out;
   // two kinds of evidence share the chance of being wrong, so together they are wrong no more often than one
   const seqOpts = { alpha: o.alpha / 2, rho: o.rho };
-  const enough = (r) => (r?.fair?.nLive ?? 0) >= o.minCalls;
+  /* Enough evidence is counted in tasks where a record says how many it holds: the steps of one
+     conversation were given to one strategy together, and one forty step task is not forty calls'
+     worth of evidence (see src/learn/fair.js). A record that only counts calls is read as it was. */
+  const enough = (r) => (r?.fair?.tasks ?? r?.fair?.nLive ?? 0) >= o.minCalls;
   const graded = (r) => (r?.graded?.n ?? 0) >= o.minGraded;
   // what was seen counts where failures are seen often enough, or the customer reports outcomes themselves
   const seen = st.hasEvents ? 1 : Math.max(0, Math.min(1, st.detection ?? 0));
