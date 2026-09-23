@@ -12,6 +12,7 @@ import { posterior, explorePlan, pickFrom, thompsonShares } from './bandit.js';
 import { decide } from './decide.js';
 import { serveWith } from './serve.js';
 import { requestText } from './check.js';
+import { graderFor, gradedBy } from './grade.js';
 import { memo, forgetState } from './memo.js';
 import { account, optimizeLeft } from '../billing.js';
 
@@ -146,12 +147,15 @@ async function readState(workload) {
   /* What the grader found on each strategy's fair calls (src/learn/grade.js), and how many of the
      answers it found wrong were also seen to fail in the traffic: that share is how often a failure is
      seen at all. Until the grader has found a few wrong answers, the share of calls that carried any
-     signal stands in for it, as it always has. */
+     signal stands in for it, as it always has. On a workload with a cascade, only the readings of the
+     grader that is not the cascade's own check count (see graderFor): the older ones marked every
+     answer the check passed as right. */
+  const grader = graderFor(arms);
   const gradedRows = await db.prepare(
     `SELECT g.arm_id, COUNT(*) AS n, SUM(g.bad) AS bad,
             SUM(CASE WHEN g.bad = 1 AND (c.status_code <> 200 OR c.reward < 0.5) THEN 1 ELSE 0 END) AS seen_bad
        FROM graded_calls g JOIN calls c ON c.id = g.call_id
-      WHERE g.workload_id = ? AND c.created_at >= ? AND c.created_at < ?
+      WHERE g.workload_id = ? AND c.created_at >= ? AND c.created_at < ? AND ${gradedBy(grader)}
       GROUP BY g.arm_id`).all(workload.id, since, settledAt);
   const graded = new Map(gradedRows.map((r) => [r.arm_id, { n: Number(r.n), bad: Number(r.bad) }]));
   const gradedBad = gradedRows.reduce((a, r) => a + Number(r.bad), 0);
@@ -349,7 +353,7 @@ async function readState(workload) {
   extra *= 1 + config.ROUTING_FEE_PCT / 100;
   // the workspace's own ceiling on optimizing, if it set one: nothing is tried past it
   const budgetLeft = await optimizeLeft(workload.workspace_id);
-  return { arms: recs, byId: recById, serving, baseline, prior, extraToday: extra, dayStart, at: t,
+  return { arms: recs, byId: recById, serving, baseline, prior, extraToday: extra, dayStart, at: t, grader,
     detection, detectionFrom: gradedDetection !== null ? 'graded' : 'signals', hasEvents, settleMs, perDay, budgetLeft,
     dailySaving: dailySavingOf() };
 }
@@ -580,7 +584,7 @@ export async function reviewRollout(workload, st, { rollBackFn = rollBack } = {}
   if (!breach) {
     const g = await db.prepare(
       `SELECT g.arm_id, COUNT(*) AS n, SUM(g.bad) AS bad FROM graded_calls g JOIN calls c ON c.id = g.call_id
-        WHERE g.workload_id = ? AND c.created_at >= ? AND g.arm_id = ANY(?::text[]) GROUP BY g.arm_id`)
+        WHERE g.workload_id = ? AND c.created_at >= ? AND g.arm_id = ANY(?::text[]) AND ${gradedBy(st.grader)} GROUP BY g.arm_id`)
       .all(workload.id, since, [newId, controlId].filter(Boolean));
     const ga = g.find((r) => r.arm_id === newId);
     const gb = g.find((r) => r.arm_id === controlId);

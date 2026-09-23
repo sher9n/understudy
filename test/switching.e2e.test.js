@@ -452,6 +452,88 @@ test('a few live answers are read in the background, within the day\'s budget, a
   assert.equal(tight.graded, 0, 'never past the day\'s budget');
 });
 
+/* Many calls at once, written as recordCall writes them, for what needs thousands of them. */
+let bulkSeq = 0;
+async function bulkCalls({ workspaceId, workloadId, armId, model, n, propensity, explored = 0, at = now() - 3600000, cost = 0.0004,
+  status = 200, reward = null }) {
+  bulkSeq += 1;
+  const tag = `bulk${bulkSeq}_${process.pid}_`;
+  await db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model, status_code, prompt_tokens,
+        completion_tokens, cost_usd, charged_usd, created_at, request_json, response_json, request_hash, task_id, step, arm_id, propensity,
+        explored, reward)
+      SELECT ? || g, ?, ?, 'routed', ?, ?, ?, 100, 10, ?, 0, ?::bigint - g, ?, ?, md5(? || g), ? || g, 1, ?, ?, ?, ?
+        FROM generate_series(1, ?) g`)
+    .run(tag, workspaceId, workloadId, REF, model, status, cost, at, JSON.stringify(request(1, { system: 'Bulk.' })),
+      JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'an answer' } }] }), tag, tag, armId, propensity, explored, reward, n);
+  return tag;
+}
+
+test('a cascade is never graded by the check that chose its answers: the model grader reads them, and every other strategy of the workload', async () => {
+  const { jevCheck } = await import('../src/learn/check.js');
+  const { stateOf } = await import('../src/learn/explore.js');
+  const s = await shop();
+  const system = 'Triage the claim.';
+  const w0 = await workloadFor(s.workspace.id, request(1, { system }));
+  const cascade = { kind: 'cascade', first: { model: CHEAP, recipe: null }, fallback: { model: REF, recipe: null }, threshold: 0.7 };
+  await promote(w0, `cascade:${CHEAP}`, { spec: cascade, rollout: false });
+  const w = await load(w0.id);
+  const baseline = await upsertArm(w, referenceSpec(w), { status: 'baseline', offline: { ratio: 1 } });
+  // cheap answers the cascade served, each passed by its live check, whose verdict is kept under the request and the answer
+  for (let i = 0; i < 12; i += 1) {
+    const req = request(80000 + i, { system });
+    const res = { choices: [{ finish_reason: 'stop', message: { content: `the cheap answer to claim ${i}` } }] };
+    const c = await jevCheck(req, res, w.shape_kind, { scope: s.workspace.id, live: true });
+    assert.ok(c.p >= cascade.threshold, 'the check passed it, which is why the customer got it');
+    await recordCall({ workspaceId: s.workspace.id, workloadId: w.id, source: 'routed', requestedModel: REF, servedModel: CHEAP,
+      statusCode: 200, promptTokens: 100, completionTokens: 10, costUsd: 0.0004, request: req, response: res,
+      armId: w.routed_arm_id, propensity: 0.98, explored: 0, escalated: false });
+  }
+  // and the customer's own model answering beside it, as the yardstick
+  for (let i = 0; i < 6; i += 1) {
+    await recordCall({ workspaceId: s.workspace.id, workloadId: w.id, source: 'routed', requestedModel: REF, servedModel: REF,
+      statusCode: 200, promptTokens: 100, completionTokens: 10, costUsd: 0.004, request: request(81000 + i, { system }),
+      response: { choices: [{ finish_reason: 'stop', message: { content: `your model on claim ${i}` } }] },
+      armId: baseline.id, propensity: 0.01, explored: 1 });
+  }
+  // a grader that is not the cascade's check finds a third of the cheap answers wrong
+  let asked = 0;
+  const askModel = async () => {
+    asked += 1;
+    return { json: { choices: [{ message: { content: asked % 3 === 0 ? 'WRONG' : 'RIGHT' } }], usage: { cost: 0.0001 } } };
+  };
+  const r = await gradeWorkload(w, { perArm: 20, budgetUsd: 1, askModel });
+  assert.equal(r.graded, 18);
+  const rows = await db.prepare('SELECT arm_id, judged_by, bad FROM graded_calls WHERE workload_id = ?').all(w.id);
+  assert.ok(rows.every((x) => x.judged_by === 'llm'), 'read by the model grader, never from the check that passed them');
+  assert.ok(rows.some((x) => x.arm_id === w.routed_arm_id && Number(x.bad) === 1), 'so a wrong cheap answer can show as wrong');
+  assert.equal(rows.filter((x) => x.arm_id === baseline.id).length, 6, 'and the yardstick is read by the same grader, like with like');
+  // readings an older grader made from the kept verdicts are left out of what the review compares
+  const old = await bulkCalls({ workspaceId: s.workspace.id, workloadId: w.id, armId: w.routed_arm_id, model: CHEAP, n: 40, propensity: 0.98 });
+  await db.prepare(`INSERT INTO graded_calls (call_id, workspace_id, workload_id, arm_id, bad, p, judged_by, cost_usd, created_at)
+      SELECT id, workspace_id, workload_id, arm_id, 0, 0.9, 'jev', 0, ? FROM calls WHERE id LIKE ?`).run(now(), `${old}%`);
+  // an hour on, so every call has had time for its outcome to arrive
+  await db.prepare('UPDATE calls SET created_at = created_at - 3600000 WHERE workload_id = ? AND created_at > ?').run(w.id, now() - 600000);
+  const st = await stateOf(w, { fresh: true });
+  assert.equal(st.byId.get(w.routed_arm_id).graded.n, 12, 'only the model grader\'s twelve readings count');
+});
+
+test('a workload with no cascade is graded as it always was, by Jev, and every strategy gets its share of readings', async () => {
+  const s = await shop();
+  const w0 = await workloadFor(s.workspace.id, request(1, { system: 'Sort the post.' }));
+  await promote(w0, CHEAP, { spec: { kind: 'model', model: CHEAP, recipe: null }, rollout: false });
+  const w = await load(w0.id);
+  const baseline = await upsertArm(w, referenceSpec(w), { status: 'baseline', offline: { ratio: 1 } });
+  // a busy day: three thousand calls on what serves, twenty on the yardstick
+  await bulkCalls({ workspaceId: s.workspace.id, workloadId: w.id, armId: w.routed_arm_id, model: CHEAP, n: 3000, propensity: 0.98 });
+  await bulkCalls({ workspaceId: s.workspace.id, workloadId: w.id, armId: baseline.id, model: REF, n: 20, propensity: 0.01, explored: 1, cost: 0.004 });
+  const r = await gradeWorkload(w, { perArm: 12, budgetUsd: 10, askModel: async () => { throw new Error('not asked while Jev answers'); } });
+  assert.equal(r.graded, 24, 'twelve of each');
+  const per = await db.prepare('SELECT arm_id, COUNT(*) AS n, MIN(judged_by) AS by FROM graded_calls WHERE workload_id = ? GROUP BY arm_id').all(w.id);
+  assert.equal(Number(per.find((x) => x.arm_id === baseline.id)?.n), 12, 'the yardstick gets its share however busy what serves is');
+  assert.equal(Number(per.find((x) => x.arm_id === w.routed_arm_id)?.n), 12);
+  assert.ok(per.every((x) => x.by === 'jev'), 'read by Jev, as before');
+});
+
 test('a live check always finds a place with Jev, however much background work is waiting', async () => {
   let release = null;
   jevHold = new Promise((r) => { release = r; });
