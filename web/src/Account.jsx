@@ -13,7 +13,8 @@ import { plainClick } from './nav.jsx';
 const S24 = { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
   strokeWidth: 1.7, strokeLinecap: 'round', 'aria-hidden': true };
 
-export default function Account({ me, dark, setDark, onSignOut, go }) {
+/* `down` opens the menu below the button rather than above it, for the phone's top bar. */
+export default function Account({ me, dark, setDark, onSignOut, go, down = false }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef(null);
 
@@ -37,7 +38,7 @@ export default function Account({ me, dark, setDark, onSignOut, go }) {
         <span className="who">{me?.name || me?.email || 'Your workspace'}</span>
       </button>
       {open && (
-        <div className="acctpop">
+        <div className={down ? 'acctpop acctdown' : 'acctpop'}>
           <div className="acctid">
             <span className="av avlg">{initial}</span>
             <div>
@@ -63,6 +64,13 @@ export default function Account({ me, dark, setDark, onSignOut, go }) {
             <span className={dark ? 'sw swon' : 'sw'} aria-hidden="true"><i /></span>
           </button>
           <div className="acctsep" />
+          {/* The pages anybody can read, reachable from inside the app too: what it costs,
+              whether it is up, and how to reach us. */}
+          <div className="acctlinks">
+            {[['pricing', 'Pricing'], ['status', 'Status'], ['contact', 'Contact us']].map(([k, label]) => (
+              <a key={k} href={href(k)} onClick={plainClick(() => { setOpen(false); if (go) go(k); })}>{label}</a>
+            ))}
+          </div>
           <button className="acctrow acctout" onClick={() => { setOpen(false); onSignOut(); }}>
             <svg {...S24}><path d="M10 4H6a2 2 0 00-2 2v12a2 2 0 002 2h4" /><path d="M16 15l4-3-4-3" /><path d="M20 12H10" /></svg>
             Sign out

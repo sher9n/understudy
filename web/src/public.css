@@ -1,0 +1,209 @@
+/* The public pages: the header and footer the home page shares with every page that says what
+   happens to a customer's traffic, what it costs, the terms, and how to reach us. The app's own
+   rules, in a sheet of their own. Every colour is a theme token, so dark mode follows. */
+
+.pubpage { display: flex; flex-direction: column; flex: 1; min-height: 100vh; }
+.pubpage > .docpage, .pubpage > .lifted { flex: 1 0 auto; }
+
+/* The header. Same weight and rhythm as the design board's, with the pages people look for
+   before they sign up (what it costs, what happens to their data, whether it is up) in it. */
+.pubhead { display: flex; align-items: center; gap: 26px; padding: 18px 44px;
+  border-bottom: 1px solid var(--line); background: var(--bg); }
+.pubwm { font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink); white-space: nowrap; }
+a.pubwm:hover { text-decoration: none; }
+.pubnav { display: flex; gap: 22px; font-size: 13.5px; min-width: 0; }
+.pubnav a { color: var(--mut-read); white-space: nowrap; }
+.pubnav a:hover { color: var(--ink); text-decoration: none; }
+.pubnav a[aria-current='page'] { color: var(--ink); font-weight: 600; }
+.pubgrow { flex: 1 1 auto; }
+.pubacts { display: flex; align-items: center; gap: 16px; }
+.pubtheme { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px;
+  border-radius: 8px; color: var(--mut-read); }
+.pubtheme:hover { color: var(--ink); background: var(--grid); }
+.pubsignin { color: var(--mut-read); font-size: 13.5px; white-space: nowrap; }
+.pubsignin:hover { color: var(--ink); text-decoration: none; }
+.pubhead .btn { white-space: nowrap; }
+
+/* The footer: the one line about data, then every page in four small groups. */
+.pubfoot { border-top: 1px solid var(--line); padding: 38px 44px 44px; background: var(--bg); }
+.pubfootin { max-width: 1240px; margin: 0 auto; display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.9fr); gap: 44px; }
+.pubfootbrand p { font-size: 13px; line-height: 1.6; color: var(--mut-read); margin: 10px 0 0; max-width: 48ch; }
+.pubcols { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; }
+.pubcolh { display: block; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--mut); font-weight: 700; }
+.pubcols ul { list-style: none; margin: 11px 0 0; padding: 0; display: grid; gap: 8px; }
+.pubcols a { font-size: 13.5px; line-height: 1.4; color: var(--mut-read); }
+.pubcols a:hover { color: var(--ink); }
+
+@media (max-width: 1020px) {
+  .pubfootin { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+}
+/* On a phone the header keeps its one row of actions and puts the pages under it, as a row of
+   their own: four links and three buttons across 390 pixels is a line nobody can read. */
+@media (max-width: 720px) {
+  .pubhead { flex-wrap: wrap; gap: 6px 12px; padding: 12px 16px 10px; }
+  .pubnav { order: 3; flex-basis: 100%; gap: 20px; overflow-x: auto; padding: 4px 0 2px; }
+  .pubacts { gap: 8px; }
+  .pubhead .btn { padding: 8px 12px; font-size: 13px; }
+  .pubfoot { padding: 28px 16px 34px; }
+  .pubcols { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 16px; }
+}
+
+/* The links the home page gives beside what it says about data and money. */
+.lp-links { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 16px 0 0; font-size: 14.5px; }
+.lp-links a { font-weight: 600; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+
+/* One document. A column narrow enough to read, the title and its date, and sections. */
+.docpage { width: 100%; max-width: 780px; margin: 0 auto; padding: 56px 24px 88px; box-sizing: border-box; }
+.doceyeb { color: var(--brand-read); }
+.dochead h1 { font-size: clamp(28px, 4vw, 38px); font-weight: 700; letter-spacing: -0.035em; line-height: 1.12;
+  margin: 10px 0 0; text-wrap: balance; }
+.docdate { font-size: 13px; color: var(--mut); margin: 12px 0 0; }
+.doclead { font-size: 17px; line-height: 1.6; color: var(--mut-read); margin: 18px 0 0; max-width: 64ch; }
+.docbody { margin-top: 8px; }
+.docsec { margin-top: 38px; scroll-margin-top: 20px; }
+.docsec h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.022em; line-height: 1.3; margin: 0; color: var(--ink); }
+.docsec h3 { font-size: 15.5px; font-weight: 650; letter-spacing: -0.015em; margin: 22px 0 0; color: var(--ink); }
+.docsec p, .docsec li { font-size: 15px; line-height: 1.7; color: var(--mut-read); }
+.docsec p { margin: 10px 0 0; max-width: 70ch; }
+/* :where keeps this as weak as a single class, so a list with a layout of its own (the path of a
+   call) is not given a reading list's indent and spacing. */
+.docsec :where(ul, ol) { margin: 10px 0 0; padding-left: 22px; display: grid; gap: 7px; max-width: 70ch; }
+.docsec b, .docsec strong { color: var(--ink); font-weight: 600; }
+/* A link inside a sentence is underlined, so it is never told apart by its colour alone. */
+.docsec a, .doclead a, .docnote a { text-decoration: underline; text-underline-offset: 2px;
+  text-decoration-thickness: 1px; }
+.docsec code { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; color: var(--ink);
+  background: var(--code); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+.docnote { margin: 22px 0 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); font-size: 14px; line-height: 1.6; color: var(--mut-read); }
+.docnote b { color: var(--ink); }
+
+/* The contents of a long page, so a reader can go straight to the part they came for. */
+.doctoc { margin: 26px 0 0; padding: 14px 18px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); }
+.doctoc ol { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4px; }
+.doctoc li { font-size: 14px; line-height: 1.5; color: var(--mut-read); }
+.doctoc a { color: var(--mut-read); text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+.doctoc a:hover { color: var(--ink); }
+
+/* A list of named things, each with what it is for: subprocessors, what we keep, what costs what. */
+.klist { margin: 14px 0 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--raise); }
+.klrow { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 2fr); gap: 18px; padding: 14px 18px;
+  border-top: 1px solid var(--line); }
+.klrow:first-child { border-top: 0; }
+.klk { font-size: 14.5px; font-weight: 650; color: var(--ink); letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.klk small { display: block; margin-top: 3px; font-size: 12px; font-weight: 500; color: var(--mut); letter-spacing: 0; }
+.klv { font-size: 14px; line-height: 1.65; color: var(--mut-read); }
+.klv p { margin: 0; font-size: 14px; }
+.klv p + p { margin-top: 6px; }
+@media (max-width: 640px) {
+  .docpage { padding: 34px 16px 64px; }
+  .doclead { font-size: 16px; }
+  .klrow { grid-template-columns: minmax(0, 1fr); gap: 5px; padding: 13px 15px; }
+}
+
+/* An address that leads nowhere: what it was, and the two ways out. */
+.lostpath { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.88em; color: var(--ink);
+  background: var(--code); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; overflow-wrap: anywhere; }
+.lostacts { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 26px; }
+.lostmore { margin: 24px 0 0; font-size: 14px; line-height: 1.6; color: var(--mut-read); }
+.lostmore a { text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+.lostapp { max-width: 640px; padding-top: 24px; }
+.lostapp h1 { margin-top: 10px; }
+
+/* The path a call takes, as boxes in a row, stacked on a phone so the words keep their size. */
+.tpath { list-style: none; margin: 18px 0 0; padding: 0; display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 22px; }
+.tstep { position: relative; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--raise);
+  padding: 13px 14px 14px; }
+.tstep + .tstep::before { content: ''; position: absolute; left: -17px; top: 50%; width: 12px; height: 2px;
+  background: var(--line-strong); }
+.tstep + .tstep::after { content: ''; position: absolute; left: -7px; top: calc(50% - 4px); border-style: solid;
+  border-width: 5px 0 5px 6px; border-color: transparent transparent transparent var(--line-strong); }
+.tstep.tzdr { border-color: var(--ok); background: var(--okq); }
+.tstepk { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px; letter-spacing: 0.09em;
+  text-transform: uppercase; color: var(--mut); font-weight: 700; }
+.tstep.tzdr .tstepk { color: var(--ok); }
+.tstept { font-size: 14.5px; font-weight: 650; color: var(--ink); margin-top: 4px; letter-spacing: -0.01em; }
+.tsteps { font-size: 12.5px; line-height: 1.5; color: var(--mut-read); margin-top: 5px; }
+.tback { margin: 10px 0 0; font-size: 13px; color: var(--mut-read); }
+@media (max-width: 760px) {
+  .tpath { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .tstep + .tstep::before { left: 22px; top: -16px; width: 2px; height: 12px; }
+  .tstep + .tstep::after { left: 18px; top: -7px; border-width: 6px 5px 0 5px;
+    border-color: var(--line-strong) transparent transparent transparent; }
+}
+
+/* Prices: one card for each thing that costs money, the figure large, what it covers under it. */
+.pricegrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 16px 0 0; }
+.pricecard { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); padding: 18px 20px 20px; }
+.pricecard.pricefree { border-color: var(--ok); background: var(--okq); }
+.pricek { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--mut); font-weight: 700; }
+.pricefig { font-size: 26px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.15; margin-top: 8px; color: var(--ink); }
+.pricecard.pricefree .pricefig { color: var(--ok); }
+.pricecard p { margin: 8px 0 0; font-size: 14px; line-height: 1.6; color: var(--mut-read); }
+@media (max-width: 640px) { .pricegrid { grid-template-columns: minmax(0, 1fr); } }
+
+/* The contact form. Labels above their fields, the way the sign-in form has them. */
+.cform { display: grid; gap: 16px; margin: 26px 0 0; max-width: 560px; }
+.cform label, .cflabel { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink); margin-bottom: 6px; }
+.cform .field { font-size: 14.5px; }
+.cform textarea.field { min-height: 150px; resize: vertical; line-height: 1.55; font-family: inherit; }
+.cform select.field { appearance: none; -webkit-appearance: none; padding-right: 36px; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--mut) 50%), linear-gradient(135deg, var(--mut) 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%; background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat; }
+.cfhint { display: block; font-size: 12px; color: var(--mut); margin-top: 5px; line-height: 1.5; }
+p.cfhint { margin: 0; font-size: 12.5px; }
+p.cfhint a { color: var(--mut-read); text-decoration: underline; text-underline-offset: 2px; }
+.cfopt { font-weight: 400; color: var(--mut); }
+.cfrow { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.cfacts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.cfacts .btn { padding: 11px 18px; font-size: 14px; }
+/* Nobody is meant to see this field, or reach it with the keyboard: only a script filling in
+   every box it finds fills it in, and the server throws those messages away. */
+.hpot { position: absolute; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }
+.cdone { margin: 26px 0 0; max-width: 560px; padding: 18px 20px; border: 1px solid var(--ok); border-radius: 14px;
+  background: var(--okq); }
+.cdone h2 { margin: 0; font-size: 17px; color: var(--ok); letter-spacing: -0.015em; }
+.cdone p { margin: 8px 0 0; font-size: 14px; line-height: 1.6; color: var(--mut-read); }
+@media (max-width: 560px) { .cfrow { grid-template-columns: minmax(0, 1fr); } }
+
+/* Status: each part of the service, whether it is working, and the facts behind that. */
+.healthsum { display: flex; align-items: center; gap: 12px; margin: 26px 0 0; padding: 16px 18px;
+  border-radius: 14px; border: 1px solid var(--line); background: var(--raise); }
+.healthsum.ok { border-color: var(--ok); background: var(--okq); }
+.healthsum.bad { border-color: var(--bad); background: var(--badq); }
+.healthsum.warn { border-color: var(--warn); background: var(--warnq); }
+.healthsumt { font-size: 16px; font-weight: 700; letter-spacing: -0.015em; color: var(--ink); }
+.healthsum.ok .healthsumt { color: var(--ok); }
+.healthsum.bad .healthsumt { color: var(--bad); }
+/* the warning colour is 3.6 to 1 on its own tint in the light theme, too faint for words: they stay
+   in ink, and the dot and the border carry the colour */
+.healthsum.warn .healthsumt { color: var(--ink); }
+.healthsums { font-size: 13px; color: var(--mut-read); margin-top: 3px; line-height: 1.5; }
+.healthdot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: var(--line-strong); }
+.healthdot.ok { background: var(--ok); }
+.healthdot.bad { background: var(--bad); }
+.healthdot.warn { background: var(--warn); }
+.healthlist { margin: 16px 0 0; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--raise); }
+.healthrow { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 14px; align-items: baseline;
+  padding: 14px 18px; border-top: 1px solid var(--line); }
+.healthrow:first-child { border-top: 0; }
+.healthrow .healthdot { align-self: start; margin-top: 6px; }
+.healthname { font-size: 14.5px; font-weight: 650; color: var(--ink); }
+.healthnote { display: block; font-size: 13px; font-weight: 400; line-height: 1.55; color: var(--mut-read); margin-top: 3px; }
+.healthstate { font-size: 13px; font-weight: 600; white-space: nowrap; color: var(--mut-read); }
+.healthstate.ok { color: var(--ok); }
+.healthstate.bad { color: var(--bad); }
+.healthstate.warn { color: var(--ink); }
+.healthmeta { margin: 16px 0 0; font-size: 13px; line-height: 1.6; color: var(--mut-read); }
+.healthmeta code { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12.5px; color: var(--ink); }
+.healthacts { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 16px 0 0; }
+@media (max-width: 560px) {
+  .healthrow { grid-template-columns: 10px minmax(0, 1fr); gap: 4px 12px; padding: 13px 15px; }
+  .healthstate { grid-column: 2; }
+}

@@ -242,7 +242,7 @@ requests.post("${o.endpoint}",
             ))}
             <button className="minig ocopy" onClick={() => navigator.clipboard?.writeText(code).catch(() => {})}>Copy</button>
           </div>
-          <pre className="ocode"><code>{code}</code></pre>
+          <pre className="ocode" tabIndex={0} aria-label="Code to copy"><code>{code}</code></pre>
         </div>
       )}
     </div>

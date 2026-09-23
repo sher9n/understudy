@@ -1,7 +1,8 @@
 import React from 'react';
 import { href } from './router.js';
 import { plainClick } from './nav.jsx';
-import { usd, num } from './api.js';
+import { num } from './api.js';
+import { usd } from './money.js';
 
 const CHEV = (
   <span className="chev">
@@ -10,6 +11,9 @@ const CHEV = (
   </span>
 );
 
+/* The workloads, one row each. On a narrow screen the table folds to a workload's name and its
+   status, and the four figures between them used to be dropped; they now move to a line of their
+   own under the name, so nothing is lost for being on a phone. */
 export default function WorkloadTable({ rows, onOpen, priced = true, title = 'Your workloads' }) {
   return (
     <section className="opt">
@@ -32,10 +36,16 @@ export default function WorkloadTable({ rows, onOpen, priced = true, title = 'Yo
           {rows.map((r) => (
             <a className="optrow" key={r.id} href={href('work', r.id)}
               onClick={plainClick(() => onOpen(r.id))}>
-              <div className="on">{r.name}</div>
+              <div className="on">
+                {r.name}
+                <span className="optmeta">
+                  {num(r.calls)} {r.calls === 1 ? 'call' : 'calls'}, {r.shape}
+                  {priced ? `, ${usd(r.cost)}` : ''}, {r.model}
+                </span>
+              </div>
               <div className="num">{num(r.calls)}</div>
               <div className="shp">{r.shape}</div>
-              <div className="num">{priced ? usd(r.cost) : '—'}</div>
+              <div className="num">{priced ? usd(r.cost) : 'not priced'}</div>
               <div className="mdl">{r.model}</div>
               <div><span className={`pill ${r.tone}`}>{r.label}</span></div>
               {CHEV}

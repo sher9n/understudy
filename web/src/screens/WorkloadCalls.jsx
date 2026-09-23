@@ -244,6 +244,7 @@ export default function WorkloadCalls({ workloadId }) {
       {peek && (
         <div ref={card} className={`fieldpop${peek.pinned ? ' pinned' : ''}`} style={peek.pos}
           role="dialog" aria-label={FIELD_LABEL[peek.field]}
+          onKeyDown={(e) => { if (e.key === 'Escape') document.querySelector('.cellmore.on')?.focus(); }}
           onMouseEnter={() => { overCard.current = true; clearTimeout(closeTimer.current); }}
           onMouseLeave={() => {
             overCard.current = false;
@@ -252,7 +253,7 @@ export default function WorkloadCalls({ workloadId }) {
           <div className="fieldhead">
             <span className="fieldname">{FIELD_LABEL[peek.field]}</span>
             {text && !text.error && text.at && <span className="fieldwhen m">{timeIST(text.at)} IST</span>}
-            <button className="peekx" onClick={close} aria-label="Close">
+            <button className="peekx" onClick={close} aria-label="Close" autoFocus={peek.pinned}>
               {peek.pinned ? 'Close' : 'Esc'}
             </button>
           </div>
@@ -268,7 +269,7 @@ export default function WorkloadCalls({ workloadId }) {
             </div>
           ) : (
             <>
-              <pre className="fieldtext">{text.text}</pre>
+              <pre className="fieldtext" tabIndex={0} aria-label={FIELD_LABEL[peek.field]}>{text.text}</pre>
               {text.truncated && (
                 <div className="fieldcut">This is the first 20,000 characters of it.</div>
               )}

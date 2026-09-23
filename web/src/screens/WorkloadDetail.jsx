@@ -249,17 +249,19 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           <div className="opthead">
             <h2>How the candidates compare</h2>
             {compared && (
-            <div className="trigwrap" ref={barRef}>
+            <div className="trigwrap" ref={barRef}
+              onKeyDown={(e) => { if (e.key === 'Escape' && barOpen) { e.stopPropagation(); setBarOpen(false); e.currentTarget.querySelector('.whyb')?.focus(); } }}>
               <div className="trigrow">
                 <span className="pill go">Your bar · {(cert.floor ?? w.floor ?? 0).toFixed(2)}%</span>
-                <button className="whyb" onClick={() => setBarOpen((v) => !v)}>
-                  <span className="whyi">?</span> How is this set?
+                <button className="whyb" onClick={() => setBarOpen((v) => !v)}
+                  aria-expanded={barOpen} aria-controls="bar-how">
+                  <span className="whyi" aria-hidden="true">?</span> How is this set?
                 </button>
               </div>
               {barOpen && (
-                <div className="pop popover">
+                <div className="pop popover" id="bar-how" role="dialog" aria-labelledby="bar-how-title">
                   <div className="pophead">
-                    <h3>How your bar is set</h3>
+                    <h3 id="bar-how-title">How your bar is set</h3>
                     <button className="popx" onClick={() => setBarOpen(false)} aria-label="Close">×</button>
                   </div>
                   <p>We take {cert.sampleSize} of your real calls and run each one twice on {measuredOn}.</p>
@@ -312,7 +314,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         </section>
       )}
 
-      <section className="opt">
+      <section className={`opt${timedToFirstWord(cert) ? ' cands-ttft' : ''}`}>
         <div className="opthead">
           <h2>Candidates tested</h2>
           <span className="s">

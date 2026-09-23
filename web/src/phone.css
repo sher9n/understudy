@@ -1,0 +1,229 @@
+/* Narrow screens: tablets and phones, checked at 390 pixels wide in both themes.
+ *
+ * Loaded after every other sheet, so it can reflow the lifted design board, the app's own rules
+ * and the screens' own sheets without touching any of them. Two rules throughout: nothing a
+ * table has on a wide screen is dropped on a narrow one (a column that no longer fits becomes a
+ * labelled line of its own), and nothing is wider than the screen, so the page never scrolls
+ * sideways and no control is cut off at its edge. Every colour is a theme token. */
+
+/* ---------------------------------------------------------------------------------------------
+   The frame. Above phone width the app keeps its menu down the side; on a phone the menu becomes
+   a bar across the top (the wordmark and your account) and the five places along the bottom,
+   each with its name under its icon. */
+.phonetop, .phonetabs { display: none; }
+
+@media (max-width: 640px) {
+  .shell { flex-direction: column; }
+  .shell > .side { display: none; }
+
+  .phonetop { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    position: sticky; top: 0; z-index: 26; height: 52px; box-sizing: border-box; padding: 0 10px 0 16px;
+    background: var(--panel); border-bottom: 1px solid var(--line); }
+  .phonetop .wm { font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink); }
+  .phonetop .wm:hover { text-decoration: none; }
+  .phonetop .acctbtn { margin: 0; padding: 5px; }
+  .phonetop .who { display: none; }
+  .acctpop.acctdown { top: calc(100% + 8px); bottom: auto; left: auto; right: 0; width: min(280px, calc(100vw - 20px)); }
+
+  .phonetabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 2px; position: fixed;
+    left: 0; right: 0; bottom: 0; z-index: 25; padding: 5px 6px calc(5px + env(safe-area-inset-bottom));
+    background: var(--panel); border-top: 1px solid var(--line); }
+  .phonetab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    min-height: 50px; padding: 5px 2px; border-radius: 10px; color: var(--mut-read); font-size: 11px;
+    font-weight: 500; line-height: 1.2; text-align: center; }
+  .phonetab svg { width: 19px; height: 19px; flex: 0 0 auto; }
+  .phonetab:hover { color: var(--ink); text-decoration: none; }
+  .phonetab.here { color: var(--brand-read); font-weight: 650; background: var(--brandq); }
+  .phonetab.off { opacity: 0.45; }
+  .phonetab:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+
+  /* room at the foot of every page for the bar that sits over it */
+  .shellmain .page { padding: 20px 16px calc(92px + env(safe-area-inset-bottom)); }
+  /* and whatever is scrolled to, or reached with Tab, stops clear of both bars rather than under them */
+  html { scroll-padding-top: 64px; scroll-padding-bottom: calc(80px + env(safe-area-inset-bottom)); }
+  .phead h1 { font-size: 25px; }
+  .opthead { padding: 15px 16px; gap: 6px 16px; }
+  .opthead .s { margin-left: 0; flex-basis: 100%; }
+  .tile { padding: 14px 14px 15px; }
+  .tile .v { font-size: 23px; }
+  .cardpad { padding: 16px 16px 18px; }
+  .dcard { padding: 18px 16px 20px; }
+  .cbody { padding: 16px 16px 8px; }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   The dashboard. Below 1100 pixels the two panels stack, and the rule that let the chart set the
+   pair's height gave the activity panel no height of its own: it collapsed to a strip under the
+   chart, with its heading printed over the next section. Stacked, it takes the height its rows
+   need, up to a window's worth, and scrolls inside that. */
+@media (max-width: 1100px) {
+  .split2 > .panel2:last-child { height: auto; min-height: 0; }
+  .split2 > .panel2:last-child .feed { max-height: 420px; }
+}
+
+/* The workloads list folds to a workload's name and status below 1100 pixels; the figures the
+   folded columns held move to a line under the name instead of being dropped. */
+.optmeta { display: none; }
+@media (max-width: 1100px) {
+  .optmeta { display: block; margin-top: 4px; font-size: 12.5px; font-weight: 500; letter-spacing: 0;
+    line-height: 1.45; color: var(--mut-read); overflow-wrap: anywhere; }
+  .optrow .on { min-width: 0; overflow-wrap: anywhere; }
+  /* the status column fits its words: at 128 pixels "Nothing cleared yet" ran past the edge */
+  .opthrow, .optrow { grid-template-columns: minmax(0, 1fr) auto; }
+}
+@media (max-width: 640px) {
+  .opthrow, .optrow { gap: 12px; padding: 13px 16px; }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Connect. The endpoint and the key each take the full width under their label, with their
+   buttons beside the label: the key used to get what was left beside a 116 pixel label and two
+   buttons, which was one character, so it ran down the page a letter a line with Replace cut
+   off at the edge. */
+@media (max-width: 980px) {
+  .sidecard { position: static; }
+}
+@media (max-width: 640px) {
+  .rowpair { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'label acts' 'value value';
+    gap: 8px 12px; padding: 12px 16px; }
+  .rowpair > .rowk { grid-area: label; }
+  .rowpair > .rowv { grid-area: value; }
+  .rowpair > :nth-child(3) { grid-area: acts; justify-self: end; }
+  .rowv.keyfull { white-space: normal; word-break: normal; overflow-wrap: anywhere; }
+  .keynote { padding: 11px 16px 13px; }
+  .keyrow { padding: 12px 14px; gap: 10px; }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Settings. The keys table set its columns inline, 148 + 138 + 138 + 92 pixels before the name
+   got any, so on a narrow screen the name and the prefix were printed over each other and Revoke
+   was off the edge. Each key is now a small card: name, prefix, when it was made and last used,
+   each labelled, with Revoke beside them. */
+@media (max-width: 900px) {
+  .settingspage .gthead { display: none; }
+  .settingspage .gtrow { grid-template-columns: minmax(0, 1fr) auto !important;
+    grid-template-areas: 'name act' 'prefix act' 'made act' 'used act'; gap: 2px 14px; }
+  .settingspage .gtrow > :nth-child(1) { grid-area: name; }
+  .settingspage .gtrow > :nth-child(2) { grid-area: prefix; overflow-wrap: anywhere; }
+  .settingspage .gtrow > :nth-child(3) { grid-area: made; }
+  .settingspage .gtrow > :nth-child(4) { grid-area: used; }
+  .settingspage .gtrow > :nth-child(5) { grid-area: act; align-self: center; }
+  .settingspage .gtrow > :nth-child(3)::before { content: 'Created '; color: var(--mut); }
+  .settingspage .gtrow > :nth-child(4)::before { content: 'Last used '; color: var(--mut); }
+}
+@media (max-width: 640px) {
+  .settingspage .kvrow { padding: 12px 16px; gap: 8px 12px; }
+  .settingspage .kvk { flex: 0 0 100%; }
+  .settingspage .kvv { flex: 1 1 0; min-width: 0; }
+  .settingspage .kvv .inp { width: 100%; min-width: 0; box-sizing: border-box; }
+  .settingspage .gtrow, .settingspage .gthead { padding: 12px 16px; }
+  .settingspage .barnote { padding: 11px 16px 13px; }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   A workload's page. */
+
+/* The four facts at the top: two across on a phone, with a model's name allowed to wrap. */
+@media (max-width: 640px) {
+  .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .facts .tile { min-width: 0; }
+  .facts .tile .v { font-size: 19px; overflow-wrap: anywhere; }
+  .kpis { gap: 10px; }
+  .kpi { padding: 13px 14px 14px; min-width: 0; }
+  .kv { font-size: 25px; overflow-wrap: anywhere; }
+}
+
+/* Every measurement there has been. Below 900 pixels its row kept three columns, two of them
+   fixed, which left what happened a few letters wide. On a phone each measurement reads as a
+   small block: when it ran and "open" on the first line, what happened across the whole width,
+   then how it was started and what it cost. */
+@media (max-width: 640px) {
+  .mrow { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'when open' 'what what' 'trig spend';
+    gap: 3px 12px; align-items: baseline; }
+  .mrow > .mwhen { grid-area: when; }
+  .mrow > .mwhat { grid-area: what; }
+  .mrow > .mtrig { grid-area: trig; }
+  .mrow > .mspend { grid-area: spend; }
+  .mrow > .mopen { grid-area: open; }
+  .mrow > :nth-child(n+4) { display: block; }
+}
+
+/* How your bar is set: the explanation opens across the section instead of 404 pixels wide from
+   the right-hand end of a button, which on a phone put most of it off the left of the screen. */
+@media (max-width: 640px) {
+  .opthead .trigwrap { margin-left: 0; flex: 1 1 100%; }
+  .trigwrap .popover { left: 0; right: 0; width: auto; }
+}
+
+/* Candidates tested. Below 1100 pixels the table kept only the model and its verdict, which
+   hid the two figures the table is for: how far each model drifted and what it would cost. Now
+   every figure stays, labelled, on a line of its own under the model. */
+@media (max-width: 1100px) {
+  .cdhrow.cd6 { display: none; }
+  .cdrow.cd6 { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-areas: 'model model model verdict' 'drift cost time calls';
+    gap: 10px 16px; align-items: start; }
+  .cdrow.cd6 > :nth-child(1) { grid-area: model; min-width: 0; overflow-wrap: anywhere; }
+  .cdrow.cd6 > :nth-child(2) { grid-area: calls; }
+  .cdrow.cd6 > :nth-child(3) { grid-area: drift; }
+  .cdrow.cd6 > :nth-child(4) { grid-area: time; }
+  .cdrow.cd6 > :nth-child(5) { grid-area: cost; }
+  .cdrow.cd6 > :nth-child(6) { grid-area: verdict; justify-self: end; text-align: right; min-width: 0; }
+  .cdrow.cd6 > :nth-child(n+2) { display: block; }
+  .cdrow.cd6 > .num { text-align: left; }
+  .cdrow.cd6 > :nth-child(n+2):nth-child(-n+5)::before { display: block; margin-bottom: 3px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px; font-weight: 700;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--mut); }
+  .cdrow.cd6 > :nth-child(2)::before { content: 'Calls'; }
+  .cdrow.cd6 > :nth-child(3)::before { content: 'Disagreement'; }
+  .cdrow.cd6 > :nth-child(4)::before { content: 'Typical time'; }
+  .cands-ttft .cdrow.cd6 > :nth-child(4)::before { content: 'First word'; }
+  .cdrow.cd6 > :nth-child(5)::before { content: 'Cost a month'; }
+}
+@media (max-width: 640px) {
+  .cdrow.cd6 { grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas: 'model model' 'drift cost' 'time calls' 'verdict verdict'; padding: 14px 16px; gap: 10px 14px; }
+  .cdrow.cd6 > :nth-child(6) { justify-self: start; text-align: left; }
+}
+
+/* The calls in a workload. Below 1100 pixels the table dropped its tokens, time and cost, and
+   below 720 everything but when and what was asked; the search box kept a 280 pixel minimum and
+   ran off the edge. The figures now sit on a line of their own, labelled; on a phone each call is
+   a small block, and the search takes the width of the section. */
+@media (max-width: 1100px) {
+  .clrow { grid-template-areas: 'when asked answered model' '. tokens took cost'; row-gap: 5px; }
+  .clrow > :nth-child(1) { grid-area: when; }
+  .clrow > :nth-child(2) { grid-area: asked; }
+  .clrow > :nth-child(3) { grid-area: answered; }
+  .clrow > :nth-child(4) { grid-area: model; }
+  .clrow > :nth-child(5) { grid-area: tokens; }
+  .clrow > :nth-child(6) { grid-area: took; }
+  .clrow > :nth-child(7) { grid-area: cost; }
+  .clrow > :nth-child(n+5) { display: block; text-align: left; }
+  .clrow > :nth-child(5)::before { content: 'Tokens '; }
+  .clrow > :nth-child(6)::before { content: 'Took '; }
+  .clrow > :nth-child(7)::before { content: 'Cost '; }
+  .clrow > :nth-child(n+5)::before { font-family: 'Schibsted Grotesk', ui-sans-serif, system-ui, sans-serif; color: var(--mut); }
+}
+@media (max-width: 720px) {
+  .clhrow { display: none; }
+  .clrow { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-areas: 'when when model' 'asked asked asked'
+    'answered answered answered' 'tokens took cost'; gap: 5px 12px; padding: 12px 16px; }
+  .clrow > :nth-child(n+3) { display: block; }
+  .clrow > :nth-child(4) { text-align: right; }
+  .clrow > :nth-child(2)::before, .clrow > :nth-child(3)::before { display: block; margin-bottom: 1px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--mut); }
+  .clrow > :nth-child(2)::before { content: 'Asked'; }
+  .clrow > :nth-child(3)::before { content: 'Answered'; }
+  .callshead { gap: 10px; }
+  .callsearch { min-width: 0; flex: 1 1 100%; margin-left: 0; }
+  .callfoot { padding: 12px 16px; }
+  .callfoot .s { flex-basis: 100%; }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   The home page. The code sample wraps rather than running off the side of its box, at a size a
+   phone can show a whole line of. */
+@media (max-width: 640px) {
+  .hero-code { font-size: 12px !important; padding: 18px 14px !important; white-space: pre-wrap; overflow-wrap: anywhere; }
+}
