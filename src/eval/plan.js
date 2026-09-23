@@ -1,7 +1,7 @@
 import { db, now } from '../db/index.js';
 import config from '../config.js';
 import { jevUsable, jevResting } from '../jev.js';
-import { gateEval } from '../billing.js';
+import { gateEval, optimizeSpent } from '../billing.js';
 import { zdrFor } from '../workspace.js';
 import { loadFacts, routedCallPrice, callPrice } from '../models/facts.js';
 import { ratingsFor } from '../models/arena.js';
@@ -10,6 +10,7 @@ import { selectCandidates, refThinksOf } from './select.js';
 import { fitsFor } from './fit.js';
 import { historyFor, fleetHistory } from './history.js';
 import { judgementsFor, judgementCost } from './judge.js';
+import { callsToClear } from './compare.js';
 
 /* What a measurement WOULD do, worked out before anything is spent.
  *
@@ -20,13 +21,71 @@ import { judgementsFor, judgementCost } from './judge.js';
 
 const DAY = 86400000;
 
-/** The calls a run is allowed to replay: this workload's own traffic, with content kept. */
-async function eligible(workloadId) {
-  return (await db.prepare(
-    `SELECT COUNT(*) AS n FROM calls
-      WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
-        AND source NOT IN ('replay', 'test')`).get(workloadId, now() - 30 * DAY)).n;
+/** The calls a run is allowed to replay: this workload's own traffic, with content kept, at most
+    EVAL_POOL_PER_DAY from each day, exactly as the run draws them. And how many of them carry the
+    answer the customer's own model gave, which the run uses instead of paying for it again. */
+async function eligible(workloadId, reference) {
+  const r = await db.prepare(
+    `SELECT COALESCE(SUM(LEAST(n, ?)), 0) AS n, COALESCE(SUM(LEAST(own, ?)), 0) AS own FROM (
+        SELECT (created_at / 86400000) AS d, COUNT(*) AS n,
+               COUNT(*) FILTER (WHERE response_json IS NOT NULL AND served_model = ?) AS own
+          FROM calls
+         WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
+           AND source NOT IN ('replay', 'test') AND (status_code IS NULL OR status_code < 400)
+         GROUP BY 1) x`)
+    .get(config.EVAL_POOL_PER_DAY, config.EVAL_POOL_PER_DAY, String(reference ?? ''), workloadId, now() - 30 * DAY);
+  const n = Number(r?.n || 0);
+  return { n, recordedShare: n && config.EVAL_USE_RECORDED ? Math.min(1, Number(r.own || 0) / n) : 0 };
 }
+
+/* What a month of this workload is: how many calls it makes, and what they cost on the customer's
+   own model. From its real traffic over the last thirty days, never from replays or tests. */
+async function monthOf(workloadId) {
+  const t = await db.prepare(
+    `SELECT COUNT(*) AS n, COALESCE(SUM(cost_usd), 0) AS cost, MIN(created_at) AS first FROM calls
+      WHERE workload_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`)
+    .get(workloadId, now() - 30 * DAY);
+  const days = t?.n ? Math.min(30, Math.max(1, (now() - Number(t.first)) / DAY)) : 30;
+  return { calls: (Number(t?.n || 0) / days) * 30, cost: (Number(t?.cost || 0) / days) * 30 };
+}
+
+/* What a measurement is worth, before anything is spent on it.
+
+   Every model a measurement tries has a chance of clearing the bar and a share it would save, both
+   from what is already known about it. The cheapest that clears wins, so the saving to expect is the
+   first one down the list, cheapest first, that clears: each model's saving, times its chance, times
+   the chance that every cheaper one did not. A workload already switched is only worth the part of
+   that beyond what it saves now, and its measurement also protects the saving it has (a model that
+   slipped is caught), which counts for EVAL_PROTECT_SHARE of it.
+
+   A measurement nobody asked for runs only when that pays for it within EVAL_PAYBACK_MONTHS, and our
+   fee is taken off the saving first, because the saving is only worth what the customer keeps. */
+export function worthOf({ ranked, refPer, month, serving, tries, fee = config.ROUTING_FEE_PCT }) {
+  const perMonth = refPer > 0 ? refPer * month.calls : month.cost;
+  const servingRow = serving ? ranked.find((r) => r.model === serving && !r.key) : null;
+  const servingShare = serving ? Math.max(0, Number(servingRow?.savingShare ?? 0)) : 0;
+  const pool = ranked.filter((r) => r.savingShare !== null && r.savingShare > servingShare && !(serving && r.model === serving && !r.key))
+    .slice(0, Math.max(1, tries))
+    .sort((a, b) => b.savingShare - a.savingShare);
+  let none = 1;
+  let share = 0;
+  const f = (Number(fee) || 0) / 100;
+  for (const r of pool) {
+    const p = Math.max(0, Math.min(1, Number(r.chance) || 0));
+    const gain = Math.max(0, (r.savingShare - servingShare) - f * (1 - r.savingShare));
+    share += gain * p * none;
+    none *= 1 - p;
+  }
+  const expectedMonthlyUsd = Math.round(perMonth * share * 100) / 100;
+  const protectedMonthlyUsd = Math.round(perMonth * servingShare * 100) / 100;
+  const budgetUsd = Math.round(config.EVAL_PAYBACK_MONTHS
+    * (expectedMonthlyUsd + config.EVAL_PROTECT_SHARE * protectedMonthlyUsd) * 100) / 100;
+  return { monthlyUsd: Math.round(perMonth * 100) / 100, expectedMonthlyUsd, protectedMonthlyUsd, budgetUsd, chanceAny: Math.round((1 - none) * 1000) / 1000 };
+}
+
+/** The most one measurement may spend on this workload: at least what anybody may ask for, more when it is worth more. */
+export const ceilingFor = (worth) => Math.max(config.EVAL_MAX_USD_PER_RUN,
+  Math.min(config.EVAL_RUN_CAP_USD, Number(worth?.budgetUsd) || 0));
 
 /* How many of them to replay. Ten at the least, a hundred at the most, and never more than
    half of what there is: a measurement is a sample, and leaving the other half untouched is
@@ -76,7 +135,7 @@ export const forgetPlan = (workloadId) => pageMemo.delete(workloadId);
 
 /* The whole plan, and whether it can run. `reason` is written to be shown to somebody as it
    is: it is the sentence under a button that cannot be pressed. */
-export async function planFor(workload, { canRoute, forRun = false, memo = false } = {}) {
+export async function planFor(workload, { canRoute, forRun = false, memo = false, automatic = false } = {}) {
   if (memo && !forRun) {
     const key = [workload.speed_pref, workload.routed_model, workload.reference_model, workload.status, canRoute].join('|');
     const hit = pageMemo.get(workload.id);
@@ -87,13 +146,14 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   }
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workload.workspace_id);
   const models = modelCountFor(ws);
-  const pool = await eligible(workload.id);
+  const { n: pool, recordedShare } = await eligible(workload.id, workload.reference_model);
   const sample = sampleSizeFor(pool);
   const plan = {
     pool, sample, models, candidates: [], order: [], funnel: [], excluded: [], waiting: 0,
     estimateUsd: null, canRun: false, reason: null, reference: workload.reference_model,
     judge: jevUsable() ? 'jev' : 'llm', jevResting: jevResting(), factsAt: {}, speed: null, profile: null, pendingJev: 0,
-    difficulty: null, cachedBar: 0, refThinks: null,
+    difficulty: null, cachedBar: 0, refThinks: null, recordedShare, worth: null, notWorth: false,
+    ceilingUsd: config.EVAL_MAX_USD_PER_RUN, optimizeBudget: null,
   };
 
   if (!canRoute) {
@@ -133,6 +193,40 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const first = selectCandidates(base);
   const survivors = first.ranked.map((r) => r.model);
 
+  /* What a measurement is worth, from what is known before Jev reads anything, so one nobody asked for
+     that would not pay for itself costs nothing at all to turn down. */
+  const month = await monthOf(workload.id);
+  const tries = Math.max(models, Math.round(models * config.EVAL_TRY_MULTIPLE));
+  plan.cachedBar = await cachedBarShare(workload, sample);
+  plan.worth = worthOf({ ranked: first.ranked, refPer: first.refPrice ?? 0, month, serving: workload.routed_model, tries });
+  /* A measurement nobody asked for waits until it has enough calls to show anything: on too few, even a
+     model that matched every answer could not clear the bar, and all it would buy is a bar. */
+  if (automatic) {
+    const barPct = Number(workload.floor_pct) > 0 ? Number(workload.floor_pct)
+      : workload.shape_kind === 'free_text' ? config.EVAL_FIRST_FLOOR_TEXT_PCT : config.EVAL_FLOOR_MIN_PCT;
+    const need = callsToClear(barPct);
+    if (sample < need) {
+      const poolNeed = Math.ceil(need / config.EVAL_SAMPLE_SHARE);
+      const perDay = month.calls / 30;
+      plan.notWorth = true;
+      plan.waitMs = perDay > 0 ? ((poolNeed - pool) / perDay) * DAY : null;
+      plan.reason = `Waiting for more calls: a measurement on ${sample} of them could not show a cheaper model is as good as yours `
+        + `at a ${barPct.toFixed(barPct < 10 ? 1 : 0)}% bar, even one that matched every answer. It takes about ${need}, which `
+        + `${poolNeed} calls in thirty days gives${perDay > 0 ? `, about ${Math.max(1, Math.ceil((poolNeed - pool) / perDay))} days away at your pace` : ''}. `
+        + 'It starts by itself then, and you can measure now whenever you like.';
+      return plan;
+    }
+  }
+  if (automatic && first.order.length) {
+    const early = estimate({ ...plan, order: first.order, refPrice: first.refPrice }, profile, facts, workload);
+    if (early > plan.worth.budgetUsd) {
+      plan.notWorth = true;
+      plan.estimateUsd = early;
+      plan.reason = notWorthReason(early, plan.worth);
+      return plan;
+    }
+  }
+
   // what Jev and the leaderboard say about the survivors; the run asks for what is missing
   /* Jev reads the models only for a measurement, which pays for the reading like any other call. It
      used to read them whenever a workload page was opened, which spent money nobody was charged for. */
@@ -162,13 +256,35 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
     return plan;
   }
 
-  plan.cachedBar = await cachedBarShare(workload, sample);
   plan.estimateUsd = estimate(plan, profile, facts, workload);
-  if (plan.estimateUsd > config.EVAL_MAX_USD_PER_RUN) {
+  plan.worth = worthOf({ ranked: sel.ranked, refPer: sel.refPrice ?? 0, month, serving: workload.routed_model, tries });
+  plan.ceilingUsd = ceilingFor(plan.worth);
+  plan.worth.worthIt = plan.estimateUsd <= plan.worth.budgetUsd;
+  if (plan.estimateUsd > plan.ceilingUsd) {
     plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)}, over the $`
-      + `${config.EVAL_MAX_USD_PER_RUN.toFixed(2)} we allow for one measurement. `
+      + `${plan.ceilingUsd.toFixed(2)} one measurement of this workload may spend. `
       + 'Testing fewer models in Settings brings it down.';
     return plan;
+  }
+  /* A measurement nobody asked for runs only when it pays for itself. A person can always ask. */
+  if (automatic && !plan.worth.worthIt) {
+    plan.notWorth = true;
+    plan.reason = notWorthReason(plan.estimateUsd, plan.worth);
+    return plan;
+  }
+  /* The workspace's own ceiling on optimizing, measurements and background answers together, over the
+     last thirty days. Nothing is spent past it, whoever asks. */
+  const budget = ws?.optimize_budget_usd == null ? null : Number(ws.optimize_budget_usd);
+  if (budget !== null) {
+    const spent = await optimizeSpent(workload.workspace_id);
+    const left = Math.max(0, budget - spent);
+    plan.optimizeBudget = { budgetUsd: budget, spentUsd: spent, leftUsd: Math.round(left * 100) / 100 };
+    if (plan.estimateUsd > left) {
+      plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)}, and $${left.toFixed(2)} of your $`
+        + `${budget.toFixed(2)} optimization budget for the last thirty days is left. Raise it in Settings, `
+        + 'or this can run once earlier spending is more than thirty days old.';
+      return plan;
+    }
   }
   /* The plan's monthly allowance is spent before the balance, so a plan customer with no balance can
      still measure within it. */
@@ -196,8 +312,25 @@ function estimate(plan, profile, facts, workload) {
   const refModel = facts.models.get(workload.reference_model);
   const refPer = plan.refPrice ?? (refModel ? routedCallPrice(refModel, pin, pout, profile.hours)
     ?? callPrice(refModel, pin, pout, profile.hours) : 0) ?? 0;
-  let total = refPer * plan.sample * 2 * (1 - plan.cachedBar);
+  /* The bar's two answers for each call, less those already paid for, and less the one the customer's
+     own model recorded, which is read rather than bought. */
+  const barPaid = Math.max(0, plan.sample * 2 * (1 - (plan.cachedBar || 0)) - plan.sample * (plan.recordedShare || 0));
+  let total = refPer * barPaid;
   const finalists = plan.order.slice(0, plan.models);
+  /* The second look: the cheapest that clears, on calls it has never seen, as many as a perfect run
+     at the lowest bar needs, times EVAL_CONFIRM_MULTIPLE. Only when there are that many to look at. */
+  const least = callsToClear(config.EVAL_FLOOR_MIN_PCT);
+  const fresh = Math.max(0, (plan.pool || 0) - plan.sample);
+  if (fresh >= least && finalists.length) {
+    const looks = Math.min(fresh, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * least), plan.sample));
+    const cheapestPrice = Math.min(...finalists.map((c) => c.price));
+    total += looks * (cheapestPrice + refPer * (2 - (plan.recordedShare || 0)));
+    if (workload.shape_kind === 'free_text') {
+      const llm = facts.models.get(config.EVAL_JUDGE_MODEL);
+      const llmPer = llm ? callPrice(llm, Math.min(pin, 600) + 400, 6) : 0;
+      total += looks * judgementCost(pin, pout, llmPer);
+    }
+  }
   const extra = plan.order.slice(plan.models);
   for (const c of finalists) total += c.price * plan.sample;
   for (const c of extra) total += c.price * Math.min(plan.sample, config.EVAL_SCREEN_CALLS);
@@ -216,6 +349,13 @@ function estimate(plan, profile, facts, workload) {
     total += judged * judgementCost(pin, pout, llmPer);
   }
   return Math.round(total * 1e8) / 1e8;
+}
+
+function notWorthReason(cost, worth) {
+  return `Not worth measuring by itself yet: it would cost about $${cost.toFixed(2)}, and we expect it to find `
+    + `about $${worth.expectedMonthlyUsd.toFixed(2)} a month`
+    + (worth.protectedMonthlyUsd > 0 ? `, on top of the $${worth.protectedMonthlyUsd.toFixed(2)} a month it saves now` : '')
+    + `. It runs by itself once it would pay for itself within ${config.EVAL_PAYBACK_MONTHS} months; you can measure now whenever you like.`;
 }
 
 function mostCommon(excluded) {

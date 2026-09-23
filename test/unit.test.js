@@ -61,10 +61,20 @@ test('key order never counts as a difference', () => {
 
 const ok = (v) => ({ ok: true, value: v });
 
-test('disagreement is measured field by field', () => {
+test('one deciding field wrong makes the whole answer different, not a share of one', () => {
   assert.equal(disagreement(ok({ a: 1, b: 2 }), ok({ a: 1, b: 2 }), 'json'), 0);
-  assert.equal(disagreement(ok({ a: 1, b: 2 }), ok({ a: 1, b: 3 }), 'json'), 0.5);
+  // a reversed decision in a two-field answer used to count as half a mistake
+  assert.equal(disagreement(ok({ a: 1, b: 2 }), ok({ a: 1, b: 3 }), 'json'), 1);
   assert.equal(disagreement(ok({ a: 1, b: 2 }), ok({ a: 9, b: 9 }), 'json'), 1);
+  // the same value written two ways is the same value
+  assert.equal(disagreement(ok({ total: '1,234.50', ok: true }), ok({ total: 1234.5, ok: 'true' }), 'json'), 0);
+  assert.equal(disagreement(ok({ label: 'Refund ' }), ok({ label: 'refund' }), 'json'), 0);
+  // written fields that differ only in wording go to a judge (null), and never on their own count as a difference
+  const why = 'The customer asked for their money back because the parcel arrived broken.';
+  const why2 = 'Because the parcel came damaged, the customer wants a refund of what they paid.';
+  assert.equal(disagreement(ok({ label: 'refund', reason: why }), ok({ label: 'refund', reason: why2 }), 'json'), null);
+  // but a deciding field that differs decides, whatever the written ones say
+  assert.equal(disagreement(ok({ label: 'refund', reason: why }), ok({ label: 'replace', reason: why }), 'json'), 1);
 });
 
 test('a failure counts as total disagreement, it is never skipped', () => {

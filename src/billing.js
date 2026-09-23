@@ -194,6 +194,24 @@ export async function gateEval(workspaceId, { estimatedUsd = 0 } = {}) {
   };
 }
 
+/* What this workspace spent on optimizing over the last thirty days, with our fee: measurements and
+   background answers, which are the two things charged as optimizing. */
+export async function optimizeSpent(workspaceId, days = 30) {
+  const since = now() - days * 86400000;
+  const r = await db.prepare(
+    `SELECT (SELECT COALESCE(SUM(spend_usd), 0) FROM eval_runs WHERE workspace_id = ? AND created_at >= ?)
+          + (SELECT COALESCE(SUM(cost_usd), 0) FROM shadow_runs WHERE workspace_id = ? AND created_at >= ?) AS spent`)
+    .get(workspaceId, since, workspaceId, since);
+  return round8(Number(r?.spent || 0) * (1 + config.ROUTING_FEE_PCT / 100));
+}
+
+/** What is left of the workspace's own optimization budget, or null when it has not set one. */
+export async function optimizeLeft(workspaceId) {
+  const ws = await db.prepare('SELECT optimize_budget_usd FROM workspaces WHERE id = ?').get(workspaceId);
+  if (ws?.optimize_budget_usd === null || ws?.optimize_budget_usd === undefined) return null;
+  return round8(Math.max(0, Number(ws.optimize_budget_usd) - await optimizeSpent(workspaceId)));
+}
+
 /** What a routed call costs the customer: what the provider charged, plus the fee. */
 export const withFee = (costUsd) => round8(costUsd * (1 + config.ROUTING_FEE_PCT / 100));
 

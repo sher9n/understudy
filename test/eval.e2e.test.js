@@ -43,6 +43,10 @@ process.env.ALERTS_ENABLED = 'false';
 // no test here is about speed: a busy machine running every test file at once must not make a model look slow
 process.env.SPEED_SLACK_MS = '5000';
 process.env.REQUEST_LOGS = 'false';
+// these tests are about what a switch does, so new workloads switch on their own as they did before asking first
+process.env.DEFAULT_OPTIMIZE_MODE = 'auto';
+// these scenarios were built on two paid answers per call; recorded answers have tests of their own
+process.env.EVAL_USE_RECORDED = 'false';
 
 const { db, now } = await import('../src/db/index.js');
 const { default: migrate } = await import('../src/db/migrate.js');
@@ -60,12 +64,14 @@ await migrate({ quiet: true });
 /* How each model behaves. The reference is slightly unstable with itself, which is what
    creates the bar; one candidate is steadier and cheaper, one drifts badly. */
 const BEHAVIOUR = {
-  'openai/gpt-5.4': (i, call) => ({ total: 100 + i, currency: 'USD', lines: call === 2 && i % 20 === 0 ? 9 : (i % 5) + 1 }),
+  'openai/gpt-5.4': (i, call) => ({ total: 100 + i, currency: 'USD', lines: call === 2 && i % 10 === 0 ? 9 : (i % 5) + 1 }),
   'vendor/steady-small': (i) => ({ total: 100 + i, currency: 'USD', lines: (i % 5) + 1 }),
   'vendor/drifty-small': (i) => ({ total: 999, currency: 'EUR', lines: 0 }),
 };
 
 let seen = 0;
+// how many times each model has been asked each call
+const asksOf = new Map();
 /* While this is set, the provider holds every answer until it resolves, so a test can know a
    measurement is mid-flight at the moment it asks it to stop. */
 let hold = null;
@@ -112,7 +118,11 @@ const server = http.createServer((req, res) => {
     const text = payload.messages.find((m) => m.role === 'user')?.content || '';
     const i = Number((text.match(/#(\d+)/) || [])[1] || 0);
     seen += 1;
-    const call = (BEHAVIOUR[model] === BEHAVIOUR['openai/gpt-5.4']) ? (seen % 2 === 0 ? 2 : 1) : 1;
+    /* The customer's model answers a call one way the first time it is asked and the other way the
+       second, so how often it disagrees with itself is the same however the calls happen to interleave. */
+    const askKey = `${model}#${i}`;
+    asksOf.set(askKey, (asksOf.get(askKey) || 0) + 1);
+    const call = (BEHAVIOUR[model] === BEHAVIOUR['openai/gpt-5.4']) ? (asksOf.get(askKey) % 2 === 0 ? 2 : 1) : 1;
     const answer = BEHAVIOUR[model] ? BEHAVIOUR[model](i, call) : { total: 0 };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -167,11 +177,12 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
       workspaceId: workspace.id, workloadId: workload.id, source,
       requestedModel: 'openai/gpt-5.4', servedModel: 'openai/gpt-5.4', statusCode: 200,
       promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0.002,
-      request, response: { choices: [{ message: { content: '{}' } }] },
+      request, response: { choices: [{ message: { content: JSON.stringify({ total: 100 + i, currency: 'USD', lines: (i % 5) + 1 }) } }] },
     });
   }
-  await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ?')
-    .run(now() - 14 * DAY, workload.id);
+  // spread over the fortnight, as real traffic is: a measurement draws on each day's calls
+  await db.prepare('UPDATE calls SET created_at = ?::bigint - (abs(hashtext(id)) % 14) * 86400000 WHERE workload_id = ?')
+    .run(now() - DAY, workload.id);
 
   const out = await runEvaluation(workload.id);
   assert.equal(out.ok, true, `the run did not finish: ${JSON.stringify(out)}`);
@@ -242,10 +253,11 @@ async function seed(tag, { source = 'trace' } = {}) {
       workspaceId: workspace.id, workloadId: workload.id, source,
       requestedModel: 'openai/gpt-5.4', servedModel: 'openai/gpt-5.4', statusCode: 200,
       promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0.002,
-      request, response: { choices: [{ message: { content: '{}' } }] },
+      request, response: { choices: [{ message: { content: JSON.stringify({ total: 100 + i, currency: 'USD', lines: (i % 5) + 1 }) } }] },
     });
   }
-  await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ?').run(now() - 14 * 86400000, workload.id);
+  await db.prepare('UPDATE calls SET created_at = ?::bigint - (abs(hashtext(id)) % 14) * 86400000 WHERE workload_id = ?')
+    .run(now() - 86400000, workload.id);
   return { workspace, workload };
 }
 

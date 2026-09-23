@@ -13,8 +13,8 @@ export async function addActivity(workspaceId, { kind, title, detail = null, wor
 }
 
 /** Find the workload this call belongs to, creating it the first time we see the shape. */
-export async function workloadFor(workspaceId, body) {
-  const workload = await matchWorkload(workspaceId, body);
+export async function workloadFor(workspaceId, body, { name = null } = {}) {
+  const workload = await matchWorkload(workspaceId, body, { name });
   /* A workload is only worth telling somebody about once it has been seen enough times to
      be a real part of their traffic. Announcing every one-off call would fill the feed with
      things that never happen again. */

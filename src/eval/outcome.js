@@ -1,3 +1,5 @@
+import config from '../config.js';
+
 /* What a finished measurement found, as SQL, for a row that may not say.
  *
  * Every run now records its outcome, and migration 011 filled it in for the runs before it. But
@@ -30,15 +32,29 @@ export function outcomeOf(r) {
 }
 
 /* Whether a measurement found a model to switch to, by the rule the run itself switches on:
-   cleared the bar, has a monthly price, and costs less a month than the customer's model. A
+   cleared the bar, priced, and costs less than the customer's model once our fee is added. A
    model that cleared but costs more is not a candidate; counting it as one put "Ready to
-   optimize" over a workload the run had said nothing cleared, and offered a saving of minus. */
-export function cheaperCleared(results) {
+   optimize" over a workload the run had said nothing cleared, and offered a saving of minus. A
+   customer's model with no known price used to wave the price check through, so a model ten
+   times dearer could be switched to; with nothing to compare against, nothing is a candidate.
+
+   Cheapest first, and one the second look did not confirm after one that it did: a person may
+   still approve it, but it is never what is offered first. */
+export function cheaperCleared(results, feePct = config.ROUTING_FEE_PCT) {
   const ref = results.find((r) => r.verdict === 'reference');
   const refCost = ref?.cost_month_usd ?? null;
-  return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null
-    && (refCost == null || r.cost_month_usd < refCost));
+  const ceiling = 1 / (1 + (Number(feePct) || 0) / 100);
+  return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null && refCost != null
+    && Number(r.cost_month_usd) < Number(refCost)
+    && (r.cost_ratio == null || Number(r.cost_ratio) < ceiling))
+    .sort((a, b) => (confirmed(b) - confirmed(a)) || (a.cost_month_usd - b.cost_month_usd));
 }
+
+/* Whether the second look stood behind a result. Runs before the second look existed carry
+   nothing, and are read as they were then; a model the second look was never reached for, because
+   a cheaper one was confirmed first, carries nothing too. */
+export const confirmed = (r) => (r.confirm_verdict == null || r.confirm_verdict === 'cleared' ? 1 : 0);
+
 
 /* Whether a switch changes anything yet. Only calls that come through Understudy can be sent to
    another model: a copy arrives after the customer's own provider has already answered it. A

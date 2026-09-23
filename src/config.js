@@ -139,9 +139,44 @@ export const config = {
      mean anything, so nothing may be certified against it. */
   EVAL_NOISE_MAX_PCT: num('EVAL_NOISE_MAX_PCT', 40),
   EVAL_REVIEW_BAND: num('EVAL_REVIEW_BAND', 1.25),
+  /* What one measurement may spend. Anybody may ask for one up to EVAL_MAX_USD_PER_RUN; a workload
+     worth more may spend more, up to what its expected saving pays back in EVAL_PAYBACK_MONTHS and
+     never past EVAL_RUN_CAP_USD. A measurement nobody asked for (a re-check, a new model worth
+     trying) only runs when its expected saving pays for it within EVAL_PAYBACK_MONTHS; a workload
+     already switched counts EVAL_PROTECT_SHARE of the saving it protects towards that. */
   EVAL_MAX_USD_PER_RUN: num('EVAL_MAX_USD_PER_RUN', 2),
+  EVAL_RUN_CAP_USD: num('EVAL_RUN_CAP_USD', 20),
+  EVAL_PAYBACK_MONTHS: num('EVAL_PAYBACK_MONTHS', 2),
+  EVAL_PROTECT_SHARE: num('EVAL_PROTECT_SHARE', 0.5),
   EVAL_JUDGE_MODEL: str('EVAL_JUDGE_MODEL', 'openai/gpt-5.4-mini'),
-  EVAL_RECHECK_HOURS: num('EVAL_RECHECK_HOURS', 24),
+  /* The calls a measurement draws on: at most this many from each of the last thirty days, so a busy
+     workload is sampled across its month rather than from its last few hours. */
+  EVAL_POOL_PER_DAY: num('EVAL_POOL_PER_DAY', 60),
+  /* Whether the answer the customer's own model actually gave a call is used as one of the two the bar
+     needs, so only one is paid for. */
+  EVAL_USE_RECORDED: bool('EVAL_USE_RECORDED', true),
+  /* The second look before anything is switched: the cheapest models that cleared (at most this many)
+     are measured again on calls they have never seen, on at least EVAL_CONFIRM_MIN calls and on
+     EVAL_CONFIRM_MULTIPLE times the fewest a perfect run needs to clear the bar. */
+  EVAL_CONFIRM_TRIES: num('EVAL_CONFIRM_TRIES', 2),
+  EVAL_CONFIRM_MIN: num('EVAL_CONFIRM_MIN', 30),
+  EVAL_CONFIRM_MULTIPLE: num('EVAL_CONFIRM_MULTIPLE', 2),
+  /* Written work with no one right answer is held to "at least as good" when it cannot be held to
+     "the same answer". */
+  EVAL_QUALITY_YARDSTICK: bool('EVAL_QUALITY_YARDSTICK', true),
+  /* Re-checks that keep confirming what serves are spaced out, doubling at most this many times;
+     a change in the catalogue that could matter to a workload brings its next one forward to within
+     EVAL_NUDGE_HOURS. */
+  EVAL_BACKOFF_MAX_DOUBLINGS: num('EVAL_BACKOFF_MAX_DOUBLINGS', 3),
+  EVAL_NUDGE_HOURS: num('EVAL_NUDGE_HOURS', 6),
+  EVAL_NUDGE_MIN_DAYS: num('EVAL_NUDGE_MIN_DAYS', 7),
+  /* How a new workload is switched in a workspace that has not chosen: 'ask' (a person approves each
+     switch), 'auto' or 'off'. Workspaces choose for themselves in Settings. */
+  DEFAULT_OPTIMIZE_MODE: ['ask', 'auto', 'off'].includes(str('DEFAULT_OPTIMIZE_MODE', 'ask')) ? str('DEFAULT_OPTIMIZE_MODE', 'ask') : 'ask',
+  /* A measurement nobody asked for waits until it has enough calls to show a cheaper model is as good
+     as the customer's own at the bar it expects: the lowest bar for structured answers, and this one
+     for written answers, whose own model varies more, until a measurement has set the real one. */
+  EVAL_FIRST_FLOOR_TEXT_PCT: num('EVAL_FIRST_FLOOR_TEXT_PCT', 10),
   /* How often a workspace re-measures by itself, in days. Zero means never: measuring is
      then something a person asks for. Set in Settings; this is what a workspace has until it
      chooses, and it is always one of MEASURE_CHOICES. */

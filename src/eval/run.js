@@ -4,14 +4,14 @@ import { priceCall } from '../openrouter.js';
 import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval } from '../billing.js';
 import { planFor } from './plan.js';
-import { judgeBarPair, judgeCandidate } from './judge.js';
-import { extract, disagreement, gates, floorFrom, verdictWith, sampleCalls, barIsMeaningful } from './compare.js';
+import { judgeBarPair, judgeCandidate, judgeQuality, canJudge } from './judge.js';
+import { extract, disagreement, gates, floorFrom, verdictWith, sampleCalls, barIsMeaningful, structuredCompare, proseText, callsToClear } from './compare.js';
 import { promote, revert, trafficOf, everReverted } from './promote.js';
 import { replayOnce } from './replay.js';
 import { thinkingFit } from './select.js';
 import { loadFacts } from '../models/facts.js';
 import { forgetFleet } from './history.js';
-import { OUTCOME_OF, OUTCOME_CASE, cheaperCleared } from './outcome.js';
+import { OUTCOME_OF, OUTCOME_CASE, cheaperCleared, confirmed } from './outcome.js';
 import { reportCallFailure } from '../alerts.js';
 import { jevUsable } from '../jev.js';
 import { structureOf, jevCheck, requestText, answerText as checkedText } from '../learn/check.js';
@@ -20,6 +20,7 @@ import { featuresOf, train, predict, leaveOneOutGently } from '../learn/router.j
 import { labelOf, armById, leadModel } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
 import { markTrying } from '../learn/explore.js';
+import { scheduleNext, deferAutomatic } from './schedule.js';
 
 /* A measurement, run as a race.
  *
@@ -153,7 +154,7 @@ const UNUSABLE = {
 
 const KIND_WORDS = {
   wording: 'wording only', omission: 'leaves things out', fact: 'changes facts', decision: 'reaches different decisions',
-  refusal: 'refuses', 'cut off': 'stops mid-answer', unrelated: 'answers something else', truncated: 'runs out of room',
+  refusal: 'refuses', 'cut off': 'stops mid-answer', worse: 'gives worse answers', unrelated: 'answers something else', truncated: 'runs out of room',
   empty: 'answers nothing', 'unparseable json': 'returns broken JSON', 'no tool call': 'calls no tool',
   'unparseable arguments': 'returns broken tool arguments', refused: 'is refused by its provider',
 };
@@ -168,8 +169,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
 
   /* The same plan the page showed, with whatever the page had to go without asked for now: the
      page never waits on Jev, a measurement does. */
-  const plan = await planFor(workload, { canRoute: canRoute(), forRun: true });
+  // nobody asked for it: the schedule, a change in the catalogue, or a new workload's first calls
+  const automatic = trigger === 'automatic' || trigger === 'first';
+  const plan = await planFor(workload, { canRoute: canRoute(), forRun: true, automatic });
   if (!plan.canRun) {
+    /* Looked at again when it is due rather than on every hourly pass, which would work the plan out
+       over and over to reach the same answer. */
+    if (automatic) await deferAutomatic(workloadId, { waitMs: plan.waitMs ?? (plan.notWorth ? null : 6 * 3600000) });
     /* Back to what its last measurement found, not to "new": a workload that has been measured
        before still has that result, and forgetting it here would put "Not optimized yet" over a
        page that shows a candidate. */
@@ -177,14 +183,46 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return { ok: false, reason: plan.reason };
   }
 
+  /* The calls a measurement can draw on: this workload's own traffic over thirty days, spread across
+     those days. It used to be the newest six hundred, which on a busy workload is its last few hours.
+     Calls that failed when they were made are left out: replaying them measures nothing. */
   const pool = await db.prepare(
-    `SELECT id, request_json, response_json FROM calls
-      WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
-        AND source NOT IN ('replay', 'test')
-      ORDER BY created_at DESC LIMIT 600`).all(workloadId, now() - 30 * DAY);
-  const samples = sampleCalls(pool, plan.sample, 1, await paidForCalls(reference, pool.map((p) => p.id)));
+    `SELECT id, request_json, response_json, served_model, source, cost_usd, created_at FROM calls
+      WHERE id IN (SELECT id FROM (
+          SELECT id, row_number() OVER (PARTITION BY (created_at / 86400000) ORDER BY md5(id || ?)) AS rn
+            FROM calls WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
+             AND source NOT IN ('replay', 'test') AND (status_code IS NULL OR status_code < 400)) x
+        WHERE rn <= ?)`).all(String(now()), workloadId, now() - 30 * DAY, config.EVAL_POOL_PER_DAY);
+  /* A re-check measures calls no earlier measurement of this workload used, so a lucky sample is not
+     simply measured again: the same twelve calls, the same cached answers and the same verdict, at
+     no cost, was what a re-measure used to be. */
+  const usedBefore = new Set((await db.prepare(
+    `SELECT DISTINCT s.call_id FROM eval_samples s JOIN eval_runs r ON r.id = s.run_id WHERE r.workload_id = ?`)
+    .all(workloadId)).map((r) => r.call_id));
+  const freshSet = new Set(pool.filter((c) => !usedBefore.has(c.id)).map((c) => c.id));
+  const recheckRun = usedBefore.size > 0;
+  const samples = sampleCalls(pool, plan.sample, now() % 100003,
+    recheckRun ? null : await paidForCalls(reference, pool.map((p) => p.id)),
+    { fresh: recheckRun ? freshSet : null });
   const shape = workload.shape_kind;
   const want = plan.models;
+  /* A call's recorded answer, when the customer's own model gave it and it can be read, used as if it
+     had been replayed: nothing is paid for it, and its own timing is never used for speed. */
+  const recorded = (c) => {
+    if (!config.EVAL_USE_RECORDED || !c?.response_json || !c.served_model || String(c.served_model) !== String(reference)) return null;
+    let json = null;
+    try { json = JSON.parse(c.response_json); } catch { return null; }
+    if (!json?.choices?.[0]?.message) return null;
+    const usage = json.usage || {};
+    const was = Number(usage.cost ?? c.cost_usd ?? 0) || 0;
+    return {
+      ok: true, status: 200, json, error: null, latencyMs: null, ttftMs: null, cost: 0, originalCost: was,
+      reused: true, recorded: true, savedUsd: was, key: null, transient: false, account: false,
+      completionTokens: usage.completion_tokens ?? null,
+      reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? null,
+      provider: json.provider ?? null, promptTokens: usage.prompt_tokens ?? null,
+    };
+  };
   const queue = plan.order;
   const speed = plan.speed || { factor: null };
 
@@ -216,14 +254,17 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      one for each of the bar's pairs and one for each model's answer. */
   const perCall = shape === 'free_text' ? 2 : 1;
   const finalists = Math.min(want, queue.length);
-  const nominal = samples.length * 2 + (shape === 'free_text' ? samples.length : 0) + finalists * samples.length * perCall;
+  /* A recorded answer is read, not sent, so it is not a step: the count on the page is of calls that
+     went out and were paid for. */
+  const recordedAhead = samples.filter((c) => recorded(c)).length;
+  const nominal = samples.length * 2 - recordedAhead + (shape === 'free_text' ? samples.length : 0) + finalists * samples.length * perCall;
   const runStartedAt = now();
   const run = {
     id: id('run'), workspace_id: workload.workspace_id, workload_id: workloadId,
     status: 'running', shape_kind: shape, reference_model: reference,
     sample_size: samples.length, created_at: now(), started_at: now(),
     steps_total: nominal, steps_done: 0, phase: `Setting your bar on ${reference}`,
-    trigger: trigger === 'automatic' ? 'automatic' : 'manual',
+    trigger: automatic ? 'automatic' : 'manual',
     models_planned: Math.min(want, queue.length), heartbeat_at: now(),
     plan_json: JSON.stringify(planRecord), judge: plan.judge, job_id: jobId,
   };
@@ -235,6 +276,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
               @models_planned, @heartbeat_at, @plan_json, @judge, @job_id)`).run(run);
   /* Whatever started it, a workload being measured says so from the moment the run exists. */
   await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), workloadId);
+  if (trigger === 'first') {
+    await addActivity(workload.workspace_id, {
+      kind: 'run', title: `Measuring ${workload.slug}`,
+      detail: `${plan.pool} calls in, which is enough for a measurement to show whether a cheaper model is as good as yours.`,
+      workloadId,
+    });
+  }
 
   /* Written as the run goes: the heartbeat that says something is still running this, and the
      place a stop is noticed. It answers true when the run should end here. */
@@ -298,6 +346,14 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   /* Which judge actually settled the written answers, whatever the plan expected: Jev can run
      out of credit part way, and a structured workload needs no judge at all. */
   const judgedWith = new Set();
+  // judgements that did not come back: left out of every number, and counted, so a run leaning on few can say so
+  let judgeMisses = 0;
+  // whether the judge failed a known pair this run, and how many of the bar's answers were the customer's own
+  let judgeUnsure = false;
+  let recordedRefs = 0;
+  let judgeCheckRecord = null;
+  // agreement: the same answer as the customer's own model; quality: at least as good an answer
+  let yardstick = 'agreement';
   const judgeLabel = () => {
     const all = [...judgedWith];
     if (all.some((j) => j.startsWith('jev'))) return 'jev';
@@ -305,8 +361,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return null;
   };
   const keepSavings = async () => {
-    await db.prepare('UPDATE eval_runs SET reused = ?, saved_usd = ?, judge = ? WHERE id = ?')
-      .run(reusedCount, round8(savedUsd), judgeLabel(), run.id);
+    await db.prepare(`UPDATE eval_runs SET reused = ?, saved_usd = ?, judge = ?, quote_usd = ?, recorded_refs = ?,
+                        judge_check_json = ?, yardstick = ? WHERE id = ?`)
+      .run(reusedCount, round8(savedUsd), judgeLabel(), plan.estimateUsd ?? null, recordedRefs,
+        judgeCheckRecord ? JSON.stringify(judgeCheckRecord) : null, yardstick, run.id);
   };
 
   /* Stopped part way. Everything that ran is charged, every model that answered all of its calls
@@ -365,6 +423,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const accountProblem = (r) => `Our account with the model provider needs attention (it answered ${r.status}: `
     + `"${String(r.error || 'no reason given').slice(0, 160)}"), so no model could be asked anything.`;
   const paid = (r) => (r.reused ? Number(r.originalCost || 0) : Number(r.cost || 0));
+  /* Every answer asked for now (a recorded one was not) came back unusable: refused, busy, or not
+     the shape the call asks for. */
+  const deadNow = (p) => {
+    const asked = [[p.ra, p.a], [p.rb, p.b]].filter(([r]) => !r.recorded);
+    return asked.length > 0 && asked.every(([r, x]) => !r.ok || !x.ok);
+  };
 
   // the bar: the customer's own model against itself, reusing what is already paid for
   const bar = [];
@@ -376,10 +440,16 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     if (stopped || cantAnswer || account) return;
     if (await halted()) { stopped = true; return; }
     const body = JSON.parse(s.request_json);
-    const [ra, rb] = await Promise.all([
-      replayOnce({ body, callId: s.id, model: reference, slot: 0, workload }),
-      replayOnce({ body, callId: s.id, model: reference, slot: 1, workload }),
-    ]);
+    /* The answer the customer's own model actually gave this call, when it is kept, is one of the two
+       the bar needs, so only one is paid for. It came from their real deployment, which is exactly the
+       variation a switch has to be held against. */
+    const had = recorded(s);
+    const [ra, rb] = had ? [had, await replayOnce({ body, callId: s.id, model: reference, slot: 1, workload })]
+      : await Promise.all([
+        replayOnce({ body, callId: s.id, model: reference, slot: 0, workload }),
+        replayOnce({ body, callId: s.id, model: reference, slot: 1, workload }),
+      ]);
+    if (had) recordedRefs += 1;
     note(ra);
     note(rb);
     if (ra.account || rb.account) { account = ra.account ? ra : rb; return; }
@@ -391,12 +461,16 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
            ra.json ? JSON.stringify(ra.json) : null, rb.json ? JSON.stringify(rb.json) : null);
     bar.push({
       i, s, body, ra, rb, a: extract(ra.json, shape), b: extract(rb.json, shape),
-      refCost: (paid(ra) + paid(rb)) / 2,
+      /* A recorded answer that carries no price of its own is priced like the replay beside it, so the
+         customer's model is never made to look cheaper than it is (which would make every candidate
+         look dearer, and the saving smaller than it is). */
+      refCost: had && !(paid(ra) > 0) ? paid(rb) : (paid(ra) + paid(rb)) / 2,
     });
-    if (await step(2, `Setting your bar on ${reference}, ${bar.length} of ${samples.length} calls`)) stopped = true;
+    if (await step(had ? 1 : 2, `Setting your bar on ${reference}, ${bar.length} of ${samples.length} calls`)) stopped = true;
     /* When the customer's own model cannot answer the first few calls at all, the rest will not
-       go differently, and every further call would be paid for to learn nothing. */
-    if (!stopped && bar.length >= 3 && bar.every((p) => !p.a.ok && !p.b.ok)) cantAnswer = true;
+       go differently, and every further call would be paid for to learn nothing. Only what was asked
+       of it now counts: a recorded answer says it could answer then, not that it can today. */
+    if (!stopped && bar.length >= 3 && bar.every((p) => deadNow(p))) cantAnswer = true;
   });
   } catch (err) {
     await interrupt(`Something went wrong here while setting the bar: ${String(err?.message || err).slice(0, 160)}.`, { retryMs: 0 });
@@ -418,17 +492,19 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      against, and the reason is said plainly: the provider refused the calls, or the model did not
      return what the calls ask for. It used to be counted as the model disagreeing with itself on
      every call, which told somebody their model was inconsistent when it had never answered. */
-  const unusable = bar.filter((p) => !p.a.ok && !p.b.ok);
+  /* Calls with nothing usable at all, and calls whose every answer asked for now failed: with a
+     recorded answer beside it, a replay that failed leaves one answer, which can set no bar. */
+  const unusable = bar.filter((p) => (!p.a.ok && !p.b.ok) || deadNow(p));
   /* When every one of those calls failed only because the provider was busy or timing out, that
      is an outage, not the customer's model being unable to answer: it used to end the run as
      "your own model could not answer these calls", which the page then said for a month. */
-  const outage = unusable.length > 0 && unusable.every((p) => [p.ra, p.rb].every((r) => r.ok || r.transient));
+  const outage = unusable.length > 0 && unusable.every((p) => [p.ra, p.rb].every((r) => r.ok || r.transient || r.recorded));
   if ((unusable.length * 2 > bar.length || cantAnswer) && outage) {
     return await interrupt(`The provider was too busy to answer ${reference} on ${unusable.length} of the first `
       + `${bar.length} calls, so the bar could not be set.`);
   }
   if (unusable.length * 2 > bar.length || cantAnswer) {
-    const refusedHttp = unusable.filter((p) => !p.ra.ok && !p.rb.ok);
+    const refusedHttp = unusable.filter((p) => [p.ra, p.rb].filter((r) => !r.recorded).every((r) => !r.ok));
     const byProvider = refusedHttp.length * 2 >= unusable.length;
     const count = cantAnswer ? `every one of the first ${bar.length}` : `${unusable.length} of ${bar.length}`;
     const why = byProvider
@@ -447,6 +523,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         + `to hold a cheaper model to. ${why} Nothing has been switched.`,
       workloadId,
     });
+    await scheduleNext(workloadId, { changed: !automatic });
     return { ok: true, runId: run.id, floor: null, results: 0, refused: true };
   }
   const kept = bar.filter((p) => p.a.ok || p.b.ok);
@@ -467,10 +544,23 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       if (await halted()) { stopped = true; return; }
       const j = await judgeBarPair(askOf(p.body), p.a.value, p.b.value, { scope: workload.workspace_id });
       addJudge(j.cost);
-      score = j.score;
-      if (j.judgedBy) judgedWith.add(j.judgedBy);
       if (j.cost > 0 && await step(1, `Comparing ${reference}'s answers with each other`)) stopped = true;
-    } else score = disagreement(p.a, p.b, shape) ?? 1;
+      /* A judge that could not judge says nothing about whether the model agrees with itself. Counted
+         as a disagreement, one failed judgement in ten raised a 3% bar to 11% and let a model that was
+         wrong one time in ten clear it. */
+      if (j.transient || !j.judgedBy) { judgeMisses += 1; return; }
+      score = j.score;
+      judgedWith.add(j.judgedBy);
+    } else {
+      const d = disagreement(p.a, p.b, shape);
+      if (d === null) {
+        const r = await proseScore(p.body, p.a, p.b, shape, workload.workspace_id);
+        addJudge(r.cost);
+        if (r.transient) { judgeMisses += 1; return; }
+        if (r.judgedBy) judgedWith.add(r.judgedBy);
+        score = r.score;
+      } else score = d;
+    }
     p.noise = score;
     noiseScores.push(score);
   });
@@ -479,14 +569,63 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     throw err;
   }
   if (stopped) return await endStopped();
-  const noise = mean(noiseScores);
+  /* A bar set from a handful of pairs is no bar. When the provider was too busy to give most calls
+     their second answer, that is an outage, and the run tries again later rather than measuring
+     every model against a bar nobody set. */
+  const busyPairs = kept.filter((p) => p.ra.transient || p.rb.transient).length;
+  if (busyPairs > 0 && noiseScores.length < Math.min(10, kept.length) && noiseScores.length * 2 < kept.length) {
+    return await interrupt(`The provider was too busy to answer ${reference} on ${busyPairs} of the first `
+      + `${bar.length} calls, so the bar could not be set.`);
+  }
+  /* The judge is tested on every run that leans on it, with pairs whose answer is known: an answer
+     against itself with only its spacing changed must read the same, and one call's answer held
+     against another call's request must read different. A judge that gets those wrong cannot be
+     trusted with a bar in single percent, so nothing it settled is switched to on its own. */
+  let noise = mean(noiseScores);
+  /* Written work with no one right answer: the customer's own model gives a different, equally good
+     answer nearly every time, so "the same answer" is no bar at all. Rather than give up, the bar
+     becomes "at least as good": how often the customer's model gives a clearly worse answer than its
+     own other one. Only when that is steady too is the workload measured on it. */
+  const agreementNoise = noise;
+  let qualityNoise = null;
+  if (shape === 'free_text' && config.EVAL_QUALITY_YARDSTICK && canJudge() && config.EVAL_JUDGE_MODEL
+    && !barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
+    if (await step(0, `Asking whether ${reference}'s answers are at least as good as each other`)) return await endStopped();
+    const worse = [];
+    await inParallel(kept.filter((p) => p.a.ok && p.b.ok), 6, async (p) => {
+      if (stopped) return;
+      if (await halted()) { stopped = true; return; }
+      const j = await judgeQuality(askOf(p.body), p.b.value, p.a.value, { scope: workload.workspace_id });
+      addJudge(j.cost);
+      if (j.transient || j.score === null) { judgeMisses += 1; return; }
+      judgedWith.add(j.judgedBy);
+      worse.push(j.score);
+    });
+    if (stopped) return await endStopped();
+    if (worse.length >= Math.min(10, kept.length)) qualityNoise = mean(worse);
+    if (qualityNoise !== null && barIsMeaningful(qualityNoise * 100, config.EVAL_NOISE_MAX_PCT)) {
+      yardstick = 'quality';
+      noise = mean(worse);
+      planRecord.yardstick = { kind: 'quality', agreementNoisePct: round8(agreementNoise * 100), qualityNoisePct: round8(noise * 100) };
+      await db.prepare('UPDATE eval_runs SET plan_json = ?, yardstick = ? WHERE id = ?').run(JSON.stringify(planRecord), 'quality', run.id);
+    }
+  }
+  let judgeCheck = null;
+  if (shape === 'free_text') {
+    judgeCheck = yardstick === 'quality'
+      ? await qualityChecks(kept, workload.workspace_id, addJudge)
+      : await plantChecks(kept, workload.workspace_id, addJudge);
+    judgeUnsure = judgeCheck.errors > 0;
+    judgeCheckRecord = { ...judgeCheck, misses: judgeMisses, yardstick };
+  }
   const floor = floorFrom(noise * 100, {
     multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT,
   });
 
   // how fast the customer's own model is on these very calls: the yardstick for speed
-  const refLat = kept.flatMap((p) => [p.ra, p.rb]).filter((r) => r.ok).map((r) => r.latencyMs);
-  const refTtft = kept.flatMap((p) => [p.ra, p.rb]).filter((r) => r.ok).map((r) => r.ttftMs);
+  const timed = kept.flatMap((p) => [p.ra, p.rb]).filter((r) => r.ok && !r.recorded);
+  const refLat = timed.map((r) => r.latencyMs);
+  const refTtft = timed.map((r) => r.ttftMs);
   const refSpeed = {
     latencyP50: pct(refLat, 0.5), latencyP90: pct(refLat, 0.9),
     ttftP50: pct(refTtft, 0.5), ttftP90: pct(refTtft, 0.9),
@@ -512,10 +651,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await addActivity(workload.workspace_id, {
       kind: 'floor',
       title: `We could not measure ${workload.slug}`,
-      detail: `${reference} gave a different answer to the same call ${(noise * 100).toFixed(0)}% of the time, `
-        + 'so there is no steady bar to hold a cheaper model to. Nothing has been switched.',
+      detail: `${reference} gave a different answer to the same call ${(noise * 100).toFixed(0)}% of the time`
+        + (qualityNoise !== null ? `, and a clearly worse one than its own other answer ${(qualityNoise * 100).toFixed(0)}% of the time` : '')
+        + ', so there is no steady bar to hold a cheaper model to. Nothing has been switched.',
       workloadId,
     });
+    await scheduleNext(workloadId, { changed: !automatic });
     return { ok: true, runId: run.id, floor: null, results: 0, unmeasurable: true };
   }
 
@@ -616,7 +757,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     /* A model already serving this workload is re-checked on fresh answers, so a change in it shows:
        it answers every call afresh, and when it is finished after being dropped, only the answers it
        gave in this very run are used again, never ones from an earlier measurement. */
-    const recheck = trigger === 'automatic' && cand.model === workload.routed_model && !cand.key;
+    const recheck = cand.model === workload.routed_model && !cand.key;
     const reuse = noDrop || !recheck;
     const reuseSince = recheck ? runStartedAt : 0;
     answered.set(key, 0);
@@ -678,17 +819,36 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
             await keepReplay(run.id, p.s.id, key, 0, r, { score: null, judged: null, failure: null });
             break;
           }
-          judged = await judgeCandidate(askOf(p.body), got.value, p.a.ok ? p.a.value : null, p.b.ok ? p.b.value : null,
-            { scope: workload.workspace_id });
+          judged = yardstick === 'quality'
+            ? await judgeQuality(askOf(p.body), got.value, p.a.ok ? p.a.value : p.b.value, { scope: workload.workspace_id })
+            : await judgeCandidate(askOf(p.body), got.value, p.a.ok ? p.a.value : null, p.b.ok ? p.b.value : null,
+              { scope: workload.workspace_id });
           addJudge(judged.cost);
           score = judged.score;
           if (judged.judgedBy) judgedWith.add(judged.judgedBy);
+          // a judgement that did not come back says nothing about this model's answer either
+          if (judged.transient) { scored = false; judgeMisses += 1; }
         } else {
           /* Held to each of the customer's two answers and averaged, the way the bar is set: the
              bar is how often the customer's model differs from one of its own answers, so a copy
              of it scores the noise exactly. Its better match gave every candidate two chances. */
-          const both = [p.a, p.b].filter((x) => x.ok).map((x) => disagreement(got, x, shape) ?? 1);
-          score = both.length ? both.reduce((x, y) => x + y, 0) / both.length : 1;
+          /* A deciding field that differs makes the call different; written fields that differ only in
+             wording are read for meaning, never counted as a difference on their own. */
+          const both = [];
+          let missed = false;
+          for (const ref of [p.a, p.b].filter((x) => x.ok)) {
+            const d = disagreement(got, ref, shape);
+            if (d !== null) { both.push(d); continue; }
+            const r = await proseScore(p.body, got, ref, shape, workload.workspace_id);
+            addJudge(r.cost);
+            if (r.transient) { missed = true; continue; }
+            if (r.judgedBy) judgedWith.add(r.judgedBy);
+            both.push(r.score);
+          }
+          // a written field nobody could read says nothing either way, unless a deciding one already differed
+          if (!both.length && missed) { scored = false; judgeMisses += 1; score = 0; } else {
+            score = both.length ? both.reduce((x, y) => x + y, 0) / both.length : 1;
+          }
         }
         st.pairs.push({ cand: got, ref: p.a.ok ? p.a : p.b, score, i });
       }
@@ -737,6 +897,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       if ((verdict === 'cleared' || verdict === 'review') && tooSlow(st, { final: true })) verdict = 'slower';
       // one refusal along the way is worth a look before anything is switched
       if (verdict === 'cleared' && st.errors > 0) verdict = 'review';
+      // a judge that failed its known pairs this run settles nothing on its own
+      if (judgeUnsure && verdict === 'cleared') verdict = 'review';
     }
     /* What it would cost a month: its own cost on these calls against the customer's model's on
        the same calls, applied to the customer's real month. That carries every difference a list
@@ -774,6 +936,123 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return finished;
   };
 
+  /* The second look: the candidate on calls it has never seen, scored exactly as the first look scored
+     it, against two of the customer's own model's answers to each call (the recorded one where there is
+     one, and a replay), averaged. Scored against one answer instead, the second look was stricter than
+     the first, and turned down models as good as the ones the first look let through.
+     Enough calls that a model better than the bar can clear: EVAL_CONFIRM_MULTIPLE times what a perfect
+     run needs, and never fewer than what a perfect run needs. */
+  const confirmOn = async (r, freshCalls) => {
+    const { cand } = stats.get(r.model_id) || {};
+    if (!cand) return { verdict: 'unconfirmed', runs: 0, note: 'there was nothing to look again with' };
+    const least = callsToClear(floor);
+    const usable = freshCalls.filter((c) => !usedBefore.has(c.id));
+    const from = usable.length >= least ? usable : freshCalls;
+    if (from.length < least) {
+      await db.prepare('UPDATE eval_results SET confirm_runs = 0, confirm_verdict = ? WHERE id = ?').run('insufficient', r.id);
+      return { verdict: 'insufficient', runs: 0,
+        note: `there are not yet enough calls it has not seen to look again (${from.length} of the ${least} needed)` };
+    }
+    // never thinner than the first look: a second look on fewer calls is a noisier one, not a stricter one
+    const n = Math.min(from.length, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * least), samples.length));
+    const picks = sampleCalls(from, n, (now() % 99991) + 13);
+    // the calls it will send: one or two of the customer's model, and the candidate's one
+    const sends = (c) => (recorded(c) ? 2 : 3);
+    confirmLeft = picks.reduce((a, c) => a + sends(c), 0);
+    remaining = () => confirmLeft;
+    const scores = [];
+    // the customer's own model against itself on these calls too, so the bar is read from both samples
+    const freshNoise = [];
+    for (const c of picks) {
+      if (halt || spentTotal >= hardLimit) break;
+      if (await halted()) { halt = 'stopped'; break; }
+      const had = recorded(c);
+      confirmLeft = Math.max(0, confirmLeft - sends(c));
+      const body = JSON.parse(c.request_json);
+      const [ra, rb] = had ? [had, await replayOnce({ body, callId: c.id, model: reference, slot: 1, workload })]
+        : await Promise.all([
+          replayOnce({ body, callId: c.id, model: reference, slot: 0, workload }),
+          replayOnce({ body, callId: c.id, model: reference, slot: 1, workload }),
+        ]);
+      if (had) recordedRefs += 1;
+      note(ra);
+      note(rb);
+      const refHit = [ra, rb].find((x) => x.account);
+      if (refHit) { halt = 'account'; accountHit = { ...refHit, model: reference }; break; }
+      const refs = [extract(ra.json, shape), extract(rb.json, shape)].filter((x, k) => [ra, rb][k].ok && x.ok);
+      let judged = 0;
+      if (refs.length === 2) {
+        if (shape === 'free_text') {
+          const j = yardstick === 'quality'
+            ? await judgeQuality(askOf(body), refs[1].value, refs[0].value, { scope: workload.workspace_id })
+            : await judgeBarPair(askOf(body), refs[0].value, refs[1].value, { scope: workload.workspace_id });
+          addJudge(j.cost);
+          if (j.cost > 0) judged += 1;
+          if (!j.transient && j.score !== null && j.score !== undefined) freshNoise.push(j.score);
+        } else {
+          const d = disagreement(refs[0], refs[1], shape);
+          if (d !== null) freshNoise.push(d);
+          else {
+            const pr = await proseScore(body, refs[0], refs[1], shape, workload.workspace_id);
+            addJudge(pr.cost);
+            if (pr.cost > 0) judged += 1;
+            if (!pr.transient) freshNoise.push(pr.score);
+          }
+        }
+      }
+      const got = refs.length ? await replayOnce({ body, callId: c.id, model: cand.model, recipe: cand.recipe, slot: 0, workload }) : null;
+      if (got) note(got);
+      if (got?.account) { halt = 'account'; accountHit = { ...got, model: cand.model }; break; }
+      let score = null;
+      if (!refs.length) score = null;
+      else if (!got.ok) score = got.transient ? null : 1;
+      else {
+        const g = extract(got.json, shape);
+        if (!g.ok) score = 1;
+        else if (shape === 'free_text') {
+          const j = yardstick === 'quality'
+            ? await judgeQuality(askOf(body), g.value, refs[0].value, { scope: workload.workspace_id })
+            : await judgeCandidate(askOf(body), g.value, refs[0].value, refs[1]?.value ?? null, { scope: workload.workspace_id });
+          addJudge(j.cost);
+          if (j.cost > 0) judged += 1;
+          score = j.transient || j.score === null ? null : j.score;
+        } else {
+          const each = [];
+          for (const ref of refs) {
+            const d = disagreement(g, ref, shape);
+            if (d !== null) { each.push(d); continue; }
+            const pr = await proseScore(body, g, ref, shape, workload.workspace_id);
+            addJudge(pr.cost);
+            if (pr.cost > 0) judged += 1;
+            if (!pr.transient) each.push(pr.score);
+          }
+          score = each.length ? each.reduce((a, b) => a + b, 0) / each.length : null;
+        }
+      }
+      if (score !== null) scores.push(score);
+      const sent = (had ? 1 : 2) + (got ? 1 : 0) + judged;
+      if (await step(sent, `Looking again at ${cand.label || cand.model} on calls it has not seen, ${scores.length} of ${picks.length}`)) {
+        halt = 'stopped';
+        break;
+      }
+    }
+    confirmLeft = 0;
+    /* The bar, read from both samples: how often the customer's model disagreed with itself on the first
+       look's calls and on these. A bar read from one sample of a hundred moves a good deal by chance,
+       and a second look held to the first sample's bar alone turned good models down whenever the two
+       samples happened to differ. The candidate's own reading is from these calls only, as it must be. */
+    const pooled = [...noiseScores, ...freshNoise];
+    const bar = pooled.length ? floorFrom(mean(pooled) * 100, {
+      multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT,
+    }) : floor;
+    const v = verdictWith(scores, bar, { reviewBand });
+    const verdict = judgeUnsure && v.verdict === 'cleared' ? 'review' : v.verdict;
+    await db.prepare(`UPDATE eval_results SET confirm_runs = ?, confirm_gap = ?, confirm_hi = ?, confirm_verdict = ?, confirm_floor = ? WHERE id = ?`)
+      .run(scores.length, round8(v.gap), round8(v.hi), verdict, round8(bar), r.id);
+    return { verdict, runs: scores.length, gap: v.gap, hi: v.hi, floor: bar };
+  };
+  let confirmLeft = 0;
+
   const insertResult = async (row) => {
     await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict,
                 gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at,
@@ -801,7 +1080,11 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   let overQuote = false;
   const quote = Number(plan.estimateUsd) || 0;
   const softLimit = quote > 0 ? quote * 1.5 : config.EVAL_MAX_USD_PER_RUN;
-  const hardLimit = Math.max(config.EVAL_MAX_USD_PER_RUN, quote);
+  /* Never past what one measurement of this workload may spend, nor past what is left of the
+     workspace's own optimization budget, whatever it was quoted at. Spend here is counted before our
+     fee, the budget after it. */
+  let hardLimit = Math.max(Number(plan.ceilingUsd) || config.EVAL_MAX_USD_PER_RUN, quote);
+  if (plan.optimizeBudget) hardLimit = Math.min(hardLimit, plan.optimizeBudget.leftUsd / (1 + config.ROUTING_FEE_PCT / 100));
   remaining = () => {
     let left = 0;
     for (const n of answered.values()) left += Math.max(0, kept.length - n) * perCall;
@@ -1029,6 +1312,46 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   }
   if (halt === 'stopped') return await endStopped();
 
+  /* Which cleared models could be switched to at all: priced, and cheaper than the customer's own
+     model on these very calls once the fee is added. A customer's model with no known price used to
+     switch the "cheaper" check off, and a model ten times dearer was switched to. */
+  const feeCeiling = 1 / (1 + config.ROUTING_FEE_PCT / 100);
+  const priced = (r) => r.cost_month_usd !== null && refMonthly !== null && r.cost_month_usd < refMonthly
+    && r.cost_ratio !== null && Number(r.cost_ratio) < feeCeiling;
+  const clearedAll = results.filter((r) => r.verdict === 'cleared' && priced(r))
+    .sort((a, b) => a.cost_month_usd - b.cost_month_usd);
+  const unpriced = results.filter((r) => r.verdict === 'cleared' && !priced(r));
+  const cleared = [];
+  for (const r of clearedAll) if (!await everReverted(workloadId, r.model_id)) cleared.push(r);
+
+  /* A second look before anything is switched. Up to ten models race and the cheapest that cleared
+     wins, which is ten chances to be lucky: in simulation, ten models each half as bad again as the
+     bar allowed switched to a bad one nearly every time, and the certificate showed about half the
+     true gap. The winner is measured again on calls it has never seen, held to the same rule, and only
+     a model that clears both times can be switched to. That brought false switches to about one in a
+     thousand. A strategy (a checked cheap model, a pick made call by call) has its second look on live
+     calls instead, a small share at a time. */
+  let best = null;
+  const confirmations = [];
+  const sampled = new Set(samples.map((x) => x.id));
+  const fresh = pool.filter((c) => !sampled.has(c.id));
+  /* What serves the workload now is not looked at twice: its live calls are watched every hour, and a
+     second look would pay again to learn what they already show. Cheaper ones are tried first, at most
+     EVAL_CONFIRM_TRIES of them, and the one serving ends the search when it is reached. */
+  const servingNow = workload.routed_model ? await servingKey(workload) : null;
+  let tries = 0;
+  for (const r of cleared) {
+    if (halt) break;
+    if (r.model_id === servingNow) { best = r; confirmations.push({ r, c: { verdict: 'cleared', runs: 0, serving: true } }); break; }
+    if (tries >= config.EVAL_CONFIRM_TRIES) continue;
+    tries += 1;
+    const plainModel = !r.arm_json || String(r.model_id).endsWith('#lighter');
+    const c = plainModel ? await confirmOn(r, fresh) : { verdict: 'cleared', runs: 0, live: true };
+    confirmations.push({ r, c });
+    if (c.verdict === 'cleared') { best = r; break; }
+  }
+  if (halt === 'stopped') return await endStopped();
+
   await settle(`Measuring ${workload.slug}`);
   await keepSavings();
   const outcome = results.length ? 'compared' : 'no_balance';
@@ -1063,6 +1386,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      which a measurement can find it again. A provider's uptime over the last day is not a
      reason at all on its own: that is one reading, and the live watch sees how it really does. */
   const serving = workload.routed_model;
+  let switchedBack = false;
   if (serving) {
     // the strategy serving it, by the name its result carries: a cascade's is its own row
     const servingAs = await servingKey(workload);
@@ -1095,31 +1419,54 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       await revert(workload, {
         auto: true, soft, reason: `Measured again: ${why}. Switched back to ${reference}.`,
       });
+      switchedBack = true;
     }
   }
 
-  /* The cheapest that cleared, and what we do about it. One switched back before is passed over
-     rather than chosen and refused, which used to stop the next cheapest from ever being switched to. */
-  const clearedAll = results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd !== null)
-    .filter((r) => refMonthly === null || r.cost_month_usd < refMonthly)
-    .sort((a, b) => a.cost_month_usd - b.cost_month_usd);
-  const cleared = [];
-  for (const r of clearedAll) if (!await everReverted(workloadId, r.model_id)) cleared.push(r);
-  const best = cleared[0] || null;
+  /* What cleared, was priced and was confirmed, and what we do about it. One switched back before is
+     passed over rather than chosen and refused. */
   const dropped = results.filter((r) => r.stopped).length;
+  if (unpriced.length) {
+    await addActivity(workload.workspace_id, {
+      kind: 'floor',
+      title: `${unpriced.length === 1 ? unpriced[0].model_id : `${unpriced.length} models`} cleared your bar on ${workload.slug}, but cannot be switched to`,
+      detail: refMonthly === null
+        ? `We could not price ${reference} on your calls, so nothing can be shown to be cheaper. Nothing was switched.`
+        : 'Once our fee is added it would not cost less than your own model on your calls. Nothing was switched.',
+      workloadId,
+    });
+  }
+  // the model that serves it held up, and nothing cheaper did: nothing changes
+  const stillServing = !!best && best.model_id === servingNow && !switchedBack;
+  if (best && best.model_id === servingNow && switchedBack) best = null;
+  const second = !best && confirmations.length && !confirmations[0].c.serving ? confirmations[0] : null;
 
-  if (best) {
+  if (stillServing) {
+    const failedLooks = confirmations.filter((x) => !x.c.serving && x.c.verdict !== 'cleared');
+    await db.prepare(`UPDATE workloads SET status = 'promoted', status_note = NULL, updated_at = ? WHERE id = ? AND routed_model IS NOT NULL`)
+      .run(now(), workloadId);
+    await addActivity(workload.workspace_id, {
+      kind: 'ok',
+      title: `${best.model_id} still clears your bar on ${workload.slug}`,
+      detail: `${best.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar, on calls it had not answered before`
+        + (failedLooks.length ? `. ${failedLooks.length === 1 ? failedLooks[0].r.model_id : `${failedLooks.length} cheaper models`} cleared once and did not hold up on a second look, so nothing changed` : ''),
+      workloadId,
+    });
+  } else if (best) {
     const saving = refMonthly === null ? null : round8(refMonthly - best.cost_month_usd);
     // calls that reach us as copies cannot be switched by us, so for them this is advice
     const traffic = await trafficOf(workload);
     await db.prepare(`UPDATE workloads SET status = 'certified', status_note = NULL, updated_at = ? WHERE id = ?`)
       .run(now(), workloadId);
+    const conf = confirmations.find((x) => x.r === best)?.c;
     await addActivity(workload.workspace_id, {
       kind: 'ok',
       title: `${best.model_id} cleared your bar on ${workload.slug}`,
       detail: `${best.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar`
+        + (conf?.runs ? `, and again on ${conf.runs} calls it had never seen (${conf.gap.toFixed(2)}%, at most ${conf.hi.toFixed(2)}%, against a ${conf.floor.toFixed(2)}% bar read from both)` : '')
         + (saving ? `, about $${saving.toFixed(2)} a month less` : '')
-        + (reusedCount ? `. ${reusedCount} answers were reused from earlier measurements` : '')
+        + (reusedCount - recordedRefs > 0 ? `. ${reusedCount - recordedRefs} answers were reused from earlier measurements` : '')
+        + (recordedRefs ? `. ${recordedRefs} of your own model's answers were read from your calls rather than paid for again` : '')
         + (traffic.carries ? '' : '. Your calls reach us as copies, so a switch starts with the first call that comes through Understudy'),
       workloadId,
     });
@@ -1129,6 +1476,20 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         runId: run.id, reason: 'cleared your bar', auto: true, recipe,
       });
     }
+  } else if (second) {
+    /* It cleared once and did not hold up on fresh calls, or there were not enough fresh calls to
+       look again. Nothing is switched on one look; a person decides, or the next measurement does. */
+    const why = second.c.note
+      || `on ${second.c.runs} calls it had never seen it differed ${second.c.gap.toFixed(2)}% of the time, and could be as high as ${second.c.hi.toFixed(2)}% against a ${second.c.floor.toFixed(2)}% bar`;
+    await db.prepare(`UPDATE workloads SET status = 'certified', status_note = ?, updated_at = ? WHERE id = ?`)
+      .run('A candidate cleared once and needs a second look', now(), workloadId);
+    await addActivity(workload.workspace_id, {
+      kind: 'floor',
+      title: `${second.r.model_id} cleared your bar on ${workload.slug} once`,
+      detail: `${second.r.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar, but ${why}. Nothing was switched: `
+        + 'approve it on the workload page, or the next measurement looks again.',
+      workloadId,
+    });
   } else {
     const anyReview = results.some((r) => r.verdict === 'review');
     // matched and too slow, which only a model that answered every call can be said to have done
@@ -1149,6 +1510,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      live experiments can try; what this measurement no longer vouches for is set aside. */
   await markTrying(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId),
     { runId: run.id, results, refMonthly, floor });
+  /* The next measurement: the workspace's rhythm when this one changed something or somebody asked for
+     it, further out when it only found what the last one did. */
+  await scheduleNext(workloadId, { changed: !automatic || switchedBack || !!second || (!!best && !stillServing) });
   return { ok: true, runId: run.id, floor, results: results.length, partial: halt === 'balance', reused: reusedCount };
 }
 
@@ -1196,9 +1560,12 @@ export async function restingStatus(workloadId) {
   if (last.outcome === 'unmeasurable') return { status: 'no_match', note: 'We could not measure this workload', routed };
   if (last.outcome === 'refused') return { status: 'no_match', note: 'Your own model could not answer these calls', routed };
   const results = await db.prepare(
-    `SELECT verdict, cost_month_usd, stopped FROM eval_results WHERE run_id = ?`).all(last.id);
+    `SELECT verdict, cost_month_usd, stopped, cost_ratio, confirm_verdict FROM eval_results WHERE run_id = ?`).all(last.id);
   // the run's own rule, so a status read again always says what the run said at its end
-  if (cheaperCleared(results).length) return { status: 'certified', note: null, routed };
+  const ready = cheaperCleared(results);
+  if (ready.length) {
+    return { status: 'certified', note: confirmed(ready[0]) ? null : 'A candidate cleared once and needs a second look', routed };
+  }
   if (results.some((r) => r.verdict === 'review')) {
     return { status: 'certified', note: 'A candidate is close and needs a look', routed };
   }
@@ -1334,6 +1701,80 @@ export async function stopMeasuring(workload, { actorUserId = null } = {}) {
     if (!(isAbandoned(run) && await closeRun(run, 'stopped'))) live += 1;
   }
   return { ok: true, state: live ? 'stopping' : 'stopped' };
+}
+
+/* A structured answer whose deciding fields match and whose written fields differ in wording: the
+   written fields are read for meaning, the way free text is. With nobody able to read them, the call
+   counts as the same, because every field that decides something matched. */
+async function proseScore(body, x, y, shape, scope) {
+  const c = structuredCompare(x.value, y.value, shape);
+  if (c.decision) return { score: 1, cost: 0 };
+  if (!c.prose.length) return { score: 0, cost: 0 };
+  const j = await judgeBarPair(askOf(body), proseText(c.prose, 'a'), proseText(c.prose, 'b'), { scope });
+  /* A judgement that did not come back is no reading at all. It used to count as "the same", which is
+     the direction that lets a candidate through. */
+  if (j.transient || !j.judgedBy) return { score: null, cost: j.cost || 0, judgedBy: null, transient: true };
+  return { score: j.score, cost: j.cost || 0, judgedBy: j.judgedBy };
+}
+
+/* The judge on pairs whose answer is known (see where it is called). An answer against itself with
+   only its spacing changed must read the same; one call's answer held against a different call's
+   request must read different. Only calls whose requests differ are paired, because a workload that
+   sends the same request again and again (a poem about rain) has interchangeable answers by design. */
+async function plantChecks(kept, scope, addJudge) {
+  const out = { errors: 0, same: 0, different: 0, cases: [] };
+  const texts = kept.filter((p) => p.a?.ok && typeof p.a.value === 'string' && p.a.value.trim().length > 20);
+  for (const p of texts.slice(0, 2)) {
+    const t = p.a.value;
+    const variant = t.replace(/\s+/, '  ');
+    if (variant.trim() === t.trim()) continue;
+    const j = await judgeBarPair(askOf(p.body), t, variant, { scope });
+    addJudge(j.cost);
+    if (j.transient || !j.judgedBy) continue;
+    out.same += 1;
+    if (j.score !== 0) { out.errors += 1; out.cases.push('an answer with only its spacing changed read as different'); }
+  }
+  const lastAsk = (p) => String(askOf(p.body)).split('\n').pop().trim().toLowerCase();
+  for (let k = 0; k + 1 < texts.length && out.different < 2; k += 1) {
+    const p = texts[k];
+    const q = texts.slice(k + 1).find((x) => lastAsk(x) !== lastAsk(p)
+      && x.a.value.trim().toLowerCase() !== p.a.value.trim().toLowerCase());
+    if (!q) continue;
+    const j = await judgeBarPair(askOf(p.body), p.a.value, q.a.value, { scope });
+    addJudge(j.cost);
+    if (j.transient || !j.judgedBy) continue;
+    out.different += 1;
+    if (j.score !== 1) { out.errors += 1; out.cases.push("another call's answer read as the same"); }
+  }
+  return out;
+}
+
+/* The quality judge on pairs whose answer is known: an answer against itself with only its spacing
+   changed is not worse, and an answer cut to its first third is. */
+async function qualityChecks(kept, scope, addJudge) {
+  const out = { errors: 0, same: 0, different: 0, cases: [] };
+  const texts = kept.filter((p) => p.a?.ok && typeof p.a.value === 'string' && p.a.value.trim().length > 60);
+  for (const p of texts.slice(0, 2)) {
+    const t = p.a.value;
+    const variant = t.replace(/\s+/, '  ');
+    if (variant.trim() !== t.trim()) {
+      const j = await judgeQuality(askOf(p.body), variant, t, { scope });
+      addJudge(j.cost);
+      if (!j.transient && j.score !== null) {
+        out.same += 1;
+        if (j.score !== 0) { out.errors += 1; out.cases.push('an answer with only its spacing changed read as worse'); }
+      }
+    }
+    const words = t.trim().split(/\s+/);
+    if (words.length < 30) continue;
+    const cut = words.slice(0, Math.ceil(words.length / 3)).join(' ');
+    const k = await judgeQuality(askOf(p.body), cut, t, { scope });
+    addJudge(k.cost);
+    if (k.transient || k.score === null) continue;
+    out.different += 1;
+    if (k.score !== 1) { out.errors += 1; out.cases.push('an answer cut to its first third read as at least as good'); }
+  }
+  return out;
 }
 
 /* What the call asked, for the judge to weigh answers against. */

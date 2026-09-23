@@ -9,6 +9,7 @@ import { chat, chatStream, priceCall, UpstreamError, reasonOf } from './openrout
 import { gateRouting, chargeCall, grantStarterCredit, hold, release, worstCaseTokens, withFee } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
+import { workloadNameOf } from './classify.js';
 import { report } from './learn/outcomes.js';
 import { chooseStrategy, served as noteServed } from './learn/choose.js';
 import { serveWith, writeAsStream } from './learn/serve.js';
@@ -87,7 +88,7 @@ export async function canonicalModel(name) {
 
 /* Everything a routed call needs before it is sent, or the reason it cannot be, so the
    streaming path, the ordinary path and Connect's test call all answer the same way. */
-async function prepare(wsId, body, { classify = true } = {}) {
+async function prepare(wsId, body, { classify = true, name = null } = {}) {
   const no = (status, message, type) => ({ error: { status, json: { error: { message, type } } } });
   if (!Array.isArray(body.messages) || !body.messages.length) {
     return no(400, '"messages" is required.', 'invalid_request_error');
@@ -106,7 +107,7 @@ async function prepare(wsId, body, { classify = true } = {}) {
   if (!gate.ok) return { error: { status: 402, json: { error: { message: gate.message, type: gate.code } } } };
   /* A test call is not the customer's traffic, so it is never fingerprinted into a
      workload: it would leave a one-call workload in their list that nothing produced. */
-  const workload = classify ? await workloadFor(wsId, body) : null;
+  const workload = classify ? await workloadFor(wsId, body, { name }) : null;
   const requested = body.model || workload?.reference_model || null;
   /* The strategy that serves this call: the one the workload was switched to (a model asked the
      way it was measured, or a cascade, or a pick made call by call), or, now and then and within
@@ -252,8 +253,8 @@ async function settle(args) {
   }
 }
 
-export async function routeOnce(wsId, body, { source = 'routed', classify = true, ref = null } = {}) {
-  const ready = await prepare(wsId, body, { classify });
+export async function routeOnce(wsId, body, { source = 'routed', classify = true, ref = null, name = null } = {}) {
+  const ready = await prepare(wsId, body, { classify, name });
   if (ready.error) {
     if (source === 'routed') await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return { ok: false, status: ready.error.status, json: ready.error.json };
@@ -319,12 +320,14 @@ v1.post('/chat/completions', async (req, res) => {
   const wsId = req.key.workspace_id;
   const body = req.body || {};
   const ref = refOf(req.headers, body);
+  // the workload the customer says this call is, if they name their jobs
+  const name = workloadNameOf(req.headers, body);
   if (!body.stream) {
-    const out = await routeOnce(wsId, body, { ref });
+    const out = await routeOnce(wsId, body, { ref, name });
     if (out.callId) res.setHeader('x-understudy-call-id', out.callId);
     return res.status(out.status).json(out.json);
   }
-  const ready = await prepare(wsId, body);
+  const ready = await prepare(wsId, body, { name });
   if (ready.error) {
     await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return res.status(ready.error.status).json(ready.error.json);
@@ -515,15 +518,17 @@ export async function considerMeasuring(wsId, workload) {
      unmeasured for a month. */
   if (await db.prepare(`SELECT 1 FROM eval_runs WHERE workload_id = ? AND status = 'stopped' LIMIT 1`)
     .get(workload.id)) return;
+  if (workload.recheck_after && Number(workload.recheck_after) > now()) return;
   const n = (await db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workload_id = ?').get(workload.id)).n;
   if (n < config.EVAL_FIRST_RUN_MIN_CALLS) return;
-  await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), workload.id);
-  await addActivity(wsId, {
-    kind: 'run', title: `Measuring ${workload.slug}`,
-    detail: `${config.EVAL_FIRST_RUN_MIN_CALLS} calls in, which is enough for a bar to mean something.`,
-    workloadId: workload.id,
-  });
-  await enqueue('eval_run', { workloadId: workload.id }, { unique: true });
+  /* Booked, not announced: the measurement decides whether it can show anything yet, and says so when
+     it starts. The booking is claimed in one statement, so the calls that follow do not book it again
+     while it decides, and one it turns down is looked at again when it is due, not on every call. */
+  const claimed = (await db.prepare(
+    `UPDATE workloads SET recheck_after = ? WHERE id = ? AND status = 'new'
+        AND (recheck_after IS NULL OR recheck_after <= ?)`).run(now() + 3600000, workload.id, now())).changes;
+  if (!claimed) return;
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'first' }, { unique: true });
 }
 
 /* The observe path. Their provider answered; we get a copy afterwards. */
@@ -545,7 +550,8 @@ v1.post('/traces', async (req, res) => {
       const named = await canonicalModel(t.response.model);
       if (named.model.includes('/')) t.response.model = named.model;
     }
-    const workload = await workloadFor(wsId, request);
+    const named = typeof t?.workload === 'string' && t.workload.trim() ? t.workload.trim().slice(0, 80) : workloadNameOf(req.headers, request);
+    const workload = await workloadFor(wsId, request, { name: named });
     const usage = t?.response?.usage || {};
     const served = t?.response?.model || request.model || null;
     // we do not bill a traced call, but we do price it, because it is what their traffic costs today

@@ -2,7 +2,7 @@ import config from '../config.js';
 import { db, id, now } from '../db/index.js';
 import { addActivity, track } from '../traffic.js';
 import { chargeEval } from '../billing.js';
-import { extract, disagreement } from '../eval/compare.js';
+import { extract, disagreement, structuredCompare, proseText } from '../eval/compare.js';
 import { judgeBarPair } from '../eval/judge.js';
 import { promote, revert, everReverted, keyOfSpec } from '../eval/promote.js';
 import { upsertArm, armsFor, setStatus, referenceSpec, armKey, specOfResult, labelOf } from './arms.js';
@@ -11,7 +11,7 @@ import { decide } from './decide.js';
 import { serveWith } from './serve.js';
 import { requestText } from './check.js';
 import { memo, forgetState } from './memo.js';
-import { account } from '../billing.js';
+import { account, optimizeLeft } from '../billing.js';
 
 /* Learning, from what live calls show, which way of serving a workload works best.
  *
@@ -280,8 +280,10 @@ async function readState(workload) {
     .get(workload.id, dayStart);
   extra += Number(sh.cost);
   extra *= 1 + config.ROUTING_FEE_PCT / 100;
+  // the workspace's own ceiling on optimizing, if it set one: nothing is tried past it
+  const budgetLeft = await optimizeLeft(workload.workspace_id);
   return { arms: recs, byId: recById, serving, baseline, prior, extraToday: extra, dayStart, at: t,
-    detection, hasEvents, settleMs, perDay };
+    detection, hasEvents, settleMs, perDay, budgetLeft };
 }
 
 /* The runners-up worth trying: ones the last measurement found inside the bar, still offered, and
@@ -299,7 +301,7 @@ export async function chooseExplore(workload, servingArm, { rng = Math.random } 
   const st = peekState(workload);
   const s = exploreOf(workload, { perDay: st?.perDay ?? null });
   if (!s.live || !servingArm || s.share <= 0) return null;
-  if (!st || st.extraToday >= s.budgetUsd) return null;
+  if (!st || st.extraToday >= s.budgetUsd || spentOut(st)) return null;
   // until what serves has a known cost, nothing is tried (see readState)
   const serving = st.byId.get(servingArm.id);
   if (!serving || serving.ratio === null) return null;
@@ -352,7 +354,12 @@ async function agreementOf(body, used, other, shape, scope) {
   if (!a.ok) return { agreement: null, cost: 0 };
   const b = extract(other, shape);
   const d = disagreement(b, a, shape);
-  return { agreement: d === null ? null : 1 - d, cost: 0, judgedBy: 'fields' };
+  if (d !== null) return { agreement: 1 - d, cost: 0, judgedBy: 'fields' };
+  // every deciding field matched and a written one is worded differently: read it for meaning
+  const c = structuredCompare(b.value, a.value, shape);
+  const j = await judgeBarPair(requestText(body), proseText(c.prose, 'a'), proseText(c.prose, 'b'), { scope });
+  if (j.transient || !j.judgedBy) return { agreement: 1, cost: j.cost || 0, judgedBy: 'fields' };
+  return { agreement: 1 - j.score, cost: j.cost || 0, judgedBy: `fields+${j.judgedBy}` };
 }
 
 /**
@@ -367,7 +374,7 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   // an answer that cannot be read has nothing to be compared with, so nothing is spent on it
   if (!extract(response, workload.shape_kind).ok) return null;
   const st = await stateOf(workload);
-  if (st.extraToday >= s.budgetUsd) return null;
+  if (st.extraToday >= s.budgetUsd || spentOut(st)) return null;
   // what answered the call: the serving strategy, or the customer's own model when nothing is switched
   const candidates = cheaperThan(st, st.serving ? st.serving.ratio : 1);
   if (!candidates.length) return null;
@@ -408,7 +415,10 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   if (cost > 0) await chargeEval(workload.workspace_id, cost, `Background answer for ${workload.slug} on ${arm.label}`);
   // counted against the day's budget straight away, not when the record is next read
   const m = memo.get(workload.id);
-  if (m) m.state.extraToday += cost * (1 + config.ROUTING_FEE_PCT / 100);
+  if (m) {
+    m.state.extraToday += cost * (1 + config.ROUTING_FEE_PCT / 100);
+    if (m.state.budgetLeft !== null && m.state.budgetLeft !== undefined) m.state.budgetLeft -= cost * (1 + config.ROUTING_FEE_PCT / 100);
+  }
   return row;
 }
 
@@ -654,9 +664,13 @@ export async function learningView(workload) {
   };
 }
 
+/* Whether the workspace's own optimization budget is used up. */
+const spentOut = (st) => st?.budgetLeft !== null && st?.budgetLeft !== undefined && st.budgetLeft <= 0;
+
 /* Why a workload is not experimenting right now, in words for its page, or null when it is. */
 function whyNot(workload, s, st) {
   if (s.mode === 'off') return 'Experiments are off for this workload.';
+  if (spentOut(st)) return 'Your optimization budget for the last thirty days is used up, so experiments pause until it is raised in Settings or earlier spending ages out.';
   if (st.extraToday >= s.budgetUsd) return `Today's experiments have used the $${s.budgetUsd.toFixed(2)} budget, so they pause until midnight IST.`;
   if (s.live && !workload.routed_model) return 'Live experiments start once this workload is switched to something cheaper.';
   if (st.serving && st.serving.ratio === null) {

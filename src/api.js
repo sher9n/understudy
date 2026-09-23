@@ -351,6 +351,12 @@ const runRow = (r) => ({
   reused: r.reused ?? 0,
   saved: round8(r.saved_usd || 0),
   judge: r.judge ?? null,
+  // what it was quoted before it started, how many of the bar's answers were read from the customer's own calls,
+  // what the judge got right on the pairs it was tested with, and which yardstick it measured with
+  quote: r.quote_usd ?? null,
+  recordedRefs: r.recorded_refs ?? null,
+  judgeCheck: parseJson(r.judge_check_json),
+  yardstick: r.yardstick ?? 'agreement',
 });
 
 const parseJson = (s) => { if (!s) return null; try { return JSON.parse(s); } catch { return null; } };
@@ -372,6 +378,15 @@ const resultRow = (r, runs = r.runs) => ({
   name: nameOfResult(r),
   escalated: r.escalated_pct ?? null,
   costRatio: r.cost_ratio ?? null,
+  // where the true gap most likely is, and how many calls a clear would take at this bar
+  gapLo: r.gap_lo ?? null,
+  gapHi: r.gap_hi ?? null,
+  callsNeeded: r.calls_needed ?? null,
+  // the second look, on calls it had never seen, when it had one
+  confirm: r.confirm_verdict ? {
+    verdict: r.confirm_verdict, runs: r.confirm_runs ?? 0, gap: r.confirm_gap ?? null, hi: r.confirm_hi ?? null,
+    floor: r.confirm_floor ?? null,
+  } : null,
 });
 
 /* The customer's own model's speed on a measurement's calls, which every model is held to. */
@@ -382,7 +397,8 @@ const refSpeedOf = (run) => ({
 
 /* The columns a measurement row is read with, wherever the page lists or opens one. */
 const RUN_COLUMNS = `id, status, outcome, trigger, sample_size, models_planned, floor_pct, noise_pct,
-  spend_usd, error, steps_done, steps_total, started_at, finished_at, created_at, reused, saved_usd, judge`;
+  spend_usd, error, steps_done, steps_total, started_at, finished_at, created_at, reused, saved_usd, judge,
+  quote_usd, recorded_refs, judge_check_json, yardstick`;
 
 /* Why a measurement has no models to show, in words somebody can act on. The page puts this
    where the chart would be. It used to leave the section out instead, so opening one of these

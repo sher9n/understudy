@@ -58,6 +58,12 @@ function headers() {
 export function buildUpstream(body, model, recipe = null, { zdr = null } = {}) {
   const out = { ...body, model };
   delete out.stream_options;
+  /* What the customer told us, rather than the model: which workload a call is, and their own
+     reference for it. A provider has no use for either, and some refuse metadata they did not expect. */
+  if (out.metadata && typeof out.metadata === 'object') {
+    const meta = Object.fromEntries(Object.entries(out.metadata).filter(([k]) => !k.startsWith('understudy_')));
+    if (Object.keys(meta).length) out.metadata = meta; else delete out.metadata;
+  }
   if (recipe?.reasoning) out.reasoning = { ...recipe.reasoning };
   /* A workspace keeps zero data retention unless it chose otherwise on Settings, and nobody's calls
      ever go to a provider that trains on them. Turning retention off lets a workspace reach the models

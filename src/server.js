@@ -13,6 +13,7 @@ import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './aler
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
+import { nudgeForCatalog } from './eval/schedule.js';
 import { runTopUp, sweepHolds } from './billing.js';
 import { pruneLimits } from './limits.js';
 import { revert, watchLive, watchCatalogue } from './eval/promote.js';
@@ -52,8 +53,13 @@ handle('catalog_sync', async () => {
     });
     throw err;
   }
+  const before = await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all();
   const n = await saveCatalog(list);
   forgetFacts();
+  /* A model worth trying that was not there before, or one serving somebody that got dearer, brings
+     the next measurement of the workloads it could matter to forward (see src/eval/schedule.js). */
+  const moved = before.length ? await nudgeForCatalog(before, list) : null;
+  if (moved?.nudged) console.log(JSON.stringify({ at: new Date().toISOString(), kind: 'catalog', ...moved }));
   // which providers keep nothing depends on the models, so it is read again straight after
   await enqueue('model_health', {}, { unique: true, sooner: true });
   return { ok: true, models: n };
@@ -184,6 +190,13 @@ handle('backfill_shapes', async () => {
 handle('name_workload', async ({ workloadId }) => {
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
   if (!w || w.named_at) return { ok: true, skipped: true };
+  /* The same prompt on another model is named after the workload it was first seen in, with its model
+     beside it, so the two read as the pair they are. It waits for that one's name. */
+  if (w.sibling_of) {
+    const root = await db.prepare('SELECT slug, named_at FROM workloads WHERE id = ?').get(w.sibling_of);
+    if (!root?.named_at) return { ok: true, skipped: 'waiting for its sibling' };
+    return { ok: true, now: await nameSibling(w, root.slug) };
+  }
   if (!canRoute()) return { ok: true, skipped: 'no provider' };
 
   /* The model we chose for this, if we stock it, and otherwise the cheapest real one. A
@@ -257,8 +270,21 @@ handle('name_workload', async ({ workloadId }) => {
   const finalSlug = taken ? `${named}-${w.id.slice(-4)}` : named;
   await db.prepare('UPDATE workloads SET slug = ?, named_at = ?, name_source = ?, updated_at = ? WHERE id = ?')
     .run(finalSlug, now(), 'model', now(), w.id);
+  // and the same prompt on other models follows the name
+  for (const sib of await db.prepare('SELECT * FROM workloads WHERE sibling_of = ?').all(w.id)) await nameSibling(sib, finalSlug);
   return { ok: true, was: w.slug, now: finalSlug, model };
 });
+
+/* A sibling's name: its first workload's, and its model's. */
+async function nameSibling(w, rootSlug) {
+  const base = slug(`${rootSlug}-${String(w.reference_model || '').split('/').pop()}`);
+  const taken = await db.prepare('SELECT 1 FROM workloads WHERE workspace_id = ? AND slug = ? AND id != ?')
+    .get(w.workspace_id, base, w.id);
+  const finalSlug = taken ? `${base}-${w.id.slice(-4)}` : base;
+  await db.prepare('UPDATE workloads SET slug = ?, named_at = ?, name_source = ?, updated_at = ? WHERE id = ?')
+    .run(finalSlug, now(), 'sibling', now(), w.id);
+  return finalSlug;
+}
 
 /* Learning from live calls: a small share of a switched workload's calls tries something else,
    within the workload's own limits, and a few answered calls are answered again in the background
@@ -355,11 +381,15 @@ handle('recheck', async () => {
   for (const ws of spaces) {
     const days = ws.measure_every_days == null ? config.MEASURE_EVERY_DAYS : ws.measure_every_days;
     if (!days || days <= 0) continue;
+    /* Due by the workload's own schedule where it has one (spaced out while re-checks keep confirming,
+       brought forward by a change that could matter), otherwise by the workspace's rhythm. */
     const due = await db.prepare(
       `SELECT w.id FROM workloads w
         WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
-          AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?`)
-      .all(ws.id, now() - days * 86400000);
+          AND ((w.recheck_after IS NOT NULL AND w.recheck_after <= ?)
+            OR (w.recheck_after IS NULL
+                AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?))`)
+      .all(ws.id, now(), now() - days * 86400000);
     for (const w of due) {
       await enqueue('eval_run', { workloadId: w.id, trigger: 'automatic' }, { unique: true });
       queued += 1;

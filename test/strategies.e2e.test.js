@@ -33,8 +33,13 @@ process.env.DATABASE_URL = testUrl.toString();
 process.env.OPENROUTER_API_KEY = 'test-key';
 process.env.OPENROUTER_BASE = `http://127.0.0.1:${PORT}/api/v1`;
 process.env.MODEL_MIN_GAP_MS = '0';
-process.env.EVAL_SAMPLE_SIZE = '80';
+/* 240 calls, so a measurement samples 120: a perfect run on fewer than about 90 calls cannot clear a
+   bar of a few percent, so the 80 this used to sample could never show a strategy clearing. */
 process.env.EVAL_MIN_RUNS = '80';
+// these tests are about what a switch does, so new workloads switch on their own
+process.env.DEFAULT_OPTIMIZE_MODE = 'auto';
+// the scenarios are built on two paid answers per call; recorded answers have tests of their own
+process.env.EVAL_USE_RECORDED = 'false';
 process.env.EVAL_MAX_USD_PER_RUN = '100';
 process.env.JOBS_ENABLED = 'false';
 // Jev through "OpenRouter", which here is the stand-in below: never the real one
@@ -64,17 +69,21 @@ const right = (i) => ({ total: 100 + i, currency: 'USD', lines: (i % 5) + 1 });
 const COST = { [REF]: 0.002, [CHEAP]: 0.0002, 'vendor/drifty-small': 0.0001 };
 const JEV_COST = 0.00001;
 
-/* The customer's model is right and a touch unstable with itself, which sets the bar; the cheap
+/* The customer's model is right and steady with itself, so the bar is its 3% floor; the cheap
    one is wrong in every field on the hard calls; the drifting one is wrong on all of them. */
-let refCalls = 0;
+// how many times the customer's model has been asked each call
+const refAsks = new Map();
 // the cheap model can go bad, and Jev can be fooled, to see a measurement catch a cascade that slipped
 let cheapBroken = false;
 let jevFooled = false;
 let jevDelay = 0;
 const answerOf = (model, i) => {
   if (model === REF) {
-    refCalls += 1;
-    return i % 20 === 0 && refCalls % 2 === 0 ? { ...right(i), lines: 9 } : right(i);
+    /* Steady with itself, so the bar is the 3% floor: the tests here are about what a strategy does with
+       a cheap model's mistakes, and a reference that wavers on a few calls leaves a strategy that fixes
+       every mistake a call or two from clearing, which is chance rather than the thing being tested. */
+    refAsks.set(i, (refAsks.get(i) || 0) + 1);
+    return right(i);
   }
   if (model === CHEAP) return hard(i) || cheapBroken ? { total: 0, currency: 'EUR', lines: 0 } : right(i);
   return { total: 999, currency: 'EUR', lines: 0 };
@@ -177,7 +186,7 @@ async function seed(tag, { long = false } = {}) {
   });
   await move(workspace.id, { kind: 'credit', amountUsd: 50, note: 'test' });
   let workload = null;
-  for (let i = 0; i < 160; i += 1) {
+  for (let i = 0; i < 240; i += 1) {
     const body = request(i, { long });
     workload = workload || await workloadFor(workspace.id, body);
     await recordCall({
@@ -188,7 +197,9 @@ async function seed(tag, { long = false } = {}) {
     });
   }
   await learningSettled();
-  await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ?').run(now() - 14 * 86400000, workload.id);
+  // spread over the fortnight, as real traffic is: a measurement draws on each day's calls
+  await db.prepare('UPDATE calls SET created_at = ?::bigint - (abs(hashtext(id)) % 14) * 86400000 WHERE workload_id = ?')
+    .run(now() - 86400000, workload.id);
   const key = await issueKey(workspace.id, 'strategies');
   return { workspace, workload, secret: key.secret };
 }
@@ -238,7 +249,7 @@ test('a measurement finds a cascade for a cheap model that is wrong one time in 
   const cascade = rows.find((r) => r.model_id === `cascade:${CHEAP}`);
   assert.ok(cascade, `a cascade was worked out: ${rows.map((r) => r.model_id).join(', ')}`);
   assert.equal(cascade.verdict, 'cleared', `the cascade clears: ${cascade.gap_pct}% against ${out.floor}%`);
-  assert.equal(cascade.runs, 80, 'on every sampled call');
+  assert.equal(cascade.runs, 120, 'on every sampled call');
   const spec = JSON.parse(cascade.arm_json);
   assert.equal(spec.kind, 'cascade');
   assert.equal(spec.first.model, CHEAP);
