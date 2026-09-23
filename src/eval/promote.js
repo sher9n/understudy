@@ -349,6 +349,9 @@ export async function watchCatalogue() {
     const r = await revert(w, { auto: true, soft: true, reason: `${why}. Switched back to ${w.reference_model}, and it can be measured again once that changes.` });
     if (r.ok) reverted += 1;
   }
+  // a switch pinned to providers that have all gone is looked at as soon as the catalogue says so
+  const { watchPins } = await import('../learn/pins.js');
+  reverted += (await watchPins()).reverted ?? 0;
   return reverted;
 }
 

@@ -1,16 +1,37 @@
 import { db, now } from '../db/index.js';
 import config from '../config.js';
+import { hintApplies } from '../openrouter.js';
 
 /* Savings a customer can make in their own code, which no switch of ours can make for them.
  *
  * Said as advice with its numbers, never done behind anybody's back: a cap on answer length cuts
  * off answers that were meant to be long, so only the customer can say whether the long ones matter.
- * Every figure is from the workload's own calls over the last thirty days. */
+ * Every figure is from the workload's own calls over the last thirty days.
+ *
+ * Advice is a side note on the workload page, so it can never take the page down: anything that
+ * goes wrong while working it out leaves the page without advice rather than without a page. */
 
 const DAY = 86400000;
 
+/* Whether a call set a cap on its answer, read from the request as it was stored. The stored text is
+   never read as JSON by the database: JSON.stringify writes a NUL character and a lone surrogate as
+   escapes that Postgres refuses as jsonb, so one such call anywhere in thirty days made the cast fail
+   and the whole workload page answer 500. It also parsed every call on every page load. A key as
+   JSON.stringify writes it, a quote, the name, a quote and a colon, cannot come from inside a string,
+   where every quote is escaped. */
+const CAPPED = `(strpos(request_json, '"max_tokens":') > 0 OR strpos(request_json, '"max_completion_tokens":') > 0)`;
+
 export async function adviceFor(workload) {
   if (!workload?.id) return [];
+  try {
+    return await adviceOf(workload);
+  } catch (err) {
+    console.error(`advice for ${workload.slug || workload.id} could not be worked out: ${err?.message || err}`);
+    return [];
+  }
+}
+
+async function adviceOf(workload) {
   const since = now() - 30 * DAY;
   const out = [];
   const s = await db.prepare(
@@ -18,8 +39,7 @@ export async function adviceFor(workload) {
             percentile_cont(0.5) WITHIN GROUP (ORDER BY completion_tokens) AS p50,
             percentile_cont(0.95) WITHIN GROUP (ORDER BY completion_tokens) AS p95,
             percentile_cont(0.99) WITHIN GROUP (ORDER BY completion_tokens) AS p99,
-            COUNT(*) FILTER (WHERE request_json IS NOT NULL
-              AND ((request_json::jsonb -> 'max_tokens') IS NOT NULL OR (request_json::jsonb -> 'max_completion_tokens') IS NOT NULL)) AS capped,
+            COUNT(*) FILTER (WHERE request_json IS NOT NULL AND ${CAPPED}) AS capped,
             COUNT(*) FILTER (WHERE request_json IS NOT NULL) AS readable
        FROM calls
       WHERE workload_id = ? AND source IN ('routed', 'trace') AND status_code = 200 AND created_at >= ?
@@ -60,12 +80,15 @@ export async function adviceFor(workload) {
   }
 
   /* A long instruction on a model that only caches what is marked, where we do not mark it: the
-     workspace turned marking off, or calls do not yet come often enough for it to pay. */
+     workspace turned marking off, or calls do not yet come often enough for it to pay. Only where the
+     instruction really is long enough for a provider to cache it: a short one is never marked, so
+     switching marking on would change nothing and the advice would be a false promise. Read from a few
+     of the newest calls that still hold their request, the way a call is read when it is marked. */
   if (model && /^anthropic\//.test(model)) {
     const ws = await db.prepare('SELECT cache_hints FROM workspaces WHERE id = ?').get(workload.workspace_id);
     const hinted = (await db.prepare(
       `SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND created_at >= ? AND hinted = 1`).get(workload.id, since)).n;
-    if (!Number(hinted) && Number(ws?.cache_hints ?? 1) === 0) {
+    if (!Number(hinted) && Number(ws?.cache_hints ?? 1) === 0 && await longInstruction(workload, model, since)) {
       out.push({
         kind: 'cache_hints',
         title: 'Let us mark your instruction for caching',
@@ -77,4 +100,18 @@ export async function adviceFor(workload) {
     }
   }
   return out;
+}
+
+/* Whether this workload's instruction is one a provider would cache if we marked it: at least
+   CACHE_HINT_MIN_CHARS long, and not already marked by the customer. */
+async function longInstruction(workload, model, since) {
+  const rows = await db.prepare(
+    `SELECT request_json FROM calls WHERE workload_id = ? AND created_at >= ? AND request_json IS NOT NULL
+        AND source IN ('routed', 'trace') ORDER BY created_at DESC LIMIT 5`).all(workload.id, since);
+  for (const r of rows) {
+    let body = null;
+    try { body = JSON.parse(r.request_json); } catch { continue; }
+    if (hintApplies(body, model)) return true;
+  }
+  return false;
 }

@@ -47,6 +47,7 @@ process.env.SHADOW_SHARE = '1';
 process.env.LEARN_SETTLE_MIN = '0';
 
 const { db, now } = await import('../src/db/index.js');
+const { default: config } = await import('../src/config.js');
 const { default: migrate } = await import('../src/db/migrate.js');
 const { createAccount } = await import('../src/auth.js');
 const { issueKey } = await import('../src/keys.js');
@@ -54,9 +55,9 @@ const { workloadFor, recordCall, learningSettled } = await import('../src/traffi
 const { saveCatalog } = await import('../src/openrouter.js');
 const { move } = await import('../src/billing.js');
 const { promote } = await import('../src/eval/promote.js');
-const { onChoose, onServed } = await import('../src/learn/choose.js');
+const { onChoose, onServed, chooseStrategy } = await import('../src/learn/choose.js');
 const {
-  chooseExplore, afterServed, reviewWorkload, markTrying, learningView, forgetState, exploreOf,
+  chooseExplore, afterServed, reviewWorkload, markTrying, learningView, forgetState, exploreOf, stateOf,
 } = await import('../src/learn/explore.js');
 const { rngFrom } = await import('../src/learn/bandit.js');
 const { upsertArm, referenceSpec } = await import('../src/learn/arms.js');
@@ -76,22 +77,38 @@ const answerOf = (model, i) => (model === CHEAPER && i % 4 === 1 ? { total: 0, c
 
 // models the provider refuses, to see what an experiment that fails does
 const failing = new Set();
+// models whose answers state no cost
+const noCost = new Set();
+/* Models the provider says are busy: every time (alwaysBusy), or the first time each request reaches
+   them and not when it is sent again (busyOnce), with how many requests each model was sent. */
+const busyOnce = new Set();
+const alwaysBusy = new Set();
+const triedOnce = new Set();
+const hits = new Map();
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
     const payload = JSON.parse(body || '{}');
+    hits.set(payload.model, (hits.get(payload.model) || 0) + 1);
     if (failing.has(payload.model)) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'Provider is overloaded' } }));
       return;
     }
     const text = payload.messages.find((m) => m.role === 'user')?.content || '';
+    const once = `${payload.model}|${text}`;
+    if (alwaysBusy.has(payload.model) || (busyOnce.has(payload.model) && !triedOnce.has(once))) {
+      triedOnce.add(once);
+      res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': '0.01' });
+      res.end(JSON.stringify({ error: { message: 'Rate limited, try again shortly' } }));
+      return;
+    }
     const i = Number((text.match(/#(\d+)/) || [])[1] || 0);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ id: `gen-${i}`, model: payload.model,
       choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(answerOf(payload.model, i)) } }],
-      usage: { prompt_tokens: 500, completion_tokens: 40, cost: COST[payload.model] ?? 0.001 } }));
+      usage: { prompt_tokens: 500, completion_tokens: 40, ...(noCost.has(payload.model) ? {} : { cost: COST[payload.model] ?? 0.001 }) } }));
   });
 });
 
@@ -176,6 +193,8 @@ const send = async (secret, body) => {
   return res.headers.get('x-understudy-call-id');
 };
 
+const close = (x, y, eps, what) => assert.ok(Math.abs(x - y) <= eps, `${what}: ${x} is not within ${eps} of ${y}`);
+
 const armOf = async (workloadId, model) => db.prepare(
   `SELECT * FROM arms WHERE workload_id = ? AND spec_json LIKE ?`).get(workloadId, `%"model":"${model}"%`);
 
@@ -204,6 +223,22 @@ async function history(s, model, { n, failed = 0, armId = undefined, yardstick =
   if (unread) await db.prepare('UPDATE calls SET request_hash = NULL WHERE id = ANY(?::text[])').run(ids);
   await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ? AND created_at > ?')
     .run(now() - 3600000, s.workload.id, now() - 3600000);
+  forgetState(s.workload.id);
+}
+
+/* Thousands of calls at once, spread evenly from `from` to `to`, written as recordCall writes them, of
+   which `failPer100` in every hundred were seen to fail; each a task of its own, or all steps of `task`. */
+let bulkSeq = 0;
+async function bulk(s, { armId, model, n, propensity, explored = 0, from, to, failPer100 = 0, cost = COST[model], task = null }) {
+  bulkSeq += 1;
+  const tag = `call_bulk${bulkSeq}_${process.pid}_`;
+  const step = Math.max(1, Math.floor((to - from) / n));
+  await db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model, status_code, prompt_tokens,
+        completion_tokens, cost_usd, charged_usd, created_at, request_hash, task_id, step, arm_id, propensity, explored, reward)
+      SELECT ? || g, ?, ?, 'routed', ?, ?, 200, 500, 40, ?, 0, ?::bigint - (g - 1)::bigint * ?::bigint, md5(? || g),
+             COALESCE(?::text, ? || g), 1, ?, ?, ?, CASE WHEN g % 100 < ? THEN 0 ELSE NULL END
+        FROM generate_series(1, ?) g`)
+    .run(tag, s.workspace.id, s.workload.id, REF, model, cost, to, step, tag, task, tag, armId, propensity, explored, failPer100, n);
   forgetState(s.workload.id);
 }
 
@@ -297,6 +332,46 @@ test('the hourly review moves to a cheaper runner-up once its live calls work as
   // the readings are kept on each strategy for the page
   const arm = await armOf(s.workload.id, CHEAPER);
   assert.equal(JSON.parse(arm.stats_json).live.calls, 250);
+});
+
+test('what live results do follows how the workload switches: on its own, after approval, or never', async () => {
+  const evidence = async (s) => {
+    await saveDef(s.workload.id, { events: [{ event: 'ticket_reopened', means: 'failed' }] });
+    await history(s, STEADY, { n: 300 });
+    await history(s, CHEAPER, { n: 250 });
+    await history(s, REF, { n: 200, yardstick: true });
+  };
+  const told = async (s) => Number((await db.prepare(
+    `SELECT COUNT(*) AS n FROM activity WHERE workload_id = ? AND title LIKE '%ready to approve%'`).get(s.workload.id)).n);
+  // never switch: a runner-up as good as what serves is neither switched to nor put to anybody
+  const never = await shop('never', { optimize: 'off' });
+  await evidence(never);
+  assert.deepEqual(await reviewWorkload(never.workload), [], 'never switched, never nagged');
+  assert.equal((await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(never.workload.id)).routed_model, STEADY);
+  assert.equal(await told(never), 0, 'and nothing in the activity feed');
+  // ask first: the same evidence is put in front of whoever approves, once, and nothing is switched
+  const asks = await shop('asks', { optimize: 'ask' });
+  await evidence(asks);
+  assert.deepEqual((await reviewWorkload(asks.workload)).map((d) => d.kind), ['suggest']);
+  assert.equal(await told(asks), 1);
+  assert.equal((await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(asks.workload.id)).routed_model, STEADY);
+  // and a switch back for safety happens whatever the mode
+  const back = await shop('never-back', { optimize: 'off' });
+  await history(back, STEADY, { n: 100, failed: 15 });
+  await history(back, REF, { n: 60, yardstick: true });
+  assert.deepEqual((await reviewWorkload(back.workload)).map((d) => d.kind), ['revert'], 'a workload that never switches is still switched back');
+});
+
+test('background answers on a workload that never switches are shown, never put forward', async () => {
+  const s = await shop('never-shadow', { optimize: 'off', explore: 'shadow', switched: false });
+  const cheaperArm = await armOf(s.workload.id, CHEAPER);
+  await db.prepare(`INSERT INTO shadow_runs (id, workspace_id, workload_id, arm_id, agreement, cost_usd, status, created_at)
+      SELECT ? || g, ?, ?, ?, 1, 0, 200, ? FROM generate_series(1, 1200) g`)
+    .run('shd_never_', s.workspace.id, s.workload.id, cheaperArm.id, now() - 60000);
+  forgetState(s.workload.id);
+  assert.deepEqual(await reviewWorkload(s.workload), [], 'twelve hundred matching answers, and nothing said');
+  const v = await learningView(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id));
+  assert.equal(v.others.find((o) => o.id === cheaperArm.id).shadow.calls, 1200, 'the page still has every one of them');
 });
 
 test('clean calls on a workload where nothing is ever seen decide nothing', async () => {
@@ -465,4 +540,223 @@ test('a call the provider failed is listed with its reason, never breaks the lis
   assert.ok(o.failures.every((f) => Array.isArray(f.why)), 'every reason is a list');
   assert.ok(o.failures.some((f) => f.why[0] === 'the provider failed the call (503)'));
   assert.ok(o.failures.some((f) => f.why[0] === 'the provider could not be reached'));
+});
+
+test('an experiment is held to the same call policy as what serves: a busy reply is retried once whichever way a call is served', async () => {
+  const s = await shop('policy');
+  for (const m of [REF, STEADY, CHEAPER]) busyOnce.add(m);
+  try {
+    const ids = [];
+    for (let i = 0; i < 30; i += 1) ids.push(await send(s.secret, request(7000 + i)));
+    const busy = await db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND status_code = 429').get(s.workload.id);
+    assert.equal(Number(busy.n), 0, 'no try was given up after one busy reply, the yardstick\'s and the runner-up\'s included');
+    const rows = await db.prepare('SELECT served_model, explored FROM calls WHERE id = ANY(?::text[])').all(ids);
+    assert.ok(rows.some((r) => r.served_model === REF && Number(r.explored) === 1), 'the yardstick answered some, after its retry');
+    assert.ok(rows.some((r) => r.served_model === STEADY && Number(r.explored) === 0), 'and what serves answered the rest, after its own');
+  } finally {
+    busyOnce.clear();
+    triedOnce.clear();
+  }
+});
+
+test('a router serving a live call waits on a busy provider as a live call does, not as a measurement does', async () => {
+  const s = await shop('router-policy', { explore: 'off' });
+  const zeros = [0, 0, 0, 0, 0, 0];
+  const router = { kind: 'router', cheap: { model: CHEAPER, recipe: null }, strong: { model: REF, recipe: null }, threshold: 0.5,
+    weights: zeros, bias: 5, means: zeros, sds: zeros.map(() => 1) };
+  const r = await promote(s.workload, `router:${CHEAPER}`, { spec: router, auto: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  alwaysBusy.add(CHEAPER);
+  hits.clear();
+  try {
+    const id = await send(s.secret, request(7100));
+    assert.equal(hits.get(CHEAPER), 1 + config.LIVE_RETRIES, 'one try and the live retries, then the customer\'s own model');
+    assert.equal((await db.prepare('SELECT served_model FROM calls WHERE id = ?').get(id)).served_model, REF);
+  } finally {
+    alwaysBusy.clear();
+  }
+});
+
+test('a drift in how often calls fail after a switch reads the same on both sides, and a real gap is still switched back', async () => {
+  const DAYMS = 86400000;
+  /* Twenty days of one switch: its first ten taking over on five calls in a hundred while the customer's
+     own model kept ninety five, when one call in a hundred failed everywhere; then ten with the customer's
+     own model as the yardstick on three in a hundred, when six in a hundred failed everywhere. What serves
+     fails `servingFail` in each hundred in each half. */
+  const twentyDays = async (tag, servingFail) => {
+    const s = await shop(tag);
+    await saveDef(s.workload.id, { events: [{ event: 'ticket_reopened', means: 'failed' }] });
+    await db.prepare(`UPDATE promotions SET created_at = ? WHERE workload_id = ? AND action = 'promote'`).run(now() - 21 * DAYMS, s.workload.id);
+    await db.prepare('UPDATE workloads SET promoted_at = ? WHERE id = ?').run(now() - 21 * DAYMS, s.workload.id);
+    const steady = await armOf(s.workload.id, STEADY);
+    const yours = await upsertArm(s.workload, referenceSpec(s.workload), { status: 'baseline', offline: { ratio: 1 } });
+    const t = now() - 3600000;
+    const early = { from: t - 20 * DAYMS, to: t - 10 * DAYMS };
+    const late = { from: t - 10 * DAYMS, to: t };
+    await bulk(s, { armId: yours.id, model: REF, n: 9500, propensity: 0.95, ...early, failPer100: 1 });
+    await bulk(s, { armId: steady.id, model: STEADY, n: 500, propensity: 0.05, ...early, failPer100: servingFail[0] });
+    await bulk(s, { armId: yours.id, model: REF, n: 300, propensity: 0.03, explored: 1, ...late, failPer100: 6 });
+    await bulk(s, { armId: steady.id, model: STEADY, n: 9700, propensity: 0.97, ...late, failPer100: servingFail[1] });
+    return { s, decisions: await reviewWorkload(s.workload) };
+  };
+  const drift = await twentyDays('drift', [1, 6]);
+  assert.deepEqual(drift.decisions, [], 'the same drift on both sides is neither strategy\'s doing');
+  const worse = await twentyDays('drift-worse', [6, 11]);
+  assert.deepEqual(worse.decisions.map((d) => d.kind), ['revert'], 'five points worse all along is still switched back');
+});
+
+test('a strategy that fails and is answered another way is priced on the calls it answered, and each call is counted once', async () => {
+  const { routedSavings } = await import('../src/eval/actual.js');
+  const s = await shop('priced', { explore: 'off' });
+  const steady = await armOf(s.workload.id, STEADY);
+  const yours = await upsertArm(s.workload, referenceSpec(s.workload), { status: 'baseline', offline: { ratio: 1 } });
+  const write = (i, extra) => recordCall({ workspaceId: s.workspace.id, workloadId: s.workload.id, source: 'routed', requestedModel: REF,
+    promptTokens: 500, completionTokens: 40, request: request(9000 + i), response: { choices: [{ message: { content: JSON.stringify(right(i)) } }] },
+    ...extra });
+  // a hundred calls given to what serves by chance: ninety answered, ten failed and answered by the customer's own model instead
+  for (let i = 0; i < 100; i += 1) {
+    if (i % 10) {
+      await write(i, { servedModel: STEADY, statusCode: 200, costUsd: COST[STEADY], armId: steady.id, propensity: 0.98, explored: 0 });
+    } else {
+      await write(i, { servedModel: STEADY, statusCode: 503, costUsd: 0, armId: steady.id, propensity: 0.98, explored: 0,
+        check: { by: 'fell back', status: 503, why: 'Provider is overloaded' } });
+      await write(i + 1000, { servedModel: REF, statusCode: 200, costUsd: COST[REF], armId: null, propensity: 1, explored: 0 });
+    }
+  }
+  // and sixty on the customer's own model as the yardstick
+  for (let i = 0; i < 60; i += 1) {
+    await write(2000 + i, { servedModel: REF, statusCode: 200, costUsd: COST[REF], armId: yours.id, propensity: 0.01, explored: 1 });
+  }
+  await learningSettled();
+  await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ? AND created_at > ?').run(now() - 3600000, s.workload.id, now() - 3600000);
+  forgetState(s.workload.id);
+  await reviewWorkload(s.workload);
+  const ratio = JSON.parse((await armOf(s.workload.id, STEADY)).stats_json).liveRatio;
+  close(ratio, COST[STEADY] / COST[REF], 1e-9, 'what one of its answered calls costs against one of yours, failures left out');
+  // every call the customer made is counted once, at what it would have cost on their own model
+  const saved = await routedSavings({ workspaceId: s.workspace.id, workloadId: s.workload.id, days: 1, at: now() });
+  const customerCalls = 3 + 100 + 60;
+  assert.equal(saved.calls, customerCalls, 'the ten failed tries are not calls of the customer\'s: the answers that stood in are');
+  close(saved.would, customerCalls * COST[REF], 1e-9, 'each of them once, at the customer\'s own price');
+});
+
+test('a task stays where an experiment put it only while that experiment could still be run, and never past a day', async () => {
+  const s = await shop('task-gates');
+  const yours = await upsertArm(s.workload, referenceSpec(s.workload), { status: 'baseline', offline: { ratio: 1 } });
+  const cheaper = await armOf(s.workload.id, CHEAPER);
+  const load = () => db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id);
+  /* A task's steps, as the customer's app sends them, the first one given to `arm` by an experiment with a
+     chance nothing else is ever given (0.37), so a step that stayed with it can be told from one drawn again. */
+  let k = 0;
+  const step = async (messages, { arm, model, i }) => {
+    const said = { role: 'assistant', content: JSON.stringify(right(i)) };
+    const id = await recordCall({ workspaceId: s.workspace.id, workloadId: s.workload.id, source: 'routed', requestedModel: REF,
+      servedModel: model, statusCode: 200, costUsd: COST[model], request: { model: REF, messages },
+      response: { choices: [{ message: said }] }, armId: arm.id, propensity: 0.37, explored: 1 });
+    await learningSettled();
+    return { id, next: [...messages, said, { role: 'user', content: `and the tax on it? #${i + 500}` }] };
+  };
+  const task = async ({ arm = yours, model = REF } = {}) => {
+    k += 1;
+    return (await step([{ role: 'system', content: `Extract the totals from invoice ${960000 + k}.` }, { role: 'user', content: `document #${8000 + k}` }],
+      { arm, model, i: 8000 + k })).next;
+  };
+  const pick = async (messages) => {
+    await stateOf(await load(), { fresh: true });
+    return chooseStrategy(await load(), { body: { model: REF, messages } });
+  };
+  const stayed = (p, arm) => p?.task === true && p.armId === arm.id && p.propensity === 0.37 && p.explored === true;
+  const steady = await armOf(s.workload.id, STEADY);
+  const usual = (p) => p.armId === steady.id && p.propensity === 1 && p.explored === false;
+
+  assert.ok(stayed(await pick(await task()), yours), 'within every limit, the next step stays with the yardstick');
+  // experiments turned off stop the tasks already running
+  await db.prepare(`UPDATE workloads SET explore_mode = 'off' WHERE id = ?`).run(s.workload.id);
+  assert.ok(usual(await pick(await task())), 'experiments off: the next step is served the usual way');
+  await db.prepare(`UPDATE workloads SET explore_mode = 'normal' WHERE id = ?`).run(s.workload.id);
+  // the day's experiment budget, used up by these very tasks
+  await db.prepare('UPDATE workloads SET explore_budget_usd = 0.0001 WHERE id = ?').run(s.workload.id);
+  assert.ok(usual(await pick(await task())), 'the day\'s budget used: the next step is served the usual way');
+  await db.prepare('UPDATE workloads SET explore_budget_usd = 100 WHERE id = ?').run(s.workload.id);
+  // the workspace's own optimizing budget, used up
+  await db.prepare('UPDATE workspaces SET optimize_budget_usd = 0 WHERE id = ?').run(s.workspace.id);
+  assert.ok(usual(await pick(await task())), 'the workspace\'s optimizing budget used: served the usual way');
+  await db.prepare('UPDATE workspaces SET optimize_budget_usd = NULL WHERE id = ?').run(s.workspace.id);
+  // a runner-up switched off in Models
+  const onCheaper = await task({ arm: cheaper, model: CHEAPER });
+  assert.ok(stayed(await pick(onCheaper), cheaper), 'a runner-up still switched on keeps its task');
+  await db.prepare(`INSERT INTO workspace_models (workspace_id, model_id, enabled, updated_at) VALUES (?, ?, 0, ?)
+      ON CONFLICT (workspace_id, model_id) DO UPDATE SET enabled = 0`).run(s.workspace.id, CHEAPER, now());
+  const off = await pick(onCheaper);
+  assert.ok(!stayed(off, cheaper) && off.armId !== cheaper.id, 'switched off in Models: its task goes elsewhere');
+  await db.prepare('DELETE FROM workspace_models WHERE workspace_id = ? AND model_id = ?').run(s.workspace.id, CHEAPER);
+  // a task older than a day is drawn again, however closely its steps follow each other
+  k += 1;
+  const first = await step([{ role: 'system', content: `Extract the totals from invoice ${960000 + k}.` }, { role: 'user', content: `document #${8000 + k}` }],
+    { arm: yours, model: REF, i: 8000 + k });
+  const second = await step(first.next, { arm: yours, model: REF, i: 8100 + k });
+  assert.equal((await db.prepare('SELECT task_id FROM calls WHERE id = ?').get(second.id)).task_id, first.id, 'one task of two steps');
+  assert.ok(stayed(await pick(second.next), yours), 'a young task keeps its strategy');
+  await db.prepare('UPDATE calls SET created_at = ? WHERE id = ?').run(now() - 25 * 3600000, first.id);
+  await db.prepare('UPDATE calls SET created_at = ? WHERE id = ?').run(now() - 3600000, second.id);
+  const old = await pick(second.next);
+  assert.ok(!(old.task === true) && old.propensity !== 0.37, 'begun a day and an hour ago, its next step is drawn again');
+});
+
+test('the review tells the rule how long each record has been gathering, which its chance of being wrong is spent over', async () => {
+  const s = await shop('ages');
+  const steady = await armOf(s.workload.id, STEADY);
+  await db.prepare('UPDATE arms SET created_at = ? WHERE id = ?').run(now() - 40 * 86400000, steady.id);
+  // learning began two days ago, with the switch, so nothing was compared before that
+  close((await stateOf(s.workload, { fresh: true })).byId.get(steady.id).ageDays, 2, 0.01, 'since learning began');
+  await db.prepare('UPDATE promotions SET created_at = ? WHERE workload_id = ?').run(now() - 60 * 86400000, s.workload.id);
+  close((await stateOf(s.workload, { fresh: true })).byId.get(steady.id).ageDays, 40, 0.01, 'since it was first kept, where that is later');
+});
+
+test('a background answer whose provider states no cost is charged as optimizing at an estimate, never as free', async () => {
+  const s = await shop('shadow-cost', { optimize: 'ask', explore: null, switched: false });
+  noCost.add(STEADY);
+  noCost.add(CHEAPER);
+  try {
+    for (let i = 0; i < 6; i += 1) await send(s.secret, request(9500 + i));
+  } finally {
+    noCost.clear();
+  }
+  const rows = await db.prepare('SELECT arm_id, cost_usd, detail_json FROM shadow_runs WHERE workload_id = ?').all(s.workload.id);
+  assert.equal(rows.length, 6, 'every call answered again in the background (the share is 1 here)');
+  const price = { [STEADY]: 500 * 0.4e-6 + 40 * 1e-6, [CHEAPER]: 500 * 0.1e-6 + 40 * 0.3e-6 };
+  const byArm = new Map((await db.prepare('SELECT id, spec_json FROM arms WHERE workload_id = ?').all(s.workload.id))
+    .map((a) => [a.id, JSON.parse(a.spec_json).model]));
+  for (const r of rows) {
+    assert.ok(Math.abs(Number(r.cost_usd) - price[byArm.get(r.arm_id)]) < 1e-15, `${r.cost_usd} for ${byArm.get(r.arm_id)}`);
+    assert.equal(JSON.parse(r.detail_json).costEstimated, true);
+  }
+  const charged = await db.prepare(`SELECT COALESCE(SUM(amount_usd), 0) AS s FROM ledger WHERE workspace_id = ? AND kind = 'eval'`).get(s.workspace.id);
+  assert.ok(Number(charged.s) < 0, 'and charged');
+});
+
+test('experiments turned off start no call anywhere else, and neither does a workload that never switches, by default', async () => {
+  for (const [tag, opts] of [['off-now', { explore: 'off' }], ['off-default', { optimize: 'off', explore: null }]]) {
+    const s = await shop(tag, opts);
+    await stateOf(s.workload, { fresh: true });
+    const ids = [];
+    for (let i = 0; i < 30; i += 1) ids.push(await send(s.secret, request(9600 + i)));
+    const rows = await db.prepare('SELECT served_model, explored, propensity FROM calls WHERE id = ANY(?::text[])').all(ids);
+    assert.ok(rows.every((r) => Number(r.explored) === 0 && r.served_model === STEADY && Number(r.propensity) === 1),
+      `${tag}: every call served by what serves, none by chance`);
+  }
+});
+
+test('evidence is counted in tasks: one forty step task is one piece of evidence, not forty', async () => {
+  const s = await shop('one-task');
+  await history(s, STEADY, { n: 120 });
+  const cheaper = await armOf(s.workload.id, CHEAPER);
+  await bulk(s, { armId: cheaper.id, model: CHEAPER, n: 40, propensity: 0.25, explored: 1, from: now() - 3 * 3600000, to: now() - 2 * 3600000,
+    failPer100: 100, task: `one-long-task-${process.pid}` });
+  assert.deepEqual(await reviewWorkload(s.workload), [], 'forty failed steps of one task are not enough to set a runner-up aside');
+  assert.equal((await armOf(s.workload.id, CHEAPER)).status, 'trying');
+  // forty tasks of one step each are forty pieces of evidence, and do set it aside
+  await bulk(s, { armId: cheaper.id, model: CHEAPER, n: 40, propensity: 0.25, explored: 1, from: now() - 3 * 3600000, to: now() - 2 * 3600000,
+    failPer100: 100 });
+  assert.deepEqual((await reviewWorkload(s.workload)).map((d) => d.kind), ['rest']);
 });

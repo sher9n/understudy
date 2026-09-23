@@ -31,19 +31,26 @@ export async function zdrFor(workspaceId) {
   return (await choicesOf(workspaceId)).zdr;
 }
 
-/* Whether this workload's calls come often enough, and the workspace lets us, to mark a long
-   instruction for caching: a cache written and never read costs a quarter more than no cache at all.
-   Read at most every five minutes a workload, never on every call. */
+/* Whether calls from this workload to this model come often enough, and the workspace lets us, to mark
+   a long instruction for caching: a cache written and never read costs a quarter more than no cache at
+   all. Counted for the model the call is sent to, because only calls to the same model read a cache
+   back. Counted for the whole workload, every call was marked: the customer's own model answering a few
+   calls a day as the yardstick, a runner-up an experiment tries, a switch's first small share, each
+   paid to write a cache it seldom read back within its five minutes. That cost the customer more, and
+   the yardstick's inflated price made what serves look cheaper against it than it is. Read at most
+   every five minutes a workload and model, never on every call. */
 const hintMemo = new Map();
-export async function cacheHintFor(workspaceId, workload) {
-  if (!config.CACHE_HINTS || !workload?.id || !workspaceId) return false;
+export async function cacheHintFor(workspaceId, workload, model) {
+  if (!config.CACHE_HINTS || !workload?.id || !workspaceId || !model) return false;
   if (!(await choicesOf(workspaceId)).cacheHints) return false;
-  const hit = hintMemo.get(workload.id);
+  const key = `${workload.id}|${model}`;
+  const hit = hintMemo.get(key);
   if (hit && Date.now() - hit.at < 5 * 60000) return hit.v;
-  const n = (await db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND source = 'routed' AND created_at >= ?`)
-    .get(workload.id, Date.now() - 3600000))?.n ?? 0;
+  const n = (await db.prepare(
+    `SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ? AND status_code = 200
+        AND created_at >= ?`).get(workload.id, model, Date.now() - 3600000))?.n ?? 0;
   const v = Number(n) >= config.CACHE_HINT_MIN_PER_HOUR;
-  hintMemo.set(workload.id, { at: Date.now(), v });
+  hintMemo.set(key, { at: Date.now(), v });
   if (hintMemo.size > 5000) hintMemo.clear();
   return v;
 }
@@ -55,7 +62,7 @@ export async function limitsFor(workspaceId) {
   return { dailyLimit: c.dailyLimit, monthlyLimit: c.monthlyLimit };
 }
 
-/** Forget every workload's call rate, so the next call reads it again (for tests, and after a setting changes). */
+/** Forget every workload's call rates, so the next call reads them again (for tests, and after a setting changes). */
 export const forgetHints = () => hintMemo.clear();
 
 export const forgetWorkspace = (workspaceId) => memo.delete(workspaceId);

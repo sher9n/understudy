@@ -100,11 +100,13 @@ export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHin
   const pinnedTo = Array.isArray(recipe?.providers) && recipe.providers.length ? recipe.providers : null;
   /* A workspace keeps zero data retention unless it chose otherwise on Settings, and nobody's calls
      ever go to a provider that trains on them. Turning retention off lets a workspace reach the models
-     that have no provider keeping nothing (o3, the newest Claude models), and says so where it is chosen. */
+     that have no provider keeping nothing (o3, the newest Claude models), and says so where it is chosen.
+     Turning it off only takes our own requirement away: a customer whose call asks for zero retention
+     itself keeps it. It used to be deleted, so that call could reach a provider that keeps what it is
+     sent, against what the customer's own code asked for. */
   const keepNothing = zdr ?? config.ZDR_ONLY;
   out.provider = { ...(out.provider || {}), data_collection: 'deny', ...(keepNothing ? { zdr: true } : {}),
     ...(pinnedTo ? { only: pinnedTo } : {}) };
-  if (!keepNothing) delete out.provider.zdr;
   return out;
 }
 

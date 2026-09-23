@@ -204,10 +204,15 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
   if (!served) return no(400, '"model" is required.', 'invalid_request_error');
   const recipe = lead?.recipe ?? null;
   const zdr = await zdrFor(wsId);
-  // whether a long instruction may be marked for caching on this call (see hintApplies)
-  const cacheHint = workload ? await cacheHintFor(wsId, workload) : false;
-  return { workload, requested, served, recipe, strategy, zdr, cacheHint };
+  return { workload, requested, served, recipe, strategy, zdr };
 }
+
+/* Whether a long instruction may be marked for caching on a try sent to this model (see hintApplies
+   and cacheHintFor): decided for the model each try goes to, never once for the whole call, so only
+   a model that answers this workload often enough to read the cache back is marked. Marking only
+   saves money, so a slip while deciding it leaves the call unmarked, never failed or sent elsewhere. */
+const hintFor = async (ready, model) => (ready.workload
+  ? await cacheHintFor(ready.workload.workspace_id, ready.workload, model).catch(() => false) : false);
 
 /* Every model one call could end up paying for: the one it is served by, the customer's own model,
    and whatever a strategy may send it on to. */
@@ -319,7 +324,11 @@ async function keepFailedTry({ wsId, workload, requested, served, started, body,
     statusCode: f.status, latencyMs: Date.now() - started, request: body, ref, costUsd: Number(err?.spent) || 0,
     ...(decisionOf(strategy) || {}),
     // "fell back" is what the watch and the learning review count against what serves
-    check: { by: fellBack ? 'fell back' : 'experiment failed', status: f.status, why: reasonOf(err).slice(0, 160) },
+    /* "counts" when the failure is one the customer's own model would likely not have had (busy, down,
+       too slow, too long for this model): an experiment failing that way is held to it, as what serves
+       is, rather than let off as a failed experiment. */
+    check: { by: fellBack ? 'fell back' : 'experiment failed', status: f.status, why: reasonOf(err).slice(0, 160),
+      counts: worthFallback(err) },
   }).catch(() => { /* never let bookkeeping stand in the way of the answer */ });
 }
 
@@ -346,10 +355,16 @@ export function worthFallback(err) {
 
 /* How long a live call waits on a busy provider. A measurement can wait out a rate limit; somebody
    whose app is waiting on this call cannot, so a live call gets one short retry and then the next
-   strategy in its chain, and an experiment gets none and a time limit. */
-const liveOpts = (strategy) => (strategy?.explored
-  ? { retries: 0, signal: AbortSignal.timeout(config.EXPERIMENT_TIMEOUT_MS) }
-  : { retries: config.LIVE_RETRIES, maxWaitMs: config.LIVE_RETRY_WAIT_MAX_MS });
+   strategy in its chain.
+
+   Every way of serving a call gets the same, the ones an experiment tries included. Learning compares
+   them on how often their calls fail, and a rate limit or a timeout counts as a failure, so an
+   experiment given no retry and a shorter time limit failed more often than what it was compared with
+   for no reason of its own: at one busy reply in twenty the customer's own model, as the yardstick,
+   failed about one call in twenty against one in four hundred for what serves, so a strategy several
+   points worse was never switched back, and on a workload whose answers take longer than the old limit
+   the yardstick failed every call. A cascade or a router is held to the same through serveWith. */
+const liveOpts = () => ({ retries: config.LIVE_RETRIES, maxWaitMs: config.LIVE_RETRY_WAIT_MAX_MS });
 
 /* The bookkeeping after an answer, apart from the provider's part: a slip in it is logged, and never
    turns an answer the customer has already been sent, and paid for, into an error. */
@@ -389,11 +404,14 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     const next = tries[k + 1];
     const { served, recipe } = leadOf(strategy, ready);
     let out;
+    // whether this try's instruction is marked for caching, kept so the saving is counted on the call it was marked on
+    let hint = false;
     try {
       if (strategy && strategy.spec.kind !== 'model') {
-        out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr });
+        out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr, call: liveOpts() });
       } else {
-        const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: ready.cacheHint, ...liveOpts(strategy) });
+        hint = await hintFor(ready, served);
+        const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: hint, ...liveOpts() });
         // a cost the answer did not state stays unstated here, so the charge estimates it (see finish)
         out = { json: r.json, served, cost: hasCost(r.json?.usage) ? Number(r.json.usage.cost) : null, latencyMs: r.latencyMs ?? Date.now() - started };
       }
@@ -421,7 +439,7 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     const done = await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
       started, body, response: out.json, status: 200, latencyMs: out.latencyMs, source, callId, ref,
       decision: decisionOf(strategy, strategy && strategy.spec.kind !== 'model' ? out : null), holdId: h.holdId,
-      cacheHint: ready.cacheHint && (!strategy || strategy.spec.kind === 'model') });
+      cacheHint: hint, partsEstimated: !!out.costEstimated });
     return { ok: true, status: 200, json: out.json, served: out.served, requested, callId,
       latencyMs: out.latencyMs, costUsd: done?.cost ?? out.cost ?? 0, workload: workload?.slug ?? null };
   }
@@ -501,7 +519,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
        would have; a measurement holds a cascade to the workload's speed setting on exactly that. */
     let out;
     try {
-      out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr });
+      out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr, call: liveOpts() });
     } catch (err) {
       return { ok: false, err, served };
     }
@@ -515,7 +533,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     res.end();
     await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
       started, body, response: out.json, status: 200, latencyMs: out.latencyMs, ttftMs: out.latencyMs, callId, ref,
-      decision: decisionOf(strategy, out), holdId });
+      decision: decisionOf(strategy, out), holdId, partsEstimated: !!out.costEstimated });
     return { ok: true };
   }
   if (strategy && strategy.spec.kind === 'router') {
@@ -527,8 +545,10 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     decision = { ...decision, escalated: use === strategy.spec.strong, check: { by: 'router', p: Math.round(p * 1000) / 1000 } };
   }
   let upstream;
+  // marked for caching only where this model answers the workload often enough (see hintFor)
+  const hint = await hintFor(ready, served);
   try {
-    upstream = await chatStream(body, served, { recipe, zdr: ready.zdr, cacheHint: ready.cacheHint });
+    upstream = await chatStream(body, served, { recipe, zdr: ready.zdr, cacheHint: hint });
   } catch (err) {
     return { ok: false, err, served };
   }
@@ -628,14 +648,18 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     choices: [{ index: 0, message: { role: 'assistant', content: answer, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason }],
   };
   await settle({ wsId, workload, requested, served, usage, started, body, response, status: 200,
-    ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision, holdId, cacheHint: ready.cacheHint });
+    ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision, holdId, cacheHint: hint });
   return { ok: true };
 }
 
 async function finish({ wsId, workload, requested, served, usage, started, body, response, status,
-  latencyMs, ttftMs = null, source = 'routed', callId = null, ref = null, decision = null, holdId = null, cacheHint = false }) {
+  latencyMs, ttftMs = null, source = 'routed', callId = null, ref = null, decision = null, holdId = null, cacheHint = false,
+  partsEstimated = false }) {
   /* What the provider said it cost. An answer that did not say used to be charged nothing; it is
-     charged from its tokens now and corrected once OpenRouter's own record of it can be read. */
+     charged from its tokens now and corrected once OpenRouter's own record of it can be read. A
+     strategy's cost is summed from its parts (a cheap answer, the check, the answer it sent on), and a
+     part whose answer said nothing is estimated where it was made (see src/learn/cost.js): that call is
+     marked an estimate that stands, because its several generations cannot be read back as one. */
   const estimated = !hasCost(usage);
   const cost = estimated
     ? await estimateCost(served, usage?.prompt_tokens ?? callShape(body).pin, usage?.completion_tokens ?? writtenTokens(response))
@@ -652,7 +676,7 @@ async function finish({ wsId, workload, requested, served, usage, started, body,
     hinted: !!(cacheHint && hintApplies(body, served)),
     costUsd: cost, chargedUsd: charged, latencyMs: latencyMs ?? Date.now() - started, ttftMs,
     request: body, response, ref, ...(decision || {}),
-    costEstimated: estimated, generationId: response?.id ?? null,
+    costEstimated: estimated ? true : partsEstimated ? 2 : false, generationId: response?.id ?? null,
   });
   if (estimated && response?.id) await enqueue('true_up', { callId }, { runAfter: now() + 60000 }).catch(() => {});
   if (workload) await considerMeasuring(wsId, workload);

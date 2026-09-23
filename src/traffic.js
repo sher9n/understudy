@@ -79,7 +79,8 @@ export async function recordCall({
     check_json: check ? JSON.stringify(check) : null,
     hinted: hinted ? 1 : null,
     // worked out from tokens because the provider did not say, until its own record corrects it
-    cost_estimated: costEstimated ? 1 : 0,
+    // 1: to be corrected from the provider's record; 2: an estimate that stands (see trueup.js)
+    cost_estimated: costEstimated === 2 ? 2 : costEstimated ? 1 : 0,
     generation_id: generationId ? String(generationId).slice(0, 120) : null,
   };
   row.task_id = customer ? row.id : null;

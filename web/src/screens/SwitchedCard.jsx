@@ -237,10 +237,14 @@ export default function SwitchedCard({ s, learn = null }) {
               ? ` What the actual calls would have cost on ${from} is their cost divided by what the measurement found ${to} costs against it on the same calls.`
               : ''}
           </p>
-          {(s.measuring.spent > 0 || s.measuring.background > 0) && (
+          {(s.measuring.spent > 0 || s.measuring.background > 0 || s.measuring.graded > 0) && (
             <p className="swnote">
-              Finding and checking this switch has cost {usd((s.measuring.spent || 0) + (s.measuring.background || 0))}
-              {s.measuring.background > 0 ? ` (${usd(s.measuring.spent || 0)} measuring, ${usd(s.measuring.background)} background answers)` : ' in measuring'}.
+              Finding and checking this switch has cost {usd((s.measuring.spent || 0) + (s.measuring.background || 0) + (s.measuring.graded || 0))}
+              {s.measuring.background > 0 || s.measuring.graded > 0
+                ? ` (${[`${usd(s.measuring.spent || 0)} measuring`,
+                  s.measuring.background > 0 ? `${usd(s.measuring.background)} background answers` : null,
+                  s.measuring.graded > 0 ? `${usd(s.measuring.graded)} answers read in the background` : null].filter(Boolean).join(', ')})`
+                : ' in measuring'}.
               {so.net != null && so.calls > 0
                 ? (so.net >= 0
                   ? ` With that paid for, the switch is ${usd(so.net)} ahead so far.`

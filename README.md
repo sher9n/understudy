@@ -211,7 +211,8 @@ budget, which can decide on its own and tells how often failures go unseen. A st
 back waits a week before it can return, twice as long each time after, and after the third time
 waits for a person.
 
-A conversation stays on the strategy its first call was given.
+A conversation stays on the strategy its first call was given, while the experiment or switch
+that chose it is still running, and for a day at most.
 
 Each workload is switched one of three ways, chosen per workload and, for new ones, in Settings:
 **Optimize automatically** (a model that clears twice is switched to, starting small), **Ask me

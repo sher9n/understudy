@@ -95,8 +95,6 @@ export const config = {
      three waits of thirty seconds each left a customer's call hanging for a minute and a half. */
   LIVE_RETRIES: num('LIVE_RETRIES', 1),
   LIVE_RETRY_WAIT_MAX_MS: num('LIVE_RETRY_WAIT_MAX_MS', 2000),
-  /* The longest an experiment's call may take before it gives way to what serves. */
-  EXPERIMENT_TIMEOUT_MS: num('EXPERIMENT_TIMEOUT_MS', 45000),
 
   // what we keep, and for how long
   RETENTION_DAYS: num('RETENTION_DAYS', 30),
