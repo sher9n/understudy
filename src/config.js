@@ -263,13 +263,27 @@ export const config = {
   ALERTS_ENABLED: bool('ALERTS_ENABLED', true),
   ALERT_WINDOW_MIN: num('ALERT_WINDOW_MIN', 10),
 
-  EMAIL_FROM: str('EMAIL_FROM', 'Understudy <noreply@docupath.tech>'),
+  /* docupath.tech is refused in src/email.js whatever this says: mail from it is quarantined where
+     it lands and reported delivered, so nobody would ever know. */
+  EMAIL_FROM: str('EMAIL_FROM', 'Understudy <noreply@docupath.ai>'),
+  /* Where the contact form on the site sends what people write. Never shown on a page. */
+  CONTACT_TO: str('CONTACT_TO', ''),
   LOGIN_CODE_TTL_MIN: num('LOGIN_CODE_TTL_MIN', 10),
-  LOGIN_CODE_DIGITS: num('LOGIN_CODE_DIGITS', 4),
-  /* Four digits is ten thousand combinations, so the cap is what makes it safe, not the
-     length. Five wrong guesses spends the code and it cannot be retried. */
+  /* Six digits is a million combinations. With five tries a code and five codes an hour, a
+     guesser has 25 tries an hour at one address: about one chance in 40,000. Four digits made it
+     one in 400, which is days of patient guessing, not years. */
+  LOGIN_CODE_DIGITS: num('LOGIN_CODE_DIGITS', 6),
   LOGIN_CODE_MAX_ATTEMPTS: num('LOGIN_CODE_MAX_ATTEMPTS', 5),
   LOGIN_CODE_MAX_PER_HOUR: num('LOGIN_CODE_MAX_PER_HOUR', 5),
+  /* Limits per internet address, so one machine cannot work through many accounts or send a
+     flood of mail. They count every request the same way whether or not the address has an
+     account, which is what keeps them from telling anybody who has one. */
+  LIMIT_SIGNIN_PER_IP_15MIN: num('LIMIT_SIGNIN_PER_IP_15MIN', 20),
+  LIMIT_CODES_PER_IP_HOUR: num('LIMIT_CODES_PER_IP_HOUR', 20),
+  LIMIT_VERIFY_PER_IP_HOUR: num('LIMIT_VERIFY_PER_IP_HOUR', 40),
+  LIMIT_SIGNUP_PER_IP_HOUR: num('LIMIT_SIGNUP_PER_IP_HOUR', 10),
+  LIMIT_CONTACT_PER_IP_HOUR: num('LIMIT_CONTACT_PER_IP_HOUR', 5),
+  LIMIT_CONTACT_PER_DAY: num('LIMIT_CONTACT_PER_DAY', 100),
 
   // money
   STRIPE_SECRET_KEY: str('STRIPE_SECRET_KEY'),
@@ -277,6 +291,10 @@ export const config = {
      installed package, so upgrading the package is not the same act as changing the API. */
   STRIPE_API_VERSION: str('STRIPE_API_VERSION', '2026-08-26.dahlia'),
   STRIPE_WEBHOOK_SECRET: str('STRIPE_WEBHOOK_SECRET'),
+  /* Whether a payment made with a Stripe TEST key may become balance. Yes on a machine of our own
+     (plain http), no on any https deployment unless this says so, because a test key takes the
+     public practice card and the models behind the balance are paid for with real money. */
+  ALLOW_TEST_PAYMENTS: bool('ALLOW_TEST_PAYMENTS', !publicUrl().startsWith('https://')),
   /* Nobody is given money they did not pay for. A new account starts at zero and adds
      credit before its first routed call; "send us copies" needs no balance at all. */
   STARTER_CREDIT_USD: num('STARTER_CREDIT_USD', 0),
@@ -296,8 +314,22 @@ export const config = {
 
 /** True when the platform can actually reach a model provider. */
 export const canRoute = () => config.OPENROUTER_API_KEY !== '';
-/** True when the platform can actually take a payment. */
-export const canBill = () => config.STRIPE_SECRET_KEY !== '';
+/* Which kind of payments the Stripe key takes. A test key takes Stripe's public practice card
+   numbers, so on a deployment that spends real money on models, a test payment must never turn
+   into balance: anybody could "pay" with the practice card and spend the operator's credit. */
+export const stripeMode = () => {
+  const k = config.STRIPE_SECRET_KEY;
+  if (!k) return 'off';
+  return /^(sk|rk)_live_/.test(k) ? 'live' : 'test';
+};
+/** live, test (allowed, on a machine of our own), test_refused (a test key on a public deployment), or off. */
+export const paymentsState = () => {
+  const m = stripeMode();
+  if (m !== 'test') return m;
+  return config.ALLOW_TEST_PAYMENTS ? 'test' : 'test_refused';
+};
+/** True when the platform can actually take a payment that becomes balance. */
+export const canBill = () => ['live', 'test'].includes(paymentsState());
 /** True when a message can actually leave the building. */
 export const canEmail = () => config.RESEND_API_KEY !== '';
 /** True when a key can be shown again after it was made. */

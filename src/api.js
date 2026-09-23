@@ -1,7 +1,8 @@
 import express from 'express';
 import { safeRouter } from './safe.js';
 import { db, now, round8, usd } from './db/index.js';
-import config, { canRoute, canBill, MEASURE_CHOICES } from './config.js';
+import config, { canRoute, canBill, canEmail, paymentsState, MEASURE_CHOICES } from './config.js';
+import { allow, clientIp } from './limits.js';
 import { createAccount, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
   requestLoginCode, verifyLoginCode, verifyLoginLink } from './auth.js';
 import send, { signInEmail } from './email.js';
@@ -99,6 +100,56 @@ api.post('/auth/sign-out', async (req, res) => {
   await endSession(m ? m[1] : null);
   res.setHeader('Set-Cookie', clearCookie());
   res.json({ ok: true });
+});
+
+/* The contact form, open to anybody.
+
+   What people write goes to the operator's inbox and is never stored here. The address it goes to
+   is never shown on a page, and a reply goes straight back to whoever wrote. Limited per internet
+   address and per day, because an open form is otherwise a way to send mail through us. */
+const TOPICS = ['question', 'sales', 'support', 'privacy', 'security', 'other'];
+api.post('/contact', async (req, res) => {
+  const b = req.body || {};
+  // a field people never see; only scripts fill it in
+  if (b.website) return res.json({ ok: true });
+  const email = String(b.email || '').trim().toLowerCase();
+  const message = String(b.message || '').trim();
+  const name = String(b.name || '').trim().slice(0, 120);
+  const topic = TOPICS.includes(b.topic) ? b.topic : 'other';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail(res, 400, 'That does not look like an email address.');
+  if (message.length < 10) return fail(res, 400, 'Say a little more, so we can answer properly.');
+  if (message.length > 5000) return fail(res, 400, 'That is longer than we can take here. Keep it under 5,000 characters.');
+  const ip = clientIp(req);
+  if (!await allow('contact_ip', ip, { max: config.LIMIT_CONTACT_PER_IP_HOUR, windowMs: 3600000 })
+    || !await allow('contact_all', 'all', { max: config.LIMIT_CONTACT_PER_DAY, windowMs: 86400000 })) {
+    return fail(res, 429, 'We have had a lot of messages from here. Try again in an hour.');
+  }
+  const to = config.CONTACT_TO || config.ALERT_EMAIL;
+  if (!to) return fail(res, 503, 'The contact form is not set up on this deployment yet.');
+  const who = req.user ? `${req.user.email} (signed in, workspace ${req.workspace?.id ?? 'none'})` : 'not signed in';
+  const text = [`Topic: ${topic}`, `From: ${name || '(no name)'} <${email}>`, `Account: ${who}`, '', message].join('\n');
+  const sent = await send({ to, subject: `Understudy contact: ${topic}${name ? ` from ${name}` : ''}`, text, replyTo: email });
+  if (!sent.ok) return fail(res, 502, 'We could not send that just now. Try again in a minute.');
+  return res.json({ ok: true });
+});
+
+/* What is working right now, for the status page and for checking a deploy. Nothing here is
+   private: it says whether routing, email and payments are switched on, not how. */
+api.get('/status', async (_req, res) => {
+  const models = (await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get())?.n ?? 0;
+  const synced = await db.prepare(`SELECT source, synced_at FROM fact_sync ORDER BY synced_at DESC`).all();
+  const last = (source) => synced.find((r) => r.source === source)?.synced_at ?? null;
+  res.json({
+    ok: true,
+    version: (process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_SHA || 'local').slice(0, 7),
+    routing: canRoute(),
+    email: canEmail(),
+    payments: paymentsState(),
+    models,
+    catalogSyncedAt: last('catalog'),
+    providersSyncedAt: last('zdr'),
+    checkedAt: now(),
+  });
 });
 
 api.get('/me', async (req, res) => {

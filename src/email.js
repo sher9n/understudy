@@ -9,7 +9,32 @@ import config, { canEmail } from './config.js';
 
 const ENDPOINT = 'https://api.resend.com/emails';
 
-export async function send({ to, subject, text, html }) {
+/* Who the mail says it is from.
+
+   Mail from docupath.tech is quarantined by the receiving side at Docupath: the provider takes it,
+   reports it delivered, and it never reaches anybody. That is invisible from here, so it is refused
+   in code rather than left to a setting somebody has to remember: a docupath.tech address, or one
+   that is not an address at all, is replaced by the one that is known to arrive. */
+const FALLBACK_FROM = 'Understudy <noreply@docupath.ai>';
+const ADDRESS = /<?([^<>\s@]+@([^<>\s@]+\.[^<>\s@]+))>?\s*$/;
+
+export function senderFor(given) {
+  const raw = String(given || '').trim();
+  const m = ADDRESS.exec(raw);
+  if (!m) return { from: FALLBACK_FROM, refused: raw ? 'not an address' : null };
+  if (/(^|\.)docupath\.tech$/i.test(m[2]) || /docupath\.tech/i.test(raw)) {
+    return { from: FALLBACK_FROM, refused: 'docupath.tech is quarantined where it lands' };
+  }
+  return { from: raw, refused: null };
+}
+
+const sender = senderFor(config.EMAIL_FROM);
+if (sender.refused && config.EMAIL_FROM) {
+  console.warn(`EMAIL_FROM "${config.EMAIL_FROM}" was not used (${sender.refused}); sending as ${sender.from}.`);
+}
+export const emailFrom = () => sender.from;
+
+export async function send({ to, subject, text, html, replyTo = null }) {
   if (!canEmail()) {
     console.log(`\n[no RESEND_API_KEY, so nothing was sent]\n  to: ${to}\n  ${subject}\n${text}\n`);
     return { ok: true, delivered: false, reason: 'no email provider configured' };
@@ -21,7 +46,9 @@ export async function send({ to, subject, text, html }) {
         Authorization: `Bearer ${config.RESEND_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ from: config.EMAIL_FROM, to: [to], subject, text, html }),
+      body: JSON.stringify({
+        from: sender.from, to: [to], subject, text, html, ...(replyTo ? { reply_to: replyTo } : {}),
+      }),
       signal: AbortSignal.timeout(15000),
     });
     const body = await r.json().catch(() => ({}));
