@@ -735,6 +735,18 @@ test('a background answer whose provider states no cost is charged as optimizing
   assert.ok(Number(charged.s) < 0, 'and charged');
 });
 
+test('experiments turned off start no call anywhere else, and neither does a workload that never switches, by default', async () => {
+  for (const [tag, opts] of [['off-now', { explore: 'off' }], ['off-default', { optimize: 'off', explore: null }]]) {
+    const s = await shop(tag, opts);
+    await stateOf(s.workload, { fresh: true });
+    const ids = [];
+    for (let i = 0; i < 30; i += 1) ids.push(await send(s.secret, request(9600 + i)));
+    const rows = await db.prepare('SELECT served_model, explored, propensity FROM calls WHERE id = ANY(?::text[])').all(ids);
+    assert.ok(rows.every((r) => Number(r.explored) === 0 && r.served_model === STEADY && Number(r.propensity) === 1),
+      `${tag}: every call served by what serves, none by chance`);
+  }
+});
+
 test('evidence is counted in tasks: one forty step task is one piece of evidence, not forty', async () => {
   const s = await shop('one-task');
   await history(s, STEADY, { n: 120 });
