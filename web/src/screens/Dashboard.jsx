@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import PeriodChip from '../PeriodChip.jsx';
 import { num, ago, feedDot, timeIST } from '../api.js';
 import { usd } from '../money.js';
+import { savedTile } from '../savings.js';
 import { usePoll } from '../poll.js';
 import { SpendChart, WaitingChart } from '../Charts.jsx';
 import WorkloadTable from '../WorkloadTable.jsx';
@@ -62,9 +63,8 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
         <Tile k={`Spend · last ${data.days} days`} v={data.priced ? usd(data.spend) : 'Not priced'}
           s={!data.priced ? 'prices sync once a provider key is set'
             : data.spend > 0 ? `on track for ${usd(runRate)} a month` : 'nothing charged yet'} />
-        <Tile k={`Saved · last ${data.days} days`} v={data.priced ? usd(data.saved) : 'Not priced'}
-          s={!data.priced ? 'waiting on prices' : data.saved > 0 ? 'against your own models'
-            : data.optimized ? 'no calls on a switched model yet' : 'nothing optimized yet'} />
+        {/* what you are actually ahead by, which can be below zero while measuring is paid for */}
+        <Tile k={`Saved · last ${data.days} days`} {...savedTile(data)} />
         <Tile k="Workloads" v={num(data.workloads)}
           s={data.workloads
             ? `${data.optimized} optimized${data.waiting ? `, ${data.waiting} waiting for routing` : ''}, ${data.ready} ready, ${data.measuring} measuring`
