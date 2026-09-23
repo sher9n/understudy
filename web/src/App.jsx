@@ -73,6 +73,12 @@ const nextFromUrl = () => {
 /* How long to wait before asking again whether Understudy can be reached, try by try. */
 const AGAIN_MS = [3000, 6000, 12000, 30000];
 
+/* Read once, as the page loads, and taken out of the address there and then: a state
+   initialiser can be run twice, and the second run would find the address already cleaned and
+   drop the notice. */
+const ARRIVED_CREDIT = takeCredit();
+const ARRIVED_LINK_EXPIRED = takeParam('link') === 'expired';
+
 export default function App() {
   const [me, setMe] = useState(null);
   const [{ screen, openId }, setWhere] = useState(() => parse());
@@ -87,9 +93,9 @@ export default function App() {
     try { return localStorage.getItem('us_dark') === '1'; } catch { return false; }
   });
   // said once at the top of the app: a payment back from Stripe, and a session that has ended
-  const [credit, setCredit] = useState(takeCredit);
+  const [credit, setCredit] = useState(ARRIVED_CREDIT);
   const [ended, setEnded] = useState(false);
-  const [linkExpired, setLinkExpired] = useState(() => takeParam('link') === 'expired');
+  const [linkExpired, setLinkExpired] = useState(ARRIVED_LINK_EXPIRED);
   // where to go after signing in, when the sign-in screen was reached from a page that needed it
   const nextRef = useRef(nextFromUrl());
   /* Every read of a screen's data carries a number, and only the newest may land. Without it a
