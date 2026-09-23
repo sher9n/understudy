@@ -12,6 +12,7 @@ import { historyFor, fleetHistory } from './history.js';
 import { judgementsFor, judgementCost } from './judge.js';
 import { callsToClear } from './compare.js';
 import { calibrationFor } from './calibrate.js';
+import { armKey, referenceSpec } from '../learn/arms.js';
 
 /* What a measurement WOULD do, worked out before anything is spent.
  *
@@ -22,19 +23,32 @@ import { calibrationFor } from './calibrate.js';
 
 const DAY = 86400000;
 
+/* Which recorded answers are the customer's own model's, as a condition on a call `c` with its
+   parameters in order: the reference, the workload, and the key of the plain reference strategy.
+   A call answered through a switch records its lead model as the one that served it, and for the
+   customer's own model thinking less, or pinned to its cheapest provider, that model is the reference
+   itself: taken as the customer's own answer, a lighter answer was held against a full one, which
+   loosened the bar for every candidate and scored the strategy partly against its own answers. Only
+   a call no strategy served, or one the customer's own model served as it is (the control a switch is
+   held against, the yardstick), carries the customer's own answer. */
+const OWN_ANSWER = (c) => `${c}response_json IS NOT NULL AND ${c}served_model = ?
+  AND (${c}arm_id IS NULL OR ${c}arm_id IN (SELECT a.id FROM arms a WHERE a.workload_id = ? AND a.key = ?))`;
+export const ownArmKey = (workload) => armKey(referenceSpec(workload));
+
 /** The calls a run is allowed to replay: this workload's own traffic, with content kept, at most
     EVAL_POOL_PER_DAY from each day, exactly as the run draws them. And how many of them carry the
     answer the customer's own model gave, which the run uses instead of paying for it again. */
-async function eligible(workloadId, reference) {
+async function eligible(workload) {
+  const perDay = config.EVAL_POOL_PER_DAY;
   const r = await db.prepare(
-    `SELECT COALESCE(SUM(LEAST(n, ?)), 0) AS n, COALESCE(SUM(LEAST(own, ?)), 0) AS own FROM (
-        SELECT (created_at / 86400000) AS d, COUNT(*) AS n,
-               COUNT(*) FILTER (WHERE response_json IS NOT NULL AND served_model = ?) AS own
-          FROM calls
-         WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
-           AND source NOT IN ('replay', 'test') AND (status_code IS NULL OR status_code < 400)
+    `SELECT COALESCE(SUM(LEAST(n, ?)), 0) AS n, COALESCE(SUM(own::float * LEAST(1.0, ?::float / n)), 0) AS own FROM (
+        SELECT (c.created_at / 86400000) AS d, COUNT(*) AS n,
+               COUNT(*) FILTER (WHERE ${OWN_ANSWER('c.')}) AS own
+          FROM calls c
+         WHERE c.workload_id = ? AND c.request_json IS NOT NULL AND c.created_at >= ?
+           AND c.source NOT IN ('replay', 'test') AND (c.status_code IS NULL OR c.status_code < 400)
          GROUP BY 1) x`)
-    .get(config.EVAL_POOL_PER_DAY, config.EVAL_POOL_PER_DAY, String(reference ?? ''), workloadId, now() - 30 * DAY);
+    .get(perDay, perDay, String(workload.reference_model ?? ''), workload.id, ownArmKey(workload), workload.id, now() - 30 * DAY);
   const n = Number(r?.n || 0);
   return { n, recordedShare: n && config.EVAL_USE_RECORDED ? Math.min(1, Number(r.own || 0) / n) : 0 };
 }
@@ -149,7 +163,7 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   }
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workload.workspace_id);
   const models = modelCountFor(ws);
-  const { n: pool, recordedShare } = await eligible(workload.id, workload.reference_model);
+  const { n: pool, recordedShare } = await eligible(workload);
   const sample = sampleSizeFor(pool);
   const plan = {
     pool, sample, models, candidates: [], order: [], funnel: [], excluded: [], waiting: 0,

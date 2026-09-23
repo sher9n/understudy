@@ -238,6 +238,41 @@ const dueNow = async (workloadId) => !!(await db.prepare(
             AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?))`)
   .get(workloadId, now(), now() - 30 * DAY));
 
+/* 4. Recorded answers are the customer's own only ----------------------------------------------- */
+
+const LIGHTER = { kind: 'model', model: REF, recipe: { reasoning: { effort: 'low' } } };
+
+test('answers a switch served are never taken for the customer\'s own, even when the switch is the same model', async () => {
+  // every call answered by the customer's model thinking less, recorded as served by that model; three in ten of them differ
+  const { workload } = await seed({
+    enabled: ['vendor/fifth-small'],
+    recordedAnswer: (i) => JSON.stringify(i % 10 < 3 ? wrong(i) : right(i)),
+    armFor: async (w) => { const arm = await upsertArm(w, LIGHTER, { status: 'serving' }); return () => arm.id; },
+  });
+  const plan = await planFor(workload, { canRoute: true });
+  assert.equal(plan.recordedShare, 0, 'none of them is the customer\'s own answer');
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const run = await runOf(out.runId);
+  assert.equal(run.recorded_refs, 0);
+  // held against the lighter answers, the customer's model seemed to disagree with itself three times in ten, and the bar was 37.5%
+  assert.equal(run.noise_pct, 0);
+  assert.equal(run.floor_pct, config.EVAL_FLOOR_MIN_PCT);
+  assert.equal((await resultOf(out.runId, 'vendor/fifth-small')).verdict, 'missed', 'a model wrong one call in five does not clear');
+});
+
+test('answers the customer\'s own model gave, or gave as the control of a switch, are still used', async () => {
+  const { workload } = await seed({
+    enabled: ['vendor/steady-small'],
+    armFor: async (w) => { const arm = await upsertArm(w, referenceSpec(w), { status: 'baseline' }); return (i) => (i % 2 ? arm.id : null); },
+  });
+  const plan = await planFor(workload, { canRoute: true });
+  assert.ok(plan.recordedShare > 0.99, `${plan.recordedShare}`);
+  const out = await runEvaluation(workload.id);
+  const run = await runOf(out.runId);
+  assert.equal(run.recorded_refs >= run.sample_size, true, `${run.recorded_refs} of ${run.sample_size}`);
+});
+
 /* 6. A switch made during a rollout keeps the rollout's control --------------------------------- */
 
 test('a switch made while another is still taking over keeps what served in full as the control', async () => {

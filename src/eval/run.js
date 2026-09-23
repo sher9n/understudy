@@ -3,7 +3,7 @@ import config, { canRoute } from '../config.js';
 import { priceCall } from '../openrouter.js';
 import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval } from '../billing.js';
-import { planFor } from './plan.js';
+import { planFor, ownArmKey } from './plan.js';
 import { judgeBarPair, judgeCandidate, judgeQuality, canJudge } from './judge.js';
 import { extract, disagreement, gates, floorFrom, verdictWith, sampleCalls, barIsMeaningful, structuredCompare, proseText, callsToClear } from './compare.js';
 import { promote, revert, trafficOf, everReverted } from './promote.js';
@@ -186,10 +186,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
 
   /* The calls a measurement can draw on: this workload's own traffic over thirty days, spread across
      those days. It used to be the newest six hundred, which on a busy workload is its last few hours.
-     Calls that failed when they were made are left out: replaying them measures nothing. */
+     Calls that failed when they were made are left out: replaying them measures nothing. Each comes
+     with the key of the strategy that served it, if one did (see `recorded`). */
   const pool = await db.prepare(
-    `SELECT id, request_json, response_json, served_model, source, cost_usd, created_at FROM calls
-      WHERE id IN (SELECT id FROM (
+    `SELECT c.id, c.request_json, c.response_json, c.served_model, c.source, c.cost_usd, c.created_at, c.arm_id,
+            a.key AS arm_key
+       FROM calls c LEFT JOIN arms a ON a.id = c.arm_id
+      WHERE c.id IN (SELECT id FROM (
           SELECT id, row_number() OVER (PARTITION BY (created_at / 86400000) ORDER BY md5(id || ?)) AS rn
             FROM calls WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
              AND source NOT IN ('replay', 'test') AND (status_code IS NULL OR status_code < 400)) x
@@ -207,10 +210,19 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     { fresh: recheckRun ? freshSet : null });
   const shape = workload.shape_kind;
   const want = plan.models;
+  const ownArm = ownArmKey(workload);
   /* A call's recorded answer, when the customer's own model gave it and it can be read, used as if it
-     had been replayed: nothing is paid for it, and its own timing is never used for speed. */
+     had been replayed: nothing is paid for it, and its own timing is never used for speed.
+
+     Only a call no strategy served, or one the customer's own model served as it is (the control a
+     switch is held against, or the yardstick), carries the customer's own answer. A switched call
+     records the lead model as the one that served it, and for the customer's own model thinking less,
+     or pinned to one provider, that is the reference itself: read as the customer's answer, a lighter
+     answer was held against a full one, which loosened the bar for every candidate, and the strategy
+     serving was scored partly against its own answers. */
   const recorded = (c) => {
     if (!config.EVAL_USE_RECORDED || !c?.response_json || !c.served_model || String(c.served_model) !== String(reference)) return null;
+    if (c.arm_id && c.arm_key !== ownArm) return null;
     let json = null;
     try { json = JSON.parse(c.response_json); } catch { return null; }
     if (!json?.choices?.[0]?.message) return null;
