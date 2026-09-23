@@ -111,7 +111,7 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
                   <div style={{ flexGrow: 1 }} />
                   <Copy text={asText(lines)} />
                 </div>
-                <pre className="m code">
+                <pre className="m code" tabIndex={0} aria-label="Code to copy">
                   {lines.map((l, i) => (
                     <span key={i} style={{ display: 'block' }}>
                       {l.text === '' ? ' ' : (

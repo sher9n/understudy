@@ -96,8 +96,9 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
         </section>
 
         <section className="panel2">
-          <div className="feedhead"><h3>Live activity</h3></div>
-          <div className="feed">
+          <div className="feedhead"><h3 id="feed-title">Live activity</h3></div>
+          {/* The feed scrolls inside its panel, so it can be reached with the keyboard to be scrolled. */}
+          <div className="feed" tabIndex={0} role="region" aria-labelledby="feed-title">
             {data.activity.length === 0 && (
               <div className="fr"><span className="fd mut" />
                 <div className="ft">Nothing yet. Every call you send us appears here, as it arrives.</div>

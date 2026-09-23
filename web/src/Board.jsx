@@ -87,7 +87,29 @@ export default function Board({ html, vals = {}, on = {}, hrefs = {}, subs, repe
       const to = hrefs[el.getAttribute('data-go')];
       if (to && el.tagName === 'A') el.setAttribute('href', to);
     }
+    /* A board control drawn as plain text, a span or a box that is clicked, gets what a button
+       has: it can be reached with Tab, it is announced as a button, and Enter or Space presses it
+       (see `press` below). The wizard's "I have already connected", "Back" and "Or send us copies
+       instead" were words a mouse could click and a keyboard could not reach at all. */
+    for (const el of root.querySelectorAll('[data-go]')) {
+      if (el.matches('a[href], button, input, select, textarea')) continue;
+      if (!el.hasAttribute('role')) el.setAttribute('role', 'button');
+      if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+    }
+    // a block of code that scrolls sideways can be reached with the keyboard, to be scrolled
+    for (const el of root.querySelectorAll('pre')) {
+      if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+    }
   });
+
+  const press = (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const hit = e.target.closest('[data-go]');
+    if (!hit || !host.current.contains(hit) || hit !== e.target) return;
+    if (hit.matches('a[href], button, input, select, textarea')) return;   // those press themselves
+    e.preventDefault();
+    hit.click();
+  };
 
   const click = (e) => {
     const hit = e.target.closest('[data-go]');
@@ -111,6 +133,7 @@ export default function Board({ html, vals = {}, on = {}, hrefs = {}, subs, repe
       ref={host}
       className={`lifted ${className}`.trim()}
       onClick={click}
+      onKeyDown={press}
       onSubmit={submit}
       dangerouslySetInnerHTML={{ __html: html }}
     />

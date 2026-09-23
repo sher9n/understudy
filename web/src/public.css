@@ -181,7 +181,9 @@ p.cfhint a { color: var(--mut-read); text-decoration: underline; text-underline-
 .healthsumt { font-size: 16px; font-weight: 700; letter-spacing: -0.015em; color: var(--ink); }
 .healthsum.ok .healthsumt { color: var(--ok); }
 .healthsum.bad .healthsumt { color: var(--bad); }
-.healthsum.warn .healthsumt { color: var(--warn); }
+/* the warning colour is 3.6 to 1 on its own tint in the light theme, too faint for words: they stay
+   in ink, and the dot and the border carry the colour */
+.healthsum.warn .healthsumt { color: var(--ink); }
 .healthsums { font-size: 13px; color: var(--mut-read); margin-top: 3px; line-height: 1.5; }
 .healthdot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: var(--line-strong); }
 .healthdot.ok { background: var(--ok); }
@@ -197,7 +199,7 @@ p.cfhint a { color: var(--mut-read); text-decoration: underline; text-underline-
 .healthstate { font-size: 13px; font-weight: 600; white-space: nowrap; color: var(--mut-read); }
 .healthstate.ok { color: var(--ok); }
 .healthstate.bad { color: var(--bad); }
-.healthstate.warn { color: var(--warn); }
+.healthstate.warn { color: var(--ink); }
 .healthmeta { margin: 16px 0 0; font-size: 13px; line-height: 1.6; color: var(--mut-read); }
 .healthmeta code { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12.5px; color: var(--ink); }
 .healthacts { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 16px 0 0; }

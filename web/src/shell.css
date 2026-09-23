@@ -196,6 +196,20 @@ aside.side.mini {
 /* The waiting chart's sentence, under the drawing when the drawing is too narrow to hold it. */
 .waitnote { margin: 6px 4px 0; font-size: 13px; line-height: 1.5; color: var(--mut-read); text-align: center; }
 
+/* Skipping past the menu to the page: out of sight until Tab reaches it. */
+.skiplink { position: absolute; left: 12px; top: -64px; z-index: 100; padding: 9px 14px; border-radius: 9px;
+  background: var(--ink); color: var(--bg); font-size: 13.5px; font-weight: 600; }
+.skiplink:focus { top: 12px; text-decoration: none; }
+
+/* The links on the sign-in and sign-up forms are underlined, so they are told apart from the
+   words around them by more than their colour: the difference in colour alone was 1.5 to 1. */
+.authcard a, .toprow a, .fl a { text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+
+/* The models waiting their turn to be tried were faded to 72%, which took their text to 3.7 to 1
+   against the page. They keep their full contrast, and say they are waiting by their heading. */
+.hwprank .hwprr.dim { opacity: 1; }
+.hwprank .hwprr.dim .hwprm { color: var(--mut-read); }
+
 /* The public pages, from inside the account menu: small, in one row, above the way out. */
 .acctlinks { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 2px 10px 8px; }
 .acctlinks a { font-size: 12.5px; line-height: 1.8; color: var(--mut-read); text-decoration: underline;

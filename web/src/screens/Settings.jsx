@@ -45,9 +45,9 @@ export default function Settings({ data, reload }) {
       <section className="opt">
         <div className="opthead"><h2>Account</h2></div>
         <div className="kvrow">
-          <span className="kvk">Name</span>
+          <span className="kvk" id="settings-name-label">Name</span>
           <span className="kvv">
-            <input className="inp" value={name} onChange={(e) => setName(e.target.value)} />
+            <input className="inp" aria-labelledby="settings-name-label" value={name} onChange={(e) => setName(e.target.value)} />
           </span>
           <span className="kva">
             <button className="minig" disabled={busy || name === data.name}
@@ -55,9 +55,9 @@ export default function Settings({ data, reload }) {
           </span>
         </div>
         <div className="kvrow">
-          <span className="kvk">Email</span>
+          <span className="kvk" id="settings-email-label">Email</span>
           <span className="kvv">
-            <input className="inp" type="email" value={email}
+            <input className="inp" type="email" aria-labelledby="settings-email-label" value={email}
               onChange={(e) => setEmail(e.target.value)} />
           </span>
           <span className="kva">

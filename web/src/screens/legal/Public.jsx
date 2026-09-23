@@ -1,6 +1,6 @@
 import React from 'react';
 import { href } from '../../router.js';
-import { plainClick } from '../../nav.jsx';
+import { plainClick, SkipLink } from '../../nav.jsx';
 import '../../public.css';
 
 /* The frame every public page shares: the home page, and the pages that say what happens to
@@ -127,6 +127,7 @@ export function PublicFooter({ go, me }) {
 export function PublicPage({ me, go, dark, setDark, here, children }) {
   return (
     <div className="pubpage">
+      <SkipLink />
       <PublicHeader me={me} go={go} dark={dark} setDark={setDark} here={here} />
       {children}
       <PublicFooter go={go} me={me} />

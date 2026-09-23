@@ -52,7 +52,7 @@ export default function CodeSignIn({ pitchHtml, digits = 4, onDone, onBack }) {
         <aside className="pitch" dangerouslySetInnerHTML={{ __html: pitchHtml }} />
         <main className="formside">
           <div className="toprow">
-            <a className="lnk" onClick={onBack}>← Use a password instead</a>
+            <a className="lnk" role="button" tabIndex={0} onClick={onBack}>← Use a password instead</a>
           </div>
 
           {!sent ? (
@@ -96,7 +96,7 @@ export default function CodeSignIn({ pitchHtml, digits = 4, onDone, onBack }) {
                 {busy ? 'Checking…' : 'Sign in'}
               </button>
               <p className="authfoot">
-                <a className="lnk" onClick={() => { setSent(null); setCode(''); setError(''); }}>
+                <a className="lnk" role="button" tabIndex={0} onClick={() => { setSent(null); setCode(''); setError(''); }}>
                   Send it again
                 </a>
               </p>

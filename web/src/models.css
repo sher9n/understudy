@@ -49,9 +49,14 @@
 .catlid { font-size: 11.5px; color: var(--mut); overflow-wrap: anywhere; }
 .catlprice { text-align: left; font-size: 12.5px; color: var(--ink); }
 .catlopen, .catlkeep, .catlserve { font-size: 13px; line-height: 1.45; color: var(--mut-read); min-width: 0; overflow-wrap: anywhere; }
-.catlkeep.none { color: var(--warn); font-weight: 600; }
+/* refused on every call: said in the colour the app gives a failure, which reads at 5 to 1 */
+.catlkeep.none { color: var(--bad); font-weight: 600; }
 .catlmut { color: var(--mut); }
 .catluse { display: flex; justify-content: flex-end; }
+/* a switch is at least 24 pixels each way, the smallest a finger or a shaky hand can be sure of */
+.catluse .sw { width: 42px; height: 24px; border-radius: 12px; }
+.catluse .sw i { top: 3px; left: 3px; }
+.catluse .sw.swon i { left: 21px; }
 .catlk { display: none; }
 /* why a rule's switch cannot be pressed, under what the rule does */
 .catlwhy { display: block; margin-top: 4px; line-height: 1.5; }

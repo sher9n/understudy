@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { href } from './router.js';
-import { plainClick } from './nav.jsx';
+import { plainClick, SkipLink } from './nav.jsx';
 import Account from './Account.jsx';
 
 const S = { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor',
@@ -38,6 +38,7 @@ export default function Shell({ here, me, go, onSignOut, dark, setDark, locked =
 
   return (
     <div className="shell">
+      <SkipLink />
       <aside className={navOpen ? 'side' : 'side mini'}>
         <div className="sidetop">
           <a className="wm" href={href(home)}

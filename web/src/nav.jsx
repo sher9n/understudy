@@ -20,6 +20,22 @@ export const plainClick = (fn) => (e) => {
   fn(e);
 };
 
+/* The first thing Tab reaches on a page: a way past the menu to the page itself, shown only
+   while it has focus. It moves focus to the page rather than only scrolling to it, so the next
+   Tab carries on from there. */
+export function SkipLink() {
+  return (
+    <a className="skiplink" href="#main" onClick={(e) => {
+      const main = document.getElementById('main');
+      if (!main) return;
+      e.preventDefault();
+      if (!main.hasAttribute('tabindex')) main.setAttribute('tabindex', '-1');
+      main.focus();
+      main.scrollIntoView({ block: 'start' });
+    }}>Skip to the page</a>
+  );
+}
+
 /** A link to a screen in the app. `to` is a screen key, `id` opens one workload. */
 export default function A({ to, id = null, go, children, ...rest }) {
   return (

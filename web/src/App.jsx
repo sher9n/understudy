@@ -117,14 +117,39 @@ export default function App() {
     return () => clearTimeout(t);
   }, [me, tries, askWho]);
 
-  // the back and forward buttons walk the app, and a typed URL lands on the right screen
+  /* The back and forward buttons walk the app, and a typed URL lands on the right screen. A
+     move to a place on the same page (a contents link, "How it works", skipping to the page)
+     changes only the part after #, and is left to the browser: it used to be taken for a new
+     screen, and threw away the screen's data to read it all again. */
+  const pathKey = useRef(`${window.location.pathname}${window.location.search}`);
+  // whatever moved the address last (a link, a redirect, a replaced parameter), this is where it is now
+  useEffect(() => { pathKey.current = `${window.location.pathname}${window.location.search}`; });
   useEffect(() => onPop(() => {
+    const key = `${window.location.pathname}${window.location.search}`;
+    if (key === pathKey.current) return;
+    pathKey.current = key;
     seq.current += 1;
     setWhere(parse());
     setData(null);
     const n = nextFromUrl();
     if (n) nextRef.current = n;
   }), []);
+
+  /* Enter and Space press anything announced as a button that is not a real one, the way they
+     press a real one. Without this, a link drawn without an address (the code sign-in's "Use a
+     password instead" and "Send it again") could be reached but not used from the keyboard. */
+  useEffect(() => {
+    const press = (e) => {
+      if (e.defaultPrevented || (e.key !== 'Enter' && e.key !== ' ')) return;
+      const t = e.target;
+      if (!(t instanceof HTMLElement) || t.getAttribute('role') !== 'button') return;
+      if (t.matches('button, a[href], input, select, textarea, summary') || t.isContentEditable) return;
+      e.preventDefault();
+      t.click();
+    };
+    document.addEventListener('keydown', press);
+    return () => document.removeEventListener('keydown', press);
+  }, []);
 
   // a session that ends while the app is open is said once, with a way back in
   useEffect(() => onSignedOut(() => setEnded(true)), []);
@@ -134,6 +159,7 @@ export default function App() {
      next one scrolled to its foot too. A place on a page (#how) is scrolled to instead. */
   const go = (next, id = null, opts = {}) => {
     navigate(next, id, opts);
+    pathKey.current = `${window.location.pathname}${window.location.search}`;
     seq.current += 1;
     setWhere({ screen: next, openId: id });
     setData(null);
@@ -148,6 +174,7 @@ export default function App() {
   const goTo = (path, { replace = false } = {}) => {
     const url = new URL(path, window.location.origin);
     window.history[replace ? 'replaceState' : 'pushState']({}, '', `${url.pathname}${url.search}${url.hash}`);
+    pathKey.current = `${url.pathname}${url.search}`;
     seq.current += 1;
     setWhere(parse(url.pathname));
     setData(null);

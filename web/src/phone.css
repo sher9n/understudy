@@ -39,6 +39,8 @@
 
   /* room at the foot of every page for the bar that sits over it */
   .shellmain .page { padding: 20px 16px calc(92px + env(safe-area-inset-bottom)); }
+  /* and whatever is scrolled to, or reached with Tab, stops clear of both bars rather than under them */
+  html { scroll-padding-top: 64px; scroll-padding-bottom: calc(80px + env(safe-area-inset-bottom)); }
   .phead h1 { font-size: 25px; }
   .opthead { padding: 15px 16px; gap: 6px 16px; }
   .opthead .s { margin-left: 0; flex-basis: 100%; }
