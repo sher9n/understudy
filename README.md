@@ -210,6 +210,12 @@ waits for a person.
 
 A conversation stays on the strategy its first call was given.
 
+Each workload is switched one of three ways, chosen per workload and, for new ones, in Settings:
+**Optimize automatically** (a model that clears twice is switched to, starting small), **Ask me
+first** (it is recommended, emailed about, and waits for approval; new workspaces start here) or
+**Never switch** (measured and shown, nothing asks and nothing moves unless a person approves it).
+Switching back for safety happens in every mode.
+
 ## Headers
 
 - `x-understudy-workload: <name>` names the workload a call belongs to.
@@ -221,12 +227,42 @@ A conversation stays on the strategy its first call was given.
 
 ## Money and limits
 
-A call first sets aside what it could cost, so calls arriving together can never spend the same
-balance twice, and gives back what it did not use. Automatic top up is opt-in, charged at most
-`TOPUP_MAX_PER_DAY` times a day. Refunds and disputes take the money back off the balance.
+A call first sets aside the most it can cost, so calls arriving together can never spend the same
+balance twice, and gives back what it did not use. The most is a bound, not a guess: the cap the
+request names (`max_tokens`), or else the longest answer the model writes, times `n`, at the
+dearest provider that keeps nothing. A request with no cap, to a model that publishes no longest
+answer, is sent capped at `HOLD_MAX_OUTPUT_TOKENS`. When less is free than a call could cost it
+runs only alone, so at most one call's overrun ever lands below zero; a call refused for that says
+how much it set aside, and that naming `max_tokens` sets aside less.
 
-A workspace can set daily and monthly spending limits; calls past one are refused with a message
-saying when they resume (days and months told in IST).
+An answer that states no cost is charged from its tokens at list price, and a streamed answer that
+breaks off part way is charged for what it wrote; both are corrected a minute later to what
+OpenRouter recorded for the call. A live stream may run as long as it keeps coming
+(`UPSTREAM_IDLE_MS` of silence at most, `UPSTREAM_STREAM_MAX_MS` in all).
+
+Automatic top up is opt-in, charges only a card saved for it at a checkout that said so, runs at
+most `TOPUP_MAX_PER_DAY` times a day, and is switched off only by a problem with the card (and the
+owner emailed); anything else is retried. Refunds and disputes take the money back off the balance,
+and a dispute decided for us gives it back. For that, the Stripe webhook needs these events:
+`checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+`checkout.session.async_payment_failed`, `payment_intent.succeeded`,
+`payment_intent.payment_failed`, `charge.refunded`, `charge.dispute.created`,
+`charge.dispute.closed`, `charge.dispute.funds_reinstated` and `customer.subscription.deleted`.
+
+A workspace can set daily and monthly spending limits, counted with what calls in flight have set
+aside; calls past one are refused with a message saying when they resume (days and months told in
+IST).
+
+## Accounts
+
+Signing up sends a code; the account works once the code comes back. The password chosen at
+sign-up is kept only when the code is used from the browser that signed up, which holds a secret of
+its own for ten minutes; from anywhere else the code still signs in and asks for a password, so
+signing up with somebody else's address can never choose their password. Trying a code answers
+the same way whether or not the address has an account. Changing the email needs the password,
+signs every other session out and tells the old address. Per-address limits read the client's
+address from `X-Real-IP`, which Railway's edge sets; with Railway's CDN in front, set
+`CLIENT_IP_FROM=xff-first`.
 
 On Anthropic models, a long instruction sent again and again is marked for caching where calls
 come often enough to read it back; the saving is counted as ours, and the extra cost of writing
