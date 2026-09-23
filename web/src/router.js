@@ -30,13 +30,15 @@ export const ROUTES = [
 export const PUBLIC = new Set(['traffic', 'pricing', 'terms', 'privacy', 'dpa', 'subprocessors',
   'security', 'contact', 'status']);
 
-/** What a URL means. A workload's own page carries its id. */
+/** What a URL means. A workload's own page carries its id. An address that means nothing is
+    said to be nothing, rather than quietly shown as the home page: a mistyped link that lands
+    on the marketing page reads as though the thing it pointed at had been taken away. */
 export function parse(pathname = window.location.pathname) {
   const clean = pathname.replace(/\/+$/, '') || '/';
   const workload = clean.match(/^\/workloads\/([A-Za-z0-9_-]+)$/);
   if (workload) return { screen: 'work', openId: workload[1] };
   const hit = ROUTES.find((r) => r.path === clean);
-  return hit ? { screen: hit.screen, openId: null } : { screen: 'home', openId: null, unknown: clean };
+  return hit ? { screen: hit.screen, openId: null } : { screen: 'notfound', openId: null };
 }
 
 /** The address for a place in the app, optionally with a place on that page. */
@@ -55,4 +57,15 @@ export function go(screen, openId = null, { replace = false, hash = '', search =
 export function onPop(fn) {
   window.addEventListener('popstate', fn);
   return () => window.removeEventListener('popstate', fn);
+}
+
+/* What the browser tab says. One name per screen, so a row of tabs, the history list and a
+   bookmark each say which screen they are, rather than every one of them reading "Understudy".
+   A workload's page is named after the workload once its name is known. */
+export function titleFor(screen, name = null) {
+  if (screen === 'notfound') return 'Page not found, Understudy';
+  if (screen === 'workload') return `${name || 'Workload'}, Understudy`;
+  const r = ROUTES.find((x) => x.screen === screen);
+  if (!r) return 'Understudy';
+  return screen === 'home' ? r.title : `${r.title}, Understudy`;
 }

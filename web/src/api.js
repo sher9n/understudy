@@ -11,6 +11,18 @@ const send = async (method, path, body) => {
   return json;
 };
 
+/* Who wants to hear a workload's name the moment it is read: the frame, which titles the tab
+   after the workload whose page is open. */
+const nameListeners = new Set();
+export const onWorkloadName = (fn) => {
+  nameListeners.add(fn);
+  return () => nameListeners.delete(fn);
+};
+const told = (id) => (w) => {
+  if (w?.name) for (const fn of nameListeners) fn(id, w.name);
+  return w;
+};
+
 /* The one address outside /api the screens read: the plain health check, which answers as long
    as the application and its database do. */
 const health = async () => {
@@ -32,7 +44,7 @@ export const api = {
   verifyCode: (email, code) => send('POST', '/auth/code/verify', { email, code }),
   overview: (days) => send('GET', days ? `/overview?days=${days}` : '/overview'),
   workloads: () => send('GET', '/workloads'),
-  workload: (id) => send('GET', `/workloads/${id}`),
+  workload: (id) => send('GET', `/workloads/${id}`).then(told(id)),
   workloadRuns: (id) => send('GET', `/workloads/${id}/runs`),
   workloadRun: (id, runId) => send('GET', `/workloads/${id}/runs/${runId}`),
   setModelsTested: (count) => send('POST', '/settings/models-tested', { count }),

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { api } from './api.js';
-import { parse, go as navigate, onPop, PUBLIC } from './router.js';
+import { api, onWorkloadName } from './api.js';
+import { parse, go as navigate, onPop, PUBLIC, titleFor } from './router.js';
 import Shell from './Shell.jsx';
 import Auth from './screens/Auth.jsx';
 import Home from './screens/Home.jsx';
@@ -21,8 +21,10 @@ import Subprocessors from './screens/legal/Subprocessors.jsx';
 import Security from './screens/legal/Security.jsx';
 import Contact from './screens/legal/Contact.jsx';
 import Status from './screens/legal/Status.jsx';
+import NotFound from './screens/NotFound.jsx';
 
 const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
+const AUTH = new Set(['signin', 'signup', 'signincode']);
 
 /* The pages anybody can read. Each is drawn inside the same public frame as the home page. */
 const PAGES = { traffic: Traffic, pricing: Pricing, terms: Terms, privacy: Privacy, dpa: Dpa,
@@ -98,6 +100,27 @@ export default function App() {
     if (me?.signedIn && APP.has(screen) && !openId && !data) load(screen);
   }, [me, screen, openId, data, load]);
 
+  /* Workload names, for the title of a workload's page: from the list whenever it is read, and
+     from the workload itself when its page is opened straight from a link. */
+  const [names, setNames] = useState({});
+  useEffect(() => onWorkloadName((id, name) => setNames((m) => (m[id] === name ? m : { ...m, [id]: name }))), []);
+  useEffect(() => {
+    if (!data?.rows) return;
+    setNames((m) => {
+      const fresh = data.rows.filter((r) => m[r.id] !== r.name);
+      return fresh.length ? { ...m, ...Object.fromEntries(fresh.map((r) => [r.id, r.name])) } : m;
+    });
+  }, [data]);
+
+  /* The title names the screen actually on show: somebody signed out who follows a link to the
+     dashboard is looking at the sign-in form, and the tab says so. */
+  const shown = PUBLIC.has(screen) || screen === 'home' || screen === 'notfound' ? screen
+    : me && !me.signedIn ? (AUTH.has(screen) ? screen : 'signin')
+      : openId ? 'workload' : screen;
+  useEffect(() => {
+    document.title = titleFor(shown, openId ? names[openId] : null);
+  }, [shown, openId, names]);
+
   /* Going somewhere starts at the top of it, the way following a link does. The page used to
      keep the scroll position of the one before, so a link at the foot of a long page opened the
      next one scrolled to its foot too. A place on a page (#how) is scrolled to instead. */
@@ -137,7 +160,28 @@ export default function App() {
     );
   }
 
-  if (!me.signedIn || screen === 'signin' || screen === 'signup' || screen === 'signincode') {
+  const signOut = async () => { await api.signOut(); setMe({ signedIn: false }); go('home'); };
+
+  /* An address that leads nowhere. Somebody signed in keeps their own frame around it, with the
+     menu still there to leave by; anybody else gets the public frame. */
+  if (screen === 'notfound') {
+    return (
+      <div className="u" data-mode={dark ? 'dark' : 'light'}>
+        {me.signedIn ? (
+          <Shell here={null} me={me} go={go} dark={dark} setDark={setDark} onSignOut={signOut}
+            locked={!me.onboarded}>
+            <NotFound me={me} go={go} inApp />
+          </Shell>
+        ) : (
+          <PublicPage me={me} go={go} dark={dark} setDark={setDark} here="notfound">
+            <NotFound me={me} go={go} />
+          </PublicPage>
+        )}
+      </div>
+    );
+  }
+
+  if (!me.signedIn || AUTH.has(screen)) {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
         <Auth
@@ -155,8 +199,6 @@ export default function App() {
       </div>
     );
   }
-
-  const signOut = async () => { await api.signOut(); setMe({ signedIn: false }); go('home'); };
 
   /* The guide lives INSIDE the app, in the same frame the customer will use afterwards. The
      screens they cannot use yet are shown but not live, so they can see what they are
