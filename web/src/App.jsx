@@ -414,6 +414,9 @@ export default function App() {
           setDark={setDark}
           onDone={async (fresh, key) => {
             if (key) setFreshKey(key);
+            /* Signed in from the form shown in place of the page they opened (a bookmarked
+               workload, say): they land on that page, not on the dashboard. */
+            if (!AUTH.has(screen) && !nextRef.current) nextRef.current = safeNext(hereNow());
             const who = await api.me();
             setMe(who);
             landAfterSignIn(who, fresh);
