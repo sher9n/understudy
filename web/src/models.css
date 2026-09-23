@@ -1,0 +1,82 @@
+/* The Models page: finding a model among three hundred, and what each one is. The app's own
+   rules, in a sheet of their own; every colour is a theme token, so dark mode follows. */
+
+/* Read by screen readers and nobody else: a label for a field whose purpose the page shows. */
+.vh { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Finding models: a search, who makes it, which ones, and whether a provider that keeps nothing
+   serves it. One row on a wide screen, wrapping as the screen narrows. */
+.catlbar { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: center; padding: 16px 20px 8px; }
+.catlsearch { flex: 1 1 240px; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 11px;
+  border: 1px solid var(--line-strong); border-radius: 9px; background: var(--raise); color: var(--mut); cursor: text; }
+.catlsearch:focus-within { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brandq); }
+.catlsearch input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; font: inherit; font-size: 13.5px;
+  color: var(--ink); padding: 8px 0; }
+.catlsearch input::placeholder { color: var(--mut); }
+.catlpick select { font: inherit; font-size: 13px; color: var(--ink); max-width: 230px; cursor: pointer;
+  background-color: var(--raise); border: 1px solid var(--line-strong); border-radius: 9px; padding: 7px 30px 7px 11px;
+  appearance: none; -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--mut) 50%), linear-gradient(135deg, var(--mut) 50%, transparent 50%);
+  background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%; background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat; }
+.catlpick select:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.catlseg .segb { padding: 7px 11px; }
+.catlseg .segb:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.catlcheck { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); cursor: pointer; }
+.catlcheck.off { color: var(--mut); cursor: default; }
+.catlcheck input { width: 15px; height: 15px; margin: 0; accent-color: var(--brand); flex: 0 0 auto; }
+.catlcount { padding: 2px 20px 12px; font-size: 12.5px; line-height: 1.55; color: var(--mut-read); }
+.catlclear { font-size: 12.5px; color: var(--brand-read); text-decoration: underline; text-underline-offset: 2px;
+  background: none; border: 0; padding: 0; }
+.catlnote { color: var(--mut); }
+
+/* The list. Each row is a model: its name and id, its price, whether its weights are open, how
+   many providers that keep nothing serve it, which of your workloads it serves, and its switch. */
+.catlhead, .catlrow { display: grid; gap: 16px; align-items: center; padding: 12px 20px;
+  grid-template-columns: minmax(0, 2.1fr) minmax(0, 1.4fr) 92px minmax(0, 1.3fr) minmax(0, 1.1fr) 52px; }
+.catlhead.nokeep, .catlrows.nokeep .catlrow {
+  grid-template-columns: minmax(0, 2.2fr) minmax(0, 1.5fr) 92px minmax(0, 1.3fr) 52px; }
+.catlhead { background: var(--panel); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding-top: 11px; padding-bottom: 11px; }
+.catlhead span { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--mut); font-weight: 700; }
+.catlusehead { text-align: right; }
+/* 335 rows are drawn only as they come near the screen, so the list stays quick to scroll */
+.catlrow { border-top: 1px solid var(--line); content-visibility: auto; contain-intrinsic-size: auto 62px; }
+.catlrows .catlrow:first-child { border-top: 0; }
+.catlname { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.catltitle { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); overflow-wrap: anywhere; }
+.catlid { font-size: 11.5px; color: var(--mut); overflow-wrap: anywhere; }
+.catlprice { text-align: left; font-size: 12.5px; color: var(--ink); }
+.catlopen, .catlkeep, .catlserve { font-size: 13px; line-height: 1.45; color: var(--mut-read); min-width: 0; overflow-wrap: anywhere; }
+.catlkeep.none { color: var(--warn); font-weight: 600; }
+.catlmut { color: var(--mut); }
+.catluse { display: flex; justify-content: flex-end; }
+.catlk { display: none; }
+/* why a rule's switch cannot be pressed, under what the rule does */
+.catlwhy { display: block; margin-top: 4px; line-height: 1.5; }
+
+/* Narrower than a table can hold, each model is a card: its name and switch on top, and every
+   figure the columns held on a labelled line under it. */
+@media (max-width: 900px) {
+  .catlhead { display: none; }
+  .catlrow, .catlrows.nokeep .catlrow { grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'name use' 'price price' 'keep keep' 'open serve'; gap: 5px 14px; padding: 13px 20px;
+    align-items: start; contain-intrinsic-size: auto 120px; }
+  .catlrows.nokeep .catlrow { grid-template-areas: 'name use' 'price price' 'open serve'; }
+  .catlname { grid-area: name; }
+  .catluse { grid-area: use; align-self: center; }
+  .catlprice { grid-area: price; }
+  .catlkeep { grid-area: keep; }
+  .catlopen { grid-area: open; }
+  .catlserve { grid-area: serve; }
+  .catlk { display: inline; margin-right: 6px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9.5px;
+    font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--mut); }
+}
+@media (max-width: 640px) {
+  .catlbar { padding: 14px 16px 6px; }
+  .catlcount { padding: 2px 16px 12px; }
+  .catlrow, .catlrows.nokeep .catlrow { padding: 13px 16px; }
+  .catlpick, .catlpick select { flex: 1 1 100%; max-width: none; width: 100%; }
+  .catlseg { flex: 1 1 auto; }
+}
