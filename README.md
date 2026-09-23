@@ -230,8 +230,9 @@ Switching back for safety happens in every mode.
 A call first sets aside the most it can cost, so calls arriving together can never spend the same
 balance twice, and gives back what it did not use. The most is a bound, not a guess: the cap the
 request names (`max_tokens`), or else the longest answer the model writes, times `n`, at the
-dearest provider that keeps nothing. A request with no cap, to a model that publishes no longest
-answer, is sent capped at `HOLD_MAX_OUTPUT_TOKENS`. When less is free than a call could cost it
+dearest provider that keeps nothing; for a model that publishes no longest answer, its whole
+context length. The request is sent as it came; only for a model that publishes neither is it
+capped at `HOLD_MAX_OUTPUT_TOKENS`. When less is free than a call could cost it
 runs only alone, so at most one call's overrun ever lands below zero; a call refused for that says
 how much it set aside, and that naming `max_tokens` sets aside less.
 

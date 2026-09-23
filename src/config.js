@@ -399,8 +399,8 @@ export const config = {
      is sent and given back once it is answered. A hold lapses after this long, longer than the longest
      streamed answer allowed (UPSTREAM_STREAM_MAX_MS), so a process that died mid-call cannot freeze a
      balance, and a live call never outlives its own hold. A request with no cap on its answer, to a
-     model that publishes no longest answer, is sent capped at HOLD_MAX_OUTPUT_TOKENS, so what was set
-     aside stays a bound. */
+     model that publishes neither a longest answer nor a context length, is sent capped at
+     HOLD_MAX_OUTPUT_TOKENS, so what was set aside stays a bound. */
   HOLD_TTL_MIN: num('HOLD_TTL_MIN', 35),
   /* A provider that keeps nothing can charge more than the list price, so a hold is the list price
      times this; a model with no known price is held at a fixed amount. */

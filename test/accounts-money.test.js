@@ -57,6 +57,7 @@ const COST = 120 * 2.5e-6 + 2 * 15e-6;
 const LONG = 'test/long-writer';
 const NOCOST = 'test/no-cost';
 const NOLIMIT = 'test/no-limit';
+const NOWINDOW = 'test/no-window';
 const STREAMY = 'test/streamy';
 const seen = [];
 const records = new Map();
@@ -146,6 +147,7 @@ test.before(async () => {
     { model_id: LONG, name: 'long writer', context_len: 200000, price_in: 1e-6, price_out: 1e-5, open_weights: 0, zdr: 1, max_output: 45000 },
     { model_id: NOCOST, name: 'no cost', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
     { model_id: NOLIMIT, name: 'no limit', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
+    { model_id: NOWINDOW, name: 'no window', context_len: null, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
     { model_id: STREAMY, name: 'streamy', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
   ]);
 });
@@ -484,11 +486,15 @@ test('many calls with no cap on their answer cannot spend a small balance many t
   if (refused.status === 402) assert.match((await refused.json()).error.message, /Add credit/);
 });
 
-test('a call to a model that publishes no longest answer is capped, so what it set aside is a bound', async () => {
+test('a request is sent as it came, and capped only when the model publishes no limit at all', async () => {
   const { workspace, key } = await auth.createAccount({ email: 'nolimit@example.test', password: 'password-123' });
   await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
   seen.length = 0;
+  // no longest answer published, but a window: held for the window, sent unchanged
   assert.equal((await call(key.secret, { model: NOLIMIT, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
+  assert.equal(seen.at(-1).max_tokens, undefined, 'sent as it came');
+  // neither: sent with the cap it was held for
+  assert.equal((await call(key.secret, { model: NOWINDOW, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
   assert.equal(seen.at(-1).max_tokens, config.HOLD_MAX_OUTPUT_TOKENS, 'sent with the cap it was held for');
   // a model that says how long it writes, and a request that names its own cap, are sent as they came
   assert.equal((await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: 'hello' }] })).status, 200);

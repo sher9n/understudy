@@ -152,9 +152,9 @@ function modelsOf(ready) {
 
 /* Set aside what this call could cost before it is sent: the most it can cost on the dearest model it
    could touch (see callBound), twice that when a strategy can pay for two models on one call. A model
-   with no known price is held at a fixed amount. When the request names no cap and some model it may
-   reach publishes no longest answer, the call is sent capped at HOLD_MAX_OUTPUT_TOKENS, so what was set
-   aside is still a bound; the request is changed only then, and only by adding that cap. */
+   with no known price is held at a fixed amount. Only when the request names no cap and some model it
+   may reach publishes neither a longest answer nor a context length is the call sent capped, at
+   HOLD_MAX_OUTPUT_TOKENS, so what was set aside is still a bound. */
 async function holdFor(wsId, body, ready) {
   const shape = callShape(body);
   let worst = 0;

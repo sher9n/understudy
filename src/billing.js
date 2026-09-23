@@ -144,8 +144,11 @@ export async function sweepHolds() {
    far longer answers and left the balance three dollars below zero, paid for by us.
 
    So the answer a call is held for is the longest it can actually be: the cap it asks for, or the
-   longest answer the model writes, times the answers it asks for (n). Where neither is known, the
-   call is sent with a cap of HOLD_MAX_OUTPUT_TOKENS, so the bound is true by construction. The price
+   longest answer the model writes, or failing that its whole context length (an answer can never be
+   longer than the model's window), times the answers it asks for (n). The request itself is left as
+   it came: adding a cap could make a provider refuse a call whose prompt leaves less room than the
+   cap. Only where even the context length is unknown is the call sent capped at
+   HOLD_MAX_OUTPUT_TOKENS, so the bound is still true. The price
    is the dearest provider that keeps nothing, where those are known one by one; otherwise the list
    price with a margin, since a provider can charge more than the list. A prompt is counted at three
    characters a token, which overcounts ordinary text, and priced as if written to a cache, a quarter
@@ -161,7 +164,7 @@ export function callShape(body) {
 
 /** The most one call can cost on one model, or null when the model has no known price. */
 export async function callBound(modelId, { pin, cap, n = 1 }, { zdr = true } = {}) {
-  const m = await db.prepare('SELECT price_in, price_out, max_output FROM models_catalog WHERE model_id = ?').get(modelId);
+  const m = await db.prepare('SELECT price_in, price_out, max_output, context_len FROM models_catalog WHERE model_id = ?').get(modelId);
   if (!m) return null;
   let pi = Number(m.price_in) || 0;
   let po = Number(m.price_out) || 0;
@@ -178,9 +181,11 @@ export async function callBound(modelId, { pin, cap, n = 1 }, { zdr = true } = {
       if (Number(e.mo) > 0) maxOut = Math.max(maxOut || 0, Number(e.mo));
     }
   }
-  if (!(pi > 0) && !(po > 0)) return { usd: 0, each: cap ?? maxOut ?? config.HOLD_MAX_OUTPUT_TOKENS, known: cap !== null || maxOut !== null };
-  const known = cap !== null || maxOut !== null;
-  const each = cap !== null ? (maxOut ? Math.min(cap, maxOut) : cap) : (maxOut ?? config.HOLD_MAX_OUTPUT_TOKENS);
+  // the longest answer the model can write: what it publishes, else its whole window
+  const limit = maxOut ?? (Number(m.context_len) > 0 ? Number(m.context_len) : null);
+  const known = cap !== null || limit !== null;
+  const each = cap !== null ? (limit ? Math.min(cap, limit) : cap) : (limit ?? config.HOLD_MAX_OUTPUT_TOKENS);
+  if (!(pi > 0) && !(po > 0)) return { usd: 0, each, known };
   const usd = (pin * pi * 1.25 + each * n * po) * margin;
   return { usd, each, known };
 }
