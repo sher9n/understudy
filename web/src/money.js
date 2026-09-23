@@ -20,7 +20,9 @@ function round(a, dp, how) {
   const f = 10 ** dp;
   if (how === 'floor') return Math.floor(a * f + EPS) / f;
   if (how === 'ceil') return Math.ceil(a * f - EPS) / f;
-  return Math.round(a * f) / f;
+  // 1.005 * 100 is 100.49999999999999 in floating point, which rounded to $1.00; a relative hair
+  // of tolerance lets an amount that is exactly halfway round up, as it is written
+  return Math.round(a * f * (1 + 1e-12)) / f;
 }
 
 /** Decimals for an amount under a dollar: enough for four significant figures, two to six. */

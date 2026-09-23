@@ -207,10 +207,9 @@ export default function App() {
      just signed in looking at the marketing page with "Sign in" still at the top of it. */
   useEffect(() => {
     if (!me?.signedIn || screen !== 'home') return;
-    const to = me.onboarded ? 'dash' : 'connect';
-    navigate(to, null, { replace: true });
-    setWhere({ screen: to, openId: null });
-  }, [me, screen]);
+    // through go, like every other move, so a read still in flight cannot land on the new screen
+    go(me.onboarded ? 'dash' : 'connect', null, { replace: true });
+  }, [me, screen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* Somebody who has never sent us a call belongs on Connect, however they reached an empty
      dashboard: a typed address, an old bookmark, a reopened tab. The check asks the server
@@ -223,11 +222,10 @@ export default function App() {
     api.me().then((who) => {
       if (!live) return;
       if (who.onboarded) { setMe(who); return; }
-      navigate('connect', null, { replace: true });
-      setWhere({ screen: 'connect', openId: null });
+      go('connect', null, { replace: true });
     }).catch(() => {});
     return () => { live = false; };
-  }, [me, screen]);
+  }, [me, screen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const read = (which, over) => {
     if (which === 'dash' || which === 'work') return api.overview(over);
@@ -255,6 +253,9 @@ export default function App() {
     const got = await read(which, days);
     if (mine === seq.current && got) setData(got);
   }, [days]);
+  // the newest refresh, for timers set before the window it reads over last changed
+  const refreshRef = useRef(null);
+  refreshRef.current = refresh;
 
   useEffect(() => {
     if (me?.signedIn && APP.has(screen) && !openId && !data) load(screen);
@@ -264,18 +265,20 @@ export default function App() {
      moment after somebody is sent back here. So Settings is read again a few times, and the new
      balance appears without a reload. A test payment on a deployment that does not add those to
      balances is said to be one, rather than promised. */
+  /* Keyed on what the page arrived with, not on the notice: putting the notice away must not stop
+     the new balance from being read. */
   useEffect(() => {
-    if (credit?.kind !== 'paid') return undefined;
+    if (ARRIVED_CREDIT?.kind !== 'paid') return undefined;
     let live = true;
     api.status().then((s) => {
       if (live && s?.payments === 'test_refused') setCredit((c) => (c ? { ...c, test: true } : c));
     }).catch(() => {});
     const timers = [4000, 12000, 30000].map((ms) => setTimeout(() => {
       const w = whereRef.current;
-      if (w.screen === 'settings' && !w.openId) refresh('settings').catch(() => {});
+      if (w.screen === 'settings' && !w.openId) refreshRef.current?.('settings').catch(() => {});
     }, ms));
     return () => { live = false; timers.forEach(clearTimeout); };
-  }, [credit?.kind]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   /* Workload names, for the title of a workload's page: from the list whenever it is read, and
      from the workload itself when its page is opened straight from a link. */
@@ -403,8 +406,10 @@ export default function App() {
   }
 
   if (!me.signedIn || AUTH.has(screen)) {
-    // the way between the sign-in screens keeps where somebody was going
-    const keep = nextRef.current ? `?next=${encodeURIComponent(nextRef.current)}` : '';
+    /* The way between the sign-in screens keeps where somebody was going: the ?next= they came
+       with, or the page this form is standing in for (a bookmarked workload, say). */
+    const going = nextRef.current || (!AUTH.has(screen) ? safeNext(hereNow()) : null);
+    const keep = going ? `?next=${encodeURIComponent(going)}` : '';
     return (
       <div className="u" data-mode={mode}>
         {creditNote}
@@ -415,7 +420,10 @@ export default function App() {
         )}
         <Auth
           mode={screen === 'signup' ? 'signup' : (screen === 'signincode' ? 'code' : 'signin')}
-          go={(where) => go(where, null, { search: AUTH.has(where) ? keep : '' })}
+          go={(where) => {
+            if (going && AUTH.has(where)) nextRef.current = going;
+            go(where, null, { search: AUTH.has(where) ? keep : '' });
+          }}
           dark={dark}
           setDark={setDark}
           onDone={async (fresh, key) => {

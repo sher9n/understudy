@@ -60,6 +60,13 @@ export default function Status() {
       ? ['ok', 'The application', 'Working', 'The site, the API and the database are answering.']
       : ['bad', 'The application', 'Not answering', 'Neither the health check nor the status report answered.']);
   }
+  /* The application can answer while its own status report does not. Then nothing is known about
+     the parts below, and saying "everything is working" would be a guess: the report's silence is
+     a row of its own. */
+  if (up && s?.failed) {
+    rows.push(['bad', 'Status report', 'Not answering',
+      `The application answers, but its report on the parts below did not (${s.failed}), so they cannot be shown.`]);
+  }
   if (s && !s.failed) {
     rows.push(s.routing
       ? ['ok', 'Model calls', 'Working', 'Routing is switched on, so routed calls and measurement replays go on to model providers.']
@@ -77,13 +84,17 @@ export default function Status() {
       : ['warn', 'Providers that keep nothing', 'Not read yet', 'The list of zero data retention providers has not been read yet.']);
   }
 
+  /* What the summary says: broken parts are counted as not working, and a part that works with a
+     caveat (payments in test mode, a list not read yet) is a note rather than a failure. */
   const bad = rows.filter((r) => r[0] === 'bad').length;
   const warn = rows.filter((r) => r[0] === 'warn').length;
+  const notes = warn ? ` ${warn === 1 ? 'One part has' : `${warn} parts have`} a note, below.` : '';
   const summary = !rows.length ? null
     : !up ? ['bad', 'Understudy is not answering right now', 'This page keeps checking every minute.']
-      : bad || warn ? ['warn', bad + warn === 1 ? 'One part is not working' : `${bad + warn} parts are not working`,
-        'Everything else below is working.']
-        : ['ok', 'Everything is working', 'Every part below answered as it should.'];
+      : bad ? ['warn', bad === 1 ? 'One part is not working' : `${bad} parts are not working`,
+        `The rest answered as it should.${notes}`]
+        : warn ? ['warn', 'Everything is working', `Every part answered.${notes}`]
+          : ['ok', 'Everything is working', 'Every part below answered as it should.'];
 
   return (
     <Doc eyebrow="Status" title="Is Understudy working?" dated={false}

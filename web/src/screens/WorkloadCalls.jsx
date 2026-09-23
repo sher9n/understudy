@@ -269,7 +269,7 @@ export default function WorkloadCalls({ workloadId }) {
             </div>
           ) : (
             <>
-              <pre className="fieldtext" tabIndex={0} aria-label={FIELD_LABEL[peek.field]}>{text.text}</pre>
+              <pre className="fieldtext" tabIndex={0} role="region" aria-label={FIELD_LABEL[peek.field]}>{text.text}</pre>
               {text.truncated && (
                 <div className="fieldcut">This is the first 20,000 characters of it.</div>
               )}
