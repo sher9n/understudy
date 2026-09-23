@@ -82,6 +82,9 @@ const DAY = 86400000;
 const sent = [];
 // models the provider says are overloaded, to send a switched call on to the customer's own model
 const failing = new Set();
+// models whose answers state no cost, and models whose answers say nothing about their usage at all
+const noCost = new Set();
+const noUsage = new Set();
 let jevHold = null;
 let jevActive = 0;
 let jevPeak = 0;
@@ -108,10 +111,12 @@ const provider = http.createServer((req, res) => {
       return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
+    const usage = { prompt_tokens: 1200, completion_tokens: 40, cost: model === REF ? 0.004 : 0.0004,
+      prompt_tokens_details: { cached_tokens: model === CLAUDE && sent.length > 1 ? 1000 : 0 } };
+    if (noCost.has(model)) delete usage.cost;
     res.end(JSON.stringify({ id: `gen-${sent.length}`, model,
       choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: `answer from ${model}` } }],
-      usage: { prompt_tokens: 1200, completion_tokens: 40, cost: model === REF ? 0.004 : 0.0004,
-        prompt_tokens_details: { cached_tokens: model === CLAUDE && sent.length > 1 ? 1000 : 0 } } }));
+      ...(noUsage.has(model) ? {} : { usage }) }));
   });
 });
 let server = null;
@@ -794,6 +799,95 @@ test('a helpful answer that opens with an apology is not a refusal', () => {
   assert.equal(refused("I can't wait to help. Here is the plan."), false);
   assert.equal(refused("I'm sorry, but I can't help with that."), true);
   assert.equal(refused('I cannot provide that.'), true);
+});
+
+test('a part of a call whose provider states no cost is counted at an estimate, and no invented cost is written into the answer', async () => {
+  const { serveWith } = await import('../src/learn/serve.js');
+  const near = (a, b, what) => assert.ok(Math.abs(a - b) < 1e-12, `${what}: ${a} is not ${b}`);
+  const body = { model: REF, messages: [{ role: 'system', content: 'Classify the parcel.' }, { role: 'user', content: 'parcel #5' }] };
+  const cascade = { kind: 'cascade', first: { model: CHEAP, recipe: null }, fallback: { model: REF, recipe: null }, threshold: 0.7 };
+  const pass = async () => ({ pass: true, by: 'jev', p: 0.9, cost: 0.0001, ms: 5 });
+  const unsure = async () => ({ pass: false, by: 'jev', p: 0.2, cost: 0.0001, ms: 5 });
+  // steady-small's catalogue price for the tokens its answers say they used
+  const cheapAt = 1200 * 0.2e-6 + 40 * 0.6e-6;
+  try {
+    // every part stated: the whole call's cost is written into the answer, as ever
+    const stated = await serveWith(cascade, body, { shape: 'free_text', check: pass });
+    near(stated.cost, 0.0004 + 0.0001, 'stated');
+    assert.equal(stated.costEstimated, false);
+    near(stated.json.usage.cost, 0.0005, 'written into the answer');
+    // the cheap answer states no cost: estimated from its tokens at the catalogue price, never nothing
+    noCost.add(CHEAP);
+    const quiet = await serveWith(cascade, body, { shape: 'free_text', check: pass });
+    near(quiet.cost, cheapAt + 0.0001, 'estimated');
+    assert.equal(quiet.costEstimated, true);
+    assert.equal('cost' in quiet.json.usage, false, 'no cost is written into an answer whose provider never stated one');
+    assert.equal(quiet.json.usage.prompt_tokens, 1200, 'and everything it did say is kept');
+    // sent on: the answer the customer got stated its cost, the cheap one before it did not
+    const sentOn = await serveWith(cascade, body, { shape: 'free_text', check: unsure });
+    near(sentOn.cost, cheapAt + 0.0001 + 0.004, 'all three parts');
+    assert.equal(sentOn.costEstimated, true);
+    assert.equal('cost' in sentOn.json.usage, false, 'a total with a guess in it is not written in as the provider\'s');
+    // a router's pick, stating no cost
+    const zeros = [0, 0, 0, 0, 0, 0];
+    const router = { kind: 'router', cheap: { model: CHEAP, recipe: null }, strong: { model: REF, recipe: null }, threshold: 0.5,
+      weights: zeros, bias: 5, means: zeros, sds: zeros.map(() => 1) };
+    const picked = await serveWith(router, body, { shape: 'free_text' });
+    near(picked.cost, cheapAt, 'the router\'s pick');
+    assert.equal(picked.costEstimated, true);
+    // an answer that says nothing about its usage: counted from what was sent and what came back, three characters a token
+    noUsage.add(CHEAP);
+    const bare = await serveWith(router, body, { shape: 'free_text' });
+    const tokensSent = Math.ceil('Classify the parcel.\nparcel #5'.length / 3);
+    const tokensBack = Math.ceil(`answer from ${CHEAP}`.length / 3);
+    near(bare.cost, tokensSent * 0.2e-6 + tokensBack * 0.6e-6, 'from the text');
+    assert.equal(bare.costEstimated, true);
+  } finally {
+    noCost.clear();
+    noUsage.clear();
+  }
+});
+
+test('reading an answer in the background, where the grader states no cost, is charged at an estimate', async () => {
+  const s = await shop();
+  const w0 = await workloadFor(s.workspace.id, request(1, { system: 'Weigh the parcel.' }));
+  await promote(w0, CHEAP, { spec: { kind: 'model', model: CHEAP, recipe: null }, rollout: false });
+  const w = await load(w0.id);
+  for (let i = 0; i < 3; i += 1) {
+    await recordCall({ workspaceId: s.workspace.id, workloadId: w.id, source: 'routed', requestedModel: REF, servedModel: CHEAP,
+      statusCode: 200, promptTokens: 100, completionTokens: 10, costUsd: 0.0004, request: request(95000 + i, { system: 'Weigh the parcel.' }),
+      response: { choices: [{ finish_reason: 'stop', message: { content: 'two kilos' } }] }, armId: w.routed_arm_id, propensity: 0.98, explored: 0 });
+  }
+  const askModel = async () => ({ json: { choices: [{ message: { content: 'RIGHT' } }], usage: { prompt_tokens: 300, completion_tokens: 2 } } });
+  const r = await gradeWorkload(w, { perArm: 3, budgetUsd: 1, askJev: async () => { throw new Error('no jev here'); }, askModel });
+  assert.equal(r.graded, 3);
+  const rows = await db.prepare('SELECT cost_usd FROM graded_calls WHERE workload_id = ?').all(w.id);
+  // judge/small's catalogue price for the tokens the grader says it used
+  assert.ok(rows.every((x) => Math.abs(Number(x.cost_usd) - (300 * 0.05e-6 + 2 * 0.1e-6)) < 1e-15), JSON.stringify(rows));
+});
+
+test('a call a cascade answered whose provider stated no cost is charged for it, and the balance moves', async () => {
+  const s = await shop();
+  const system = 'Classify the parcel.';
+  const w0 = await workloadFor(s.workspace.id, request(1, { system }));
+  const cascade = { kind: 'cascade', first: { model: CHEAP, recipe: null }, fallback: { model: REF, recipe: null }, threshold: 0.7 };
+  await promote(w0, `cascade:${CHEAP}`, { spec: cascade, rollout: false });
+  const balance = async () => Number((await db.prepare('SELECT balance_usd FROM billing_accounts WHERE workspace_id = ?').get(s.workspace.id)).balance_usd);
+  const before = await balance();
+  noCost.add(CHEAP);
+  try {
+    const r = await send(s.secret, request(2, { system }));
+    assert.equal(r.status, 200);
+    assert.equal(r.served, CHEAP, 'the cheap answer passed its check');
+    assert.equal(r.json.usage.cost, undefined, 'the answer claims no cost its provider never stated');
+    const row = await db.prepare('SELECT cost_usd, charged_usd FROM calls WHERE id = ?').get(r.callId);
+    const cheapAt = 1200 * 0.2e-6 + 40 * 0.6e-6;
+    assert.ok(Number(row.cost_usd) >= cheapAt, `what the cheap answer cost, estimated, and the check: ${row.cost_usd}`);
+    assert.ok(Number(row.charged_usd) > Number(row.cost_usd), 'charged, with our fee');
+    assert.ok(before - await balance() >= Number(row.charged_usd) - 1e-9, 'and the balance moved by it');
+  } finally {
+    noCost.clear();
+  }
 });
 
 test('a strategy served only by the providers it was measured on is switched back or set aside when none of them serves it any more', async () => {

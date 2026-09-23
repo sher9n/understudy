@@ -500,11 +500,14 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
       reading = { agreement: null, cost: 0, judgedBy: 'not read' };
     }
   }
-  const cost = (out?.cost || 0) + (reading.cost || 0);
+  /* What it cost: the background answer as its provider said, or estimated where it said nothing (serveWith
+     never reads a missing cost as nothing), and the reading of it. Charged as optimizing. */
+  const cost = (Number(out?.cost) || 0) + (Number(reading.cost) || 0);
   const row = {
     id: id('shd'), workspace_id: workload.workspace_id, workload_id: workload.id, arm_id: arm.id, call_id: callId,
     agreement: reading.agreement, cost_usd: cost, latency_ms: out ? out.latencyMs ?? Date.now() - started : null, status,
-    detail_json: JSON.stringify({ judgedBy: reading.judgedBy ?? null, escalated: out?.escalated ?? null }), created_at: now(),
+    detail_json: JSON.stringify({ judgedBy: reading.judgedBy ?? null, escalated: out?.escalated ?? null,
+      ...(out?.costEstimated ? { costEstimated: true } : {}) }), created_at: now(),
   };
   await db.prepare(`INSERT INTO shadow_runs (id, workspace_id, workload_id, arm_id, call_id, agreement, cost_usd, latency_ms,
       status, detail_json, created_at) VALUES (@id, @workspace_id, @workload_id, @arm_id, @call_id, @agreement, @cost_usd,

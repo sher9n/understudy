@@ -5,6 +5,7 @@ import { chargeEval, optimizeLeft } from '../billing.js';
 import { jevUsable } from '../jev.js';
 import { structureOf, jevCheck, requestText, answerText } from './check.js';
 import { armsFor } from './arms.js';
+import { costOf } from './cost.js';
 
 /* Reading a few live answers in the background, to know how often each strategy is right.
  *
@@ -72,9 +73,13 @@ export async function gradeOne(body, response, shape, { scope = null, askJev = n
       : await chat({ messages: [{ role: 'system', content: GRADE }, { role: 'user', content: text }], max_tokens: 4, temperature: 0 },
         config.EVAL_JUDGE_MODEL, { pace: true });
     const said = String(json?.choices?.[0]?.message?.content ?? '').trim().toUpperCase();
-    const cost = Number(json?.usage?.cost ?? 0);
+    /* what reading it cost: what the provider said, or estimated where it said nothing (src/learn/cost.js),
+       never nothing, since it is charged to the customer as optimizing */
+    const { cost } = await costOf(json, config.EVAL_JUDGE_MODEL,
+      { messages: [{ role: 'system', content: GRADE }, { role: 'user', content: text }] });
     if (said.startsWith('RIGHT')) return { bad: 0, p: 1, judgedBy: 'llm', cost };
     if (said.startsWith('WRONG')) return { bad: 1, p: 0, judgedBy: 'llm', cost };
+    // a reading nobody can use is not charged to anybody: it is ours
     return null;
   } catch {
     return null;

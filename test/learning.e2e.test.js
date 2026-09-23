@@ -77,6 +77,8 @@ const answerOf = (model, i) => (model === CHEAPER && i % 4 === 1 ? { total: 0, c
 
 // models the provider refuses, to see what an experiment that fails does
 const failing = new Set();
+// models whose answers state no cost
+const noCost = new Set();
 /* Models the provider says are busy: every time (alwaysBusy), or the first time each request reaches
    them and not when it is sent again (busyOnce), with how many requests each model was sent. */
 const busyOnce = new Set();
@@ -106,7 +108,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ id: `gen-${i}`, model: payload.model,
       choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(answerOf(payload.model, i)) } }],
-      usage: { prompt_tokens: 500, completion_tokens: 40, cost: COST[payload.model] ?? 0.001 } }));
+      usage: { prompt_tokens: 500, completion_tokens: 40, ...(noCost.has(payload.model) ? {} : { cost: COST[payload.model] ?? 0.001 }) } }));
   });
 });
 
@@ -709,6 +711,28 @@ test('the review tells the rule how long each record has been gathering, which i
   close((await stateOf(s.workload, { fresh: true })).byId.get(steady.id).ageDays, 2, 0.01, 'since learning began');
   await db.prepare('UPDATE promotions SET created_at = ? WHERE workload_id = ?').run(now() - 60 * 86400000, s.workload.id);
   close((await stateOf(s.workload, { fresh: true })).byId.get(steady.id).ageDays, 40, 0.01, 'since it was first kept, where that is later');
+});
+
+test('a background answer whose provider states no cost is charged as optimizing at an estimate, never as free', async () => {
+  const s = await shop('shadow-cost', { optimize: 'ask', explore: null, switched: false });
+  noCost.add(STEADY);
+  noCost.add(CHEAPER);
+  try {
+    for (let i = 0; i < 6; i += 1) await send(s.secret, request(9500 + i));
+  } finally {
+    noCost.clear();
+  }
+  const rows = await db.prepare('SELECT arm_id, cost_usd, detail_json FROM shadow_runs WHERE workload_id = ?').all(s.workload.id);
+  assert.equal(rows.length, 6, 'every call answered again in the background (the share is 1 here)');
+  const price = { [STEADY]: 500 * 0.4e-6 + 40 * 1e-6, [CHEAPER]: 500 * 0.1e-6 + 40 * 0.3e-6 };
+  const byArm = new Map((await db.prepare('SELECT id, spec_json FROM arms WHERE workload_id = ?').all(s.workload.id))
+    .map((a) => [a.id, JSON.parse(a.spec_json).model]));
+  for (const r of rows) {
+    assert.ok(Math.abs(Number(r.cost_usd) - price[byArm.get(r.arm_id)]) < 1e-15, `${r.cost_usd} for ${byArm.get(r.arm_id)}`);
+    assert.equal(JSON.parse(r.detail_json).costEstimated, true);
+  }
+  const charged = await db.prepare(`SELECT COALESCE(SUM(amount_usd), 0) AS s FROM ledger WHERE workspace_id = ? AND kind = 'eval'`).get(s.workspace.id);
+  assert.ok(Number(charged.s) < 0, 'and charged');
 });
 
 test('evidence is counted in tasks: one forty step task is one piece of evidence, not forty', async () => {
