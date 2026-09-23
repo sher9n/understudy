@@ -178,7 +178,11 @@ export async function switchStory(w) {
   // what background answers on this workload have cost since the switch, which is optimizing too
   const background = (await db.prepare(
     'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM shadow_runs WHERE workload_id = ? AND created_at >= ?').get(w.id, at)).s;
-  const optimizing = withFeeOn(Number(spent) + Number(background), fee);
+  /* and what reading its live answers in the background has cost since the switch (src/learn/grade.js),
+     charged as optimizing like the rest, and left out of the net saving until now */
+  const graded = (await db.prepare(
+    'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM graded_calls WHERE workload_id = ? AND created_at >= ?').get(w.id, at)).s;
+  const optimizing = withFeeOn(Number(spent) + Number(background) + Number(graded), fee);
   const savedSoFar = wouldHave == null ? null : wouldHave - served.paid;
   // how long the switch takes to pay back what finding it cost, at the pace it saves now
   const perDay = projection[0] ? projection[0].saved / 30 : null;
@@ -224,12 +228,13 @@ export async function switchStory(w) {
       saved: savedSoFar == null ? null : round8(savedSoFar),
       // how the original was priced: from the measured cost of the new one, or at list price
       wouldPricedBy: measuredRatio !== null && Number(served.cost) > 0 ? 'measured' : 'list',
-      // and what is left once measuring and background answers are paid for
+      // and what is left once measuring, background answers and reading answers are paid for
       net: savedSoFar == null ? null : round8(savedSoFar - optimizing),
     },
     measuring: {
       spent: round8(withFeeOn(spent, fee)),
       background: round8(withFeeOn(background, fee)),
+      graded: round8(withFeeOn(graded, fee)),
       paybackDays: perDay && perDay > 0 ? Math.ceil(optimizing / perDay) : null,
     },
     projection,

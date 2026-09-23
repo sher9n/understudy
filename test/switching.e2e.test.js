@@ -628,6 +628,29 @@ test('a workload with no cascade is graded as it always was, by Jev, and every s
   assert.ok(per.every((x) => x.by === 'jev'), 'read by Jev, as before');
 });
 
+test('the net saving of a switch counts what reading its answers in the background cost', async () => {
+  const { switchStory } = await import('../src/eval/switch-story.js');
+  const s = await shop();
+  const w0 = await workloadFor(s.workspace.id, request(1, { system: 'Tidy the address.' }));
+  await promote(w0, CHEAP, { spec: { kind: 'model', model: CHEAP, recipe: null }, rollout: false });
+  const w = await load(w0.id);
+  const ids = [];
+  for (let i = 0; i < 10; i += 1) {
+    ids.push(await recordCall({ workspaceId: s.workspace.id, workloadId: w.id, source: 'routed', requestedModel: REF, servedModel: CHEAP,
+      statusCode: 200, promptTokens: 1200, completionTokens: 40, costUsd: 0.0004, chargedUsd: 0.000404, request: request(90000 + i),
+      response: { choices: [{ message: { content: 'ok' } }] }, armId: w.routed_arm_id, propensity: 0.98, explored: 0 }));
+  }
+  const before = await switchStory(w);
+  assert.ok(before.soFar.net !== null, 'priced');
+  assert.equal(before.measuring.graded, 0);
+  await db.prepare(`INSERT INTO graded_calls (call_id, workspace_id, workload_id, arm_id, bad, p, judged_by, cost_usd, created_at)
+      VALUES (?, ?, ?, ?, 0, 1, 'llm', 0.05, ?)`).run(ids[0], s.workspace.id, w.id, w.routed_arm_id, now());
+  const after = await switchStory(w);
+  const withFee = 0.05 * (1 + config.ROUTING_FEE_PCT / 100);
+  assert.ok(Math.abs(after.measuring.graded - withFee) < 1e-9, `${after.measuring.graded}`);
+  assert.ok(Math.abs((before.soFar.net - after.soFar.net) - withFee) < 1e-9, 'the net saving is what is left after reading answers too');
+});
+
 test('a live check always finds a place with Jev, however much background work is waiting', async () => {
   let release = null;
   jevHold = new Promise((r) => { release = r; });
