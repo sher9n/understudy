@@ -19,7 +19,7 @@ export async function adviceFor(workload) {
             percentile_cont(0.95) WITHIN GROUP (ORDER BY completion_tokens) AS p95,
             percentile_cont(0.99) WITHIN GROUP (ORDER BY completion_tokens) AS p99,
             COUNT(*) FILTER (WHERE request_json IS NOT NULL
-              AND (request_json::jsonb ? 'max_tokens' OR request_json::jsonb ? 'max_completion_tokens')) AS capped,
+              AND ((request_json::jsonb -> 'max_tokens') IS NOT NULL OR (request_json::jsonb -> 'max_completion_tokens') IS NOT NULL)) AS capped,
             COUNT(*) FILTER (WHERE request_json IS NOT NULL) AS readable
        FROM calls
       WHERE workload_id = ? AND source IN ('routed', 'trace') AND status_code = 200 AND created_at >= ?

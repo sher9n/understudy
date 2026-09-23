@@ -40,6 +40,9 @@ process.env.JEV_VIA = 'off';
 process.env.TYPESAFE_API_KEY = '';
 process.env.TYPESAFE_BASE = `http://127.0.0.1:${PORT}/typesafe`;
 process.env.ALERTS_ENABLED = 'false';
+// these tests are about what a switch does once it serves every call; the staged rollout has tests of its own
+process.env.ROLLOUT_ENABLED = 'false';
+process.env.DEFAULT_OPTIMIZE_MODE = process.env.DEFAULT_OPTIMIZE_MODE || 'auto';
 // no test here is about speed: a busy machine running every test file at once must not make a model look slow
 process.env.SPEED_SLACK_MS = '5000';
 process.env.REQUEST_LOGS = 'false';

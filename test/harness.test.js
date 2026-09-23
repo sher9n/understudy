@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 const { verdictWith, wilson, callsToClear } = await import('../src/eval/compare.js');
 const { verdictSim, learnRates } = await import('../src/eval/harness.js');
-const { decide } = await import('../src/learn/decide.js');
+const { decide, zSeq, diffRange } = await import('../src/learn/decide.js');
 const { posterior, expectedLoss, zDiff } = await import('../src/learn/bandit.js');
 const { crossFit, simulateCascade, bestOf } = await import('../src/learn/simulate.js');
 
@@ -42,26 +42,49 @@ test('a candidate exactly at the bar clears about one time in twenty, never one 
 
 test('the decision rule: nothing on too little, nothing by default, and the customer\'s model is always the yardstick', () => {
   const rec = (n, s, prior = { mean: 0.97, strength: 4 }) => posterior({ live: [{ ageDays: 0, n, s }] }, { prior, quantiles: false });
-  const serving = { id: 's', fair: rec(300, 291) };
+  const serving = { id: 's', fair: rec(3000, 2910) };
   const base = { id: 'b', fair: rec(20, 20) };
   assert.deepEqual(decide({ serving, base, runners: [], detection: 1 }), [], 'the yardstick has under 30 calls');
   // a runner-up shown as good as what serves, but the yardstick still thin: no promotion
-  const runner = { id: 'r', fair: rec(400, 392), ratio: 0.5, verdict: 'cleared' };
+  const runner = { id: 'r', fair: rec(3000, 2940), ratio: 0.5, verdict: 'cleared' };
   assert.deepEqual(decide({ serving, base, runners: [runner], detection: 1 }), []);
-  // enough yardstick: promoted
-  const d = decide({ serving, base: { id: 'b', fair: rec(120, 116) }, runners: [runner], detection: 1 });
+  // a few hundred calls a side cannot show a runner-up within two points, looked at every hour
+  assert.deepEqual(decide({ serving: { id: 's', fair: rec(300, 291) }, base: { id: 'b', fair: rec(120, 116) },
+    runners: [{ ...runner, fair: rec(400, 392) }], detection: 1 }), [], 'the rule before this promoted here');
+  // enough on every side: promoted
+  const d = decide({ serving, base: { id: 'b', fair: rec(2000, 1940) }, runners: [runner], detection: 1 });
   assert.equal(d[0]?.kind, 'promote');
+  assert.equal(d[0]?.by, 'seen');
   // the same runner-up with nothing ever seen on this workload: live results decide nothing
-  assert.deepEqual(decide({ serving, base: { id: 'b', fair: rec(120, 116) }, runners: [runner], detection: 0 }), []);
+  assert.deepEqual(decide({ serving, base: { id: 'b', fair: rec(2000, 1940) }, runners: [runner], detection: 0 }), []);
   // one that only came close in its measurement is never promoted on live results
-  assert.deepEqual(decide({ serving, base: { id: 'b', fair: rec(120, 116) }, runners: [{ ...runner, verdict: 'review' }], detection: 1 }), []);
+  assert.deepEqual(decide({ serving, base: { id: 'b', fair: rec(2000, 1940) }, runners: [{ ...runner, verdict: 'review' }], detection: 1 }), []);
   // what serves clearly worse than the customer's model: switched back
-  const bad = { id: 's', fair: rec(400, 360) };
-  const r = decide({ serving: bad, base: { id: 'b', fair: rec(150, 146) }, runners: [runner], detection: 1 });
+  const bad = { id: 's', fair: rec(600, 540) };
+  const r = decide({ serving: bad, base: { id: 'b', fair: rec(300, 292) }, runners: [runner], detection: 1 });
   assert.equal(r[0]?.kind, 'revert');
   // a runner-up clearly worse than what serves is set aside
-  const worse = { id: 'w', fair: rec(300, 270), ratio: 0.4, verdict: 'cleared' };
-  assert.equal(decide({ serving, base: { id: 'b', fair: rec(120, 116) }, runners: [worse], detection: 1 })[0]?.kind, 'rest');
+  const worse = { id: 'w', fair: rec(600, 530), ratio: 0.4, verdict: 'cleared' };
+  assert.equal(decide({ serving: { id: 's', fair: rec(900, 873) }, base: { id: 'b', fair: rec(2000, 1940) }, runners: [worse], detection: 1 })[0]?.kind, 'rest');
+  // graded calls decide where nothing is ever seen: a runner-up the grader finds as good, on enough of them
+  const g = (n, bad) => ({ n, bad });
+  const quiet = (id, n, extra = {}) => ({ id, fair: rec(n, n), ...extra });
+  const byGrade = decide({ serving: quiet('s', 3000, { graded: g(1500, 30) }), base: quiet('b', 2000, { graded: g(1500, 30) }),
+    runners: [quiet('r', 3000, { graded: g(1500, 25), ratio: 0.5, verdict: 'cleared' })], detection: 0 });
+  assert.equal(byGrade[0]?.kind, 'promote');
+  assert.equal(byGrade[0]?.by, 'graded');
+  // and what serves, graded clearly worse than the customer's own model, goes back
+  const gradedBad = decide({ serving: quiet('s', 3000, { graded: g(600, 60) }), base: quiet('b', 2000, { graded: g(600, 12) }), runners: [], detection: 0 });
+  assert.equal(gradedBad[0]?.kind, 'revert');
+  assert.equal(gradedBad[0]?.by, 'graded');
+});
+
+test('the ranges hold at every look: about three standard errors, growing slowly', () => {
+  assert.ok(zSeq(300) > 2.9 && zSeq(300) < 3.4, `${zSeq(300)}`);
+  assert.ok(zSeq(30000) > zSeq(300), 'looked at longer, the range is a little wider in standard errors');
+  assert.ok(zSeq(30000) < 4, `${zSeq(30000)}`);
+  const r = diffRange({ a: 970, b: 30 }, { a: 940, b: 60 });
+  assert.ok(r.d < 0 && r.lo < r.d && r.hi > r.d);
 });
 
 test('over a month of hourly looks, equal strategies are almost never switched, and a bad one is caught', () => {
@@ -71,6 +94,9 @@ test('over a month of hourly looks, equal strategies are almost never switched, 
   assert.ok(bad.revert >= 0.7, `a strategy five points worse is switched back ${bad.revert}`);
   const worseRunner = learnRates({ volume: 1000, share: 0.05, rates: { base: 0.97, serving: 0.97, runner: 0.94 } }, { trials: 60 });
   assert.ok(worseRunner.promote <= 0.03, `a runner-up three points worse is promoted ${worseRunner.promote}`);
+  // and one as good is promoted, where there are calls enough to show it
+  const busy = learnRates({ volume: 5000, share: 0.05, rates: { base: 0.97, serving: 0.97, runner: 0.97 } }, { trials: 40 });
+  assert.ok(busy.promote >= 0.6, `an equal runner-up on a busy workload is promoted ${busy.promote}`);
   // failures seen one time in ten: a runner-up five points worse looks nearly equal, and is never promoted
   const blind = learnRates({ volume: 1000, share: 0.05, rates: { base: 0.97, serving: 0.97, runner: 0.92 }, detection: 0.1 }, { trials: 40 });
   assert.equal(blind.promote, 0, `promoted on silence ${blind.promote}`);

@@ -38,6 +38,9 @@ process.env.JOBS_ENABLED = 'false';
 process.env.JEV_VIA = 'off';
 process.env.TYPESAFE_API_KEY = '';
 process.env.ALERTS_ENABLED = 'false';
+// these tests are about what a switch does once it serves every call; the staged rollout has tests of its own
+process.env.ROLLOUT_ENABLED = 'false';
+process.env.DEFAULT_OPTIMIZE_MODE = process.env.DEFAULT_OPTIMIZE_MODE || 'auto';
 // big shares, so a handful of calls shows every path; the arithmetic is the same at 2%
 process.env.EXPLORE_SHARE_NORMAL = '0.5';
 process.env.SHADOW_SHARE = '1';
@@ -148,6 +151,8 @@ async function shop(tag, { optimize = 'auto', explore = 'normal', switched = tru
     await promote(workload, STEADY, { spec: { kind: 'model', model: STEADY, recipe: null }, auto: true });
     // switched two days ago, so the calls written below, an hour old, came after it as they would
     await db.prepare('UPDATE workloads SET promoted_at = ? WHERE id = ?').run(now() - 2 * 86400000, workload.id);
+    // and the record of the switch with it: learning counts calls from the first switch on
+    await db.prepare("UPDATE promotions SET created_at = ? WHERE workload_id = ? AND action = 'promote'").run(now() - 2 * 86400000, workload.id);
     workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id);
   }
   const results = [
@@ -265,15 +270,20 @@ test('experiments stop once the day\'s budget is used, and the call is served as
 
 test('the hourly review moves to a cheaper runner-up once its live calls work as often', async () => {
   const s = await shop('promote');
+  /* A clean call only says something where a failure would have shown: here the customer reports how
+     calls turned out, so a call with nothing reported worked. Without that, clean calls are silence,
+     and live results decide nothing (the next tests, and the harness, hold that). */
+  await saveDef(s.workload.id, { events: [{ event: 'ticket_reopened', means: 'failed' }] });
   /* Sixty clean calls are not enough: after n calls without a failure, the failure rate can still
-     plausibly be about 3/n, 5% at sixty, and the runner-up has to be shown within two points. */
+     plausibly be about 3/n, 5% at sixty, and the runner-up has to be shown within two points at every
+     hourly look, not only at this one. */
   await history(s, STEADY, { n: 300 });
   await history(s, CHEAPER, { n: 60 });
   assert.deepEqual(await reviewWorkload(s.workload), [], 'sixty clean calls: not yet');
   await history(s, CHEAPER, { n: 190 });
   // and never without the customer's own model answering beside it, as the yardstick
   assert.deepEqual(await reviewWorkload(s.workload), [], 'no yardstick calls: not yet');
-  await history(s, REF, { n: 120, yardstick: true });
+  await history(s, REF, { n: 200, yardstick: true });
   const decisions = await reviewWorkload(s.workload);
   assert.deepEqual(decisions.map((d) => d.kind), ['promote']);
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id);
@@ -282,11 +292,20 @@ test('the hourly review moves to a cheaper runner-up once its live calls work as
   assert.equal(promo.to_model, CHEAPER);
   assert.match(promo.reason, /live results/);
   const act = await db.prepare(`SELECT * FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(s.workload.id);
-  assert.match(act.detail, /Switched on its own by live results: its calls worked 100\.0% of 250 calls, against 100\.0% of 300 calls on steady and 100\.0% of 120 calls on gpt-5\.4/);
+  assert.match(act.detail, /Switched on its own by live results: its calls worked 100\.0% of 250 calls, against 100\.0% of 300 calls on steady and 100\.0% of 200 calls on gpt-5\.4/);
   assert.match(act.detail, /costs 75% less/, 'a quarter of the price: 0.05 against 0.2');
   // the readings are kept on each strategy for the page
   const arm = await armOf(s.workload.id, CHEAPER);
   assert.equal(JSON.parse(arm.stats_json).live.calls, 250);
+});
+
+test('clean calls on a workload where nothing is ever seen decide nothing', async () => {
+  const s = await shop('silence');
+  await history(s, STEADY, { n: 300 });
+  await history(s, CHEAPER, { n: 250 });
+  await history(s, REF, { n: 200, yardstick: true });
+  assert.deepEqual(await reviewWorkload(s.workload), [], 'no failure could have shown, so none showing says nothing');
+  assert.equal((await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(s.workload.id)).routed_model, STEADY);
 });
 
 test('the hourly review switches back when what serves works less often than the customer\'s own model', async () => {

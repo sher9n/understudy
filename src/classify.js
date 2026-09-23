@@ -174,6 +174,18 @@ export function workloadNameOf(headers, body) {
   return /[a-z0-9]/i.test(name) ? name : null;
 }
 
+/* Whether a call must be answered by the model it names, whatever the workload was switched to:
+   x-understudy-pin (or x-understudy-no-substitute) set to anything but "0" or "false", or
+   metadata.understudy_pin. For the calls a customer cannot risk on anything else. */
+export function pinnedOf(headers, body) {
+  const h = headers?.['x-understudy-pin'] ?? headers?.['x-understudy-no-substitute'];
+  const v = Array.isArray(h) ? h[0] : h;
+  const meta = body?.metadata && typeof body.metadata === 'object' ? body.metadata.understudy_pin : undefined;
+  const given = v ?? meta;
+  if (given === undefined || given === null) return false;
+  return !['0', 'false', 'no', ''].includes(String(given).trim().toLowerCase());
+}
+
 /** The part of a call that does not vary with the data, hashed exactly. */
 export function structKeyOf(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];

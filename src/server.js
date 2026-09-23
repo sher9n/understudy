@@ -20,6 +20,7 @@ import { revert, watchLive, watchCatalogue } from './eval/promote.js';
 import { onFollowUp, readFollowUp } from './learn/outcomes.js';
 import { onChoose, onServed } from './learn/choose.js';
 import { chooseExplore, afterServed, reviewAll } from './learn/explore.js';
+import { gradeAll } from './learn/grade.js';
 import { ask as askJev, jevUsable } from './jev.js';
 import api from './api.js';
 import v1 from './proxy.js';
@@ -296,7 +297,9 @@ onServed((info) => afterServed(info));
 handle('learn', async () => {
   // the next one is booked first, so one that fails still leaves the next one coming
   await enqueue('learn', {}, { runAfter: now() + 3600000, unique: true });
-  return { ok: true, ...(await reviewAll()) };
+  // a few live answers read first, so the review decides on the newest grades
+  const graded = await gradeAll();
+  return { ok: true, graded: graded.graded, ...(await reviewAll()) };
 });
 
 /** Content ages out; the numbers the charts need do not. */

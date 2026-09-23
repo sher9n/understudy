@@ -31,6 +31,9 @@ process.env.JOBS_ENABLED = 'false';
 process.env.JEV_VIA = 'off';
 process.env.TYPESAFE_API_KEY = '';
 process.env.ALERTS_ENABLED = 'false';
+// these tests are about what a switch does once it serves every call; the staged rollout has tests of its own
+process.env.ROLLOUT_ENABLED = 'false';
+process.env.DEFAULT_OPTIMIZE_MODE = process.env.DEFAULT_OPTIMIZE_MODE || 'auto';
 process.env.RESEND_API_KEY = '';
 process.env.STARTER_CREDIT_USD = '0';
 process.env.REQUEST_LOGS = 'false';

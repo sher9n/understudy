@@ -55,4 +55,7 @@ export async function limitsFor(workspaceId) {
   return { dailyLimit: c.dailyLimit, monthlyLimit: c.monthlyLimit };
 }
 
+/** Forget every workload's call rate, so the next call reads it again (for tests, and after a setting changes). */
+export const forgetHints = () => hintMemo.clear();
+
 export const forgetWorkspace = (workspaceId) => memo.delete(workspaceId);

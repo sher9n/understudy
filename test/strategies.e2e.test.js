@@ -46,6 +46,9 @@ process.env.JOBS_ENABLED = 'false';
 process.env.JEV_VIA = 'openrouter';
 process.env.TYPESAFE_API_KEY = '';
 process.env.ALERTS_ENABLED = 'false';
+// these tests are about what a switch does once it serves every call; the staged rollout has tests of its own
+process.env.ROLLOUT_ENABLED = 'false';
+process.env.DEFAULT_OPTIMIZE_MODE = process.env.DEFAULT_OPTIMIZE_MODE || 'auto';
 // a live check that takes longer than this sends the call on
 process.env.JEV_LIVE_TIMEOUT_MS = '400';
 

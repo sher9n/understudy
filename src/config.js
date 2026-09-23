@@ -175,6 +175,22 @@ export const config = {
      write, so it is only marked where calls come often enough to read it back: at least
      CACHE_HINT_MIN_PER_HOUR an hour, with an instruction of at least CACHE_HINT_MIN_CHARS characters,
      which is about the smallest a provider will cache. */
+  /* A switch starts on a share of the calls and grows while its live calls hold up: the shares it
+     passes through before all of them, the hours it spends at each at least, and the calls it has to
+     answer at each first. A quiet workload moves on after a day with ROLLOUT_QUIET_CALLS. A switch
+     whose calls fail more often than what served before it, by more than ROLLOUT_ERROR_MARGIN, or whose
+     answers are shown worse, is rolled back on its own. */
+  ROLLOUT_ENABLED: bool('ROLLOUT_ENABLED', true),
+  ROLLOUT_STAGES: str('ROLLOUT_STAGES', '0.05,0.25').split(',').map(Number).filter((x) => x > 0 && x < 1),
+  ROLLOUT_STAGE_HOURS: str('ROLLOUT_STAGE_HOURS', '2,12').split(',').map(Number).filter((x) => x >= 0),
+  ROLLOUT_MIN_CALLS: num('ROLLOUT_MIN_CALLS', 30),
+  ROLLOUT_QUIET_CALLS: num('ROLLOUT_QUIET_CALLS', 10),
+  ROLLOUT_ERROR_MARGIN: num('ROLLOUT_ERROR_MARGIN', 0.01),
+  /* Reading a few live answers in the background (src/learn/grade.js): how many of each strategy's
+     fair calls a day, and the most it may spend on one workload a day. */
+  GRADE_ENABLED: bool('GRADE_ENABLED', true),
+  GRADE_PER_ARM_PER_DAY: num('GRADE_PER_ARM_PER_DAY', 20),
+  GRADE_BUDGET_USD_PER_DAY: num('GRADE_BUDGET_USD_PER_DAY', 0.25),
   /* Emails about a workspace's own events (src/notify.js): on, and at most this many a day. */
   NOTIFY_ENABLED: bool('NOTIFY_ENABLED', true),
   NOTIFY_MAX_PER_DAY: num('NOTIFY_MAX_PER_DAY', 10),
@@ -245,6 +261,9 @@ export const config = {
   JEV_MODEL: str('JEV_MODEL', 'jev-latest'),
   JEV_PRICE_PER_MTOK: num('JEV_PRICE_PER_MTOK', 0.042),
   JEV_CONCURRENCY: num('JEV_CONCURRENCY', 12),
+  /* Of those, how many only a question a live call is waiting on may take: measuring, grading and
+     reading follow-ups can never fill every place, so a cascade's live check always has one. */
+  JEV_LIVE_RESERVED: num('JEV_LIVE_RESERVED', 4),
   JEV_TIMEOUT_MS: num('JEV_TIMEOUT_MS', 20000),
   /* A cascade's check on a live call: one try, this long at most, and never a wait behind other
      questions. A check that does not come back in time sends the call on to the customer's own
@@ -279,6 +298,9 @@ export const config = {
      tolerance (0.02 is two calls in a hundred). */
   LEARN_MIN_CALLS: num('LEARN_MIN_CALLS', 30),
   LEARN_CONFIDENCE: num('LEARN_CONFIDENCE', 0.95),
+  /* The chance any one live decision is wrong, over every hourly look it will ever get: each is made
+     on a range that holds at every look at once (src/learn/decide.js), not at one look chosen ahead. */
+  LEARN_ALPHA: num('LEARN_ALPHA', 0.05),
   LEARN_TOLERANCE: num('LEARN_TOLERANCE', 0.02),
   /* Live results only decide anything where outcomes are seen often enough for "worked" to mean
      something: at least this share of calls has ever shown a signal, or the customer reports results. */
@@ -286,7 +308,10 @@ export const config = {
   /* In "normal" mode the experiment share grows on a quiet workload, up to this, so that evidence
      arrives within a half-life rather than in a year: the yardstick needs about eight calls a day. */
   EXPLORE_SHARE_MAX: num('EXPLORE_SHARE_MAX', 0.1),
-  EXPLORE_YARDSTICK_PER_DAY: num('EXPLORE_YARDSTICK_PER_DAY', 8),
+  EXPLORE_YARDSTICK_PER_DAY: num('EXPLORE_YARDSTICK_PER_DAY', 24),
+  /* A day's experiments may cost up to this share of what the switch saves in a day, where that is
+     more than EXPLORE_BUDGET_USD: keeping a switch honest is worth more on a workload that saves more. */
+  EXPLORE_BUDGET_SHARE: num('EXPLORE_BUDGET_SHARE', 0.1),
 
   /* How long what we learn stays true. Models improve, providers are added and dropped,
      prices and speeds move, so every fact is read again once it is this old. */

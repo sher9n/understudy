@@ -9,7 +9,7 @@ import { chat, chatStream, priceCall, UpstreamError, reasonOf, hintApplies } fro
 import { gateRouting, chargeCall, grantStarterCredit, hold, release, worstCaseTokens, withFee } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
-import { workloadNameOf } from './classify.js';
+import { workloadNameOf, pinnedOf } from './classify.js';
 import { report } from './learn/outcomes.js';
 import { chooseStrategy, served as noteServed } from './learn/choose.js';
 import { serveWith, writeAsStream } from './learn/serve.js';
@@ -88,7 +88,7 @@ export async function canonicalModel(name) {
 
 /* Everything a routed call needs before it is sent, or the reason it cannot be, so the
    streaming path, the ordinary path and Connect's test call all answer the same way. */
-async function prepare(wsId, body, { classify = true, name = null } = {}) {
+async function prepare(wsId, body, { classify = true, name = null, pinned = false } = {}) {
   const no = (status, message, type) => ({ error: { status, json: { error: { message, type } } } });
   if (!Array.isArray(body.messages) || !body.messages.length) {
     return no(400, '"messages" is required.', 'invalid_request_error');
@@ -112,7 +112,8 @@ async function prepare(wsId, body, { classify = true, name = null } = {}) {
   /* The strategy that serves this call: the one the workload was switched to (a model asked the
      way it was measured, or a cascade, or a pick made call by call), or, now and then and within
      the workload's limits, one being tried. None, and the call goes to the model it asked for. */
-  const strategy = workload ? await chooseStrategy(workload) : null;
+  // a pinned call is answered by the model it names: no switch, no experiment
+  const strategy = workload && !pinned ? await chooseStrategy(workload, { body }) : null;
   const lead = strategy ? leadModel(strategy.spec) : null;
   const served = lead?.model || requested;
   if (!served) return no(400, '"model" is required.', 'invalid_request_error');
@@ -255,8 +256,8 @@ async function settle(args) {
   }
 }
 
-export async function routeOnce(wsId, body, { source = 'routed', classify = true, ref = null, name = null } = {}) {
-  const ready = await prepare(wsId, body, { classify, name });
+export async function routeOnce(wsId, body, { source = 'routed', classify = true, ref = null, name = null, pinned = false } = {}) {
+  const ready = await prepare(wsId, body, { classify, name, pinned });
   if (ready.error) {
     if (source === 'routed') await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return { ok: false, status: ready.error.status, json: ready.error.json };
@@ -311,7 +312,7 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
       decision: decisionOf(strategy, strategy && strategy.spec.kind !== 'model' ? out : null), holdId: h.holdId,
       cacheHint: ready.cacheHint && (!strategy || strategy.spec.kind === 'model') });
     return { ok: true, status: 200, json: out.json, served: out.served, requested, callId,
-      latencyMs: out.latencyMs, costUsd: out.cost };
+      latencyMs: out.latencyMs, costUsd: out.cost, workload: workload?.slug ?? null };
   }
   await release(h.holdId).catch(() => {});
   return { ok: false, status: 502, json: { error: { message: 'The provider could not be reached.' } }, callId };
@@ -325,12 +326,17 @@ v1.post('/chat/completions', async (req, res) => {
   const ref = refOf(req.headers, body);
   // the workload the customer says this call is, if they name their jobs
   const name = workloadNameOf(req.headers, body);
+  // and whether it must be answered by the model it names
+  const pinned = pinnedOf(req.headers, body);
   if (!body.stream) {
-    const out = await routeOnce(wsId, body, { ref, name });
+    const out = await routeOnce(wsId, body, { ref, name, pinned });
     if (out.callId) res.setHeader('x-understudy-call-id', out.callId);
+    // which model answered, and which workload the call joined, for the customer's own logs
+    if (out.served) res.setHeader('x-understudy-served-model', out.served);
+    if (out.workload) res.setHeader('x-understudy-workload', out.workload);
     return res.status(out.status).json(out.json);
   }
-  const ready = await prepare(wsId, body, { name });
+  const ready = await prepare(wsId, body, { name, pinned });
   if (ready.error) {
     await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return res.status(ready.error.status).json(ready.error.json);
@@ -390,6 +396,8 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     }
     res.status(200);
     res.setHeader('x-understudy-call-id', callId);
+    res.setHeader('x-understudy-served-model', out.served);
+    if (workload?.slug) res.setHeader('x-understudy-workload', workload.slug);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     writeAsStream(res, out.json);
@@ -415,6 +423,8 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
   }
   res.status(200);
   res.setHeader('x-understudy-call-id', callId);
+  res.setHeader('x-understudy-served-model', served);
+  if (workload?.slug) res.setHeader('x-understudy-workload', workload.slug);
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');

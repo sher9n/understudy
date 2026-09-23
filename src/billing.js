@@ -259,14 +259,15 @@ export async function gateEval(workspaceId, { estimatedUsd = 0 } = {}) {
   };
 }
 
-/* What this workspace spent on optimizing over the last thirty days, with our fee: measurements and
-   background answers, which are the two things charged as optimizing. */
+/* What this workspace spent on optimizing over the last thirty days, with our fee: measurements,
+   background answers and answers read in the background, the three things charged as optimizing. */
 export async function optimizeSpent(workspaceId, days = 30) {
   const since = now() - days * 86400000;
   const r = await db.prepare(
     `SELECT (SELECT COALESCE(SUM(spend_usd), 0) FROM eval_runs WHERE workspace_id = ? AND created_at >= ?)
-          + (SELECT COALESCE(SUM(cost_usd), 0) FROM shadow_runs WHERE workspace_id = ? AND created_at >= ?) AS spent`)
-    .get(workspaceId, since, workspaceId, since);
+          + (SELECT COALESCE(SUM(cost_usd), 0) FROM shadow_runs WHERE workspace_id = ? AND created_at >= ?)
+          + (SELECT COALESCE(SUM(cost_usd), 0) FROM graded_calls WHERE workspace_id = ? AND created_at >= ?) AS spent`)
+    .get(workspaceId, since, workspaceId, since, workspaceId, since);
   return round8(Number(r?.spent || 0) * (1 + config.ROUTING_FEE_PCT / 100));
 }
 

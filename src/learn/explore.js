@@ -4,7 +4,9 @@ import { addActivity, track } from '../traffic.js';
 import { chargeEval } from '../billing.js';
 import { extract, disagreement, structuredCompare, proseText } from '../eval/compare.js';
 import { judgeBarPair } from '../eval/judge.js';
-import { promote, revert, everReverted, keyOfSpec } from '../eval/promote.js';
+import { promote, revert, everReverted, keyOfSpec, rollBack } from '../eval/promote.js';
+import { diffRange } from './decide.js';
+import { notify } from '../notify.js';
 import { upsertArm, armsFor, setStatus, referenceSpec, armKey, specOfResult, labelOf } from './arms.js';
 import { posterior, explorePlan, pickFrom, thompsonShares } from './bandit.js';
 import { decide } from './decide.js';
@@ -40,19 +42,24 @@ const pctOf = (x) => (x === null || x === undefined ? 'no' : `${(x * 100).toFixe
  * In "normal" mode the share grows on a quiet workload, so the customer's own model answers about
  * eight calls a day as the yardstick whatever the volume; "careful" stays at its small share.
  */
-export function exploreOf(workload, { perDay = null } = {}) {
+export function exploreOf(workload, { perDay = null, dailySaving = null } = {}) {
   const chosen = EXPLORE_MODES.includes(workload?.explore_mode) ? workload.explore_mode : null;
   const mode = chosen || (workload?.optimize_mode === 'ask' ? 'shadow' : 'careful');
   let share = mode === 'normal' ? config.EXPLORE_SHARE_NORMAL
     : mode === 'careful' ? config.EXPLORE_SHARE_CAREFUL
       : mode === 'shadow' ? config.SHADOW_SHARE : 0;
-  if (mode === 'normal' && perDay > 0) {
+  /* The customer's own model answers enough calls a day, as the yardstick, for a switch that slipped
+     to be caught within days rather than months: the share grows on a quiet workload, careful or
+     normal, up to EXPLORE_SHARE_MAX. */
+  if ((mode === 'normal' || mode === 'careful') && perDay > 0) {
     share = Math.max(share, Math.min(config.EXPLORE_SHARE_MAX, (2 * config.EXPLORE_YARDSTICK_PER_DAY) / perDay));
   }
   const budget = workload?.explore_budget_usd;
+  // what keeping the switch honest is worth: a share of what it saves a day, never less than the default
+  const worth = Number(dailySaving) > 0 ? config.EXPLORE_BUDGET_SHARE * Number(dailySaving) : 0;
   return {
     mode, chosen: !!chosen, share,
-    budgetUsd: budget === null || budget === undefined ? config.EXPLORE_BUDGET_USD : Number(budget),
+    budgetUsd: budget === null || budget === undefined ? Math.max(config.EXPLORE_BUDGET_USD, worth) : Number(budget),
     live: mode === 'careful' || mode === 'normal',
   };
 }
@@ -124,10 +131,25 @@ async function readState(workload) {
     `SELECT COUNT(*) AS n, COUNT(reward) AS known FROM calls
       WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND created_at < ? AND ${COUNTED} AND ${READABLE}`)
     .get(workload.id, since, settledAt);
-  const detection = Number(seenRow?.n) ? Number(seenRow.known) / Number(seenRow.n) : 0;
+  const knownShare = Number(seenRow?.n) ? Number(seenRow.known) / Number(seenRow.n) : 0;
   const def = await db.prepare('SELECT events_json FROM outcome_defs WHERE workload_id = ?').get(workload.id);
   let hasEvents = false;
   try { hasEvents = JSON.parse(def?.events_json || '[]').length > 0; } catch { hasEvents = false; }
+  /* What the grader found on each strategy's fair calls (src/learn/grade.js), and how many of the
+     answers it found wrong were also seen to fail in the traffic: that share is how often a failure is
+     seen at all. Until the grader has found a few wrong answers, the share of calls that carried any
+     signal stands in for it, as it always has. */
+  const gradedRows = await db.prepare(
+    `SELECT g.arm_id, COUNT(*) AS n, SUM(g.bad) AS bad,
+            SUM(CASE WHEN g.bad = 1 AND (c.status_code <> 200 OR c.reward < 0.5) THEN 1 ELSE 0 END) AS seen_bad
+       FROM graded_calls g JOIN calls c ON c.id = g.call_id
+      WHERE g.workload_id = ? AND c.created_at >= ? AND c.created_at < ?
+      GROUP BY g.arm_id`).all(workload.id, since, settledAt);
+  const graded = new Map(gradedRows.map((r) => [r.arm_id, { n: Number(r.n), bad: Number(r.bad) }]));
+  const gradedBad = gradedRows.reduce((a, r) => a + Number(r.bad), 0);
+  const seenBad = gradedRows.reduce((a, r) => a + Number(r.seen_bad), 0);
+  const gradedDetection = gradedBad >= 10 ? (seenBad + 1) / (gradedBad + 5) : null;
+  const detection = gradedDetection ?? knownShare;
   // the volume, for sizing experiments and saying how long evidence will take
   const vol = await db.prepare(`SELECT COUNT(*) AS n, MIN(created_at) AS first FROM calls
       WHERE workload_id = ? AND source = 'routed' AND created_at >= ?`).get(workload.id, t - 7 * DAY);
@@ -181,17 +203,34 @@ async function readState(workload) {
      model keeps its record across switches: it is the same yardstick throughout. */
   const began = Number((await db.prepare(
     `SELECT MIN(created_at) AS at FROM promotions WHERE workload_id = ? AND action = 'promote'`).get(workload.id))?.at) || 0;
+  /* Each call is weighted by one over the chance it had of being served that way, so a strategy that
+     was given more of the calls in some hours and fewer in others is read over the traffic as a whole,
+     not over the hours it happened to get more of. The record then counts the calls the weights are
+     worth (fewer than the calls, where the chances varied). */
   const fairRows = began ? await db.prepare(
     `SELECT arm_id, FLOOR((? - created_at) / 86400000.0) AS age, COUNT(*) AS n,
-            SUM(CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) AS s
+            SUM(CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) AS s,
+            SUM(1.0 / GREATEST(COALESCE(propensity, 1), 0.001)) AS w,
+            SUM(1.0 / POWER(GREATEST(COALESCE(propensity, 1), 0.001), 2)) AS w2,
+            SUM((CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) / GREATEST(COALESCE(propensity, 1), 0.001)) AS ws,
+            COALESCE(SUM(cost_usd), 0) AS cost
        FROM calls
       WHERE workload_id = ? AND source = 'routed' AND arm_id IS NOT NULL AND created_at >= ? AND created_at < ?
         AND ${COUNTED} AND ${READABLE} AND (explored = 1 OR propensity < 1)
       GROUP BY 1, 2`).all(t, workload.id, Math.max(began, since), settledAt) : [];
   const fair = new Map();
+  const fairCost = new Map();
   for (const r of fairRows) {
     if (!fair.has(r.arm_id)) fair.set(r.arm_id, []);
-    fair.get(r.arm_id).push({ ageDays: Number(r.age), n: Number(r.n), s: Number(r.s) });
+    const w = Number(r.w);
+    // rounded, so equal chances count every call exactly rather than 249.9999
+    const nEff = w > 0 && Number(r.w2) > 0 ? Math.min(Number(r.n), Math.round(((w * w) / Number(r.w2)) * 1000) / 1000) : Number(r.n);
+    const rate = w > 0 ? Number(r.ws) / w : (Number(r.n) ? Number(r.s) / Number(r.n) : 0);
+    fair.get(r.arm_id).push({ ageDays: Number(r.age), n: nEff, s: Math.max(0, Math.min(nEff, rate * nEff)) });
+    const c = fairCost.get(r.arm_id) || { n: 0, cost: 0 };
+    c.n += Number(r.n);
+    c.cost += Number(r.cost);
+    fairCost.set(r.arm_id, c);
   }
   const shadowRows = await db.prepare(
     `SELECT arm_id, FLOOR((? - created_at) / 86400000.0) AS age, COUNT(*) AS n, SUM(agreement) AS s,
@@ -216,9 +255,20 @@ async function readState(workload) {
   };
   // the fair record counts only calls that were used: background answers are a stand-in, kept apart
   const fairOpts = { ...opts, surrogateWeight: 0 };
+  /* What a strategy costs a call against the customer's own model, from calls each answered by chance
+     in the same hours: a cascade that sends more calls on than it did when measured costs more than its
+     measurement said, and a promotion or an experiment's price should know. */
+  const baseCost = baselineArm ? fairCost.get(baselineArm.id) : null;
+  const liveRatioOf = (a) => {
+    const c = fairCost.get(a.id);
+    if (!c || !baseCost || c.n < 50 || baseCost.n < 50 || !(baseCost.cost > 0)) return null;
+    return (c.cost / c.n) / (baseCost.cost / baseCost.n);
+  };
   const record = (a) => ({
     ...a,
-    ratio: ratioOf(a),
+    graded: graded.get(a.id) || null,
+    liveRatio: a.key === baseKey ? 1 : liveRatioOf(a),
+    ratio: a.key === baseKey ? 1 : (liveRatioOf(a) ?? ratioOf(a)),
     post: posterior({ live: live.get(a.id) || [], shadow: shadow.get(a.id) || [] }, opts),
     fair: posterior({ live: fair.get(a.id) || [] }, fairOpts),
     same: same.get(a.id) || 0,
@@ -236,6 +286,15 @@ async function readState(workload) {
       failed: tally.get('baseline')?.failed ?? 0, known: tally.get('baseline')?.known ?? 0,
     };
   const serving = workload.routed_arm_id ? recById.get(workload.routed_arm_id) || null : null;
+  /* What the switch saves a day: the day's calls, at what a call on the customer's own model costs,
+     less what they cost on what serves. For sizing what keeping it honest may spend. */
+  const dailySavingOf = () => {
+    const sc = serving ? fairCost.get(serving.id) : null;
+    const r = serving?.ratio;
+    if (!sc || !(sc.n > 0) || !(r > 0) || r >= 1) return null;
+    const perCall = sc.cost / sc.n;
+    return perDay * (perCall / r - perCall);
+  };
 
   /* A switch made before costs were kept on its strategy learns its cost from the measurement it
      rests on. Without one, nothing is tried on the workload: an experiment could be neither priced
@@ -283,7 +342,8 @@ async function readState(workload) {
   // the workspace's own ceiling on optimizing, if it set one: nothing is tried past it
   const budgetLeft = await optimizeLeft(workload.workspace_id);
   return { arms: recs, byId: recById, serving, baseline, prior, extraToday: extra, dayStart, at: t,
-    detection, hasEvents, settleMs, perDay, budgetLeft };
+    detection, detectionFrom: gradedDetection !== null ? 'graded' : 'signals', hasEvents, settleMs, perDay, budgetLeft,
+    dailySaving: dailySavingOf() };
 }
 
 /* The runners-up worth trying: ones the last measurement found inside the bar, still offered, and
@@ -299,7 +359,7 @@ const cheaperThan = (st, ratio) => (ratio === null || ratio === undefined ? []
  */
 export async function chooseExplore(workload, servingArm, { rng = Math.random } = {}) {
   const st = peekState(workload);
-  const s = exploreOf(workload, { perDay: st?.perDay ?? null });
+  const s = exploreOf(workload, { perDay: st?.perDay ?? null, dailySaving: st?.dailySaving ?? null });
   if (!s.live || !servingArm || s.share <= 0) return null;
   if (!st || st.extraToday >= s.budgetUsd || spentOut(st)) return null;
   // until what serves has a known cost, nothing is tried (see readState)
@@ -447,10 +507,125 @@ export function readingOf(a) {
   const p = a.post;
   return {
     live: { mean: p.mean, lo: p.lo, hi: p.hi, calls: p.nLive, rate: p.liveRate, failed: a.failed, known: a.known },
+    // answers read in the background, and how many were right
+    graded: a.graded ? { calls: a.graded.n, right: a.graded.n - a.graded.bad } : null,
+    // what it costs a call against the customer's own model, from the live calls, where there are enough
+    liveRatio: a.liveRatio ?? null,
     // background answers: how many there were, how many were the same answer, and how close they were on average
     shadow: { calls: p.nShadow, same: a.same ?? 0, rate: p.shadowRate },
     readAt: now(),
   };
+}
+
+/* A switch in progress, read again: rolled back when its calls do clearly worse than what served
+ * before it, otherwise given a larger share once it has spent long enough and answered enough calls
+ * at the share it has. Only calls since the switch count, each served by chance, so the two sides
+ * answered calls of the same hours. Every comparison is a range that holds at every hourly look
+ * (src/learn/decide.js), so a rollback is never chance.
+ *
+ * Three things roll it back: more of its calls failing outright (refused, timed out, sent on to the
+ * customer's own model) by more than ROLLOUT_ERROR_MARGIN; more of its answers seen to fail, where
+ * failures are seen; more of its answers found wrong by the grader. */
+export async function reviewRollout(workload, st, { rollBackFn = rollBack } = {}) {
+  if (workload.rollout_share === null || workload.rollout_share === undefined || !workload.routed_arm_id) return null;
+  const stage = Number(workload.rollout_stage ?? 0);
+  const stageAt = Number(workload.rollout_started_at ?? workload.promoted_at ?? now());
+  const since = Number(workload.promoted_at ?? stageAt);
+  const newId = workload.routed_arm_id;
+  const control = workload.rollout_from_arm_id ? st.byId.get(workload.rollout_from_arm_id) : st.baseline;
+  const controlId = control?.virtual ? null : control?.id ?? null;
+  const rows = await db.prepare(
+    `SELECT arm_id, COUNT(*) AS n,
+            SUM(CASE WHEN status_code = 200 AND (check_json IS NULL OR check_json NOT LIKE '%"by":"fell back"%') THEN 0 ELSE 1 END) AS failed,
+            SUM(CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) AS worked,
+            COUNT(*) FILTER (WHERE created_at >= ?) AS at_stage
+       FROM calls WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND propensity < 1
+        AND arm_id = ANY(?::text[]) GROUP BY arm_id`)
+    .all(stageAt, workload.id, since, [newId, controlId].filter(Boolean));
+  const of = (id) => rows.find((r) => r.arm_id === id) || { n: 0, failed: 0, worked: 0, at_stage: 0 };
+  const a = of(newId);
+  const b = controlId ? of(controlId) : { n: 0, failed: 0, worked: 0, at_stage: 0 };
+  const rec = (n, bad) => ({ a: Number(n) - Number(bad) + 0.5, b: Number(bad) + 0.5 });
+  const label = st.serving?.label || 'the new strategy';
+  const beforeLabel = control?.label || `${short(workload.reference_model)} (yours)`;
+  const minEach = config.LEARN_MIN_CALLS;
+  const opts = { alpha: config.LEARN_ALPHA / 2 };
+  let breach = null;
+  if (Number(a.n) >= minEach && Number(b.n) >= minEach) {
+    // failing outright: refused, timed out, sent on
+    const e = diffRange(rec(a.n, a.failed), rec(b.n, b.failed), opts);
+    if (e.lo > config.ROLLOUT_ERROR_MARGIN) {
+      breach = `${(Number(a.failed) / Number(a.n) * 100).toFixed(1)}% of its ${a.n} calls failed, against `
+        + `${(Number(b.failed) / Number(b.n) * 100).toFixed(1)}% of ${b.n} on ${beforeLabel}`;
+    }
+    // answers seen to fail, where failures are seen
+    const seen = st.hasEvents ? 1 : st.detection;
+    if (!breach && (st.hasEvents || seen >= config.LEARN_MIN_DETECTION)) {
+      const w = diffRange(rec(a.n, Number(a.n) - Number(a.worked)), rec(b.n, Number(b.n) - Number(b.worked)), opts);
+      if (w.lo > (config.LEARN_TOLERANCE * Math.max(seen, config.LEARN_MIN_DETECTION)) / 2) {
+        breach = `its calls worked ${(Number(a.worked) / Number(a.n) * 100).toFixed(1)}% of ${a.n}, against `
+          + `${(Number(b.worked) / Number(b.n) * 100).toFixed(1)}% of ${b.n} on ${beforeLabel}`;
+      }
+    }
+  }
+  // answers the grader found wrong
+  if (!breach) {
+    const g = await db.prepare(
+      `SELECT g.arm_id, COUNT(*) AS n, SUM(g.bad) AS bad FROM graded_calls g JOIN calls c ON c.id = g.call_id
+        WHERE g.workload_id = ? AND c.created_at >= ? AND g.arm_id = ANY(?::text[]) GROUP BY g.arm_id`)
+      .all(workload.id, since, [newId, controlId].filter(Boolean));
+    const ga = g.find((r) => r.arm_id === newId);
+    const gb = g.find((r) => r.arm_id === controlId);
+    if (ga && gb && Number(ga.n) >= 20 && Number(gb.n) >= 20) {
+      const r = diffRange(rec(ga.n, ga.bad), rec(gb.n, gb.bad), opts);
+      if (r.lo > config.LEARN_TOLERANCE / 2) {
+        breach = `answers read in the background were right ${Number(ga.n) - Number(ga.bad)} of ${ga.n}, against `
+          + `${Number(gb.n) - Number(gb.bad)} of ${gb.n} on ${beforeLabel}`;
+      }
+    }
+  }
+  if (breach) {
+    const reason = `While ${label} was taking over a share of the calls, ${breach}. Switched back to ${beforeLabel}.`;
+    const r = await rollBackFn(workload, reason);
+    return r?.ok ? { kind: 'rollback', reason } : null;
+  }
+  // long enough, and enough calls, at this share: the next one
+  const hours = (now() - stageAt) / 3600000;
+  const needHours = config.ROLLOUT_STAGE_HOURS[stage] ?? config.ROLLOUT_STAGE_HOURS[config.ROLLOUT_STAGE_HOURS.length - 1] ?? 0;
+  const atStage = Number(a.at_stage);
+  const ready = hours >= needHours && (atStage >= config.ROLLOUT_MIN_CALLS || (hours >= 24 && atStage >= config.ROLLOUT_QUIET_CALLS));
+  if (!ready) return null;
+  const stages = config.ROLLOUT_STAGES;
+  if (stage + 1 < stages.length) {
+    const share = stages[stage + 1];
+    const moved = await db.prepare(`UPDATE workloads SET rollout_share = ?, rollout_stage = ?, rollout_started_at = ?, updated_at = ?
+        WHERE id = ? AND routed_arm_id = ? AND rollout_stage = ?`).run(share, stage + 1, now(), now(), workload.id, newId, stage);
+    if (!moved.changes) return null;
+    await addActivity(workload.workspace_id, {
+      kind: 'ok', title: `${label} now answers ${Math.round(share * 100)}% of ${workload.slug}'s calls`,
+      detail: `Its ${a.n} calls so far held up against ${beforeLabel}, so it takes more of them.`,
+      workloadId: workload.id,
+    });
+    forgetState(workload.id);
+    return { kind: 'advance', share };
+  }
+  const done = await db.prepare(`UPDATE workloads SET rollout_share = NULL, rollout_stage = NULL, rollout_started_at = NULL,
+      rollout_from_arm_id = NULL, updated_at = ? WHERE id = ? AND routed_arm_id = ? AND rollout_stage = ?`)
+    .run(now(), workload.id, newId, stage);
+  if (!done.changes) return null;
+  await addActivity(workload.workspace_id, {
+    kind: 'ok', title: `${label} now answers all of ${workload.slug}'s calls`,
+    detail: `Its ${a.n} calls since the switch held up against ${beforeLabel} at every share.`,
+    workloadId: workload.id,
+  });
+  await notify(workload.workspace_id, 'switched', `${workload.id}:${newId}:all`, {
+    title: `${workload.slug} now runs fully on ${label}`,
+    lines: [`It took over step by step, and its ${a.n} live calls held up against ${beforeLabel} at every step.`,
+      'You can switch it back at any time from the workload page.'],
+    path: `/workloads/${workload.id}`, linkText: 'See the switch',
+  });
+  forgetState(workload.id);
+  return { kind: 'complete' };
 }
 
 /**
@@ -463,34 +638,49 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
   const workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(given.id);
   if (!workload) return [];
   const st = await stateOf(workload, { fresh: true });
-  const s = exploreOf(workload, { perDay: st.perDay });
+  const s = exploreOf(workload, { perDay: st.perDay, dailySaving: st.dailySaving });
   for (const a of st.arms) {
     const prev = a.stats || {};
-    await db.prepare('UPDATE arms SET stats_json = ? WHERE id = ?').run(JSON.stringify({ ...prev, ...readingOf(a) }), a.id);
+    const reading = readingOf(a);
+    await db.prepare('UPDATE arms SET stats_json = ? WHERE id = ?')
+      .run(JSON.stringify({ ...prev, ...reading, liveRatio: reading.liveRatio ?? prev.liveRatio ?? null }), a.id);
+  }
+  // a switch still taking over is only ever grown or rolled back: one change at a time
+  if (workload.rollout_share !== null && workload.rollout_share !== undefined) {
+    const r = await reviewRollout(workload, st);
+    return r ? [r] : [];
   }
   const decisions = [];
   const min = config.LEARN_MIN_CALLS;
   const ref = workload.reference_model;
   const serving = st.serving;
   const base = st.baseline;
-  const said = (x) => `${pctOf(x.fair.liveRate)} of ${x.fair.nLive} calls`;
+  const said = (x) => `${pctOf(x.fair.liveRate)} of ${Math.round(x.fair.nLive)} calls`;
+  // what the grader found, for a decision it made
+  const read = (x) => (x.graded ? `${x.graded.n - x.graded.bad} of ${x.graded.n} answers right` : 'no answers read');
+  const why = (d, a, b, bLabel) => (d.by === 'graded'
+    ? `read in the background, ${read(a)} against ${read(b)} on ${bLabel}`
+    : `calls worked ${said(a)}, against ${said(b)} on ${bLabel}`);
 
   /* Every decision is made by one pure rule (src/learn/decide.js) on the fair record: calls since
      learning began, served by chance in matched hours, with time for their outcomes to arrive. The
      rule's false-switch rates are measured by the harness (scripts/harness.mjs). */
   if (serving && serving.ratio !== null) {
-    const runners = cheaperThan(st, serving.ratio).map((a) => ({ id: a.id, fair: a.fair, ratio: a.ratio, verdict: a.offline?.verdict ?? 'cleared' }));
-    const ruling = decide({ serving: { id: serving.id, fair: serving.fair }, base: { id: base.id, fair: base.fair }, runners,
-      detection: st.detection, hasEvents: st.hasEvents },
-    { minCalls: config.LEARN_MIN_CALLS, tolerance: config.LEARN_TOLERANCE, minDetection: config.LEARN_MIN_DETECTION });
+    const runners = cheaperThan(st, serving.ratio).map((a) => ({ id: a.id, fair: a.fair, graded: a.graded, ratio: a.ratio, verdict: a.offline?.verdict ?? 'cleared' }));
+    const ruling = decide({ serving: { id: serving.id, fair: serving.fair, graded: serving.graded }, base: { id: base.id, fair: base.fair, graded: base.graded },
+      runners, detection: st.detection, hasEvents: st.hasEvents },
+    { minCalls: config.LEARN_MIN_CALLS, tolerance: config.LEARN_TOLERANCE, minDetection: config.LEARN_MIN_DETECTION, alpha: config.LEARN_ALPHA });
     for (const d of ruling) {
       if (d.kind === 'revert') {
-        const reason = `Live results: since the switch, calls on ${serving.label} worked ${said(serving)}, `
-          + `against ${said(base)} on ${short(ref)} answering beside it. Switched back to ${ref}.`;
+        const reason = d.by === 'graded'
+          ? `Live results: since the switch, answers on ${serving.label} read in the background were right ${read(serving)}, `
+            + `against ${read(base)} on ${short(ref)} answering beside it. Switched back to ${ref}.`
+          : `Live results: since the switch, calls on ${serving.label} worked ${said(serving)}, `
+            + `against ${said(base)} on ${short(ref)} answering beside it. Switched back to ${ref}.`;
         const r = await revertFn(workload, { auto: true, soft: true, reason });
         if (r?.ok) {
           forgetState(workload.id);
-          decisions.push({ kind: 'revert', armId: serving.id, loss: d.loss });
+          decisions.push({ kind: 'revert', armId: serving.id, by: d.by });
           return decisions;
         }
         continue;
@@ -502,10 +692,10 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
         await addActivity(workload.workspace_id, {
           kind: 'floor',
           title: `Stopped trying ${a.label} on ${workload.slug}`,
-          detail: `Its calls worked ${said(a)}, against ${said(serving)} on ${serving.label}.`,
+          detail: `Its ${why(d, a, serving, serving.label)}.`,
           workloadId: workload.id,
         });
-        decisions.push({ kind: 'rest', armId: a.id, loss: d.loss });
+        decisions.push({ kind: 'rest', armId: a.id, by: d.by });
         continue;
       }
       // promote: shown as good as what serves and as the customer's own model, on enough calls each
@@ -515,7 +705,7 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
         await addActivity(workload.workspace_id, {
           kind: 'ok',
           title: `${a.label} is ready to approve on ${workload.slug}`,
-          detail: `Its calls worked ${said(a)}, against ${said(serving)} on ${serving.label} and ${said(base)} on ${short(ref)}, `
+          detail: `Its ${why(d, a, serving, serving.label)}, and ${d.by === 'graded' ? read(base) : said(base)} on ${short(ref)}, `
             + `and it costs ${cheaper}% less. Nothing was switched: approve it on the workload's page.`,
           workloadId: workload.id,
         });
@@ -524,14 +714,16 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
         decisions.push({ kind: 'suggest', armId: a.id });
         continue;
       }
-      const reason = `live results: ${a.fair.nLive} calls worked ${pctOf(a.fair.liveRate)} of the time, `
-        + `against ${pctOf(serving.fair.liveRate)} on ${serving.label} and ${pctOf(base.fair.liveRate)} on ${short(ref)}`;
-      const detail = `Switched on its own by live results: its calls worked ${said(a)}, against ${said(serving)} on `
-        + `${serving.label} and ${said(base)} on ${short(ref)}, and it costs ${cheaper}% less.`;
+      const reason = d.by === 'graded'
+        ? `live results: answers read in the background were right ${read(a)}, against ${read(serving)} on ${serving.label} and ${read(base)} on ${short(ref)}`
+        : `live results: ${Math.round(a.fair.nLive)} calls worked ${pctOf(a.fair.liveRate)} of the time, `
+          + `against ${pctOf(serving.fair.liveRate)} on ${serving.label} and ${pctOf(base.fair.liveRate)} on ${short(ref)}`;
+      const detail = `Switched on its own by live results: its ${why(d, a, serving, serving.label)} and `
+        + `${d.by === 'graded' ? read(base) : said(base)} on ${short(ref)}, and it costs ${cheaper}% less.`;
       const r = await promoteFn(workload, keyOfSpec(a.spec, ref), { auto: true, reason, spec: a.spec, runId: a.origin_run_id ?? null, detail });
       if (r?.ok && !r.already) {
         forgetState(workload.id);
-        decisions.push({ kind: 'promote', armId: a.id, loss: d.loss });
+        decisions.push({ kind: 'promote', armId: a.id, by: d.by });
         return decisions;
       }
     }
@@ -604,7 +796,7 @@ export async function markTrying(workload, { runId, results, refMonthly, floor }
 /** Everything a page needs to show what is being learned about one workload. */
 export async function learningView(workload) {
   const st = await stateOf(workload, { fresh: true });
-  const s = exploreOf(workload, { perDay: st.perDay });
+  const s = exploreOf(workload, { perDay: st.perDay, dailySaving: st.dailySaving });
   const ref = workload.reference_model;
   /* The last seven days, or the days since the switch when it is more recent: the customer's own
      model answering before the switch is not an experiment, and counted in with them it read as a
