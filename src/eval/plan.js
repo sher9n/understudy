@@ -13,7 +13,7 @@ import { judgePrices, canJudge } from './judge.js';
 import { callsToClear } from './compare.js';
 import { calibrationFor } from './calibrate.js';
 import { FOUND, OUTCOME_OF } from './outcome.js';
-import { servingKey } from './promote.js';
+import { servingKey, heldBack } from './promote.js';
 import { armKey, referenceSpec } from '../learn/arms.js';
 
 const parseRecipe = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
@@ -128,7 +128,7 @@ export function modelCountFor(ws) {
   return Math.max(1, Math.min(config.EVAL_MODELS_MAX, Math.round(n)));
 }
 
-async function enabledSet(workspaceId) {
+export async function enabledSet(workspaceId) {
   return new Set((await db.prepare(
     `SELECT c.model_id FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
@@ -174,6 +174,31 @@ async function drawnFor(workload) {
   const n = Number(row?.n || 0);
   const share = (x) => (n ? Number(x || 0) / n : 0);
   return { used: share(row?.used), seen: share(row?.seen), paidFresh: share(row?.paid_fresh), paidUsed: share(row?.paid_used) };
+}
+
+/* Which of these models a measurement of this workload would try: switched on in its workspace,
+   able to do what its calls ask (their length, tools and structured answers, and keeping nothing when
+   the workspace requires that), able to answer within its cap on answers, not being retired,
+   answering reliably, cheaper than the customer's model at the price that would really be paid, not
+   far too slow by what its providers publish, and not switched back before. The plan's own rules, on
+   these models alone, from what is already known: nothing is asked of anybody. */
+export async function wouldTry(workload, modelIds) {
+  if (!workload?.reference_model || !modelIds?.length) return [];
+  const facts = await loadFacts();
+  const asked = new Set(modelIds.filter((m) => facts.models.has(m)));
+  if (!asked.size) return [];
+  const keep = new Set([...asked, workload.reference_model, workload.routed_model].filter(Boolean));
+  const models = new Map([...facts.models].filter(([m]) => keep.has(m)));
+  const profile = await profileOf(workload);
+  const sel = selectCandidates({
+    facts: { ...facts, models }, profile, reference: workload.reference_model,
+    enabled: await enabledSet(workload.workspace_id), want: keep.size, tryMultiple: 1,
+    reverted: await heldBack(workload.id), serving: workload.routed_model, servingAs: await servingKey(workload),
+    speed: speedRule(workload, profile, config),
+    refThinks: refThinksOf(facts.models.get(workload.reference_model) || null, profile.refThinking, profile.thinking),
+    config, at: now(), zdrOnly: await zdrFor(workload.workspace_id),
+  });
+  return sel.ranked.filter((r) => !r.key && asked.has(r.model) && r.model !== workload.routed_model).map((r) => r.model);
 }
 
 /* Work for Jev a later look at the page will want: readings of how each model suits this

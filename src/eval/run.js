@@ -20,7 +20,7 @@ import { featuresOf, train, predict, leaveOneOutGently } from '../learn/router.j
 import { labelOf, armById, leadModel } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
 import { markTrying } from '../learn/explore.js';
-import { scheduleNext, deferAutomatic, deferAfterStop, deferAfterFailure } from './schedule.js';
+import { scheduleNext, deferAutomatic, deferAfterStop, deferAfterFailure, cadenceOf } from './schedule.js';
 import { notify } from '../notify.js';
 
 /* A measurement, run as a race.
@@ -218,6 +218,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      page never waits on Jev, a measurement does. */
   // nobody asked for it: the schedule, a change in the catalogue, or a new workload's first calls
   const automatic = trigger === 'automatic' || trigger === 'first';
+  /* A workspace that measures only when asked measures nothing by itself: not on its schedule, not
+     for a new model in the catalogue, and not a new workload's first measurement either. Settings
+     promises that nothing is replayed and nothing is spent until somebody presses Measure now. */
+  if (automatic && !(await cadenceOf(workload.workspace_id))) {
+    if (workload.status === 'measuring') await rest(workloadId);
+    return { ok: false, reason: 'This workspace measures only when somebody asks.' };
+  }
   const plan = await planFor(workload, { canRoute: canRoute(), forRun: true, automatic });
   if (!plan.canRun) {
     /* Looked at again when it is due rather than on every hourly pass, which would work the plan out

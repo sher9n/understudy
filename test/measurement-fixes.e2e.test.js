@@ -544,6 +544,53 @@ test('a measurement that looks at two models again is quoted both looks', async 
   }
 });
 
+/* 9. The catalogue's nudge ---------------------------------------------------------------------- */
+
+test('a new model nudges only workloads a measurement would try it on, keeps the backoff, and leaves "only when asked" alone', async () => {
+  const later = now() + 60 * DAY;
+  const book = (id) => db.prepare('UPDATE workloads SET recheck_after = ?, recheck_streak = 2 WHERE id = ?').run(later, id);
+  const tries = await seed({ n: 20, enabled: ['vendor/cheap-new'] });
+  const off = await seed({ n: 20, enabled: [], disabled: ['vendor/cheap-new'] });
+  const never = await seed({ n: 20, enabled: ['vendor/cheap-new'], cadence: 0 });
+  // prompts longer than the new model can read
+  const long = await seed({ n: 20, enabled: ['vendor/cheap-new'], promptTokens: 150000 });
+  const measured = await seed({ n: 20, enabled: ['vendor/cheap-new'] });
+  for (const s of [tries, off, never, long, measured]) await book(s.workload.id);
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model, sample_size, created_at)
+      VALUES ('run_nudge_measured', ?, ?, 'done', 'compared', 'json', ?, 10, ?)`).run(measured.workspace.id, measured.workload.id, REF, now() - 10 * DAY);
+  const before = await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all();
+  await db.prepare(`INSERT INTO models_catalog (model_id, name, context_len, price_in, price_out, open_weights, zdr, synced_at)
+      VALUES ('vendor/cheap-new', 'cheap new', 32000, 0.02e-6, 0.05e-6, 1, 1, ?)`).run(now());
+  forgetFacts();
+  try {
+    const after = await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all();
+    await nudgeForCatalog(before, after);
+    const [t, o, n, l, m] = await Promise.all([tries, off, never, long, measured].map((s) => load(s.workload.id)));
+    assert.ok(t.recheck_after <= now() + config.EVAL_NUDGE_HOURS * HOUR + 1000, 'a workload it could be tried on comes forward');
+    assert.equal(Number(t.recheck_streak), 2, 'and keeps its backoff: a nudge brings one check forward, it does not erase the streak');
+    assert.equal(Number(o.recheck_after), later, 'not where the model is switched off');
+    assert.equal(Number(n.recheck_after), later, 'not in a workspace that measures only when asked');
+    assert.equal(Number(l.recheck_after), later, 'not where it cannot read the calls');
+    // measured ten days ago on a thirty day rhythm: never sooner than that rhythm after it
+    assert.ok(Math.abs(Number(m.recheck_after) - (now() + 20 * DAY)) < 60000, `${(m.recheck_after - now()) / DAY} days`);
+  } finally {
+    await db.prepare(`DELETE FROM models_catalog WHERE model_id = 'vendor/cheap-new'`).run();
+    forgetFacts();
+  }
+});
+
+test('a workspace that measures only when asked is never measured by itself, and a person can still ask', async () => {
+  const { workload } = await seed({ enabled: ['vendor/steady-small'], cadence: 0 });
+  for (const trigger of ['automatic', 'first']) {
+    const out = await runEvaluation(workload.id, { trigger });
+    assert.equal(out.ok, false);
+    assert.match(out.reason, /only when somebody asks/);
+  }
+  assert.equal(await runsOf(workload.id), 0, 'nothing ran, and nothing was spent');
+  const asked = await runEvaluation(workload.id, { trigger: 'manual' });
+  assert.equal(asked.ok, true, JSON.stringify(asked));
+});
+
 /* 10. Never two measurements of one workload, and a stopped one stays stopped -------------------- */
 
 async function orphan(workload, workspace, { stopped = false, heartbeatAgo = 20 * 60000, jobId = null, status = 'running' } = {}) {
