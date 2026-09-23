@@ -45,3 +45,11 @@
 /* A key shown in full, on a row of its own under the key it belongs to, with a way to copy it. */
 .keyshow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0 2px; min-width: 0; }
 .keyshow code { min-width: 0; overflow-wrap: anywhere; word-break: break-all; font-size: 12.5px; }
+
+/* The three ways a workload is switched sit side by side where there is room; below 1100 pixels the
+   lifted sheet stacks them, and that rule is left to apply. */
+@media (min-width: 1101px) { .choices { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+/* A Settings row's text takes the room beside its label and wraps there. Left at its natural width, a
+   long sentence pushed itself onto a line of its own under the label, and its switch onto a third. */
+.settingspage .kvv { flex: 1 1 0; min-width: 0; max-width: 720px; }
