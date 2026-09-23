@@ -314,13 +314,15 @@ function Money({ data, busy, run, setErr }) {
               : data.card
                 ? 'The card on file was not saved for top ups. Add credit again and tick the box there, which saves it for them and shows you what that means.'
                 : 'Needs a card saved for top ups: add credit and tick the box to top up automatically, which saves the card for them.'}
-            {data.cardNote ? ` Turned off after the card was declined (${data.cardNote}).` : ''}
+            {data.cardNote === 'unreachable'
+              ? ' Paused after the card processor could not be reached; switch it back on to try again.'
+              : data.cardNote ? ` Turned off after the card was declined (${data.cardNote}).` : ''}
           </span>
         </span>
         <span className="kva">
           {/* switching it on needs a card saved for top ups; switching it off never needs anything */}
-          <Sw label="Automatic top up" on={data.autoTopUp} busy={busy || !data.canBill || (!data.autoTopUp && !topUpCard)}
-            onClick={run(() => api.setTopUp({ enabled: !data.autoTopUp, amountUsd: data.topUpAmount }))} />
+          <Sw label="Automatic top up" on={data.autoTopUp} busy={busy || (!data.autoTopUp && (!data.canBill || !topUpCard))}
+            onClick={run(() => api.setTopUp(data.autoTopUp ? { enabled: false } : { enabled: true, amountUsd: data.topUpAmount }))} />
         </span>
       </div>
       <div className="kvrow">

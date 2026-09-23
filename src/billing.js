@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { db, id, now, round8, usd } from './db/index.js';
 import config, { canBill, stripeMode } from './config.js';
 import { addActivity } from './traffic.js';
@@ -40,12 +41,15 @@ export async function move(workspaceId, { kind, amountUsd, note = null, ref = nu
     const r = kind === 'call'
       ? await x.prepare(
         `UPDATE billing_accounts SET balance_usd = ROUND((balance_usd + ?)::numeric, 8)::double precision,
-                call_day_usd = ROUND(((CASE WHEN call_day_start = ?::bigint THEN call_day_usd ELSE 0 END) - ?)::numeric, 8)::double precision,
-                call_day_start = ?::bigint,
-                call_month_usd = ROUND(((CASE WHEN call_month_start = ?::bigint THEN call_month_usd ELSE 0 END) - ?)::numeric, 8)::double precision,
-                call_month_start = ?::bigint,
+                call_day_usd = ROUND((CASE WHEN call_day_start = ?::bigint THEN call_day_usd - ?::double precision
+                                           WHEN call_day_start > ?::bigint THEN call_day_usd ELSE -(?::double precision) END)::numeric, 8)::double precision,
+                call_day_start = GREATEST(COALESCE(call_day_start, 0), ?::bigint),
+                call_month_usd = ROUND((CASE WHEN call_month_start = ?::bigint THEN call_month_usd - ?::double precision
+                                             WHEN call_month_start > ?::bigint THEN call_month_usd ELSE -(?::double precision) END)::numeric, 8)::double precision,
+                call_month_start = GREATEST(COALESCE(call_month_start, 0), ?::bigint),
                 updated_at = ? WHERE workspace_id = ? RETURNING balance_usd`)
-        .run(amountUsd, istDayStart(t), amountUsd, istDayStart(t), istMonthStart(t), amountUsd, istMonthStart(t), t, workspaceId)
+        .run(amountUsd, istDayStart(t), amountUsd, istDayStart(t), amountUsd, istDayStart(t),
+          istMonthStart(t), amountUsd, istMonthStart(t), amountUsd, istMonthStart(t), t, workspaceId)
       : await x.prepare(
         `UPDATE billing_accounts SET balance_usd = ROUND((balance_usd + ?)::numeric, 8)::double precision,
                 updated_at = ? WHERE workspace_id = ? RETURNING balance_usd`).run(amountUsd, t, workspaceId);
@@ -162,30 +166,58 @@ export async function sweepHolds() {
    request went to the provider unchanged: twenty calls at once on fifty cents of credit each wrote
    far longer answers and left the balance three dollars below zero, paid for by us.
 
-   So the answer a call is held for is the longest it can actually be: the cap it asks for, or the
-   longest answer the model writes, or failing that its whole context length (an answer can never be
-   longer than the model's window), times the answers it asks for (n). The request itself is left as
-   it came: adding a cap could make a provider refuse a call whose prompt leaves less room than the
-   cap. Only where even the context length is unknown is the call sent capped at
-   HOLD_MAX_OUTPUT_TOKENS, so the bound is still true. The price
-   is the dearest provider that keeps nothing, where those are known one by one; otherwise the list
-   price with a margin, since a provider can charge more than the list. A prompt is counted at three
-   characters a token, which overcounts ordinary text, and priced as if written to a cache, a quarter
-   dearer than read plainly. Only ever used to set money aside. */
-export function callShape(body) {
+   So what a call is held for is the most it can cost, and the request carries what makes that true:
+   - Its answer is the cap it asks for, times the answers it asks for (n). With no cap, the longest
+     answer every provider it can reach publishes, when all of them do (the providers that keep
+     nothing are listed one by one); otherwise the call is sent capped at the model's own longest
+     answer, or at what its window has room for after the prompt, so the bound is still true.
+   - Its prices are the dearest it can be charged: the dearest provider that keeps nothing where those
+     are known, else the list price with a margin, and in both cases every published exception that can
+     apply (a tier the prompt is long enough to reach, a dearer hour), the dearer price of pictures or
+     sound written when the call asks for them, a cache write where that is dearer than a plain read,
+     and a fee per request. The request tells OpenRouter never to use a provider dearer than that
+     (provider.max_price, see buildUpstream), which is what makes the margin a bound.
+   - What it carries beyond text is counted: a picture by address as HOLD_IMAGE_TOKENS of prompt, a PDF
+     sent inline by its pages (each read as up to three thousand tokens, and at up to a quarter of a cent
+     by a reader that charges per page), web search at HOLD_WEB_SEARCH_USD.
+   A prompt is counted at three characters a token, which overcounts ordinary text. Only ever used to
+   set money aside. */
+
+const PDF_PAGE_TOKENS = 3000;
+const PDF_PAGE_USD = 0.0025;
+const pdfMemo = new Map();
+
+/* How many pages a PDF sent inline has, read with a real parser: a page can be a couple of hundred
+   bytes, so no count of bytes is a bound. One that cannot be read is counted at a page per hundred
+   bytes, which no real PDF comes near. */
+async function pdfPages(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : '';
+  const key = crypto.createHash('sha1').update(b64).digest('hex');
+  if (pdfMemo.has(key)) return pdfMemo.get(key);
+  const bytes = Buffer.from(b64, 'base64');
+  let pages;
+  try {
+    const { PDFDocument } = await import('pdf-lib');
+    const doc = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false, throwOnInvalidObject: false });
+    pages = Math.max(1, doc.getPageCount());
+  } catch {
+    pages = Math.max(1, Math.ceil(bytes.length / 100));
+  }
+  pdfMemo.set(key, pages);
+  if (pdfMemo.size > 200) pdfMemo.delete(pdfMemo.keys().next().value);
+  return pages;
+}
+
+export async function callShape(body) {
   const text = JSON.stringify(body?.messages ?? []) + JSON.stringify(body?.tools ?? []);
   const pin = Math.ceil(text.length / 3);
   const raw = Number(body?.max_completion_tokens ?? body?.max_tokens);
   const cap = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null;
   const n = Math.max(1, Math.min(128, Math.floor(Number(body?.n) || 1)));
-  /* What a call can cost beyond the text it carries. A picture given by its address is read by the
-     provider, and counted here at HOLD_IMAGE_TOKENS of prompt; one sent inline is already counted by
-     its size. A file sent inline may be read page by page at a price per page, allowed for by its
-     size (a page is at least a kilobyte, and the dearest reader costs a fifth of a cent a page). Web
-     search is charged per search, allowed for at HOLD_WEB_SEARCH_USD. A prompt cached for an hour costs
-     twice the prompt price to write, where the five minute cache costs a quarter more. */
   let images = 0;
-  let fileChars = 0;
+  let pages = 0;
+  let otherFileChars = 0;
   let longCache = false;
   for (const m of Array.isArray(body?.messages) ? body.messages : []) {
     for (const p of Array.isArray(m?.content) ? m.content : []) {
@@ -193,78 +225,111 @@ export function callShape(body) {
         const u = typeof p.image_url === 'string' ? p.image_url : p.image_url?.url;
         if (typeof u === 'string' && !u.startsWith('data:')) images += 1;
       }
-      if (p?.type === 'file' && typeof p.file?.file_data === 'string' && p.file.file_data.startsWith('data:')) {
-        fileChars += p.file.file_data.length;
+      const data = p?.type === 'file' ? p.file?.file_data : null;
+      if (typeof data === 'string' && data.startsWith('data:')) {
+        if (/^data:application\/pdf/i.test(data)) pages += await pdfPages(data);
+        else otherFileChars += data.length;
       }
       if (p?.cache_control?.ttl === '1h') longCache = true;
     }
   }
-  const web = (Array.isArray(body?.plugins) && body.plugins.some((p) => p?.id === 'web'))
+  const on = (p) => p && p.enabled !== false;
+  const web = (Array.isArray(body?.plugins) && body.plugins.some((p) => on(p) && p.id === 'web'))
     || !!body?.web_search_options || /:online$/i.test(String(body?.model || ''));
+  const wants = Array.isArray(body?.modalities) ? body.modalities.map((x) => String(x).toLowerCase()) : [];
   return {
     pin, cap, n, longCache,
-    extraIn: images * config.HOLD_IMAGE_TOKENS,
-    extraUsd: (web ? config.HOLD_WEB_SEARCH_USD : 0) + fileChars * 1.5e-6,
+    outputs: wants.filter((x) => x === 'image' || x === 'audio'),
+    extraIn: images * config.HOLD_IMAGE_TOKENS + pages * PDF_PAGE_TOKENS,
+    extraUsd: (web ? config.HOLD_WEB_SEARCH_USD : 0) + pages * PDF_PAGE_USD + otherFileChars * 1.5e-6,
   };
 }
 
-/* A model's own id without the variant OpenRouter reads after a colon (":nitro", ":online",
-   ":free"): the catalogue lists the model once, and a variant is priced as the model. */
+/* A model's own id without the variant OpenRouter reads after a colon (":nitro", ":online"): the
+   catalogue lists the model once, and a variant is priced as the model. */
 export const baseModelId = (modelId) => String(modelId || '').replace(/:[a-z0-9._-]+$/i, '');
 
-/* The dearest a price can be. A long prompt can cost more from some size up, and some prices change
-   with the hour; a bound is the dearest of all of them, never an average. */
-function dearest(pin, pout, overridesJson) {
-  let list = [];
-  try { list = JSON.parse(overridesJson || '[]'); } catch { list = []; }
-  let i = pin;
-  let o = pout;
-  for (const x of Array.isArray(list) ? list : []) {
-    if (Number.isFinite(Number(x?.prompt))) i = Math.max(i, Number(x.prompt));
-    if (Number.isFinite(Number(x?.completion))) o = Math.max(o, Number(x.completion));
+const priceOf = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0);
+
+/* The dearest one listing can charge for this call. A long-prompt tier counts when the prompt could
+   reach it (the prompt is overcounted, so a prompt near the threshold does); an hour's price always
+   counts, since the call can be billed at whatever hour it ends. */
+function dearestOf(row, { pin, outputs, longCache }) {
+  let pricing = {};
+  try { pricing = JSON.parse(row.pricing_json || '{}') || {}; } catch { pricing = {}; }
+  let overrides = [];
+  try { overrides = JSON.parse(row.overrides_json || '[]') || []; } catch { overrides = []; }
+  let prompt = priceOf(row.price_in);
+  let completion = priceOf(row.price_out);
+  for (const o of Array.isArray(overrides) ? overrides : []) {
+    const reachable = o?.min_prompt_tokens == null || pin >= Number(o.min_prompt_tokens);
+    if (!reachable) continue;
+    prompt = Math.max(prompt, priceOf(o.prompt));
+    completion = Math.max(completion, priceOf(o.completion));
   }
-  return [i, o];
+  // writing to a cache costs more than a plain read: what the listing says, or a quarter more (twice for an hour)
+  const write = Math.max(priceOf(pricing.input_cache_write), prompt * (longCache ? 2 : 1.25));
+  let out = completion;
+  if (outputs.includes('image')) out = Math.max(out, priceOf(pricing.image_output), priceOf(pricing.image_token));
+  if (outputs.includes('audio')) out = Math.max(out, priceOf(pricing.audio_output), priceOf(pricing.audio));
+  return { prompt, write, out, request: priceOf(pricing.request) };
 }
 
 /** The most one call can cost on one model, or null when the model is not in the catalogue. */
 export async function callBound(modelId, shape, { zdr = true } = {}) {
-  const { pin, cap, n = 1, extraIn = 0, extraUsd = 0, longCache = false } = shape;
-  const base = baseModelId(modelId);
+  const { pin, cap, n = 1, extraIn = 0, extraUsd = 0, longCache = false, outputs = [] } = shape;
+  const wanted = String(modelId || '');
+  const base = baseModelId(wanted);
+  // the listing under the exact name first (a model sold only as a variant), else the model it varies
   const m = await db.prepare(
-    'SELECT price_in, price_out, context_len, overrides_json FROM models_catalog WHERE model_id = ?').get(base);
+    `SELECT model_id, price_in, price_out, context_len, max_output, overrides_json, pricing_json FROM models_catalog
+      WHERE model_id = ANY(?::text[]) ORDER BY (model_id = ?) DESC LIMIT 1`).get([wanted, base], wanted);
   if (!m) return null;
-  let [pi, po] = dearest(Number(m.price_in) || 0, Number(m.price_out) || 0, m.overrides_json);
+  const opts = { pin, outputs, longCache };
+  let d = dearestOf(m, opts);
   let margin = config.HOLD_PRICE_MULTIPLE;
   let window = Number(m.context_len) > 0 ? Number(m.context_len) : null;
-  /* The longest answer is a bound only when it holds for every provider the call can reach. With zero
-     retention required, those are the providers that keep nothing, each listed with its own prices and
-     limits, so the dearest price is the bound (no margin) and the longest answer is theirs, if every
-     one of them publishes one. Otherwise the call could reach a provider we know nothing about: the
-     list price with a margin, and the model's whole window as the longest answer. */
-  let maxOut = null;
+  /* With zero retention required, every provider the call can reach is listed with its own prices and
+     limits: the dearest of them is the bound (no margin), and the longest answer is theirs when every
+     one publishes one. Otherwise the call can reach providers we know nothing about: the list price
+     with a margin, which the request's price ceiling then enforces, and a cap sent with the request. */
+  let everyLimit = null;
   if (zdr) {
     const rows = await db.prepare(
-      'SELECT price_in, price_out, max_output, context_len, overrides_json FROM model_endpoints WHERE model_id = ?').all(base);
+      `SELECT price_in, price_out, max_output, context_len, overrides_json, pricing_json FROM model_endpoints
+        WHERE model_id = ?`).all(m.model_id);
     if (rows.length) {
       margin = 1;
       let every = true;
       let longest = 0;
       for (const r of rows) {
-        const [ei, eo] = dearest(Number(r.price_in) || 0, Number(r.price_out) || 0, r.overrides_json);
-        pi = Math.max(pi, ei);
-        po = Math.max(po, eo);
+        const e = dearestOf(r, opts);
+        d = { prompt: Math.max(d.prompt, e.prompt), write: Math.max(d.write, e.write), out: Math.max(d.out, e.out), request: Math.max(d.request, e.request) };
         if (Number(r.max_output) > 0) longest = Math.max(longest, Number(r.max_output)); else every = false;
         if (Number(r.context_len) > 0) window = Math.max(window || 0, Number(r.context_len));
       }
-      if (every && longest > 0) maxOut = longest;
+      if (every && longest > 0) everyLimit = longest;
     }
   }
-  // the longest answer the model can write here: what every provider publishes, else its whole window
-  const limit = maxOut ?? window;
-  const known = cap !== null || limit !== null;
-  const each = cap !== null ? (limit ? Math.min(cap, limit) : cap) : (limit ?? config.HOLD_MAX_OUTPUT_TOKENS);
-  const usd = ((pin + extraIn) * pi * (longCache ? 2 : 1.25) + each * n * po) * margin + extraUsd;
-  return { usd, each, known };
+  /* The longest answer: a cap the request names is kept as it is. Otherwise, where every provider
+     publishes its longest answer, that holds by itself (known). Else the call must be sent capped:
+     at the model's own longest answer, or at what its window has room for after the prompt. */
+  let each;
+  let known = true;
+  if (cap !== null) {
+    each = cap;
+  } else if (everyLimit !== null) {
+    each = everyLimit;
+  } else {
+    known = false;
+    const room = window ? Math.max(16, window - pin) : null;
+    const own = Number(m.max_output) > 0 ? Number(m.max_output) : null;
+    each = Math.min(own ?? room ?? config.HOLD_MAX_OUTPUT_TOKENS, room ?? Infinity);
+  }
+  const usd = ((pin + extraIn) * d.write + each * n * d.out) * margin + d.request * margin * n + extraUsd;
+  // the most a provider may charge on this call, per token, as OpenRouter is told (provider.max_price)
+  const caps = { prompt: d.write * margin, completion: d.out * margin, request: d.request * margin };
+  return { usd, each, known, caps };
 }
 
 /** Can this workspace make a routed call right now? A quick check before the hold is taken. */
@@ -314,6 +379,31 @@ export async function spentOnCalls(workspaceId, x = db) {
     month: r && Number(r.call_month_start) === month ? round8(Number(r.call_month_usd || 0)) : 0,
   };
 }
+/* The running totals, read again from the ledger, for every workspace that has a limit: a process that
+   predates them (the old one, during a deploy) charged without moving them. Run hourly and a few minutes
+   after boot. Each row is set under its own lock, so a charge landing meanwhile is not lost. */
+export async function reconcileLimitTotals() {
+  const t = now();
+  const day = istDayStart(t);
+  const month = istMonthStart(t);
+  const rows = await db.prepare(
+    `SELECT workspace_id FROM billing_accounts a JOIN workspaces w ON w.id = a.workspace_id
+      WHERE w.daily_limit_usd IS NOT NULL OR w.monthly_limit_usd IS NOT NULL`).all();
+  let fixed = 0;
+  for (const { workspace_id: ws } of rows) {
+    await db.tx(async (tx) => {
+      await tx.prepare('SELECT 1 FROM billing_accounts WHERE workspace_id = ? FOR UPDATE').get(ws);
+      const r = await tx.prepare(
+        `SELECT COALESCE(-SUM(amount_usd) FILTER (WHERE created_at >= ?), 0) AS day, COALESCE(-SUM(amount_usd), 0) AS month
+           FROM ledger WHERE workspace_id = ? AND kind = 'call' AND created_at >= ?`).get(day, ws, Math.min(day, month));
+      fixed += (await tx.prepare(
+        `UPDATE billing_accounts SET call_day_start = ?, call_day_usd = ?, call_month_start = ?, call_month_usd = ?
+          WHERE workspace_id = ?`).run(day, round8(Number(r?.day || 0)), month, round8(Number(r?.month || 0)), ws)).changes;
+    });
+  }
+  return fixed;
+}
+
 /* Whether one more call would take the workspace past its own daily or monthly limit, counting what
    has been charged and what calls in flight have set aside, read inside the hold's lock. */
 async function overLimit(workspaceId, x, want, a, lim) {
@@ -547,7 +637,12 @@ export async function maybeTopUp(workspaceId) {
 export function stripeErrorKind(err) {
   const type = err?.type || err?.rawType || '';
   const code = err?.code || err?.raw?.code || '';
-  if (type === 'StripeCardError' || code === 'authentication_required' || err?.raw?.decline_code) return 'card';
+  /* A decline Stripe says to try again (the issuer was out of reach, a processing error, try again
+     later) is passing, not the card's fault. */
+  const decline = err?.raw?.decline_code || err?.decline_code || '';
+  if (['processing_error', 'try_again_later', 'issuer_not_available', 'reenter_transaction', 'approve_with_id'].includes(decline)
+    || code === 'processing_error') return 'retry';
+  if (type === 'StripeCardError' || code === 'authentication_required' || decline) return 'card';
   if (['card_declined', 'expired_card', 'payment_intent_authentication_failure', 'payment_method_unexpected_state',
     'payment_method_not_available'].includes(code)) return 'card';
   if (code === 'resource_missing' && /payment_method/.test(String(err?.param || err?.raw?.param || ''))) return 'card';
@@ -555,6 +650,32 @@ export function stripeErrorKind(err) {
     || ['idempotency_key_in_use', 'lock_timeout', 'rate_limit'].includes(code)
     || Number(err?.statusCode) === 429 || Number(err?.statusCode) >= 500) return 'retry';
   return 'ours';
+}
+
+/* The last try of a top up job failed for a reason that is not the card. Automatic top up is paused, so
+   the low balance email is no longer held back behind it, and its owner is told once for this low balance
+   (keyed on the last credit), however many jobs later give up the same way. We are told as well. */
+export async function giveUpTopUp(workspaceId, err) {
+  reportCallFailure({ kind: 'automatic top up', model: 'stripe', status: Number(err?.statusCode) || 0,
+    message: `gave up after 5 tries: ${err?.message || err}`, workspaceId });
+  const paused = (await db.prepare(`UPDATE billing_accounts SET auto_topup = 0, topup_failed_note = 'unreachable', updated_at = ?
+      WHERE workspace_id = ? AND auto_topup = 1 RETURNING workspace_id`).run(now(), workspaceId)).rows.length > 0;
+  if (!paused) return false;
+  const last = (await db.prepare(
+    `SELECT id FROM ledger WHERE workspace_id = ? AND kind = 'credit' ORDER BY created_at DESC LIMIT 1`).get(workspaceId))?.id ?? 'none';
+  await addActivity(workspaceId, {
+    kind: 'bill', title: 'Automatic top up paused',
+    detail: 'We could not reach the card processor after trying five times. Switch it back on in Settings to try again.',
+  });
+  await notify(workspaceId, 'money', `topup-gaveup:${workspaceId}:${last}`, {
+    title: 'Automatic top up is paused',
+    lines: [
+      'We could not reach the card processor to top up your balance, after trying five times, so automatic top up is paused.',
+      'Calls through Understudy stop when the balance runs out. Add credit, or switch automatic top up back on, in Settings.',
+    ],
+    path: '/settings', linkText: 'Open Settings',
+  }).catch(() => {});
+  return true;
 }
 
 export async function runTopUp(workspaceId, { attempt = 0 } = {}) {
@@ -588,11 +709,12 @@ export async function runTopUp(workspaceId, { attempt = 0 } = {}) {
     `SELECT id, created_at FROM ledger WHERE workspace_id = ? AND kind = 'credit' ORDER BY created_at DESC LIMIT 1`)
     .get(workspaceId);
   const lastCredit = last?.id ?? 'none';
-  /* A try that failed on Stripe's side may still have charged the card. Stripe keeps the answer it gave
-     a key, even an error, for a day, so trying again under the same key only hears the same error; each
-     try has a key of its own instead, and before it, Stripe is asked whether a top up since the last
-     credit is already under way, so a card is never charged twice for one low balance. */
-  if (attempt > 0) {
+  /* A try that failed on Stripe's side may still have charged the card, and a second low balance can
+     book a second job before the first payment lands. Stripe keeps the answer it gave a key, even an
+     error, for a day, so each try has a key of its own; and before every payment, the first try of a job
+     included, Stripe is asked whether a top up since the last credit is already under way, so a card is
+     never charged twice for one low balance. */
+  {
     const since = Math.floor((Number(last?.created_at) || now() - DAY) / 1000);
     const recent = await s.paymentIntents.list({ customer: acct.stripe_customer, created: { gte: since }, limit: 20 });
     const going = (recent?.data || []).find((p) => p?.metadata?.topup === '1' && p?.metadata?.workspace_id === workspaceId

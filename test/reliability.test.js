@@ -181,11 +181,15 @@ test('a switched model that leaves the catalogue is switched back within the hou
   const said = await db.prepare(`SELECT reason, action FROM promotions WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(w.id);
   assert.equal(said.action, 'soft_revert');
   assert.match(said.reason, /no longer offered/);
-  await saveCatalog([{ model_id: CHEAP, name: 'cheap', context_len: 8192, price_in: 0.1e-6, price_out: 0.4e-6, open_weights: 1, zdr: 1 }]);
+  // the whole catalogue comes back, the customer's model included: saving a list takes out what it leaves out
+  await saveCatalog([
+    { model_id: REF, name: 'gpt-5.4', context_len: 200000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1 },
+    { model_id: CHEAP, name: 'cheap', context_len: 8192, price_in: 0.1e-6, price_out: 0.4e-6, open_weights: 1, zdr: 1 },
+  ]);
 });
 
 test('a workspace that allows providers keeping data briefly never allows ones that train on it', async () => {
-  await call({ model: REF, messages: [{ role: 'user', content: 'retention check' }] });
+  assert.equal((await call({ model: REF, messages: [{ role: 'user', content: 'retention check' }] })).status, 200);
   assert.equal(seen.at(-1).provider.zdr, true, 'zero data retention by default');
   assert.equal(seen.at(-1).provider.data_collection, 'deny');
   await db.prepare('UPDATE workspaces SET zdr_required = 0 WHERE id = ?').run(ws.id);

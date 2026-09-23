@@ -402,6 +402,7 @@ test('automatic top ups: only when switched on, never twice for one low balance,
   const s = await billing.stripe();
   const keys = [];
   s.paymentIntents.create = async (_body, opts) => { keys.push(opts.idempotencyKey); return { id: `pi_${keys.length}` }; };
+  s.paymentIntents.list = async () => ({ data: [] });
   await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_1', payment_method = 'pm_1', balance_usd = 1, auto_topup = 0
                      WHERE workspace_id = ?`).run(workspace.id);
   assert.equal((await billing.runTopUp(workspace.id)).code, 'no_card', 'off unless switched on');
@@ -486,21 +487,27 @@ test('many calls with no cap on their answer cannot spend a small balance many t
   if (refused.status === 402) assert.match((await refused.json()).error.message, /Add credit/);
 });
 
-test('a request is sent as it came, and capped only when the model publishes no limit at all', async () => {
+test('a request is sent as it came where every provider publishes its longest answer, and capped where not', async () => {
   const { workspace, key } = await auth.createAccount({ email: 'nolimit@example.test', password: 'password-123' });
   await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  await saveZdrEndpoints([
+    { model_id: NOCOST, tag: 'a', provider: 'A', price_in: 1e-6, price_out: 2e-6, context_len: 200000, max_output: 8000 },
+  ]);
   seen.length = 0;
-  // no longest answer published, but a window: held for the window, sent unchanged
-  assert.equal((await call(key.secret, { model: NOLIMIT, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
+  // every provider that keeps nothing publishes its longest answer: that is the bound, and the call goes as it came
+  assert.equal((await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
   assert.equal(seen.at(-1).max_tokens, undefined, 'sent as it came');
-  // neither: sent with the cap it was held for
+  assert.ok(seen.at(-1).provider?.max_price, 'with the price ceiling the hold was sized on');
+  // providers not each known: sent capped at what the window has room for after the prompt
+  assert.equal((await call(key.secret, { model: NOLIMIT, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
+  assert.ok(seen.at(-1).max_tokens > 0 && seen.at(-1).max_tokens < 200000, `capped at its room: ${seen.at(-1).max_tokens}`);
+  // no window known either: sent with the cap it was held for
   assert.equal((await call(key.secret, { model: NOWINDOW, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
   assert.equal(seen.at(-1).max_tokens, config.HOLD_MAX_OUTPUT_TOKENS, 'sent with the cap it was held for');
-  // a model that says how long it writes, and a request that names its own cap, are sent as they came
-  assert.equal((await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
-  assert.equal(seen.at(-1).max_tokens, undefined);
+  // a request that names its own cap is sent with it
   assert.equal((await call(key.secret, { model: NOLIMIT, max_tokens: 77, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
   assert.equal(seen.at(-1).max_tokens, 77);
+  await saveZdrEndpoints([]);
 });
 
 test('a daily limit counts calls in flight, so a burst cannot run far past it', async () => {
@@ -707,6 +714,7 @@ test('a dispute the bank decides for us gives its credit back, once', async () =
 test('a top up that fails for a reason other than the card stays on and is tried again', async () => {
   const { workspace } = await auth.createAccount({ email: 'blip@example.test', password: 'password-123' });
   const s = await billing.stripe();
+  s.paymentIntents.list = async () => ({ data: [] });
   await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_b', payment_method = 'pm_b', card_for_topups = 1,
                      balance_usd = 1, auto_topup = 1 WHERE workspace_id = ?`).run(workspace.id);
   s.paymentIntents.create = async () => { const e = new Error('connection reset'); e.type = 'StripeConnectionError'; throw e; };
@@ -749,11 +757,11 @@ test('only models the catalogue knows are routed, fallbacks included, and a vari
 });
 
 test('a fallback list, web search, pictures by address and price tiers all count in what a call sets aside', async () => {
-  const shape = billing.callShape({ messages: [{ role: 'user', content: 'x' }] });
+  const shape = await billing.callShape({ messages: [{ role: 'user', content: 'x' }] });
   const plain = await billing.callBound(NOCOST, shape, { zdr: true });
-  const web = await billing.callBound(NOCOST, billing.callShape({ plugins: [{ id: 'web' }], messages: [{ role: 'user', content: 'x' }] }), { zdr: true });
+  const web = await billing.callBound(NOCOST, await billing.callShape({ plugins: [{ id: 'web' }], messages: [{ role: 'user', content: 'x' }] }), { zdr: true });
   assert.ok(web.usd >= plain.usd + config.HOLD_WEB_SEARCH_USD - 1e-12, 'web search is allowed for');
-  const pics = await billing.callBound(NOCOST, billing.callShape({ messages: [{ role: 'user', content: [
+  const pics = await billing.callBound(NOCOST, await billing.callShape({ messages: [{ role: 'user', content: [
     { type: 'text', text: 'x' }, { type: 'image_url', image_url: { url: 'https://example.test/a.png' } }] }] }), { zdr: true });
   assert.ok(pics.usd > plain.usd, 'a picture by address is allowed for');
   // a dearer tier for long prompts, and a dearer hour: the bound takes the dearest
@@ -779,13 +787,14 @@ test('a fallback list, web search, pictures by address and price tiers all count
   assert.ok(outs.includes(402), `the fallback's cost was set aside: ${outs.join(',')}`);
 });
 
-test('a provider that publishes no longest answer means the whole window is the bound', async () => {
+test('a provider that publishes no longest answer means the call is sent capped', async () => {
   await saveZdrEndpoints([
     { model_id: NOCOST, tag: 'a', provider: 'A', price_in: 1e-6, price_out: 2e-6, context_len: 200000, max_output: 8000 },
     { model_id: NOCOST, tag: 'b', provider: 'B', price_in: 1e-6, price_out: 2e-6, context_len: 200000, max_output: null },
   ]);
   const b = await billing.callBound(NOCOST, { pin: 10, cap: null, n: 1 }, { zdr: true });
-  assert.equal(b.each, 200000, 'one provider could write to the end of the window');
+  assert.equal(b.known, false, 'one provider could write on, so the bound needs a cap');
+  assert.equal(b.each, 8000, 'the cap is the model\'s own longest answer');
   await saveZdrEndpoints([]);
 });
 
@@ -835,6 +844,7 @@ test('a bank inquiry takes nothing; a dispute takes its money when it is withdra
 test('a declined top up is told once, and a problem of ours never blames the customer\'s card', async () => {
   const { workspace } = await auth.createAccount({ email: 'toldonce@example.test', password: 'password-123' });
   const s = await billing.stripe();
+  s.paymentIntents.list = async () => ({ data: [] });
   const arm = () => db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_t', payment_method = 'pm_t', card_for_topups = 1,
                      balance_usd = 1, auto_topup = 1, topup_failed_note = NULL WHERE workspace_id = ?`).run(workspace.id);
   await arm();
@@ -910,4 +920,144 @@ test('spending limits read running totals that every charge moves', async () => 
   // a correction that gives money back lowers them
   await billing.move(workspace.id, { kind: 'call', amountUsd: 0.1, note: 'given back' });
   assert.ok(Math.abs((await billing.spentOnCalls(workspace.id)).day - (0.75 * fee - 0.1)) < 1e-9);
+});
+
+/* The third review of the money fixes ------------------------------------------------------------ */
+
+test('tools the provider runs itself, and videos by address, are refused; free plugins and free variants are said plainly', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'servertools@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  for (const tool of [{ type: 'openrouter:web_search' }, { type: 'web_search' }, { type: 'openrouter:advisor', model: 'openai/gpt-5.5-pro' }]) {
+    const r = await call(key.secret, { model: NOCOST, tools: [tool], messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(r.status, 400, JSON.stringify(tool));
+    assert.match((await r.json()).error.message, /runs on the provider's side/);
+  }
+  const fn = await call(key.secret, { model: NOCOST, tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }],
+    messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(fn.status, 200, 'a function the customer runs is ordinary');
+  const video = await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: [{ type: 'video_url', video_url: { url: 'https://example.test/v.mp4' } }] }] });
+  assert.equal(video.status, 400);
+  for (const plugin of [{ id: 'response-healing' }, { id: 'context-compression', enabled: false }, { id: 'anything', enabled: false }]) {
+    const r = await call(key.secret, { model: NOCOST, plugins: [plugin], messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(r.status, 200, JSON.stringify(plugin));
+  }
+  const free = await call(key.secret, { model: 'liquid/lfm-2.5-2.6b:free', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(free.status, 400);
+  assert.match((await free.json()).error.message, /free variant/);
+});
+
+test('a fallback named without its maker is sent under the name it was priced as', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'barefallback@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  seen.length = 0;
+  const r = await call(key.secret, { model: NOCOST, models: ['long-writer'], max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 200);
+  assert.deepEqual(seen.at(-1).models, [LONG]);
+});
+
+test('a call with no model is checked against the model its workload was made with', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'nomodel@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  const system = 'Tag the courier note as late, lost or delivered, one word.';
+  // copies sent to us from a client that used openrouter/auto make the workload
+  for (let i = 0; i < 3; i += 1) {
+    const t = await fetch(`${base}/v1/traces`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key.secret}` },
+      body: JSON.stringify({ request: { model: 'openrouter/auto', messages: [{ role: 'system', content: system }, { role: 'user', content: `note ${i}` }] },
+        response: { model: 'openrouter/auto', choices: [{ message: { role: 'assistant', content: 'late' } }], usage: { prompt_tokens: 10, completion_tokens: 1 } } }) });
+    assert.ok(t.status < 300, `trace accepted: ${t.status}`);
+  }
+  const r = await call(key.secret, { messages: [{ role: 'system', content: system }, { role: 'user', content: 'note 9' }] });
+  assert.equal(r.status, 400, 'refused, not sent unbounded');
+  assert.match((await r.json()).error.message, /workload's model is not one we route to/);
+});
+
+test('with zero retention off, a short uncapped call holds the model\'s own longest answer at a capped price, and says so upstream', async () => {
+  await saveCatalog([
+    { model_id: MODEL, name: 'gpt-5.4', context_len: 400000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1, max_output: 128000,
+      overrides_json: JSON.stringify([{ min_prompt_tokens: 272000, prompt: '0.000005', completion: '0.0000225' }]) },
+    { model_id: LONG, name: 'long writer', context_len: 200000, price_in: 1e-6, price_out: 1e-5, open_weights: 0, zdr: 1, max_output: 45000 },
+    { model_id: NOCOST, name: 'no cost', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
+    { model_id: NOLIMIT, name: 'no limit', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
+    { model_id: NOWINDOW, name: 'no window', context_len: null, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
+    { model_id: STREAMY, name: 'streamy', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
+    { model_id: 'test/pictures', name: 'pictures', context_len: 100000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 4000,
+      pricing_json: JSON.stringify({ prompt: '0.000001', completion: '0.000002', image_output: '0.00012', request: '0.01' }) },
+  ]);
+  const short = await billing.callBound(MODEL, { pin: 20, cap: null, n: 1 }, { zdr: false });
+  // the model's own longest answer at twice the list price, and the long-prompt tier left out for a short prompt
+  assert.ok(short.usd < 128000 * 15e-6 * 2 * 1.01 + 1e-6, `not the whole window: ${short.usd}`);
+  assert.equal(short.each, 128000);
+  assert.equal(short.known, false, 'the request carries the cap');
+  assert.ok(Math.abs(short.caps.completion - 15e-6 * 2) < 1e-12, 'and a price ceiling that makes the margin a bound');
+  const long = await billing.callBound(MODEL, { pin: 300000, cap: 100, n: 1 }, { zdr: false });
+  assert.ok(Math.abs(long.caps.completion - 22.5e-6 * 2) < 1e-12, 'a prompt long enough for the tier is priced at it');
+  // pictures written, and a fee per request, are priced as such
+  const pic = await billing.callBound('test/pictures', { pin: 10, cap: 4000, n: 1, outputs: ['image'] }, { zdr: false });
+  assert.ok(pic.usd >= 4000 * 0.00012 * 2 + 0.01 * 2 - 1e-9, `pictures: ${pic.usd}`);
+  // and the request tells OpenRouter the ceiling
+  const { buildUpstream } = await import('../src/openrouter.js');
+  const up = buildUpstream({ messages: [], provider: { max_price: { prompt: 0.5 } } }, MODEL, null, { zdr: false, priceCaps: { [MODEL]: short.caps } });
+  assert.equal(up.provider.max_price.prompt, 0.5, 'a lower ceiling the customer set is kept');
+  assert.ok(up.provider.max_price.completion >= 30 && up.provider.max_price.completion < 30.001, `per million: ${up.provider.max_price.completion}`);
+});
+
+test('a PDF sent inline is counted by its pages, however small each page is', async () => {
+  const { PDFDocument } = await import('pdf-lib');
+  const doc = await PDFDocument.create();
+  for (let i = 0; i < 300; i += 1) doc.addPage([50, 50]);
+  const bytes = await doc.save({ useObjectStreams: true });
+  const data = `data:application/pdf;base64,${Buffer.from(bytes).toString('base64')}`;
+  const shape = await billing.callShape({ messages: [{ role: 'user', content: [{ type: 'file', file: { filename: 'a.pdf', file_data: data } }] }] });
+  assert.ok(shape.extraUsd >= 300 * 0.0025 - 1e-9, `three hundred pages allowed for: ${shape.extraUsd} from ${bytes.length} bytes`);
+});
+
+test('a second top up job asks Stripe first, even on its first try, so one low balance is charged once', async () => {
+  const { workspace } = await auth.createAccount({ email: 'secondjob@example.test', password: 'password-123' });
+  const s = await billing.stripe();
+  await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_3', payment_method = 'pm_3', card_for_topups = 1,
+                     balance_usd = 1, auto_topup = 1 WHERE workspace_id = ?`).run(workspace.id);
+  let made = 0;
+  s.paymentIntents.create = async () => { made += 1; return { id: `pi_second_${made}` }; };
+  s.paymentIntents.list = async () => ({ data: [{ id: 'pi_first_job', status: 'succeeded', metadata: { topup: '1', workspace_id: workspace.id } }] });
+  const out = await billing.runTopUp(workspace.id, { attempt: 0 });
+  assert.equal(out.already, true);
+  assert.equal(made, 0);
+});
+
+test('declines Stripe says to retry are retried, and giving up pauses top up and tells the owner once', async () => {
+  const { workspace } = await auth.createAccount({ email: 'retrydecline@example.test', password: 'password-123' });
+  const s = await billing.stripe();
+  s.paymentIntents.list = async () => ({ data: [] });
+  await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_4', payment_method = 'pm_4', card_for_topups = 1,
+                     balance_usd = 1, auto_topup = 1, topup_failed_note = NULL WHERE workspace_id = ?`).run(workspace.id);
+  s.paymentIntents.create = async () => { const e = new Error('Try again later'); e.type = 'StripeCardError'; e.code = 'card_declined';
+    e.raw = { decline_code: 'try_again_later' }; throw e; };
+  await assert.rejects(billing.runTopUp(workspace.id));
+  assert.equal((await billing.account(workspace.id)).auto_topup, 1, 'still on: this decline is worth another try');
+  const before = mail.filter((m) => m.includes('to: retrydecline@example.test')).length;
+  assert.equal(await billing.giveUpTopUp(workspace.id, new Error('Stripe down')), true);
+  assert.equal(await billing.giveUpTopUp(workspace.id, new Error('Stripe down')), false, 'a second give up changes nothing');
+  const acct = await billing.account(workspace.id);
+  assert.equal(acct.auto_topup, 0);
+  assert.equal(acct.topup_failed_note, 'unreachable');
+  assert.equal(mail.filter((m) => m.includes('to: retrydecline@example.test')).length - before, 1, 'told once');
+});
+
+test('the limit totals never move a day backwards, and are read again from the ledger', async () => {
+  const { workspace } = await auth.createAccount({ email: 'backwards@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 10, note: 'test credit' });
+  await db.prepare('UPDATE workspaces SET daily_limit_usd = 5 WHERE id = ?').run(workspace.id);
+  await billing.chargeCall(workspace.id, 0.5, 'today');
+  // a later day already on the row (a charge after midnight got there first): an older charge leaves it alone
+  const acct = await db.prepare('SELECT call_day_start FROM billing_accounts WHERE workspace_id = ?').get(workspace.id);
+  await db.prepare('UPDATE billing_accounts SET call_day_start = ?, call_day_usd = 0.2 WHERE workspace_id = ?').run(Number(acct.call_day_start) + 86400000, workspace.id);
+  await billing.chargeCall(workspace.id, 0.25, 'yesterday, late');
+  const row = await db.prepare('SELECT call_day_start, call_day_usd FROM billing_accounts WHERE workspace_id = ?').get(workspace.id);
+  assert.equal(Number(row.call_day_start), Number(acct.call_day_start) + 86400000, 'the later day stays');
+  assert.equal(Number(row.call_day_usd), 0.2, 'and its total is untouched');
+  // reading the ledger again sets today's total from what today's charges were
+  await db.prepare('UPDATE billing_accounts SET call_day_start = ?, call_day_usd = 0 WHERE workspace_id = ?').run(Number(acct.call_day_start), workspace.id);
+  assert.ok(await billing.reconcileLimitTotals() >= 1);
+  const fee = 1 + config.ROUTING_FEE_PCT / 100;
+  assert.ok(Math.abs((await billing.spentOnCalls(workspace.id)).day - 0.75 * fee) < 1e-9);
 });

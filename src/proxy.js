@@ -89,7 +89,7 @@ export async function canonicalModel(name) {
   const any = Number((await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get())?.n ?? 0) > 0;
   let v;
   if (bare.includes('/')) {
-    const found = !!(await db.prepare('SELECT 1 FROM models_catalog WHERE model_id = ?').get(baseModelId(bare)));
+    const found = !!(await db.prepare('SELECT 1 FROM models_catalog WHERE model_id = ANY(?::text[])').get([bare, baseModelId(bare)]));
     v = { model: bare, known: found, empty: !any };
   } else {
     const rows = await db.prepare(`SELECT model_id FROM models_catalog WHERE model_id LIKE ?`).all(`%/${bare.replace(/[\\%_]/g, '\\$&')}`);
@@ -108,13 +108,19 @@ export async function canonicalModel(name) {
 const unknownModelWords = (m) => (/^openrouter\/auto/i.test(String(m))
   ? 'openrouter/auto picks a different model for every call, so what a call can cost is not known before it is sent, '
     + 'and there is nothing to measure a cheaper model against. Name the model you want; every model is listed at GET /v1/models.'
+  : /:free$/i.test(String(m))
+    ? `"${String(m).slice(0, 80)}" is a free variant. Free variants are not routed: their providers may keep or learn from `
+      + 'what they are sent, which Understudy never allows. Name the paid model; every model is listed at GET /v1/models.'
   : `"${String(m).slice(0, 80)}" is not a model we route to. Name it with its maker, `
     + 'for example openai/gpt-5.4; every model is listed at GET /v1/models.');
 
 /* What a request asks for whose cost cannot be known before it is sent. A file given by its address can
    be any length; a plugin we do not know can charge anything. Those calls are refused with a way round,
    rather than sent unbounded on a balance that has to cover them. */
-const PLUGINS_WE_PRICE = new Set(['web', 'file-parser']);
+/* Plugins whose cost is known before a call is sent: web search (allowed for per call), the PDF reader
+   (a PDF sent inline is counted by its pages), and the two that cost nothing. One switched off costs
+   nothing either, whatever it is. */
+const PLUGINS_WE_PRICE = new Set(['web', 'file-parser', 'response-healing', 'context-compression']);
 function unpriceable(body) {
   for (const m of Array.isArray(body?.messages) ? body.messages : []) {
     for (const p of Array.isArray(m?.content) ? m.content : []) {
@@ -123,9 +129,24 @@ function unpriceable(body) {
         return 'A file given by its address can be any length, so what the call would cost is not known before it is sent. '
           + 'Send the file\'s contents inline (as a data URL), or send us a copy of the call instead.';
       }
+      const video = p?.type === 'video_url' ? (typeof p.video_url === 'string' ? p.video_url : p.video_url?.url) : null;
+      if (typeof video === 'string' && !video.startsWith('data:')) {
+        return 'A video given by its address can be any length, so what the call would cost is not known before it is sent. '
+          + 'Send it inline, or send us a copy of the call instead.';
+      }
+    }
+  }
+  /* A tool the provider runs itself (web search, an adviser that asks another model, image making) is
+     billed on top of the model and can run several times in one call, so its cost is not known before
+     the call is sent. Tools the customer's own code runs are ordinary text, and priced as such. */
+  for (const t of Array.isArray(body?.tools) ? body.tools : []) {
+    if (t && t.type !== 'function') {
+      return `The "${String(t.type).slice(0, 60)}" tool runs on the provider's side and can cost any amount in one call, `
+        + 'so it is not routed. Offer it as a function your own code runs, or send us a copy of the call instead.';
     }
   }
   for (const p of Array.isArray(body?.plugins) ? body.plugins : []) {
+    if (p?.enabled === false) continue;
     if (!PLUGINS_WE_PRICE.has(p?.id)) {
       return `The "${String(p?.id).slice(0, 40)}" plugin is not one we can price before a call is sent. `
         + 'Call without it, or send us a copy of the call instead.';
@@ -167,7 +188,7 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
   if (body.model) {
     const named = await canonicalModel(body.model);
     if (!named.known) {
-      if (named.empty) return no(503, 'The list of models we route to is still being read. Try again in a minute.', 'not_ready');
+      if (named.empty) return no(503, 'The list of models we route to is being read. Try again shortly.', 'not_ready');
       return no(400, unknownModelWords(body.model), 'model_not_found');
     }
     body.model = named.model;
@@ -177,10 +198,17 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
     if (!Array.isArray(body.models) || body.models.some((m) => typeof m !== 'string')) {
       return no(400, '"models" is a list of model ids.', 'invalid_request_error');
     }
+    const named = [];
     for (const m of body.models) {
       const k = await canonicalModel(m);
-      if (!k.known) return no(k.empty ? 503 : 400, k.empty ? 'The list of models we route to is still being read. Try again in a minute.' : unknownModelWords(m), 'model_not_found');
+      if (!k.known) {
+        return no(k.empty ? 503 : 400, k.empty ? 'The list of models we route to is being read. Try again shortly.' : unknownModelWords(m),
+          k.empty ? 'not_ready' : 'model_not_found');
+      }
+      named.push(k.model);
     }
+    // sent under the name that was priced, so what answers is what was held for
+    body.models = named;
   }
   const cannot = unpriceable(body);
   if (cannot) return no(400, cannot, 'unsupported_feature');
@@ -191,6 +219,16 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
      workload: it would leave a one-call workload in their list that nothing produced. */
   const workload = classify ? await workloadFor(wsId, body, { name }) : null;
   const requested = body.model || workload?.reference_model || null;
+  /* A call that names no model goes to the model its workload was made with, which can be one that is not
+     routed (openrouter/auto, from copies sent to us): it is checked the same way a named one is. */
+  if (!body.model && requested) {
+    const k = await canonicalModel(requested);
+    if (!k.known) {
+      return no(k.empty ? 503 : 400, k.empty ? 'The list of models we route to is being read. Try again shortly.'
+        : `This call names no model, and its workload's model is not one we route to. ${unknownModelWords(requested)}`,
+        k.empty ? 'not_ready' : 'model_not_found');
+    }
+  }
   /* The strategy that serves this call: the one the workload was switched to (a model asked the
      way it was measured, or a cascade, or a pick made call by call), or, now and then and within
      the workload's limits, one being tried. None, and the call goes to the model it asked for. */
@@ -232,33 +270,42 @@ function modelsOf(ready) {
    may reach publishes neither a longest answer nor a context length is the call sent capped, at
    HOLD_MAX_OUTPUT_TOKENS, so what was set aside is still a bound. */
 async function holdFor(wsId, body, ready) {
-  const shape = callShape(body);
+  const shape = await callShape(body);
   let worst = 0;
-  let priced = false;
-  let unbounded = false;
+  let capTo = null;
+  // the most a provider may charge per token on this call, per model, as OpenRouter is told
+  const caps = {};
   // the models the request itself names to fall back to count too: any of them may answer, and be paid for
   const fallbacks = Array.isArray(body.models) ? body.models.filter((m) => typeof m === 'string') : [];
   for (const m of [...new Set([...modelsOf(ready), ...fallbacks])]) {
     const b = await callBound(m, shape, { zdr: ready.zdr });
-    if (!b) continue;
-    priced = true;
-    if (!b.known) unbounded = true;
+    /* A model the call can reach that cannot be priced (the catalogue changed a moment ago) is not
+       held at a guess: the call is refused, and the next one finds the catalogue as it is now. */
+    if (!b) return { ok: false, unpriced: m };
+    caps[m] = b.caps;
+    if (!b.known) capTo = capTo === null ? b.each : Math.min(capTo, b.each);
     if (b.usd > worst) worst = b.usd;
   }
-  if (unbounded && shape.cap === null) body.max_tokens = config.HOLD_MAX_OUTPUT_TOKENS;
-  const est = priced ? worst : config.HOLD_UNPRICED_USD;
+  // where the bound needs a cap to be true, the request carries it, no larger than any model's room
+  if (capTo !== null && shape.cap === null) body.max_tokens = capTo;
+  const est = worst;
   /* A strategy can pay for two models on one call (a cheap answer, then the one it sends on to), and a
      cascade also pays for the check that reads the cheap answer: twice, and a quarter more for that. */
   const cascade = chainModels(ready.strategy || {}).length && [ready.strategy?.spec?.kind, ready.strategy?.fallback?.spec?.kind].includes('cascade');
   const twice = !!ready.strategy?.fallback || cascade;
   const h = await hold(wsId, withFee(est * (cascade ? 2.25 : twice ? 2 : 1)), 'call');
-  return { ...h, capped: shape.cap !== null };
+  return { ...h, capped: shape.cap !== null, caps };
 }
 
 /* Why a call that did not fit was refused, in words that say what to do. A workspace's own limit is
    said as that limit; otherwise the balance is empty, or what is free is set aside for calls in
    flight, and a call with no cap on its answer sets aside the most its longest answer could cost. */
 const cannotCover = (h) => {
+  if (h.unpriced) {
+    return { status: 503, json: { error: {
+      message: `${String(h.unpriced).slice(0, 80)} cannot be priced just now, so the call was not sent. Try again shortly.`,
+      type: 'not_ready' } } };
+  }
   if (h.code === 'daily_limit' || h.code === 'monthly_limit') {
     return { status: 402, json: { error: { message: h.message, type: h.code } } };
   }
@@ -408,10 +455,10 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     let hint = false;
     try {
       if (strategy && strategy.spec.kind !== 'model') {
-        out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr, call: liveOpts() });
+        out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr, call: { ...liveOpts(), priceCaps: h.caps } });
       } else {
         hint = await hintFor(ready, served);
-        const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: hint, ...liveOpts() });
+        const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: hint, ...liveOpts(), priceCaps: h.caps });
         // a cost the answer did not state stays unstated here, so the charge estimates it (see finish)
         out = { json: r.json, served, cost: hasCost(r.json?.usage) ? Number(r.json.usage.cost) : null, latencyMs: r.latencyMs ?? Date.now() - started };
       }
@@ -483,7 +530,7 @@ v1.post('/chat/completions', async (req, res) => {
   if (!tries.length) tries.push(null);
   for (const [k, strategy] of tries.entries()) {
     const next = tries[k + 1];
-    const r = await streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready, holdId: h.holdId });
+    const r = await streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready, holdId: h.holdId, priceCaps: h.caps });
     // an answer that failed part way was charged for what it wrote, which took its hold; this is only a safety
     if (r.sent) await release(h.holdId).catch(() => {});
     if (r.ok || r.sent) return undefined;
@@ -510,7 +557,7 @@ v1.post('/chat/completions', async (req, res) => {
 /* One streamed call on one strategy. Answers { ok } once the whole answer has gone out; { sent } when
    the provider failed part way, after the answer had started, which is ended as it stands; or the
    failure, with nothing sent yet, so the caller can try again or say so. */
-async function streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready, holdId = null }) {
+async function streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready, holdId = null, priceCaps = null }) {
   let { served, recipe } = leadOf(strategy, ready);
   let decision = decisionOf(strategy);
   if (strategy && strategy.spec.kind === 'cascade') {
@@ -519,7 +566,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
        would have; a measurement holds a cascade to the workload's speed setting on exactly that. */
     let out;
     try {
-      out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr, call: liveOpts() });
+      out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr, call: { ...liveOpts(), priceCaps } });
     } catch (err) {
       return { ok: false, err, served };
     }
@@ -548,7 +595,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
   // marked for caching only where this model answers the workload often enough (see hintFor)
   const hint = await hintFor(ready, served);
   try {
-    upstream = await chatStream(body, served, { recipe, zdr: ready.zdr, cacheHint: hint });
+    upstream = await chatStream(body, served, { recipe, zdr: ready.zdr, cacheHint: hint, priceCaps });
   } catch (err) {
     return { ok: false, err, served };
   }

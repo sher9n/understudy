@@ -1634,7 +1634,8 @@ api.get('/billing/checkout/:id', async (req, res) => {
 api.post('/settings/auto-topup', async (req, res) => {
   const acct = await account(req.workspace.id);
   const b = req.body || {};
-  if (b.amountUsd !== undefined) {
+  // switching off needs nothing else, and is never refused over an amount
+  if (b.amountUsd !== undefined && b.enabled !== false) {
     const a = Number(b.amountUsd);
     if (!Number.isFinite(a) || a < config.TOPUP_MIN_USD || a > config.TOPUP_MAX_USD) {
       return fail(res, 400, `Pick an amount between $${config.TOPUP_MIN_USD} and $${config.TOPUP_MAX_USD}.`);

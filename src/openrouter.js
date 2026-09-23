@@ -86,7 +86,7 @@ function withCacheHint(body) {
   return { ...body, messages: msgs };
 }
 
-export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHint = false } = {}) {
+export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHint = false, priceCaps = null } = {}) {
   const out = { ...(cacheHint && hintApplies(body, model) ? withCacheHint(body) : body), model };
   delete out.stream_options;
   /* What the customer told us, rather than the model: which workload a call is, and their own
@@ -107,12 +107,30 @@ export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHin
   const keepNothing = zdr ?? config.ZDR_ONLY;
   out.provider = { ...(out.provider || {}), data_collection: 'deny', ...(keepNothing ? { zdr: true } : {}),
     ...(pinnedTo ? { only: pinnedTo } : {}) };
+  /* The most any provider may charge on this call, per million tokens and per request: the prices the
+     call's hold was sized on (see callBound). OpenRouter never sends the call to a provider dearer than
+     this, which is what makes the hold a bound when providers are not all known one by one. A ceiling the
+     customer set is kept where it is lower. Rounded up a hair, so a provider at exactly the bound is not
+     turned away by the arithmetic. */
+  const cap = priceCaps?.[model];
+  if (cap) {
+    const theirs = out.provider.max_price && typeof out.provider.max_price === 'object' ? out.provider.max_price : {};
+    const perMillion = (v) => Math.ceil(Number(v) * 1e6 * 1e6) / 1e6;
+    const lower = (given, ours) => (Number.isFinite(Number(given)) ? Math.min(Number(given), ours) : ours);
+    out.provider.max_price = {
+      ...theirs,
+      prompt: lower(theirs.prompt, perMillion(cap.prompt)),
+      completion: lower(theirs.completion, perMillion(cap.completion)),
+      ...(cap.request > 0 ? { request: lower(theirs.request, Math.ceil(cap.request * 1e6) / 1e6) } : {}),
+    };
+  }
   return out;
 }
 
-export async function chat(body, model, { signal, retries = 3, recipe = null, pace = false, maxWaitMs = null, zdr = null, cacheHint = false } = {}) {
+export async function chat(body, model, { signal, retries = 3, recipe = null, pace = false, maxWaitMs = null, zdr = null, cacheHint = false,
+  priceCaps = null } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
-  const payload = buildUpstream(body, model, recipe, { zdr, cacheHint });
+  const payload = buildUpstream(body, model, recipe, { zdr, cacheHint, priceCaps });
   for (let attempt = 0; ; attempt += 1) {
     await waitForSlot(model, pace);
     const started = Date.now();
@@ -151,9 +169,9 @@ const timedOut = (message) => Object.assign(new Error(message), { name: 'Timeout
  *  longer than two minutes to write, which a long answer or a model that thinks at length routinely
  *  does, and the customer was left holding half an answer. */
 export async function chatStream(body, model, { signal, recipe = null, retries = 0, pace = false, zdr = null, cacheHint = false,
-  wholeMs = config.UPSTREAM_STREAM_MAX_MS } = {}) {
+  wholeMs = config.UPSTREAM_STREAM_MAX_MS, priceCaps = null } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
-  const payload = buildUpstream(body, model, recipe, { zdr, cacheHint });
+  const payload = buildUpstream(body, model, recipe, { zdr, cacheHint, priceCaps });
   payload.stream = true;
   payload.stream_options = { include_usage: true };
   for (let attempt = 0; ; attempt += 1) {
@@ -393,6 +411,8 @@ export async function fetchModels() {
       reasoning_json: json(m.reasoning ?? null),
       expires_at: epochMs(m.expiration_date),
       overrides_json: json(m.pricing?.overrides ?? null),
+      // every price it publishes: pictures and sound written, cache writes, per request (see callBound)
+      pricing_json: json(m.pricing ?? null),
     }));
 }
 
@@ -405,21 +425,21 @@ export async function saveCatalog(models) {
     const stmt = tx.prepare(
       `INSERT INTO models_catalog (model_id, name, context_len, price_in, price_out, open_weights, zdr, synced_at,
               description, released_at, params_json, inputs_json, max_output, reasoning_json, expires_at,
-              overrides_json, price_cache_read)
+              overrides_json, price_cache_read, pricing_json)
        VALUES (@model_id, @name, @context_len, @price_in, @price_out, @open_weights, @zdr, @synced_at,
               @description, @released_at, @params_json, @inputs_json, @max_output, @reasoning_json, @expires_at,
-              @overrides_json, @price_cache_read)
+              @overrides_json, @price_cache_read, @pricing_json)
        ON CONFLICT(model_id) DO UPDATE SET name = excluded.name, context_len = excluded.context_len,
          price_in = excluded.price_in, price_out = excluded.price_out, price_cache_read = excluded.price_cache_read,
          open_weights = excluded.open_weights, synced_at = excluded.synced_at,
          description = excluded.description, released_at = excluded.released_at,
          params_json = excluded.params_json, inputs_json = excluded.inputs_json,
          max_output = excluded.max_output, reasoning_json = excluded.reasoning_json,
-         expires_at = excluded.expires_at, overrides_json = excluded.overrides_json`);
+         expires_at = excluded.expires_at, overrides_json = excluded.overrides_json, pricing_json = excluded.pricing_json`);
     for (const m of models) {
       await stmt.run({
         description: null, released_at: null, params_json: null, inputs_json: null, max_output: null,
-        reasoning_json: null, expires_at: null, overrides_json: null, price_cache_read: null, ...m, synced_at: at,
+        reasoning_json: null, expires_at: null, overrides_json: null, price_cache_read: null, pricing_json: null, ...m, synced_at: at,
       });
     }
     /* And take out what is no longer offered. Inserting and updating without ever removing
@@ -461,6 +481,7 @@ export async function fetchZdrEndpoints() {
       price_in: Number(e.pricing?.prompt || 0),
       price_out: Number(e.pricing?.completion || 0),
       overrides_json: json(e.pricing?.overrides ?? null),
+      pricing_json: json(e.pricing ?? null),
       context_len: e.context_length ?? null,
       max_output: e.max_completion_tokens ?? null,
       max_prompt: e.max_prompt_tokens ?? null,
@@ -491,10 +512,10 @@ export async function saveZdrEndpoints(rows) {
     const stmt = tx.prepare(
       `INSERT INTO model_endpoints (model_id, tag, provider, price_in, price_out, overrides_json, context_len,
               max_output, max_prompt, params_json, status, uptime_5m, uptime_30m, uptime_1d,
-              ttft_p50, ttft_p90, tps_p50, tps_p90, speed_at, synced_at)
+              ttft_p50, ttft_p90, tps_p50, tps_p90, speed_at, synced_at, pricing_json)
        VALUES (@model_id, @tag, @provider, @price_in, @price_out, @overrides_json, @context_len,
               @max_output, @max_prompt, @params_json, @status, @uptime_5m, @uptime_30m, @uptime_1d,
-              @ttft_p50, @ttft_p90, @tps_p50, @tps_p90, @speed_at, @synced_at)`);
+              @ttft_p50, @ttft_p90, @tps_p50, @tps_p90, @speed_at, @synced_at, @pricing_json)`);
     for (const r of rows) {
       await stmt.run({ ...r, speed_at: r.ttft_p50 != null || r.tps_p50 != null ? at : null, synced_at: at });
     }

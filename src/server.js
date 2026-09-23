@@ -10,14 +10,14 @@ import { forgetFacts } from './models/facts.js';
 import { syncArena } from './models/arena.js';
 import { planFor, onMissingFits } from './eval/plan.js';
 import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './alerts.js';
-import { notify } from './notify.js';
+
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
 import { trueUp } from './trueup.js';
 import { parse as parseRoute } from '../web/src/router.js';
 import { nudgeForCatalog } from './eval/schedule.js';
-import { runTopUp, sweepHolds } from './billing.js';
+import { runTopUp, giveUpTopUp, reconcileLimitTotals, sweepHolds } from './billing.js';
 import { pruneLimits } from './limits.js';
 import { revert, watchLive, watchCatalogue } from './eval/promote.js';
 import { onFollowUp, readFollowUp } from './learn/outcomes.js';
@@ -61,6 +61,15 @@ handle('catalog_sync', async () => {
     throw err;
   }
   const before = await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all();
+  /* A list that comes back empty, or less than half as long as the one we have, is a fault on the way
+     rather than a catalogue that shrank: saved, it would stop routing every model it left out until the
+     next reading, six hours on. It is kept out, we are told, and the reading is tried again soon. */
+  if (!list.length || (before.length >= 20 && list.length < before.length / 2)) {
+    reportCallFailure({ kind: 'model catalogue', status: 0,
+      message: `the model list came back with ${list.length} models against ${before.length}; kept the list we have` });
+    await enqueue('catalog_sync', {}, { runAfter: now() + 15 * 60000, unique: true, sooner: true });
+    return { ok: false, note: `refused a list of ${list.length} models` };
+  }
   const n = await saveCatalog(list);
   forgetFacts();
   /* A model worth trying that was not there before, or one serving somebody that got dearer, brings
@@ -81,10 +90,17 @@ handle('model_health', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
   await enqueue('model_health', {}, { runAfter: now() + config.HEALTH_TTL_MIN * 60000, unique: true });
   const rows = await fetchZdrEndpoints();
-  if (rows.length) {
-    await saveZdrEndpoints(rows);
-    forgetFacts();
+  // the same guard as the catalogue: an empty or much shorter list is a fault, not news
+  const had = Number((await db.prepare('SELECT COUNT(*) AS n FROM model_endpoints').get())?.n || 0);
+  if (!rows.length || (had >= 20 && rows.length < had / 2)) {
+    if (had) {
+      reportCallFailure({ kind: 'provider list', status: 0,
+        message: `the list of providers that keep nothing came back with ${rows.length} against ${had}; kept the list we have` });
+    }
+    return { ok: false, providers: rows.length };
   }
+  await saveZdrEndpoints(rows);
+  forgetFacts();
   return { ok: true, providers: rows.length };
 });
 
@@ -144,18 +160,8 @@ handle('topup', async ({ workspaceId }, job) => {
   try {
     return await runTopUp(workspaceId, { attempt: Math.max(0, Number(job?.attempts || 1) - 1) });
   } catch (err) {
-    if (Number(job?.attempts || 0) >= 5) {
-      reportCallFailure({ kind: 'automatic top up', model: 'stripe', status: Number(err?.statusCode) || 0,
-        message: `gave up after 5 tries: ${err?.message || err}`, workspaceId });
-      await notify(workspaceId, 'money', `topup-gaveup:${job?.id}`, {
-        title: 'An automatic top up could not be made',
-        lines: [
-          'We could not reach the card processor to top up your balance, after trying five times.',
-          'Calls through Understudy stop when the balance runs out. Add credit in Settings to carry on.',
-        ],
-        path: '/settings', linkText: 'Add credit',
-      }).catch(() => {});
-    }
+    // the last try: automatic top up is paused and its owner told, once for this low balance
+    if (Number(job?.attempts || 0) >= 5) await giveUpTopUp(workspaceId, err);
     throw err;
   }
 });
@@ -393,6 +399,8 @@ handle('recheck', async () => {
   /* A measurement a deploy or a restart left saying "running" is closed here too, not only when
      somebody opens its page, so it cannot hold a workload in "Measuring" that nobody visits. */
   await closeAbandoned();
+  // the spending limits' running totals, read again from the ledger (see reconcileLimitTotals)
+  await reconcileLimitTotals().catch((err) => console.error(`reconciling limit totals failed: ${err?.message || err}`));
   await settleOutcomes();
   /* A workload saying "Ready to optimize" or "Nothing cleared yet" is read again from what its
      measurements found. The code before this set the first from whether a bar had ever been
@@ -545,6 +553,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
   await enqueue('learn', {}, { runAfter: now() + 10 * 60000, unique: true });
   startJobs();
+  /* A few minutes after boot, once the process a deploy replaced has stopped charging, the limit totals
+     are read again from the ledger, so a charge it made without moving them is counted. */
+  setTimeout(() => { reconcileLimitTotals().catch(() => {}); }, 3 * 60000).unref();
   const server = app.listen(config.PORT, () => {
     console.log(`Understudy on http://localhost:${config.PORT}`);
     console.log(`  routing: ${canRoute() ? 'ready' : 'no OPENROUTER_API_KEY, /v1 will answer 503'}`);

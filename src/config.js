@@ -405,11 +405,11 @@ export const config = {
      as this much (the dearest search is a few cents). */
   HOLD_IMAGE_TOKENS: num('HOLD_IMAGE_TOKENS', 6000),
   HOLD_WEB_SEARCH_USD: num('HOLD_WEB_SEARCH_USD', 0.05),
-  /* A provider that keeps nothing can charge more than the list price, so a hold is the list price
-     times this; a model with no known price is held at a fixed amount. */
+  /* Where the providers a call can reach are not each known (zero retention off), a hold prices it at
+     the list price times this, and the request tells OpenRouter never to use a provider dearer than
+     that (provider.max_price), so the margin is a bound and not a hope. A model with no known price is
+     never routed. */
   HOLD_PRICE_MULTIPLE: num('HOLD_PRICE_MULTIPLE', 2),
-  HOLD_UNPRICED_USD: num('HOLD_UNPRICED_USD', 0.25),
-  HOLD_DEFAULT_OUTPUT_TOKENS: num('HOLD_DEFAULT_OUTPUT_TOKENS', 2000),
   HOLD_MAX_OUTPUT_TOKENS: num('HOLD_MAX_OUTPUT_TOKENS', 32000),
   OBSERVE_PLAN_USD: num('OBSERVE_PLAN_USD', 49),
   EVAL_ALLOWANCE_USD: num('EVAL_ALLOWANCE_USD', 10),

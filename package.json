@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "express": "^4.21.2",
+    "pdf-lib": "^1.17.1",
     "pg": "^8.23.0",
     "stripe": "^22.6.2"
   },

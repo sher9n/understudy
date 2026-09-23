@@ -32,6 +32,8 @@ const WOBBLE = {
   'anthropic/claude-haiku-4.5': 0.026,
   'qwen/qwen3-235b-a22b-2507': 0.041,
   'google/gemini-2.5-flash-lite': 0.098,
+  // a walk can make a model steadier or shakier: FAKE_WOBBLE='{"openai/gpt-5.4":0.1}'
+  ...(() => { try { return JSON.parse(process.env.FAKE_WOBBLE || '{}'); } catch { return {}; } })(),
 };
 
 let seq = 0;
