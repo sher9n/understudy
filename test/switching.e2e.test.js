@@ -375,6 +375,20 @@ test('a long instruction is marked for caching only where calls come often enoug
   assert.equal(typeof sent.filter((p) => p.model === CLAUDE).pop().messages[0].content, 'string');
 });
 
+test('a workspace that allows retention only takes our own requirement away, never the customer\'s', () => {
+  const messages = [{ role: 'user', content: 'hi' }];
+  const asked = { messages, provider: { zdr: true, order: ['somebody'] } };
+  const off = buildUpstream(asked, REF, null, { zdr: false });
+  assert.equal(off.provider.zdr, true, 'the customer\'s own code asked for zero retention, and keeps it');
+  assert.deepEqual(off.provider.order, ['somebody'], 'and everything else it asked of the provider');
+  assert.equal(off.provider.data_collection, 'deny', 'nobody\'s calls ever go to a provider that trains on them');
+  assert.equal(asked.provider.zdr, true, 'the request the customer sent is never changed in place');
+  const plain = buildUpstream({ messages }, REF, null, { zdr: false });
+  assert.equal(plain.provider.zdr, undefined, 'with retention allowed, nothing of ours asks for it');
+  const required = buildUpstream({ messages, provider: { zdr: false } }, REF, null, { zdr: true });
+  assert.equal(required.provider.zdr, true, 'a workspace that requires it is never loosened by a call');
+});
+
 test('a few live answers are read in the background, within the day\'s budget, and paid for as optimizing', async () => {
   const s = await shop();
   const w0 = await workloadFor(s.workspace.id, request(1, { system: 'Grade me.' }));
