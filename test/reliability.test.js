@@ -248,3 +248,41 @@ test('a restart does not start again a measurement a person stopped, nor one som
   assert.equal(await status('job_boot_dead'), 'queued', 'nothing is, so it can go again');
   assert.equal(await status('job_boot_other'), 'queued', 'other work goes back as before');
 });
+
+test('a process being stopped hands its measurements over at once, and leaves a stopped one stopped', async () => {
+  const t = now();
+  await db.prepare(`INSERT INTO workloads (id, workspace_id, slug, fingerprint, shape_kind, reference_model, sample_prompt, created_at, updated_at)
+                     VALUES ('wl_hand', ?, 'hand', 'fp_hand', 'free_text', ?, 'x', ?, ?)`).run(ws.id, REF, t, t);
+  // a stand-in measurement that writes its run and then waits, as a long one does
+  let finish = null;
+  const started = new Promise((ok) => {
+    jobs.handle('eval_run', async (_p, job) => {
+      await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model, created_at, job_id, heartbeat_at)
+                         VALUES (?, ?, 'wl_hand', 'running', 'free_text', ?, ?, ?, ?)`).run(`run_${job.id}`, ws.id, REF, now(), job.id, now());
+      ok(job.id);
+      await new Promise((r) => { finish = r; });
+      return { ok: true };
+    });
+  });
+  await db.prepare(`UPDATE jobs SET status = 'done' WHERE status IN ('queued', 'claimed')`).run();
+  const id = await jobs.enqueue('eval_run', { workloadId: 'wl_hand', trigger: 'manual' });
+  const running = jobs.runOnce();
+  assert.equal(await started, id);
+  assert.equal(await jobs.releaseMine(), 1, 'its job goes back in the queue');
+  const run = await db.prepare('SELECT heartbeat_at FROM eval_runs WHERE job_id = ?').get(id);
+  assert.equal(Number(run.heartbeat_at), 0, 'and its run reads as nothing running it');
+  finish();
+  await running;
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(id)).status, 'queued', 'finishing here does not undo the hand-over');
+  // a stopped one is not handed over
+  await db.prepare(`UPDATE jobs SET status = 'done' WHERE status IN ('queued', 'claimed')`).run();
+  const stopped = jobs.enqueue('eval_run', { workloadId: 'wl_hand', trigger: 'manual', n: 2 });
+  const sid = await stopped;
+  const going = jobs.runOnce();
+  await new Promise((r) => setTimeout(r, 200));
+  await db.prepare('UPDATE eval_runs SET stop_requested_at = ? WHERE job_id = ?').run(now(), sid);
+  assert.equal(await jobs.releaseMine(), 0);
+  finish();
+  await going;
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(sid)).status, 'done');
+});

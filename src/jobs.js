@@ -3,6 +3,8 @@ import { db, id, now, background } from './db/index.js';
 import config from './config.js';
 
 const handlers = new Map();
+// the jobs this process is running now, by id, so a shutdown can hand its measurements over (releaseMine)
+const mine = new Map();
 
 /* Which job the code running now belongs to, so a job that books its own next run is not
    mistaken for that next run. Without this, every job that schedules itself (the catalogue,
@@ -65,7 +67,12 @@ async function claim(skipKinds = []) {
 export async function runOnce({ skipKinds = [] } = {}) {
   const job = await claim(skipKinds);
   if (!job) return false;
-  await background.run(true, () => runJob(job));
+  mine.set(job.id, job.kind);
+  try {
+    await background.run(true, () => runJob(job));
+  } finally {
+    mine.delete(job.id);
+  }
   return true;
 }
 
@@ -122,10 +129,12 @@ async function pump() {
       if (!job) break;
       active += 1;
       activeByKind.set(job.kind, (activeByKind.get(job.kind) || 0) + 1);
+      mine.set(job.id, job.kind);
       const t0 = Date.now();
       background.run(true, () => runJob(job))
         .catch(() => { /* runJob records its own failures; the loop must not die */ })
         .finally(() => {
+          mine.delete(job.id);
           active -= 1;
           activeByKind.set(job.kind, Math.max(0, (activeByKind.get(job.kind) || 1) - 1));
           if (job.kind !== 'learn' || Date.now() - t0 > 1000) {
@@ -149,6 +158,24 @@ export function startJobs() {
 export async function stopJobs() {
   stopping = true;
   if (timer) { clearInterval(timer); timer = null; }
+}
+
+/* A process being stopped (a deploy, a restart) hands its measurements over rather than leaving them
+   saying "running" for EVAL_STALE_MIN minutes with nothing behind them. Their runs are marked as
+   nothing running them (a heartbeat of zero, which reads as long gone), so the next process closes
+   them as interrupted at once, and their jobs go back in the queue, so the measurement starts again
+   there. One a person stopped is left alone: its job ends, as a stop should. */
+export async function releaseMine() {
+  const ids = [...mine].filter(([, kind]) => kind === 'eval_run').map(([jobId]) => jobId);
+  if (!ids.length) return 0;
+  await db.prepare(
+    `UPDATE eval_runs SET heartbeat_at = 0
+      WHERE status = 'running' AND stop_requested_at IS NULL AND job_id = ANY(?::text[])`).run(ids);
+  return (await db.prepare(
+    `UPDATE jobs SET status = 'queued', run_after = ?, error = 'handed over: a new version was starting'
+      WHERE status = 'claimed' AND id = ANY(?::text[])
+        AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id AND r.stop_requested_at IS NOT NULL)`)
+    .run(now(), ids)).changes;
 }
 
 /* Anything claimed when the process died goes back in the queue at boot, with two exceptions for

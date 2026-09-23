@@ -4,7 +4,7 @@ import express from 'express';
 import config, { canRoute } from './config.js';
 import { db, now } from './db/index.js';
 import migrate from './db/migrate.js';
-import { handle, startJobs, stopJobs, requeueStale, enqueue } from './jobs.js';
+import { handle, startJobs, stopJobs, requeueStale, enqueue, releaseMine } from './jobs.js';
 import { fetchModels, saveCatalog, fetchZdrEndpoints, saveZdrEndpoints } from './openrouter.js';
 import { forgetFacts } from './models/facts.js';
 import { syncArena } from './models/arena.js';
@@ -529,7 +529,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`  alerts:  ${canAlert() ? `a failed call emails ${config.ALERT_EMAIL}`
       : 'nowhere to send (set RESEND_API_KEY and ALERT_EMAIL)'}`);
   });
-  const bye = async () => { await stopJobs(); await flushAllAlerts(); server.close(() => process.exit(0)); };
+  /* Stopping: no new work is claimed, measurements in flight are handed to the next process, alerts
+     are sent, and the process ends once open requests finish, or after a few seconds whatever they do,
+     so a measurement handed over is not also finished here. */
+  let leaving = false;
+  const bye = async () => {
+    if (leaving) return;
+    leaving = true;
+    await stopJobs();
+    await releaseMine().catch((err) => console.error(`handing measurements over failed: ${err?.message || err}`));
+    await flushAllAlerts().catch(() => {});
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
   process.on('SIGINT', bye);
   process.on('SIGTERM', bye);
 }
