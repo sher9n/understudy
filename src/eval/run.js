@@ -1319,15 +1319,20 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   // the next plan, for any workload, sees how fast these models were and whether any was busy
   forgetFleet();
 
+  /* Our own account with the provider refused a call. That is nothing about any model and true of
+     every model at once, so the measurement stops there, the alert goes out, and it ends interrupted
+     in the provider's words, wherever it had got to: the race, the strategies, or the second look.
+     Met after the race, it used to be left unread, and the run ended "compared" with nothing said. */
+  const accountHalt = async () => {
+    reportCallFailure({ kind: 'measurement replays', model: accountHit?.model ?? null, status: accountHit?.status, message: accountHit?.error });
+    return await interrupt(accountProblem(accountHit));
+  };
   if (halt === 'stopped') return await endStopped();
   if (laneError) {
     await interrupt(`Something went wrong here part way through: ${String(laneError?.message || laneError).slice(0, 160)}.`, { retryMs: 0 });
     throw laneError;
   }
-  if (halt === 'account') {
-    reportCallFailure({ kind: 'measurement replays', model: accountHit?.model ?? null, status: accountHit?.status, message: accountHit?.error });
-    return await interrupt(accountProblem(accountHit));
-  }
+  if (halt === 'account') return await accountHalt();
 
   /* Strategies, for the cheaper models that could not manage alone.
    *
@@ -1489,6 +1494,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     }
   }
   if (halt === 'stopped') return await endStopped();
+  if (halt === 'account') return await accountHalt();
 
   /* Which cleared models could be switched to at all: priced, and cheaper than the customer's own
      model on these very calls once the fee is added. A customer's model with no known price used to
@@ -1549,6 +1555,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await db.prepare(`UPDATE eval_results SET confirm_verdict = 'not_reached' WHERE id = ? AND confirm_verdict IS NULL`).run(r.id);
   }
   if (halt === 'stopped') return await endStopped();
+  if (halt === 'account') return await accountHalt();
 
   await settle(`Measuring ${workload.slug}`);
   await keepSavings();

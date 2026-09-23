@@ -618,3 +618,19 @@ test('a workload that asks first still gets its email', async () => {
   assert.equal(Number(waiting.n), 1);
   assert.equal((await load(workload.id)).routed_model, null);
 });
+
+test('our own account refused during the second look ends the run as interrupted, and switches nothing', async () => {
+  const { workload } = await seed({ enabled: ['vendor/steady-small'], mode: 'auto' });
+  // the bar is a hundred calls to the customer's model; the second look's first call to it is refused
+  refusesFrom = countOf(REF) + 101;
+  try {
+    const out = await runEvaluation(workload.id);
+    assert.equal(out.ok, false, JSON.stringify(out));
+  } finally {
+    refusesFrom = null;
+  }
+  const run = await db.prepare('SELECT * FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1').get(workload.id);
+  assert.equal(run.outcome, 'interrupted', 'not "compared", as though nothing had happened');
+  assert.match(run.error, /account/);
+  assert.equal((await load(workload.id)).routed_model, null);
+});
