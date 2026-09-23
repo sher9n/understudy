@@ -5,7 +5,7 @@ import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval } from '../billing.js';
 import { planFor } from './plan.js';
 import { judgeBarPair, judgeCandidate } from './judge.js';
-import { extract, disagreement, gates, floorFrom, verdictFor, sampleCalls, barIsMeaningful } from './compare.js';
+import { extract, disagreement, gates, floorFrom, verdictWith, sampleCalls, barIsMeaningful } from './compare.js';
 import { promote, revert, trafficOf, everReverted } from './promote.js';
 import { replayOnce } from './replay.js';
 import { thinkingFit } from './select.js';
@@ -15,7 +15,7 @@ import { OUTCOME_OF, OUTCOME_CASE, cheaperCleared } from './outcome.js';
 import { reportCallFailure } from '../alerts.js';
 import { jevUsable } from '../jev.js';
 import { structureOf, jevCheck, requestText, answerText as checkedText } from '../learn/check.js';
-import { simulateCascade, simulateRouter, bestOf } from '../learn/simulate.js';
+import { simulateCascade, simulateRouter, bestOf, crossFit } from '../learn/simulate.js';
 import { featuresOf, train, predict, leaveOneOutGently } from '../learn/router.js';
 import { labelOf, armById, leadModel } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
@@ -597,7 +597,6 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   };
 
   const refMonthly = await monthlyOn(workloadId, reference);
-  const minRuns = Math.min(config.EVAL_MIN_RUNS, kept.length);
   const reviewBand = config.EVAL_REVIEW_BAND;
   const results = [];
   let halt = null;
@@ -683,7 +682,11 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
           score = judged.score;
           if (judged.judgedBy) judgedWith.add(judged.judgedBy);
         } else {
-          score = Math.min(p.a.ok ? disagreement(got, p.a, shape) ?? 1 : 1, p.b.ok ? disagreement(got, p.b, shape) ?? 1 : 1);
+          /* Held to each of the customer's two answers and averaged, the way the bar is set: the
+             bar is how often the customer's model differs from one of its own answers, so a copy
+             of it scores the noise exactly. Its better match gave every candidate two chances. */
+          const both = [p.a, p.b].filter((x) => x.ok).map((x) => disagreement(got, x, shape) ?? 1);
+          score = both.length ? both.reduce((x, y) => x + y, 0) / both.length : 1;
         }
         st.pairs.push({ cand: got, ref: p.a.ok ? p.a : p.b, score, i });
       }
@@ -719,12 +722,16 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const record = async (cand, st) => {
     const gap = st.counted ? (st.sum / st.counted) * 100 : 100;
     const finished = st.runs === kept.length && (!st.stopped || st.stopped === 'speed' || st.stopped === 'bar');
+    /* The verdict carries how sure the sample can make anybody (see verdictWith): cleared only when
+       even the top of its range is inside the bar, and "not enough calls" when this many calls could
+       never show it, whatever the answers. */
+    const read = verdictWith(st.calls.filter((c) => c.scored).map((c) => c.score), floor, { reviewBand });
     let verdict;
     if (st.stopped === 'refused' || st.stopped === 'errors') verdict = 'failed';
     else if (st.stopped === 'speed') verdict = 'slower';
     else if (st.stopped === 'bar') verdict = 'missed';
     else {
-      verdict = verdictFor(gap, floor, st.runs, { minRuns, reviewBand });
+      verdict = read.verdict;
       if ((verdict === 'cleared' || verdict === 'review') && tooSlow(st, { final: true })) verdict = 'slower';
       // one refusal along the way is worth a look before anything is switched
       if (verdict === 'cleared' && st.errors > 0) verdict = 'review';
@@ -758,6 +765,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       // the customer's own model thinking less is a strategy of its own, served the way it was measured
       arm_json: cand.key ? JSON.stringify({ kind: 'model', model: cand.model, recipe: cand.recipe ?? null }) : null,
       escalated_pct: null,
+      // where the true gap most likely is, and how many calls it would take to clear this bar
+      gap_lo: round8(read.lo), gap_hi: round8(read.hi), calls_needed: read.need ?? null,
     };
     await insertResult(row);
     return finished;
@@ -767,11 +776,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict,
                 gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at,
                 latency_p50, latency_p90, ttft_p50, ttft_p90, errors, stopped, error_text, difference, reused,
-                rank_json, recipe_json, cost_ratio, arm_json, escalated_pct)
+                rank_json, recipe_json, cost_ratio, arm_json, escalated_pct, gap_lo, gap_hi, calls_needed)
                 VALUES (@id, @run_id, @model_id, @runs, @gap_pct, @cost_month_usd, @verdict,
                 @gate_structure, @gate_accuracy, @gate_coverage, @gate_complete, @failures, @created_at,
                 @latency_p50, @latency_p90, @ttft_p50, @ttft_p90, @errors, @stopped, @error_text, @difference, @reused,
-                @rank_json, @recipe_json, @cost_ratio, @arm_json, @escalated_pct)`).run(row);
+                @rank_json, @recipe_json, @cost_ratio, @arm_json, @escalated_pct, @gap_lo, @gap_hi, @calls_needed)`)
+      .run({ gap_lo: null, gap_hi: null, calls_needed: null, ...row });
     results.push(row);
   };
 
@@ -887,13 +897,21 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       recipe_json: cand.recipe ? JSON.stringify(cand.recipe) : null,
       cost_ratio: reading.ratio === null ? null : round8(reading.ratio),
       arm_json: JSON.stringify(spec), escalated_pct: round8(reading.escalated * 100),
+      gap_lo: reading.read ? round8(reading.read.lo) : null, gap_hi: reading.read ? round8(reading.read.hi) : null,
+      calls_needed: reading.read?.need ?? null,
     };
   };
+  /* A strategy's verdict comes from its held-out per-call scores (see crossFit), through the same
+     interval rule as a plain model's. */
   const verdictOf = (reading) => {
-    let v = reading.inside ? verdictFor(reading.gap, floor, kept.length, { minRuns, reviewBand }) : reading.near ? 'review' : 'missed';
+    const read = verdictWith(reading.scores || [], floor, { reviewBand });
+    reading.read = read;
+    let v = read.verdict;
     if ((v === 'cleared' || v === 'review') && !quickEnough(metric === 'ttft' ? reading.ttft : reading.latency)) v = 'slower';
+    if (reading.slow && (v === 'cleared' || v === 'review')) v = 'slower';
     return v;
   };
+  const fastEnough = (r) => quickEnough(metric === 'ttft' ? r.ttft : r.latency);
 
   const cascadeFor = async (cand, st) => {
     const spec = { kind: 'cascade', first: { model: cand.model, recipe: cand.recipe ?? null }, fallback: { model: reference, recipe: null } };
@@ -917,8 +935,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     }
     const calls = st.calls.map((c, k) => ({ ok: c.ok, score: c.scored ? c.score : (kept[c.i].noise ?? noiseMean),
       cost: c.cost, latency: c.latency, ttft: c.ttft, check: checks[k], ref: refOfPair(kept[c.i]) }));
-    const readings = simulateCascade(calls, { checkCost: (i) => checks[i].liveCost, checkMs: (i) => checks[i].ms });
-    const best = bestOf(readings, { floor, reviewBand, fast: (r) => quickEnough(metric === 'ttft' ? r.ttft : r.latency) });
+    /* The strictness is chosen on some calls and scored on the others (crossFit), so the gap reported
+       is one the choice never saw; the strictness served is the one chosen on all of them. */
+    const readingsOf = (cs) => simulateCascade(cs, { checkCost: (c) => c.liveCost, checkMs: (c) => c.ms });
+    const cf = crossFit(calls.map((c, k) => ({ ...c, liveCost: checks[k].liveCost, ms: checks[k].ms })), readingsOf,
+      (rs) => bestOf(rs, { floor, reviewBand, fast: fastEnough }));
+    const best = { ...cf.heldOut, threshold: cf.threshold, inside: cf.inSample.inside, near: cf.inSample.near, slow: cf.inSample.slow };
     await insertResult(strategyRow(cand, { ...spec, threshold: best.threshold }, best, verdictOf(best), { difference: label }));
     return true;
   };
@@ -937,16 +959,17 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const model = train(samples);
     const calls = st.calls.map((c) => ({ ok: c.ok, score: c.scored ? c.score : (kept[c.i].noise ?? noiseMean), cost: c.cost,
       latency: c.latency, ttft: c.ttft, p: byCall.get(c.i) ?? predict(model, featuresOf(kept[c.i].body)), ref: refOfPair(kept[c.i]) }));
-    const readings = simulateRouter(calls);
-    const best = bestOf(readings, { floor, reviewBand, fast: (r) => quickEnough(metric === 'ttft' ? r.ttft : r.latency) });
+    const cf = crossFit(calls, (cs) => simulateRouter(cs), (rs) => bestOf(rs, { floor, reviewBand, fast: fastEnough }));
+    const best = { ...cf.heldOut, threshold: cf.threshold, inside: cf.inSample.inside, near: cf.inSample.near, slow: cf.inSample.slow };
+    const v = verdictOf(best);
     /* A router is only worth keeping when it clears the bar on calls it did not learn from, and
        saves something doing it: one that sends every call to the customer's own model clears
        the bar at no saving, and is the customer's own model with extra steps. The router serving
        the workload is always written down, whatever it found, so a measurement can switch it back. */
-    if (!always && (!best.inside || best.ratio === null || best.ratio > 0.95)) return false;
+    if (!always && (v !== 'cleared' || best.ratio === null || best.ratio > 0.95)) return false;
     const spec = { kind: 'router', cheap: { model: cand.model, recipe: cand.recipe ?? null }, strong: { model: reference, recipe: null },
       threshold: best.threshold, ...model };
-    await insertResult(strategyRow(cand, spec, best, verdictOf(best)));
+    await insertResult(strategyRow(cand, spec, best, v));
     return true;
   };
 

@@ -188,7 +188,8 @@ async function history(s, model, { n, failed = 0, armId = undefined, yardstick =
       workspaceId: s.workspace.id, workloadId: s.workload.id, source: 'routed', requestedModel: REF, servedModel: model,
       statusCode: 200, promptTokens: 500, completionTokens: 40, costUsd: COST[model], request: request(seq),
       response: { choices: [{ message: { content: JSON.stringify(right(seq)) } }] },
-      armId: arm?.id ?? null, propensity: yardstick ? 0.01 : 1, explored: yardstick ? 1 : 0,
+      // an experiment was possible on every one of these calls (the serving strategy keeps 98 in 100)
+      armId: arm?.id ?? null, propensity: yardstick ? 0.01 : 0.98, explored: yardstick ? 1 : 0,
     });
     ids.push(callId);
     // a failure the traffic showed: say the answer was not what the request asked for
@@ -270,6 +271,9 @@ test('the hourly review moves to a cheaper runner-up once its live calls work as
   await history(s, CHEAPER, { n: 60 });
   assert.deepEqual(await reviewWorkload(s.workload), [], 'sixty clean calls: not yet');
   await history(s, CHEAPER, { n: 190 });
+  // and never without the customer's own model answering beside it, as the yardstick
+  assert.deepEqual(await reviewWorkload(s.workload), [], 'no yardstick calls: not yet');
+  await history(s, REF, { n: 120, yardstick: true });
   const decisions = await reviewWorkload(s.workload);
   assert.deepEqual(decisions.map((d) => d.kind), ['promote']);
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id);
@@ -278,7 +282,7 @@ test('the hourly review moves to a cheaper runner-up once its live calls work as
   assert.equal(promo.to_model, CHEAPER);
   assert.match(promo.reason, /live results/);
   const act = await db.prepare(`SELECT * FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(s.workload.id);
-  assert.match(act.detail, /Switched on its own by live results: its calls worked 100\.0% of 250 calls/);
+  assert.match(act.detail, /Switched on its own by live results: its calls worked 100\.0% of 250 calls, against 100\.0% of 300 calls on steady and 100\.0% of 120 calls on gpt-5\.4/);
   assert.match(act.detail, /costs 75% less/, 'a quarter of the price: 0.05 against 0.2');
   // the readings are kept on each strategy for the page
   const arm = await armOf(s.workload.id, CHEAPER);
@@ -299,7 +303,7 @@ test('the hourly review switches back when what serves works less often than the
   assert.equal(w.routed_model, null, 'back on the customer\'s own model');
   const r = await db.prepare(`SELECT * FROM promotions WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(s.workload.id);
   assert.equal(r.action, 'soft_revert', 'for a while, not for good: live results can change');
-  assert.match(r.reason, /since the switch, calls on steady worked 85\.0% of 100 calls, against 100\.0% of 60 calls on gpt-5\.4/);
+  assert.match(r.reason, /since the switch, calls on steady worked 85\.0% of 100 calls, against 100\.0% of 60 calls on gpt-5\.4 answering beside it/);
 });
 
 test('a runner-up that clearly works less often is set aside', async () => {

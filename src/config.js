@@ -113,7 +113,7 @@ export const config = {
      of what the workload has, so a measurement is always made on a sample and there is
      always untouched traffic left to check a promoted model against later. */
   EVAL_SAMPLE_MIN: num('EVAL_SAMPLE_MIN', 10),
-  EVAL_SAMPLE_MAX: num('EVAL_SAMPLE_MAX', 100),
+  EVAL_SAMPLE_MAX: num('EVAL_SAMPLE_MAX', 120),
   EVAL_SAMPLE_SHARE: num('EVAL_SAMPLE_SHARE', 0.5),
   /* So the smallest measurable workload is twice the smallest sample. */
   EVAL_MIN_CALLS: num('EVAL_MIN_CALLS', 20),
@@ -224,6 +224,13 @@ export const config = {
   LEARN_MIN_CALLS: num('LEARN_MIN_CALLS', 30),
   LEARN_CONFIDENCE: num('LEARN_CONFIDENCE', 0.95),
   LEARN_TOLERANCE: num('LEARN_TOLERANCE', 0.02),
+  /* Live results only decide anything where outcomes are seen often enough for "worked" to mean
+     something: at least this share of calls has ever shown a signal, or the customer reports results. */
+  LEARN_MIN_DETECTION: num('LEARN_MIN_DETECTION', 0.02),
+  /* In "normal" mode the experiment share grows on a quiet workload, up to this, so that evidence
+     arrives within a half-life rather than in a year: the yardstick needs about eight calls a day. */
+  EXPLORE_SHARE_MAX: num('EXPLORE_SHARE_MAX', 0.1),
+  EXPLORE_YARDSTICK_PER_DAY: num('EXPLORE_YARDSTICK_PER_DAY', 8),
 
   /* How long what we learn stays true. Models improve, providers are added and dropped,
      prices and speeds move, so every fact is read again once it is this old. */

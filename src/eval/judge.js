@@ -101,10 +101,28 @@ export function numbersOf(text) {
   return out.sort();
 }
 
+/* Two answers carry different figures when they state the same count of them with different values,
+   or, when the counts differ, when an amount (a figure with a decimal part or a thousands separator)
+   in one is missing from the other: "Total 1,234.50" against "Total 1,243.50 (incl. 12% VAT)" is a
+   different answer. Plain small figures with different counts are left to the reading, because "4
+   March 2026" against "2026-03-04" carries the month as a figure on one side only. Figures on one
+   side alone say nothing, since the other may write them in words. */
+const AMOUNT = /^\d{1,3}([.,]\d{3})+([.,]\d+)?$|^\d+[.,]\d+$/;
 export function numbersDiffer(a, b) {
   const x = numbersOf(a);
   const y = numbersOf(b);
-  return x.length > 0 && x.length === y.length && x.join(',') !== y.join(',');
+  if (!x.length || !y.length) return false;
+  if (x.length === y.length) return x.join(',') !== y.join(',');
+  const amounts = (text) => [...String(text ?? '').matchAll(/\d+(?:[.,]\d+)*/g)].map((m) => m[0]).filter((t) => AMOUNT.test(t));
+  const ax = numbersOf(amounts(a).join(' '));
+  const ay = numbersOf(amounts(b).join(' '));
+  if (!ax.length && !ay.length) return false;
+  const count = (xs) => { const m = new Map(); for (const v of xs) m.set(v, (m.get(v) || 0) + 1); return m; };
+  const cx = count(ax);
+  const cy = count(ay);
+  for (const [v, n] of cx) if ((cy.get(v) || 0) !== n) return true;
+  for (const [v, n] of cy) if ((cx.get(v) || 0) !== n) return true;
+  return false;
 }
 
 const SAME = {
@@ -267,40 +285,52 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
         pA, pB, refuses: soft(A.refuses?.noul), cutOff: soft(A.cut?.noul),
         kind: A.kind?.choice ?? null,
       };
-      out = { score: best >= 0.5 ? 0 : 1, judgedBy: 'jev', detail, cost: r.costUsd };
+      /* Judged against each of the customer's two answers on its own, and averaged: the bar is how
+         often the customer's model differs from one of its own answers, so a candidate has to be
+         held to one answer at a time as well. Taking its better match gave every candidate two
+         chances where the reference had one, and a perfect copy of the reference read as better
+         than the reference itself. */
+      const ps = pB === null ? [pA] : [pA, pB];
+      const each = [];
+      let cost = r.costUsd;
+      let transient = false;
+      let judgedBy = 'jev';
+      for (const [i, p] of ps.entries()) {
+        if (!unsure(p)) { each.push(p >= 0.5 ? 0 : 1); continue; }
+        const l = await judgePair(request, cand, refs[i]);
+        cost += l.cost;
+        if (l.judged) { each.push(l.score); judgedBy = 'jev+llm'; detail.llm = l.score; } else { each.push(p >= 0.5 ? 0 : 1); transient = true; }
+      }
+      out = { score: each.reduce((x, y) => x + y, 0) / each.length, judgedBy, detail, cost, transient };
       /* A refusal or an answer that stops short is a different answer, unless Jev is sure it
          serves as well as one of the customer's own: on a workload whose right answer is to
          decline, the customer's model declines too, and a candidate that does the same matches. */
       if ((detail.refuses >= 0.8 || detail.cutOff >= 0.8) && best < 0.8) {
         out.score = 1;
         detail.kind = detail.refuses >= 0.8 ? 'refusal' : 'cut off';
-      } else if (unsure(best)) {
-        const closest = pB !== null && pB > pA ? refs[1] : refs[0];
-        const l = await judgePair(request, cand, closest);
-        out = l.judged
-          ? { score: l.score, judgedBy: 'jev+llm', detail: { ...detail, llm: l.score }, cost: out.cost + l.cost }
-          : { ...out, cost: out.cost + l.cost, transient: true };
       }
     } catch {
       out = null;
     }
   }
   if (!out) {
-    let score = 1;
+    let sum = 0;
     let cost = 0;
     let transient = false;
     for (const ref of refs) {
       const l = await judgePair(request, cand, ref);
       cost += l.cost;
       if (!l.judged) transient = true;
-      if (l.score === 0) { score = 0; transient = false; break; }
+      sum += l.score;
     }
-    out = { score, judgedBy: 'llm', detail: null, cost, transient };
+    out = { score: sum / refs.length, judgedBy: 'llm', detail: null, cost, transient };
   }
-  /* The safety net under everybody: the same count of figures with different values is a
-     different answer, even when the prose reads the same. */
-  if (out.score === 0 && refs.every((ref) => numbersDiffer(cand, ref))) {
-    out = { ...out, score: 1, judgedBy: `${out.judgedBy}+numbers`, detail: { ...(out.detail || {}), kind: 'fact' } };
+  /* The safety net under everybody: different figures make a different answer, even when the
+     prose reads the same, held to each of the customer's answers on its own. */
+  const numbered = refs.map((ref) => (numbersDiffer(cand, ref) ? 1 : 0));
+  if (numbered.some(Boolean)) {
+    const floor = numbered.reduce((x, y) => x + y, 0) / refs.length;
+    if (out.score < floor) out = { ...out, score: floor, judgedBy: `${out.judgedBy}+numbers`, detail: { ...(out.detail || {}), kind: 'fact' } };
   }
   if (lasting(out)) await keep(key, out);
   return out;

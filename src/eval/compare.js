@@ -96,6 +96,67 @@ export function floorFrom(noisePct, { multiple, minPct }) {
 /** A bar is only meaningful while the reference agrees with itself most of the time. */
 export const barIsMeaningful = (noisePct, maxPct) => noisePct <= maxPct;
 
+/* A verdict is a claim about a rate seen on a sample, so it carries how sure the sample can make
+ * anybody: nineteen times in twenty the true rate is under the upper bound (Wilson's, one-sided).
+ * The bound is worked out from the mean score, which for scores between 0 and 1 is conservative,
+ * because nothing varies more than a yes-or-no with the same mean.
+ *
+ * cleared: even the upper bound is inside the bar.
+ * missed: even the lower bound is past the review band.
+ * review: the sample straddles the bar, so a person should look.
+ * insufficient: a perfect run on this many calls could not clear the bar; nothing can be said.
+ */
+const Z95 = 1.6449;
+export function wilson(mean, n, z = Z95) {
+  if (!(n > 0)) return { lo: 0, hi: 1 };
+  const p = Math.max(0, Math.min(1, mean));
+  const centre = p + (z * z) / (2 * n);
+  const half = z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+  const d = 1 + (z * z) / n;
+  return { lo: Math.max(0, (centre - half) / d), hi: Math.min(1, (centre + half) / d) };
+}
+
+/** The fewest calls on which a perfect run clears a bar (in percent). */
+export function callsToClear(floorPct, z = Z95) {
+  return Math.ceil((z * z) / (floorPct / 100) - z * z);
+}
+
+/**
+ * The verdict for one candidate from its per-call scores (each 0 to 1, 1 meaning a different answer).
+ *
+ * A score is two things: whether the call differed at all, and by how much when it did. The first
+ * is a count, which Wilson bounds properly; the second is bounded between 0 and 1 and gets its own
+ * small margin. Bounding the mean as if every score were a yes or no read a candidate that only
+ * ever differs slightly (one JSON field wrong on a few calls) as far more uncertain than it is.
+ */
+export function verdictWith(scores, floorPct, { reviewBand = 1.25 } = {}) {
+  const n = scores.length;
+  const gap = n ? (scores.reduce((a, b) => a + b, 0) / n) * 100 : 100;
+  const differed = scores.filter((x) => x > 0);
+  const k = differed.length;
+  const share = wilson(n ? k / n : 0, n);
+  let sevLo = 1;
+  let sevHi = 1;
+  if (k) {
+    const mean = differed.reduce((a, b) => a + b, 0) / k;
+    const sd = Math.sqrt(differed.reduce((a, b) => a + (b - mean) ** 2, 0) / k);
+    const margin = (Z95 * Math.max(sd, 0.1)) / Math.sqrt(k);
+    sevLo = Math.max(0, mean - margin);
+    sevHi = Math.min(1, mean + margin);
+  }
+  const lo = share.lo * sevLo;
+  const hi = share.hi * sevHi;
+  const loPct = lo * 100;
+  const hiPct = hi * 100;
+  if (n === 0 || wilson(0, n).hi * 100 > floorPct) {
+    return { verdict: 'insufficient', gap, lo: loPct, hi: hiPct, need: callsToClear(floorPct) };
+  }
+  if (hiPct <= floorPct) return { verdict: 'cleared', gap, lo: loPct, hi: hiPct };
+  if (loPct > floorPct * reviewBand) return { verdict: 'missed', gap, lo: loPct, hi: hiPct };
+  return { verdict: 'review', gap, lo: loPct, hi: hiPct };
+}
+
+/** Kept for the pages that still read a verdict from a gap alone; every measurement uses verdictWith. */
 export function verdictFor(gapPct, floorPct, runs, { minRuns, reviewBand }) {
   if (runs < minRuns) return 'insufficient';
   if (gapPct <= floorPct) return 'cleared';
