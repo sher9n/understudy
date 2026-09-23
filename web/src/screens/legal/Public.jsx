@@ -37,13 +37,6 @@ const Moon = () => (
   </svg>
 );
 
-/* "How it works" is a place on the home page. From the home page itself the browser scrolls
-   there on its own; from anywhere else it is a trip to the home page, landing on that part. */
-function HowLink({ go, here }) {
-  if (here === 'home') return <a href="#how">How it works</a>;
-  return <To to="home" hash="how" go={go}>How it works</To>;
-}
-
 export function PublicHeader({ me, go, dark, setDark, here }) {
   const signedIn = !!me?.signedIn;
   // until the account check answers, neither "Sign in" nor "Open the dashboard" is offered
@@ -53,7 +46,7 @@ export function PublicHeader({ me, go, dark, setDark, here }) {
     <header className="pubhead">
       <To to="home" go={go} className="pubwm" aria-label="Understudy, home">Understudy</To>
       <nav className="pubnav" aria-label="Understudy">
-        {known && !signedIn && <HowLink go={go} here={here} />}
+        <To to="how" go={go} aria-current={cur('how')}>How it works</To>
         <To to="pricing" go={go} aria-current={cur('pricing')}>Pricing</To>
         <To to="traffic" go={go} aria-current={cur('traffic')}>Your traffic</To>
         <To to="status" go={go} aria-current={cur('status')}>Status</To>
@@ -82,19 +75,14 @@ export function PublicHeader({ me, go, dark, setDark, here }) {
 /* The footer is where somebody looks for the small print, so every page of it is here, in
    four short groups, beside the one line about data that matters most. */
 const FOOT = [
-  ['Product', [['home', 'How it works', 'how'], ['pricing', 'Pricing'], ['status', 'Status']]],
+  ['Product', [['how', 'How it works'], ['pricing', 'Pricing'], ['status', 'Status']]],
   ['Your data', [['traffic', 'What happens to your traffic'], ['security', 'Security'],
     ['subprocessors', 'Subprocessors']]],
   ['Legal', [['terms', 'Terms of service'], ['privacy', 'Privacy'], ['dpa', 'Data processing terms']]],
   ['Talk to us', [['contact', 'Contact us']]],
 ];
 
-export function PublicFooter({ go, me }) {
-  /* The home page is where somebody signed in is never sent (it takes them to their dashboard),
-     so its "How it works" is only offered to people who can read it. */
-  const cols = me?.signedIn
-    ? FOOT.map(([head, links]) => [head, links.filter(([to]) => to !== 'home')])
-    : FOOT;
+export function PublicFooter({ go }) {
   return (
     <footer className="pubfoot">
       <div className="pubfootin">
@@ -107,12 +95,12 @@ export function PublicFooter({ go, me }) {
           </p>
         </div>
         <nav className="pubcols" aria-label="More about Understudy">
-          {cols.map(([head, links]) => (
+          {FOOT.map(([head, links]) => (
             <div key={head}>
               <span className="pubcolh">{head}</span>
               <ul>
-                {links.map(([to, label, hash]) => (
-                  <li key={label}><To to={to} hash={hash || ''} go={go}>{label}</To></li>
+                {links.map(([to, label]) => (
+                  <li key={label}><To to={to} go={go}>{label}</To></li>
                 ))}
               </ul>
             </div>
@@ -130,7 +118,7 @@ export function PublicPage({ me, go, dark, setDark, here, children }) {
       <SkipLink />
       <PublicHeader me={me} go={go} dark={dark} setDark={setDark} here={here} />
       {children}
-      <PublicFooter go={go} me={me} />
+      <PublicFooter go={go} />
     </div>
   );
 }
