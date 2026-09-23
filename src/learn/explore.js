@@ -552,14 +552,26 @@ export function readingOf(a) {
 }
 
 /* A switch in progress, read again: rolled back when its calls do clearly worse than what served
- * before it, otherwise given a larger share once it has spent long enough and answered enough calls
- * at the share it has. Only calls since the switch count, each served by chance, so the two sides
- * answered calls of the same hours. Every comparison is a range that holds at every hourly look
+ * before it, otherwise given a larger share once it has spent long enough at the share it has and both
+ * sides have enough tasks to be compared. Every comparison is a range that holds at every hourly look
  * (src/learn/decide.js), so a rollback is never chance.
+ *
+ * Every task since the switch counts, weighted by one over the chance its share gave it, so the two sides
+ * are read over the same traffic whatever each stage gave them. Pooled as they came, most of the new
+ * strategy's calls fell in the later, larger stage, and a stage that went worse for everybody read as the
+ * new strategy being worse. How often answers worked is read only from calls old enough for what happened
+ * to them to have arrived, on both sides alike: read sooner, the new strategy's fresher calls all read as
+ * having worked.
  *
  * Three things roll it back: more of its calls failing outright (refused, timed out, sent on to the
  * customer's own model) by more than ROLLOUT_ERROR_MARGIN; more of its answers seen to fail, where
- * failures are seen; more of its answers found wrong by the grader. */
+ * failures are seen; more of its answers found wrong by the grader. The three share the chance of being
+ * wrong, so together they roll a switch back by chance no more often than one would; each used to be
+ * given half of it, half as much again as there was.
+ *
+ * A workload too quiet for either side to reach LEARN_MIN_CALLS tasks still moves on after a day at a
+ * share with ROLLOUT_QUIET_CALLS, and then says plainly that there were too few calls to compare, in the
+ * activity feed and in the email, rather than that its calls held up. */
 export async function reviewRollout(workload, st, { rollBackFn = rollBack } = {}) {
   if (workload.rollout_share === null || workload.rollout_share === undefined || !workload.routed_arm_id) return null;
   const stage = Number(workload.rollout_stage ?? 0);
@@ -568,50 +580,79 @@ export async function reviewRollout(workload, st, { rollBackFn = rollBack } = {}
   const newId = workload.routed_arm_id;
   const control = workload.rollout_from_arm_id ? st.byId.get(workload.rollout_from_arm_id) : st.baseline;
   const controlId = control?.virtual ? null : control?.id ?? null;
+  const settledAt = now() - (Number(st.settleMs) || 0);
+  // each task once, weighted by its chance; `s` columns only count calls old enough to have been heard about
   const rows = await db.prepare(
-    `SELECT arm_id, COUNT(*) AS n,
-            SUM(CASE WHEN status_code = 200 AND (check_json IS NULL OR check_json NOT LIKE '%"by":"fell back"%') THEN 0 ELSE 1 END) AS failed,
-            SUM(CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) AS worked,
-            COUNT(*) FILTER (WHERE created_at >= ?) AS at_stage
-       FROM calls WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND propensity < 1
-        AND arm_id = ANY(?::text[]) GROUP BY arm_id`)
-    .all(stageAt, workload.id, since, [newId, controlId].filter(Boolean));
-  const of = (id) => rows.find((r) => r.arm_id === id) || { n: 0, failed: 0, worked: 0, at_stage: 0 };
+    `SELECT arm_id, COUNT(*) AS tasks, SUM(n) AS n, COUNT(*) FILTER (WHERE started >= ?) AS at_stage,
+            SUM(w) AS w, SUM(w * w) AS q, SUM(w * bad / n) AS wbad,
+            COUNT(*) FILTER (WHERE sn > 0) AS stasks, COALESCE(SUM(sn), 0) AS sn,
+            COALESCE(SUM(w) FILTER (WHERE sn > 0), 0) AS sw, COALESCE(SUM(w * w) FILTER (WHERE sn > 0), 0) AS sq,
+            COALESCE(SUM(w * sworked / sn) FILTER (WHERE sn > 0), 0) AS sworked
+       FROM (SELECT arm_id, MIN(created_at) AS started, COUNT(*) AS n,
+                    SUM(CASE WHEN status_code = 200 AND (check_json IS NULL OR check_json NOT LIKE '%"by":"fell back"%') THEN 0 ELSE 1 END) AS bad,
+                    COUNT(*) FILTER (WHERE created_at < ?) AS sn,
+                    COALESCE(SUM(CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) FILTER (WHERE created_at < ?), 0) AS sworked,
+                    AVG(1.0 / GREATEST(COALESCE(propensity, 1), 0.001)) AS w
+               FROM calls
+              WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND propensity < 1
+                AND ${COUNTED} AND ${READABLE} AND arm_id = ANY(?::text[])
+              GROUP BY arm_id, COALESCE(task_id, id)) t
+      GROUP BY arm_id`)
+    .all(stageAt, settledAt, settledAt, workload.id, since, [newId, controlId].filter(Boolean));
+  const none = { tasks: 0, n: 0, at_stage: 0, w: 0, q: 0, wbad: 0, stasks: 0, sn: 0, sw: 0, sq: 0, sworked: 0 };
+  const of = (id) => {
+    const r = rows.find((x) => x.arm_id === id);
+    return r ? Object.fromEntries(Object.entries(none).map(([k]) => [k, Number(r[k]) || 0])) : { ...none };
+  };
   const a = of(newId);
-  const b = controlId ? of(controlId) : { n: 0, failed: 0, worked: 0, at_stage: 0 };
-  const rec = (n, bad) => ({ a: Number(n) - Number(bad) + 0.5, b: Number(bad) + 0.5 });
+  const b = controlId ? of(controlId) : { ...none };
+  /* A weighted share as a record for diffRange: what the tasks are worth (Kish's count) and the share of
+     them that went badly, held at half a call either way as a plain count is. */
+  const rec = (w, q, bad) => {
+    const nEff = w > 0 && q > 0 ? (w * w) / q : 0;
+    const share = w > 0 ? Math.max(0, Math.min(1, bad / w)) : 0;
+    return { a: nEff * (1 - share) + 0.5, b: nEff * share + 0.5 };
+  };
+  const pct = (x) => `${(x * 100).toFixed(1)}%`;
+  const count = (x, tasks, n) => (tasks < n ? `${tasks} tasks (${n} calls)` : `${n} calls`);
   const label = st.serving?.label || 'the new strategy';
   const beforeLabel = control?.label || `${short(workload.reference_model)} (yours)`;
   const minEach = config.LEARN_MIN_CALLS;
-  const opts = { alpha: config.LEARN_ALPHA / 2 };
+  // the three kinds of evidence share the chance of being wrong (the graded kind only where grading is on)
+  const opts = { alpha: config.LEARN_ALPHA / (config.GRADE_ENABLED ? 3 : 2) };
+  const compared = a.tasks >= minEach && b.tasks >= minEach;
   let breach = null;
-  if (Number(a.n) >= minEach && Number(b.n) >= minEach) {
+  if (compared) {
     // failing outright: refused, timed out, sent on
-    const e = diffRange(rec(a.n, a.failed), rec(b.n, b.failed), opts);
+    const e = diffRange(rec(a.w, a.q, a.wbad), rec(b.w, b.q, b.wbad), opts);
     if (e.lo > config.ROLLOUT_ERROR_MARGIN) {
-      breach = `${(Number(a.failed) / Number(a.n) * 100).toFixed(1)}% of its ${a.n} calls failed, against `
-        + `${(Number(b.failed) / Number(b.n) * 100).toFixed(1)}% of ${b.n} on ${beforeLabel}`;
-    }
-    // answers seen to fail, where failures are seen
-    const seen = st.hasEvents ? 1 : st.detection;
-    if (!breach && (st.hasEvents || seen >= config.LEARN_MIN_DETECTION)) {
-      const w = diffRange(rec(a.n, Number(a.n) - Number(a.worked)), rec(b.n, Number(b.n) - Number(b.worked)), opts);
-      if (w.lo > (config.LEARN_TOLERANCE * Math.max(seen, config.LEARN_MIN_DETECTION)) / 2) {
-        breach = `its calls worked ${(Number(a.worked) / Number(a.n) * 100).toFixed(1)}% of ${a.n}, against `
-          + `${(Number(b.worked) / Number(b.n) * 100).toFixed(1)}% of ${b.n} on ${beforeLabel}`;
-      }
+      breach = `${pct(a.wbad / a.w)} of its ${count(a, a.tasks, a.n)} failed, against `
+        + `${pct(b.wbad / b.w)} of ${count(b, b.tasks, b.n)} on ${beforeLabel}`;
     }
   }
-  // answers the grader found wrong
+  // answers seen to fail, where failures are seen, from calls old enough to have been heard about
+  const seen = st.hasEvents ? 1 : st.detection;
+  if (!breach && a.stasks >= minEach && b.stasks >= minEach && (st.hasEvents || seen >= config.LEARN_MIN_DETECTION)) {
+    const w = diffRange(rec(a.sw, a.sq, a.sw - a.sworked), rec(b.sw, b.sq, b.sw - b.sworked), opts);
+    if (w.lo > (config.LEARN_TOLERANCE * Math.max(seen, config.LEARN_MIN_DETECTION)) / 2) {
+      breach = `its calls worked ${pct(a.sworked / a.sw)} of ${count(a, a.stasks, a.sn)}, against `
+        + `${pct(b.sworked / b.sw)} of ${count(b, b.stasks, b.sn)} on ${beforeLabel}`;
+    }
+  }
+  // answers the grader found wrong, each weighted by the chance its call had
   if (!breach) {
     const g = await db.prepare(
-      `SELECT g.arm_id, COUNT(*) AS n, SUM(g.bad) AS bad FROM graded_calls g JOIN calls c ON c.id = g.call_id
+      `SELECT g.arm_id, COUNT(*) AS n, SUM(g.bad) AS bad,
+              SUM(1.0 / GREATEST(COALESCE(c.propensity, 1), 0.001)) AS w,
+              SUM(1.0 / POWER(GREATEST(COALESCE(c.propensity, 1), 0.001), 2)) AS q,
+              SUM(g.bad / GREATEST(COALESCE(c.propensity, 1), 0.001)) AS wbad
+         FROM graded_calls g JOIN calls c ON c.id = g.call_id
         WHERE g.workload_id = ? AND c.created_at >= ? AND g.arm_id = ANY(?::text[]) AND ${gradedBy(st.grader)} GROUP BY g.arm_id`)
       .all(workload.id, since, [newId, controlId].filter(Boolean));
     const ga = g.find((r) => r.arm_id === newId);
     const gb = g.find((r) => r.arm_id === controlId);
     if (ga && gb && Number(ga.n) >= 20 && Number(gb.n) >= 20) {
-      const r = diffRange(rec(ga.n, ga.bad), rec(gb.n, gb.bad), opts);
+      const r = diffRange(rec(Number(ga.w), Number(ga.q), Number(ga.wbad)), rec(Number(gb.w), Number(gb.q), Number(gb.wbad)), opts);
       if (r.lo > config.LEARN_TOLERANCE / 2) {
         breach = `answers read in the background were right ${Number(ga.n) - Number(ga.bad)} of ${ga.n}, against `
           + `${Number(gb.n) - Number(gb.bad)} of ${gb.n} on ${beforeLabel}`;
@@ -623,12 +664,16 @@ export async function reviewRollout(workload, st, { rollBackFn = rollBack } = {}
     const r = await rollBackFn(workload, reason);
     return r?.ok ? { kind: 'rollback', reason } : null;
   }
-  // long enough, and enough calls, at this share: the next one
+  /* Long enough at this share, and then either enough to compare both sides, with enough of its tasks at
+     this share, or, on a quiet workload, a day at this share with a few of them, said as too few. */
   const hours = (now() - stageAt) / 3600000;
   const needHours = config.ROLLOUT_STAGE_HOURS[stage] ?? config.ROLLOUT_STAGE_HOURS[config.ROLLOUT_STAGE_HOURS.length - 1] ?? 0;
-  const atStage = Number(a.at_stage);
-  const ready = hours >= needHours && (atStage >= config.ROLLOUT_MIN_CALLS || (hours >= 24 && atStage >= config.ROLLOUT_QUIET_CALLS));
-  if (!ready) return null;
+  const atStage = a.at_stage;
+  const onEvidence = compared && atStage >= config.ROLLOUT_MIN_CALLS;
+  const quiet = hours >= 24 && atStage >= config.ROLLOUT_QUIET_CALLS;
+  if (!(hours >= needHours && (onEvidence || quiet))) return null;
+  const thin = `too few calls to compare it with ${beforeLabel}: ${count(a, a.tasks, a.n)} on it and `
+    + `${count(b, b.tasks, b.n)} on ${beforeLabel} since the switch, where ${minEach} on each are needed`;
   const stages = config.ROLLOUT_STAGES;
   if (stage + 1 < stages.length) {
     const share = stages[stage + 1];
@@ -637,29 +682,40 @@ export async function reviewRollout(workload, st, { rollBackFn = rollBack } = {}
     if (!moved.changes) return null;
     await addActivity(workload.workspace_id, {
       kind: 'ok', title: `${label} now answers ${Math.round(share * 100)}% of ${workload.slug}'s calls`,
-      detail: `Its ${a.n} calls so far held up against ${beforeLabel}, so it takes more of them.`,
+      detail: compared
+        ? `Its ${count(a, a.tasks, a.n)} so far held up against ${beforeLabel}, so it takes more of them.`
+        : `It takes more of them after a day at its share, not on evidence: there are ${thin}. They are compared as soon as there are enough.`,
       workloadId: workload.id,
     });
     forgetState(workload.id);
-    return { kind: 'advance', share };
+    return { kind: 'advance', share, compared };
   }
   const done = await db.prepare(`UPDATE workloads SET rollout_share = NULL, rollout_stage = NULL, rollout_started_at = NULL,
       rollout_from_arm_id = NULL, updated_at = ? WHERE id = ? AND routed_arm_id = ? AND rollout_stage = ?`)
     .run(now(), workload.id, newId, stage);
   if (!done.changes) return null;
+  // what keeps an eye on it from now on, said from this workload's own settings
+  const after = exploreOf(workload, { perDay: st.perDay, dailySaving: st.dailySaving }).live
+    ? `A small share of its calls keeps going to ${short(workload.reference_model)} to compare against, and it is switched back if it does clearly worse.`
+    : 'Calls that fail or slow down still switch it back by themselves, and the next measurement checks its answers again.';
   await addActivity(workload.workspace_id, {
     kind: 'ok', title: `${label} now answers all of ${workload.slug}'s calls`,
-    detail: `Its ${a.n} calls since the switch held up against ${beforeLabel} at every share.`,
+    detail: compared
+      ? `Its ${count(a, a.tasks, a.n)} since the switch held up against ${beforeLabel}.`
+      : `It took over a day at a time, not on evidence: there were ${thin}. ${after}`,
     workloadId: workload.id,
   });
   await notify(workload.workspace_id, 'switched', `${workload.id}:${newId}:all`, {
     title: `${workload.slug} now runs fully on ${label}`,
-    lines: [`It took over step by step, and its ${a.n} live calls held up against ${beforeLabel} at every step.`,
-      'You can switch it back at any time from the workload page.'],
+    lines: compared
+      ? [`It took over step by step, and its ${count(a, a.tasks, a.n)} since the switch held up against ${beforeLabel}.`,
+        'You can switch it back at any time from the workload page.']
+      : [`It took over step by step, a day at a time, but it was not compared with ${beforeLabel}: there were ${thin}.`, after,
+        'You can switch it back at any time from the workload page.'],
     path: `/workloads/${workload.id}`, linkText: 'See the switch',
   });
   forgetState(workload.id);
-  return { kind: 'complete' };
+  return { kind: 'complete', compared };
 }
 
 /**

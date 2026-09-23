@@ -65,6 +65,8 @@ const { ask, jevSlots } = await import('../src/jev.js');
 const { adviceFor } = await import('../src/eval/advice.js');
 const { routedSavings } = await import('../src/eval/actual.js');
 const { refused } = await import('../src/learn/threads.js');
+const { saveDef } = await import('../src/learn/outcomes.js');
+const { diffRange } = await import('../src/learn/decide.js');
 const { notify } = await import('../src/notify.js');
 const { upsertArm, referenceSpec } = await import('../src/learn/arms.js');
 const { app } = await import('../src/server.js');
@@ -261,6 +263,98 @@ test('a switch whose calls fail more than what served before it is rolled back o
   assert.equal(p.action, 'soft_revert');
   assert.match(p.reason, /calls failed/);
   assert.ok(await everReverted(w.id, CHEAP), 'and it waits before it can be switched to again');
+});
+
+/* A switch taking over from the customer's own model, begun `hoursAgo`, and its calls written in bulk. */
+async function rolling(system, { hoursAgo = 2, stage = 0 } = {}) {
+  const s = await shop();
+  const w0 = await workloadFor(s.workspace.id, request(1, { system }));
+  await promote(w0, CHEAP, { spec: { kind: 'model', model: CHEAP, recipe: null } });
+  const baseline = await upsertArm(await load(w0.id), referenceSpec(w0), { status: 'baseline', offline: { ratio: 1 } });
+  await db.prepare('UPDATE workloads SET promoted_at = ?, rollout_started_at = ?, rollout_stage = ?, rollout_share = ? WHERE id = ?')
+    .run(now() - hoursAgo * 3600000, now() - hoursAgo * 3600000, stage, config.ROLLOUT_STAGES[stage], w0.id);
+  const w = await load(w0.id);
+  const write = (armId, model, n, propensity, extra = {}) => bulkCalls({ workspaceId: s.workspace.id, workloadId: w.id, armId, model, n, propensity,
+    cost: model === REF ? 0.004 : 0.0004, ...extra });
+  return { s, w, baseline, write };
+}
+
+test('a switch taking over is read over the same traffic on both sides, whatever share each stage gave it', async () => {
+  const { w, baseline, write } = await rolling('Price the repair.');
+  /* Two stages: at five in a hundred, when one call in a hundred failed everywhere, and at twenty five in a
+     hundred, when an incident failed one in five everywhere. Pooled as they came, most of the new
+     strategy's calls fell in the bad stage, and it read as clearly worse than what it replaces. */
+  await write(w.routed_arm_id, CHEAP, 198, 0.05);
+  await write(w.routed_arm_id, CHEAP, 2, 0.05, { status: 502 });
+  await write(baseline.id, REF, 3762, 0.95);
+  await write(baseline.id, REF, 38, 0.95, { status: 502 });
+  await write(w.routed_arm_id, CHEAP, 800, 0.25);
+  await write(w.routed_arm_id, CHEAP, 200, 0.25, { status: 502 });
+  await write(baseline.id, REF, 2400, 0.75);
+  await write(baseline.id, REF, 600, 0.75, { status: 502 });
+  forgetState(w.id);
+  const d = await reviewWorkload(w);
+  assert.notEqual(d[0]?.kind, 'rollback', `the same incident on both sides is neither's doing: ${JSON.stringify(d)}`);
+  assert.equal((await load(w.id)).routed_model, CHEAP);
+});
+
+test('a switch taking over is judged on answers old enough to have been heard about, on both sides alike', async () => {
+  const { w, baseline, write } = await rolling('Draft the reply to the landlord.');
+  await saveDef(w.id, { events: [{ event: 'reply_rewritten', means: 'failed' }] });
+  // settled calls: one in four of the new strategy's answers failed, one in fifty of the customer's own
+  await write(w.routed_arm_id, CHEAP, 90, 0.05);
+  await write(w.routed_arm_id, CHEAP, 30, 0.05, { reward: 0 });
+  await write(baseline.id, REF, 392, 0.95);
+  await write(baseline.id, REF, 8, 0.95, { reward: 0 });
+  // and six hundred of the new strategy's from the last minute, too fresh for anything to have been said about them
+  await write(w.routed_arm_id, CHEAP, 600, 0.05, { at: now() - 60000 });
+  forgetState(w.id);
+  const d = await reviewWorkload(w);
+  assert.equal(d[0]?.kind, 'rollback', JSON.stringify(d));
+  assert.match(d[0].reason, /its calls worked 75\.0% of 120 calls, against 98\.0% of 400 calls/, 'from the settled calls alone');
+});
+
+test('the three kinds of evidence a switch is rolled back on share the chance of being wrong', async () => {
+  const { w, baseline, write } = await rolling('Sort the meter readings.');
+  const rec = (n, bad) => ({ a: n - bad + 0.5, b: bad + 0.5 });
+  const nNew = 300;
+  const nBefore = 2000;
+  const badBefore = 20;
+  /* a number of failed calls that a range at half the chance would call clearly worse, and one at a third
+     would not: what the switch is rolled back on once the chance is shared three ways, not given to each */
+  let bad = null;
+  for (let k = 1; k < nNew && bad === null; k += 1) {
+    const lo = (alpha) => diffRange(rec(nNew, k), rec(nBefore, badBefore), { alpha }).lo;
+    if (lo(config.LEARN_ALPHA / 2) > config.ROLLOUT_ERROR_MARGIN && lo(config.LEARN_ALPHA / 3) <= config.ROLLOUT_ERROR_MARGIN) bad = k;
+  }
+  assert.ok(bad, 'there is such a number');
+  await write(w.routed_arm_id, CHEAP, nNew - bad, 0.05);
+  await write(w.routed_arm_id, CHEAP, bad, 0.05, { status: 502 });
+  await write(baseline.id, REF, nBefore - badBefore, 0.95);
+  await write(baseline.id, REF, badBefore, 0.95, { status: 502 });
+  forgetState(w.id);
+  const d = await reviewWorkload(w);
+  assert.notEqual(d[0]?.kind, 'rollback', `${bad} of ${nNew} failed: not enough, with the chance shared: ${JSON.stringify(d)}`);
+});
+
+test('a switch on a quiet workload that takes over without enough calls to compare says so, in the feed and the email', async () => {
+  // the last share, a day and an hour in, with a dozen calls on the new strategy and forty on the customer's own model
+  const { s, w, baseline, write } = await rolling('Chase the late payment.', { hoursAgo: 25, stage: config.ROLLOUT_STAGES.length - 1 });
+  await write(w.routed_arm_id, CHEAP, 12, config.ROLLOUT_STAGES.at(-1));
+  await write(baseline.id, REF, 40, 1 - config.ROLLOUT_STAGES.at(-1));
+  forgetState(w.id);
+  const before = mail.length;
+  const d = await reviewWorkload(w);
+  assert.equal(d[0]?.kind, 'complete', JSON.stringify(d));
+  assert.equal(d[0].compared, false);
+  const act = await db.prepare(`SELECT * FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(w.id);
+  assert.match(act.detail, /not on evidence: there were too few calls to compare it with gpt-5\.4 \(yours\): 12 calls on it and 40 calls on/);
+  assert.doesNotMatch(act.detail, /held up/);
+  const told = mail.slice(before).join('\n');
+  assert.match(told, /it was not compared with gpt-5\.4 \(yours\)/);
+  assert.doesNotMatch(told, /held up/);
+  assert.equal((await load(w.id)).rollout_share, null, 'it still takes over: a quiet workload is not held at a share for ever');
+  assert.ok(s);
 });
 
 test('a strategy switched back again and again stays out longer each time, and for good after the third', async () => {
