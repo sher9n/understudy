@@ -67,6 +67,8 @@ export default function Learning({ w, d, err: loadErr, onReload, onSwitched }) {
       role: x.role === 'yardstick' && !d.serving ? 'Your own model, serving now' : ROLE[x.role] || x.role,
       tone: x.role === 'yardstick' && !d.serving ? 'serving' : TONE[x.role],
       rate: x.live.rate, mean: x.live.mean, lo: x.live.lo, hi: x.live.hi, calls: x.live.calls, ratio: x.ratio, bg: x.shadow, action,
+      // answers read in the background, where there are any: how many, and how many were right
+      graded: x.graded || null,
     });
   };
   // the ones that can be tried now, said by the server; the rest that cleared are counted in one line
@@ -128,6 +130,14 @@ export default function Learning({ w, d, err: loadErr, onReload, onSwitched }) {
         {anyCalls || rows.length > 1 ? (
           <>
             <RateRows rows={rows} />
+            {rows.some((r) => r.graded?.calls > 0) && (
+              <p className="lsmall">
+                Read in the background:{' '}
+                {rows.filter((r) => r.graded?.calls > 0)
+                  .map((r) => `${r.label}, ${num(r.graded.right)} of ${num(r.graded.calls)} answers right`).join('; ')}.
+                {' '}The same reader reads every strategy, so a difference between them is theirs.
+              </p>
+            )}
             <p className="lkey">
               <span><i className="kdot" />how often its calls worked</span>
               <span><i className="kband" />where the real rate most likely is, a 9 in 10 chance</span>
@@ -232,16 +242,20 @@ function nextSteps(d, w, runners) {
   }
   if (d.serving && e.live) {
     out.push(`If ${d.serving.label} starts working clearly less often than ${ref}, we switch back to ${ref} on our own. `
-      + `“Clearly” means we are at least ${Math.round(d.confidence * 100)} in 100 sure it is more than ${Math.round(d.tolerance * 100)} calls in 100 worse, `
-      + `from at least ${d.minCalls} calls on each since the switch.`);
+      + `“Clearly” means more than ${Math.max(1, Math.round((d.tolerance * 100) / 2))} calls in 100 worse, from at least ${d.minCalls} calls on each since the switch, `
+      + 'shown by a range that holds however often we look, so a switch back is almost never chance.');
+    if (d.graded) {
+      out.push(`We also read about ${num(d.graded.perDay)} of each strategy's answers a day in the background, to see how often each is right where `
+        + 'a wrong answer shows nothing in your traffic. Those readings can switch back, or move on, by themselves.');
+    }
     const runner = runners[0];
     if (!e.servingCostKnown) {
       out.push('No runner-up is tried until a measurement prices what serves now against your own model.');
     } else if (runner) {
-      const need = Math.max(0, 150 - runner.live.calls);
-      out.push(`${runner.label} cleared the bar and costs less than what serves. Once its calls are shown to work as often, `
-        + (ask ? 'we tell you in the activity feed, and you can approve it here.' : 'it serves this workload instead.')
-        + (need > 0 ? ` That usually takes about 150 of its calls; it has ${num(runner.live.calls)}.` : ' It has enough calls; it moves as soon as its record is as good.'));
+      out.push(`${runner.label} cleared the bar and costs less than what serves. Once its calls are shown to work no more than `
+        + `${Math.round(d.tolerance * 100)} calls in 100 less often than what serves and than ${ref}, however often we look, `
+        + (ask ? 'we tell you in the activity feed, and you can approve it here.' : 'it starts serving this workload, a share of the calls at a time.')
+        + ` That usually takes a thousand or more of its calls, and as many of ${ref}'s; it has ${num(runner.live.calls)}.`);
     } else {
       out.push('No cheaper runner-up is being tried. The next measurement may find one.');
     }

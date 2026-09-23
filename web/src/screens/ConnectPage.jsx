@@ -170,6 +170,36 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
             )}
             {keyError && <div className="errbox">{keyError}</div>}
           </section>
+
+          <section className="opt" aria-labelledby="headers-h">
+            <div className="opthead"><h2 id="headers-h">Headers you can send, and read</h2>
+              <span className="s">None of these is needed. Each is taken off before the call goes on to a provider.</span></div>
+            <div className="cbody">
+              <div className="rowpair"><code className="rowk">x-understudy-workload</code>
+                <span className="rowv">Names the job a call belongs to. Calls with the same name are measured together, whatever their words, and the workload is called by it.</span></div>
+              <div className="rowpair"><code className="rowk">x-understudy-pin: 1</code>
+                <span className="rowv">This call is answered by the model it names, whatever the workload was switched to. For the calls you cannot risk on anything else.</span></div>
+              <div className="rowpair"><code className="rowk">x-understudy-ref</code>
+                <span className="rowv">Your own reference for a call, to report later how it turned out (POST /v1/outcomes).</span></div>
+              <div className="rowpair"><code className="rowk">x-understudy-served-model</code>
+                <span className="rowv">On every answer: the model that actually answered it. With <code>x-understudy-workload</code> (the workload it joined) and <code>x-understudy-call-id</code>.</span></div>
+            </div>
+          </section>
+
+          {data.turnedAway?.length > 0 && (
+            <section className="opt" aria-labelledby="refused-h">
+              <div className="opthead"><h2 id="refused-h">Calls we turned away</h2>
+                <span className="s">The latest, with the reason each was given. Fix the cause and they go through.</span></div>
+              <div className="cbody">
+                {data.turnedAway.map((t) => (
+                  <div className="rowpair" key={`${t.at}-${t.status}`}>
+                    <span className="rowk">{ago(t.at)} · {t.status}</span>
+                    <span className="rowv">{t.why || 'No reason was recorded.'}{t.model ? ` (model: ${t.model})` : ''}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
         </div>
 
         <aside className="opt sidecard" style={{ marginTop: 0 }}>

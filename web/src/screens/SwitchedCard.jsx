@@ -223,8 +223,21 @@ export default function SwitchedCard({ s, learn = null }) {
           <p className="swnote">
             Estimates use today&rsquo;s list prices and the size of this workload&rsquo;s recent calls.{' '}
             {from} is priced as it costs without us; {to} includes our {p.feePct}% routing fee.
-            {s.measuring.spent > 0 ? ` Measuring this workload has cost ${usd(s.measuring.spent)} so far.` : ''}
+            {so.calls > 0 && so.wouldPricedBy === 'measured'
+              ? ` What the actual calls would have cost on ${from} is their cost divided by what the measurement found ${to} costs against it on the same calls.`
+              : ''}
           </p>
+          {(s.measuring.spent > 0 || s.measuring.background > 0) && (
+            <p className="swnote">
+              Finding and checking this switch has cost {usd((s.measuring.spent || 0) + (s.measuring.background || 0))}
+              {s.measuring.background > 0 ? ` (${usd(s.measuring.spent || 0)} measuring, ${usd(s.measuring.background)} background answers)` : ' in measuring'}.
+              {so.net != null && so.calls > 0
+                ? (so.net >= 0
+                  ? ` With that paid for, the switch is ${usd(so.net)} ahead so far.`
+                  : ` With that counted, it is ${usd(-so.net)} short of paying for itself so far${s.measuring.paybackDays ? `, about ${num(s.measuring.paybackDays)} ${s.measuring.paybackDays === 1 ? 'day' : 'days'} of saving at this pace` : ''}.`)
+                : s.measuring.paybackDays ? ` At the pace above, the saving pays that back in about ${num(s.measuring.paybackDays)} ${s.measuring.paybackDays === 1 ? 'day' : 'days'}.` : ''}
+            </p>
+          )}
         </div>
       )}
     </>

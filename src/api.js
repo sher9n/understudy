@@ -16,7 +16,7 @@ import { adviceFor } from './eval/advice.js';
 import { planFor, forgetPlan, forgetPlanAll } from './eval/plan.js';
 import { recipeKind } from './eval/select.js';
 import { outcomeSummary, outcomeTotals, tasksFor } from './learn/views.js';
-import { nameOfResult } from './learn/arms.js';
+import { nameOfResult, armById } from './learn/arms.js';
 import { saveDef } from './learn/outcomes.js';
 import { learningView, exploreOf, forgetState, EXPLORE_MODES } from './learn/explore.js';
 import { certificate, promote, revert, trafficOf, servingKey } from './eval/promote.js';
@@ -649,6 +649,16 @@ api.get('/workloads/:id', async (req, res) => {
     models: Math.min(plan.models, plan.order.length),
     modelsWanted: plan.models,
     estimateUsd: plan.estimateUsd,
+    /* What a measurement is worth: what it is expected to find a month, what the switch already saves
+       and protects, and the most one may spend on this workload. A measurement nobody asks for runs
+       only when it would pay for itself within EVAL_PAYBACK_MONTHS. */
+    worth: plan.worth ? { ...plan.worth, paybackMonths: config.EVAL_PAYBACK_MONTHS } : null,
+    ceilingUsd: plan.ceilingUsd ?? null,
+    optimizeBudget: plan.optimizeBudget ?? null,
+    // how many of the bar's answers can be read from the customer's own calls rather than bought
+    recordedShare: plan.recordedShare ?? 0,
+    // when it is next measured by itself, where the workload has its own schedule
+    nextAt: w.recheck_after ? Number(w.recheck_after) : null,
     picked: plan.order.slice(0, plan.models).map((r) => r.model),
     /* How the models were chosen, for the page to explain: what ruled each group out, in what
        order the rest will be tried and why, what Jev and the leaderboard said, how old each fact
@@ -768,6 +778,10 @@ api.get('/workloads/:id', async (req, res) => {
       reused: cert.run.reused ?? 0,
       saved: round8(cert.run.saved_usd || 0),
       plan: parseJson(cert.run.plan_json),
+      // held to the same answer as the customer's own model, or to one at least as good
+      yardstick: cert.run.yardstick ?? 'agreement',
+      // how many of the bar's answers were the customer's own, read rather than bought
+      recordedRefs: cert.run.recorded_refs ?? null,
       // this measurement's calls, like the reference row beside them and the note above them
       results: compared.map((r) => resultRow(r)),
       nothing: compared.length ? null : nothingCompared(cert.run),
@@ -783,6 +797,16 @@ api.get('/workloads/:id', async (req, res) => {
       model: best.model_id, gap: best.gap_pct, costMonth: best.cost_month_usd,
       accuracy: round8(100 - best.gap_pct),
       name: nameOfResult(best), escalated: best.escalated_pct ?? null,
+      // the second look on calls it had never seen, when it had one: a candidate it did not confirm waits for a person
+      confirm: best.confirm_verdict ? { verdict: best.confirm_verdict, runs: best.confirm_runs ?? 0, gap: best.confirm_gap ?? null,
+        hi: best.confirm_hi ?? null, floor: best.confirm_floor ?? null } : null,
+    },
+    /* A switch still taking over: the share of calls it answers now, the steps it passes through, and
+       what it has to show at this one before it takes the next. */
+    rollout: w.rollout_share === null || w.rollout_share === undefined ? null : {
+      share: Number(w.rollout_share), stage: Number(w.rollout_stage ?? 0), stages: config.ROLLOUT_STAGES,
+      startedAt: Number(w.rollout_started_at ?? w.promoted_at ?? 0), stageHours: config.ROLLOUT_STAGE_HOURS,
+      minCalls: config.ROLLOUT_MIN_CALLS, from: w.rollout_from_arm_id ? (await armById(w.rollout_from_arm_id))?.label ?? null : null,
     },
     traffic: { routed: traffic.routed, copies: traffic.copies, carries: traffic.carries, observe: traffic.observe },
   });
@@ -897,10 +921,29 @@ api.post('/workloads/:id/promote', async (req, res) => {
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
   const cert = await certificate(w.id);
-  const pick = req.body?.model
-    || cert?.results.find((r) => r.verdict === 'cleared')?.model_id;
+  /* The model named, or the one the measurement itself would switch to: cleared, priced, cheaper once
+     our fee is added, and confirmed by the second look before one that was not. The first model that
+     cleared, whatever it cost, used to be taken. */
+  const pick = req.body?.model || (cert ? cheaperCleared(cert.results)[0]?.model_id : null);
   if (!pick) return fail(res, 400, 'Nothing has cleared your bar on this workload yet.');
-  return res.json(await promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it' }));
+  // a person may take all of the calls at once; otherwise it starts on a share and grows
+  return res.json(await promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it',
+    rollout: req.body?.rollout !== false }));
+});
+
+/* A switch still taking over a share at a time, given every call now, because a person says so. */
+api.post('/workloads/:id/rollout/finish', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  if (w.rollout_share === null || w.rollout_share === undefined) return res.json({ ok: true, already: true });
+  await db.prepare(`UPDATE workloads SET rollout_share = NULL, rollout_stage = NULL, rollout_started_at = NULL,
+      rollout_from_arm_id = NULL, updated_at = ? WHERE id = ?`).run(now(), w.id);
+  forgetState(w.id);
+  await addActivity(req.workspace.id, {
+    kind: 'ok', title: `${w.slug} now answers all of its calls on the new strategy`,
+    detail: 'You gave it every call at once rather than a share at a time.', workloadId: w.id,
+  });
+  return res.json({ ok: true });
 });
 
 api.post('/workloads/:id/revert', async (req, res) => {
@@ -1130,6 +1173,8 @@ api.get('/settings', async (req, res) => {
   const planActive = acct.plan_status === 'active';
   res.json({
     name: req.user.name, email: req.user.email,
+    // signed in with a code after the password was cleared: a new one is set without the old
+    needsPassword: !!req.user.pw_cleared,
     mode: req.workspace.mode,
     keys: (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at),
     balance: round8(acct.balance_usd),
@@ -1551,8 +1596,22 @@ api.get('/connect', async (req, res) => {
     `SELECT COUNT(*) AS n FROM calls WHERE workspace_id = ? AND status_code = 402`)
     .get(req.workspace.id)).n;
   const acct = await account(req.workspace.id);
+  /* The last calls we turned away, with the reason each was given, so a mistake in the wiring (a model
+     name we do not know, a body that is not JSON, a limit reached) is seen and fixed here rather than
+     found in the customer's own logs. At most one a minute is kept (see recordRefusal). */
+  const turnedAway = (await db.prepare(
+    `SELECT created_at, status_code, requested_model, response_json FROM calls
+      WHERE workspace_id = ? AND source = 'routed' AND status_code >= 400 ORDER BY created_at DESC LIMIT 5`)
+    .all(req.workspace.id)).map((r) => {
+    let why = null;
+    try { const j = JSON.parse(r.response_json || 'null'); why = j?.error?.message ?? (typeof j?.error === 'string' ? j.error : null); } catch { why = null; }
+    return { at: r.created_at, status: r.status_code, model: r.requested_model, why: why ? String(why).slice(0, 300) : null };
+  });
   res.json({
     baseUrl: `${config.PUBLIC_URL}/v1`,
+    // how new workloads are switched, chosen once while connecting and changeable in Settings
+    defaultMode: req.workspace.default_optimize_mode || config.DEFAULT_OPTIMIZE_MODE,
+    turnedAway,
     key: live?.secret ?? null,
     balance: round8(acct.balance_usd),
     refused,

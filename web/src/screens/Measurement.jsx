@@ -206,7 +206,8 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
                   ? ' Written answers cannot be compared word for word, so a judge also compares each pair.'
                   : ''}{' '}
                 You are charged for the calls made, not for answers reused from earlier
-                measurements{m.estimateUsd != null ? `, about ${usd(m.estimateUsd)} for this one` : ''}.
+                measurements{m.recordedShare > 0 ? ` or read from your own calls` : ''}{m.estimateUsd != null ? `, about ${usd(m.estimateUsd)} for this one, a second look at the winner included` : ''}.
+                {' '}<WorthLine m={m} />
               </p>
             ) : (
               <p className="mwhy cannot">{m.reason}</p>
@@ -255,6 +256,26 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
 }
 
 const shortName = (m) => (m ? String(m).split('/').pop() : 'your model');
+
+/* Whether measuring this workload pays for itself, said with its numbers, and what that means for
+   the measurements nobody asks for. */
+function WorthLine({ m }) {
+  const w = m.worth;
+  if (!w || m.estimateUsd == null) return null;
+  const pays = w.worthIt !== false && m.estimateUsd <= w.budgetUsd;
+  const parts = [];
+  if (w.expectedMonthlyUsd > 0) parts.push(`It is expected to find about ${usd(w.expectedMonthlyUsd)} a month`);
+  else parts.push('It is not expected to find a saving from what is known about these models');
+  if (w.protectedMonthlyUsd > 0) parts.push(`and checks the ${usd(w.protectedMonthlyUsd)} a month the switch saves now`);
+  const said = `${parts.join(' ')}.`;
+  const when = pays
+    ? ` That pays for it within ${w.paybackMonths} months, so it also runs on its schedule.`
+    : ` It would not pay for itself within ${w.paybackMonths} months, so it runs only when you ask; the schedule leaves it until it would.`;
+  const budget = m.optimizeBudget
+    ? ` ${usd(m.optimizeBudget.leftUsd)} of your ${usd(m.optimizeBudget.budgetUsd)} optimizing budget is left for the last thirty days.` : '';
+  const next = m.nextAt && m.nextAt > Date.now() ? ` Next looked at by itself around ${timeIST(m.nextAt)} IST.` : '';
+  return <span className="mworth">{said}{when}{budget}{next}</span>;
+}
 
 const STOPPED = 'Stopped. You were charged only for the calls it made, and nothing was switched.';
 

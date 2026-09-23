@@ -7,3 +7,21 @@
   text-decoration: underline; text-underline-offset: 2px; }
 .linkbtn:disabled { opacity: .55; cursor: default; }
 .linkbtn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 3px; }
+
+/* A button that does something that cannot be undone, asked for a second time. */
+.mini.danger { background: var(--bad, #c0392b); border-color: var(--bad, #c0392b); color: #fff; }
+
+/* A switch still taking over: how much of the traffic it answers now, and what moves it on. */
+.rolloutbar { display: grid; gap: 10px; padding: 14px 16px; margin: 0 0 16px; border-radius: 12px; background: var(--card2, rgba(15, 98, 254, 0.06)); border: 1px solid var(--line, rgba(0, 0, 0, 0.08)); }
+.rolloutbar p { margin: 0; line-height: 1.55; }
+.rolloutbar .minig { justify-self: start; }
+.rolloutmeter { height: 6px; border-radius: 999px; background: var(--line, rgba(0, 0, 0, 0.08)); overflow: hidden; }
+.rolloutmeter i { display: block; height: 100%; background: var(--accent, #0f62fe); }
+
+/* Choosing, while connecting, how a workload is switched once a cheaper model clears. */
+.wizmode { display: grid; gap: 8px; margin: 14px 0 6px; }
+.wizmode .t { font-weight: 600; }
+.wizmode .modeb { display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line, rgba(0, 0, 0, 0.12)); background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.wizmode .modeb span { font-size: 13px; color: var(--mut); }
+.wizmode .modeb.on { border-color: var(--accent, #0f62fe); box-shadow: 0 0 0 1px var(--accent, #0f62fe) inset; }
+.wizmodenote { font-size: 12.5px; color: var(--mut); }

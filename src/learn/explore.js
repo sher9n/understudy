@@ -850,6 +850,8 @@ export async function learningView(workload) {
       daysToEvidence: st.perDay > 0 && s.share > 0 ? Math.ceil(config.LEARN_MIN_CALLS / Math.max(0.01, (st.perDay * s.share) / 2)) : null,
     },
     tolerance: config.LEARN_TOLERANCE, confidence: config.LEARN_CONFIDENCE, minCalls: config.LEARN_MIN_CALLS,
+    // answers read in the background: how many of each strategy's a day, when that is on
+    graded: config.GRADE_ENABLED ? { perDay: config.GRADE_PER_ARM_PER_DAY } : null,
     halfLifeDays: config.LEARN_HALF_LIFE_DAYS, weekCalls, weekSince, weekFromSwitch: weekSince > now() - 7 * DAY + 60000,
     serving, baseline, others,
     shadow: { recent: shadows.map((r) => ({ ...r, agreement: r.agreement === null ? null : Number(r.agreement) })), spentUsd: Number(spent.c) },

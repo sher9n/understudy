@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { href } from '../router.js';
 import { plainClick } from '../nav.jsx';
 import { api, usd, num, dateIST, timeIST } from '../api.js';
+import { more } from '../moreApi.js';
 import { CandidateChart, chartPoints } from '../Charts.jsx';
 import WorkloadCalls from './WorkloadCalls.jsx';
 import Measurement from './Measurement.jsx';
@@ -152,6 +153,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
       </div>
 
       <section className={`dcard${switched ? ' done' : hot ? ' hot' : ''}`}>
+        {w.rollout && <Rollout w={w} busy={busy} onAll={act(() => more.finishRollout(w.id))} />}
         {switched && w.switched ? (
           <SectionBoundary><SwitchedCard s={w.switched} learn={learn} /></SectionBoundary>
         ) : (
@@ -201,10 +203,12 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         <div className="dacts">
           {switched && <button className="minig" disabled={busy}
             onClick={act(() => api.revert(w.id))}>Switch back to {short(w.reference)}</button>}
-          {hot && w.optimizeMode === 'ask' && (
+          {hot && w.optimizeMode !== 'auto' && (
             <>
               <button className="mini" disabled={busy}
-                onClick={act(() => api.promote(w.id, cand.model))}>Approve switch</button>
+                onClick={act(() => more.promote(w.id, cand.model))}>Approve switch</button>
+              <button className="minig" disabled={busy}
+                onClick={act(() => more.promote(w.id, cand.model, { rollout: false }))}>Approve for every call at once</button>
             </>
           )}
           {hot && copiesOnly && (
@@ -231,7 +235,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         <div className="choices">
           {/* The live watch looks at a switched model's calls every hour, and each measurement on
               the workspace's schedule checks its answers again; either switches it back. */}
-          {[['auto', 'Optimize automatically', 'We switch as soon as a candidate clears your bar, and switch back on our own if it stops clearing it, starts failing calls or slows down. You can switch back yourself at any time.'],
+          {[['auto', 'Optimize automatically', 'We switch once a candidate clears your bar twice, the second time on calls it had never seen. It starts on a small share of your calls and takes more while they hold up, and goes back on its own if it stops clearing your bar, fails calls or slows down. You can switch back yourself at any time.'],
             ['ask', 'Ask me first', 'We test and recommend. Nothing is switched until you approve it.']].map(([mode, t, s]) => (
             <button key={mode} className={`choicebox${w.optimizeMode === mode ? ' picked' : ''}`}
               disabled={busy} onClick={act(() => api.setMode(w.id, mode))}>
@@ -264,13 +268,15 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                     <h3 id="bar-how-title">How your bar is set</h3>
                     <button className="popx" onClick={() => setBarOpen(false)} aria-label="Close">×</button>
                   </div>
-                  <p>We take {cert.sampleSize} of your real calls and run each one twice on {measuredOn}.</p>
-                  <p>Your own model did not give the same answer both times on {(cert.noise ?? 0).toFixed(2)}% of them.</p>
-                  <p><b>That is where your {(cert.floor ?? 0).toFixed(2)}% bar comes from.</b> A candidate is measured
-                    the same way on the same calls, and has to stay inside it.</p>
-                  <p>Every model is judged on the same {num(cert.sampleSize)} calls. That is half of this
-                    workload&rsquo;s recent traffic, between ten and a hundred, so there is always
-                    fresh traffic left to re-check a model we switch you to.</p>
+                  <p>We take {cert.sampleSize} of your real calls, spread over the last thirty days, and get two answers
+                    to each from {measuredOn}: the one it gave you, where it was kept, and one more.</p>
+                  <p>Your own model {cert.yardstick === 'quality' ? 'gave a clearly worse answer than its other one' : 'did not give the same answer both times'} on {(cert.noise ?? 0).toFixed(2)}% of them.</p>
+                  <p><b>That is where your {(cert.floor ?? 0).toFixed(2)}% bar comes from</b> (never below 3%). A candidate is measured
+                    the same way on the same calls, and has to stay inside it, with room for chance: a model is only
+                    said to clear when even the high end of what it could be is inside the bar.</p>
+                  <p>The cheapest model that clears is then measured again on calls it has never seen, and only one that
+                    clears both times is switched to.{cert.yardstick === 'quality'
+                    ? ' This workload\u2019s answers have no one right answer, so it is held to answers at least as good as yours rather than the same.' : ''}</p>
                 </div>
               )}
             </div>
@@ -373,6 +379,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                   <div>
                     <span className={`pill ${serving ? 'ok' : tone}`}>{serving ? 'Serving now' : label}</span>
                     {why && <span className="cdwhy">{why}</span>}
+                    {r.confirm && <span className="cdwhy">{confirmWords(r.confirm)}</span>}
                   </div>
                 </div>
               );
@@ -381,15 +388,31 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                 clears, fails calls or is too slow switches back, and so does the live watch. */}
             <div className="barnote">
               Every model was tried on the same {num(cert.sampleSize)} calls, and dropped as soon as it
-              could not win, so a model that stopped early was not paid for on every call. A model we
-              switch to is re-tested on fresh calls, and watched on your live traffic: if it stops
-              clearing, fails calls, or slows down, it goes back.
+              could not win, so a model that stopped early was not paid for on every call. The cheapest that
+              cleared was measured again on calls it had never seen before anything was switched. A model we
+              switch to is watched on your live traffic: if it stops clearing, fails calls, or slows down, it goes back.
               {cert.reused ? ` ${num(cert.reused)} answers were reused from earlier measurements${cert.saved ? `, saving ${usd(cert.saved)}` : ''}.` : ''}
               {cert.finishedAt ? ` Last run ${dateIST(cert.finishedAt)} IST.` : ''}
             </div>
           </>
         )}
       </section>
+
+      {w.advice?.length > 0 && (
+        <section className="opt" aria-labelledby="advice-h">
+          <div className="opthead"><h2 id="advice-h">Savings in your own code</h2>
+            <span className="s">Things only you can change, with what each would save. Nothing here is done for you.</span></div>
+          <div className="cbody">
+            {w.advice.map((a) => (
+              <div className="kvrow" key={a.kind}>
+                <span className="kvk">{a.title}</span>
+                <span className="kvv">{a.detail}</span>
+                {a.monthlyUsd ? <span className="kva kvm">{usd(a.monthlyUsd)} a month</span> : <span className="kva" />}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <SectionBoundary title="What live calls are teaching us">
         <Learning w={w} d={learn} err={learnErr} onReload={loadLearn} onSwitched={async () => { await load(); onChanged?.(); }} />
@@ -400,6 +423,36 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
 
       <WorkloadCalls workloadId={w.id} />
     </>
+  );
+}
+
+/* The second look, in a few words under a verdict. */
+function confirmWords(c) {
+  if (c.verdict === 'insufficient' && !c.runs) return 'Second look: not enough calls it had not seen yet';
+  const pct = (x) => (x === null || x === undefined ? '?' : `${Number(x).toFixed(2)}%`);
+  const said = c.verdict === 'cleared' ? 'cleared again' : c.verdict === 'missed' ? 'did not hold up' : 'needs a look';
+  return `Second look on ${num(c.runs)} calls it had never seen: ${pct(c.gap)}, at most ${pct(c.hi)}${c.floor ? ` against ${pct(c.floor)}` : ''}, ${said}`;
+}
+
+/* A switch still taking over: the share it answers now, what it has to show before it takes more, and
+   the way to give it every call at once. */
+function Rollout({ w, busy, onAll }) {
+  const r = w.rollout;
+  const pct = Math.round(r.share * 100);
+  const hours = r.stageHours?.[r.stage] ?? r.stageHours?.[r.stageHours.length - 1] ?? 0;
+  const next = r.stage + 1 < (r.stages?.length || 0) ? `${Math.round(r.stages[r.stage + 1] * 100)}% of calls` : 'every call';
+  const since = r.startedAt ? Math.max(0, (Date.now() - r.startedAt) / 3600000) : 0;
+  return (
+    <div className="rolloutbar" role="status">
+      <div className="rolloutmeter" aria-hidden="true"><i style={{ width: `${Math.max(2, pct)}%` }} /></div>
+      <p>
+        <b>Taking over step by step: {pct}% of this workload&rsquo;s calls now.</b> The rest stay on {r.from || `${short(w.reference)}, your own model`},
+        chosen by chance, so the two can be compared fairly. It moves to {next} once it has been at this share for {hours} hours
+        ({since.toFixed(1)} so far) and answered {num(r.minCalls)} calls here, as long as its calls hold up. If they fail more,
+        are seen to work less, or are read as worse, it goes back on its own.
+      </p>
+      <button type="button" className="minig" disabled={busy} onClick={onAll}>Give it every call now</button>
+    </div>
   );
 }
 
@@ -435,6 +488,7 @@ const headline = (w, cand, switched) => {
   if (cand && cand.name?.kind === 'cascade') return `A checked cheaper model cleared your bar`;
   if (cand && cand.name?.kind === 'router') return `Picking a model call by call cleared your bar`;
   if (cand && cand.name?.kind === 'lighter') return `${short(w.reference)} thinking less cleared your bar`;
+  if (cand && cand.confirm && cand.confirm.verdict !== 'cleared') return `${short(cand.model)} cleared your bar once, and needs a second look`;
   if (cand) return `${short(cand.model)} cleared your bar`;
   if (w.label === 'Measuring') return 'We are still learning your bar';
   if (w.certificate?.outcome === 'unmeasurable' || w.certificate?.outcome === 'refused') return 'We could not set a bar for this workload';
@@ -465,6 +519,11 @@ const blurb = (w, cand, switched) => {
         : `The same model, asked to think less before it answers.`;
     return `${lead} Worked out on your own calls, it stayed inside your bar. `
       + (w.optimizeMode === 'ask' ? 'Nothing changes until you approve it.' : 'This workload optimizes automatically, so it switches on its own.');
+  }
+  if (cand && cand.confirm && cand.confirm.verdict !== 'cleared') {
+    return `It cleared your bar on the calls it was measured on, but not again on calls it had never seen `
+      + `(${confirmWords(cand.confirm).replace(/^Second look on /, 'on ')}). A model that clears once can be lucky, so nothing was `
+      + 'switched on its own. Approve it if you are satisfied, or the next measurement looks again.';
   }
   if (cand) {
     return w.optimizeMode === 'ask'

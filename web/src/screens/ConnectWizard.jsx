@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { href } from '../router.js';
 import { api } from '../api.js';
+import { more } from '../moreApi.js';
 import Board from '../Board.jsx';
 import html from './connect.html?raw';
 
@@ -54,6 +55,8 @@ export default function ConnectWizard({ go, freshKey, onFreshKey, signedIn, onDo
   const [step, setStep] = useState(1);
   const [way, setWay] = useState('route');
   const [lang, setLang] = useState('python');
+  // how new workloads are switched: read from the workspace, chosen here once
+  const [mode, setMode] = useState(null);
   const timer = useRef(null);
 
   const load = useCallback(() => api.connect().then(setData).catch(() => {}), []);
@@ -88,6 +91,8 @@ export default function ConnectWizard({ go, freshKey, onFreshKey, signedIn, onDo
     waiting: !calls && !data.needsCredit,
     creditLabel: buying ? 'Opening…' : 'Add credit',
     regenLabel: rotating ? 'working…' : (shownKey ? 'Replace' : 'Regenerate'),
+    askCls: (mode || data.defaultMode) === 'ask' ? 'modeb on' : 'modeb',
+    autoCls: (mode || data.defaultMode) === 'auto' ? 'modeb on' : 'modeb',
     /* Nothing beside the key. The row is the key, a way to copy it and a way to replace it,
        and any line of commentary next to all three only competed with them. */
   };
@@ -142,6 +147,9 @@ export default function ConnectWizard({ go, freshKey, onFreshKey, signedIn, onDo
       go('dash');
     },
     back: () => (step === 2 ? setStep(1) : go('connect')),
+    // at connecting, every workload is new, so the choice covers the ones already found too
+    mode_ask: async () => { setMode('ask'); try { await more.setDefaultMode('ask', true); } catch { setMode(null); } },
+    mode_auto: async () => { setMode('auto'); try { await more.setDefaultMode('auto', true); } catch { setMode(null); } },
   };
   for (const l of LANGS) on[`pick_${l}`] = () => setLang(l);
 
