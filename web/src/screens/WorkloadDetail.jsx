@@ -312,7 +312,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         </section>
       )}
 
-      <section className="opt">
+      <section className={`opt${timedToFirstWord(cert) ? ' cands-ttft' : ''}`}>
         <div className="opthead">
           <h2>Candidates tested</h2>
           <span className="s">

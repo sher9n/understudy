@@ -25,6 +25,8 @@ import Security from './screens/legal/Security.jsx';
 import Contact from './screens/legal/Contact.jsx';
 import Status from './screens/legal/Status.jsx';
 import NotFound from './screens/NotFound.jsx';
+/* Last, after every screen's own sheet, so the narrow-screen rules can reflow any of them. */
+import './phone.css';
 
 const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
 const AUTH = new Set(['signin', 'signup', 'signincode']);

@@ -1,5 +1,6 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { num } from './api.js';
+import { useWidth, NARROW } from './Charts.jsx';
 
 /* The pictures the learning side of a workload is explained with: how its calls are served, how
  * often each way of serving them worked, where the week's calls went, how calls turned out day by
@@ -227,12 +228,13 @@ export function DotStrip({ items }) {
   );
 }
 
-const OW = 980;
-const OH = 250;
-const OL = 50;
-const OR = 18;
-const OT = 16;
-const OB = 40;
+/* The frame of the day-by-day chart for a given width. Drawn at the width it is given, like the
+   spend chart, so its dates and counts keep their size on a phone. */
+function barFrame(width) {
+  const OW = width > 0 ? width : 980;
+  const narrow = OW < NARROW;
+  return { OW, narrow, OH: narrow ? 200 : 250, OL: narrow ? 38 : 50, OR: narrow ? 8 : 18, OT: 16, OB: narrow ? 34 : 40 };
+}
 const niceTop = (v) => {
   if (v <= 4) return 4;
   const pow = 10 ** Math.floor(Math.log10(v));
@@ -251,8 +253,9 @@ export const OUTCOME_PARTS = [
 /** Calls day by day, each day's bar in the four ways a call can have turned out. */
 export function OutcomeBars({ series }) {
   const n = series.length;
-  const box = useRef(null);
+  const [box, width] = useWidth();
   const [at, setAt] = useState(null);
+  const { OW, OH, OL, OR, OT, OB, narrow } = barFrame(width);
   const pick = useCallback((clientX) => {
     const el = box.current;
     if (!el || !n) return;
@@ -261,14 +264,14 @@ export function OutcomeBars({ series }) {
     const x = ((clientX - r.left) / r.width) * OW;
     const i = Math.floor(((x - OL) / (OW - OL - OR)) * n);
     setAt(Math.max(0, Math.min(n - 1, i)));
-  }, [n]);
-  if (!n) return null;
+  }, [n, OW, OL, OR, box]);
+  if (!n) return <div className="chartwrap" ref={box} />;
   const top = niceTop(Math.max(...series.map((d) => d.calls), 1));
   const slot = (OW - OL - OR) / n;
   const barW = Math.max(2, Math.min(22, slot * 0.7));
   const py = (v) => OH - OB - (v / top) * (OH - OB - OT);
   const ticks = [0, top / 2, top];
-  const marks = n < 12 ? [0, n >> 1, n - 1] : [0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1];
+  const marks = n < 12 || narrow ? [...new Set([0, n >> 1, n - 1])] : [0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1];
   const fill = { problem: 'var(--bad)', confirmed: 'var(--ok)', quiet: 'var(--ok)', recent: 'var(--line-strong)' };
   const op = { problem: 0.9, confirmed: 0.95, quiet: 0.38, recent: 0.9 };
   const day = at === null ? null : series[at];
@@ -287,7 +290,7 @@ export function OutcomeBars({ series }) {
         {ticks.map((v) => (
           <g key={v}>
             <line x1={OL} y1={py(v)} x2={OW - OR} y2={py(v)} stroke="var(--line)" strokeWidth="1" />
-            <text x={OL - 9} y={py(v) + 3.5} className="m" textAnchor="end" fontSize="10" fill="var(--mut)">{num(v)}</text>
+            <text x={OL - 8} y={py(v) + 3.5} className="m" textAnchor="end" fontSize="10" fill="var(--mut)">{num(v)}</text>
           </g>
         ))}
         {series.map((d, i) => {
@@ -311,8 +314,8 @@ export function OutcomeBars({ series }) {
         ))}
       </svg>
       {day && (
-        <div className={`charttip${OL + at * slot > OW * 0.62 ? ' left' : ''}`}
-          style={{ left: `${((OL + at * slot + slot / 2) / OW) * 100}%` }} aria-live="polite">
+        <div className={narrow ? 'charttip wide' : `charttip${OL + at * slot > OW * 0.62 ? ' left' : ''}`}
+          style={narrow ? undefined : { left: `${((OL + at * slot + slot / 2) / OW) * 100}%` }} aria-live="polite">
           <div className="tipday">{dfull(day.at)}, {num(day.calls)} {day.calls === 1 ? 'call' : 'calls'}</div>
           {OUTCOME_PARTS.map(([k, label, tone]) => (day[k] ? (
             <div className="tiprow" key={k}><span className="tipkey"><i className={`osw ${tone}`} />{label}</span>

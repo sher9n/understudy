@@ -13,7 +13,8 @@ import { plainClick } from './nav.jsx';
 const S24 = { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
   strokeWidth: 1.7, strokeLinecap: 'round', 'aria-hidden': true };
 
-export default function Account({ me, dark, setDark, onSignOut, go }) {
+/* `down` opens the menu below the button rather than above it, for the phone's top bar. */
+export default function Account({ me, dark, setDark, onSignOut, go, down = false }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef(null);
 
@@ -37,7 +38,7 @@ export default function Account({ me, dark, setDark, onSignOut, go }) {
         <span className="who">{me?.name || me?.email || 'Your workspace'}</span>
       </button>
       {open && (
-        <div className="acctpop">
+        <div className={down ? 'acctpop acctdown' : 'acctpop'}>
           <div className="acctid">
             <span className="av avlg">{initial}</span>
             <div>

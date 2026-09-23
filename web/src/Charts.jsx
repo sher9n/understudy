@@ -1,12 +1,45 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { usd } from './api.js';
 
-const W = 980;
-const H = 408;
-const L = 74;
-const R = 22;
-const T = 26;
-const B = 62;
+/* The charts are drawn at the width they are given.
+ *
+ * They used to be drawn once, 980 units wide, and scaled to fit, which on a phone shrank every
+ * word on them to a third of its size: axis labels of three pixels, a legend nobody could read.
+ * Now each one measures the box it sits in and draws itself to that width, so a label set at ten
+ * pixels is ten pixels on a phone as on a desk, and a narrow chart simply has fewer marks on it. */
+export function useWidth() {
+  const ref = useRef(null);
+  const [w, setW] = useState(0);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const read = () => setW(Math.round(el.getBoundingClientRect().width));
+    read();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, w];
+}
+
+/** Below this width a chart is drawn in its narrow form. */
+export const NARROW = 560;
+
+/* The spend chart's frame for a given width: how tall, and how much room the labels get. */
+function spendFrame(width) {
+  const W = width > 0 ? width : 980;
+  const narrow = W < NARROW;
+  return {
+    W,
+    narrow,
+    H: narrow ? 240 : Math.round(Math.min(408, Math.max(300, W * 0.42))),
+    L: narrow ? 56 : 74,
+    R: narrow ? 12 : 22,
+    T: narrow ? 16 : 26,
+    B: narrow ? 42 : 62,
+  };
+}
 
 // en-GB already abbreviates September as Sept, so appending one gave "Septt"
 const dlab = (ms) => new Date(ms).toLocaleDateString('en-GB',
@@ -20,15 +53,21 @@ const money = (v, max) => (max <= 0.05 ? `$${v.toFixed(3)}` : max <= 5 ? `$${v.t
 const dfull = (ms) => new Date(ms).toLocaleDateString('en-GB',
   { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
 
+/* Which days get a date under the axis: the first, the last and one or two between, fewer on a
+   narrow chart so the dates never run into each other. */
+const markDays = (n, narrow) => (n < 12 || narrow
+  ? [...new Set([0, n >> 1, n - 1])]
+  : [0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1]);
+
 /** Daily spend, with what the same traffic would have cost on the customer's own models. */
 export function SpendChart({ series }) {
   const n = series.length;
-  const box = useRef(null);
+  const [box, width] = useWidth();
   const [at, setAt] = useState(null);
+  const { W, H, L, R, T, B, narrow } = spendFrame(width);
 
-  /* Which day is under the pointer. The drawing is a viewBox scaled to whatever width the
-     panel happens to be, so the pointer's position on the screen has to be put back into
-     the drawing's own coordinates before it means anything. */
+  /* Which day is under the pointer. The drawing's own units are put back from the pointer's
+     position on the screen, which works whatever width the chart is drawn at. */
   const pick = useCallback((clientX) => {
     const el = box.current;
     if (!el || !n) return;
@@ -38,23 +77,27 @@ export function SpendChart({ series }) {
     const span = (W - L - R) / Math.max(1, n - 1);
     const i = Math.round((x - L) / span);
     setAt(Math.max(0, Math.min(n - 1, i)));
-  }, [n]);
+  }, [n, W, L, R, box]);
 
   const step = (by) => setAt((cur) => {
     const next = (cur === null ? n - 1 : cur) + by;
     return Math.max(0, Math.min(n - 1, next));
   });
 
-  if (!n) return null;
+  if (!n) return <div className="chartwrap" ref={box} />;
   const top = Math.max(...series.map((d) => Math.max(d.paid, d.would)), 0.02);
   const max = niceTop(top);
   const ticks = [0, max / 4, max / 2, (max * 3) / 4, max];
   const px = (i) => L + (i * (W - L - R)) / Math.max(1, n - 1);
   const py = (v) => H - B - (v / max) * (H - B - T);
   const path = (key) => series.map((d, i) => `${px(i).toFixed(1)} ${py(d[key]).toFixed(1)}`).join(' L');
-  const marks = n < 12 ? [0, n >> 1, n - 1] : [0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1];
+  const marks = markDays(n, narrow);
 
   const day = at === null ? null : series[at];
+  /* On a narrow chart the card reading a day spans the top of the chart, rather than sitting
+     beside the day and running off the side of the screen. */
+  const tipStyle = narrow ? undefined : { left: `${(px(at ?? 0) / W) * 100}%` };
+  const tipClass = narrow ? 'charttip wide' : `charttip${px(at ?? 0) > W * 0.62 ? ' left' : ''}`;
 
   return (
     <div className="chartwrap" ref={box}
@@ -75,7 +118,7 @@ export function SpendChart({ series }) {
       {ticks.map((v) => (
         <g key={v}>
           <line x1={L} y1={py(v)} x2={W - R} y2={py(v)} stroke="var(--line)" strokeWidth="1" />
-          <text x={L - 11} y={py(v) + 3.5} className="m" textAnchor="end" fontSize="10" fill="var(--mut)">{money(v, max)}</text>
+          <text x={L - 9} y={py(v) + 3.5} className="m" textAnchor="end" fontSize="10" fill="var(--mut)">{money(v, max)}</text>
         </g>
       ))}
       <path d={`M${path('would')}`} fill="none" stroke="var(--line-strong)" strokeWidth="2" strokeDasharray="6 5" />
@@ -84,7 +127,7 @@ export function SpendChart({ series }) {
       <path d={`M${path('paid')}`} fill="none" stroke="var(--brand)" strokeWidth="2.4" strokeLinejoin="round" />
       <line x1={L} y1={py(0)} x2={W - R} y2={py(0)} stroke="var(--line-strong)" strokeWidth="1.2" />
       {marks.map((i, k) => (
-        <text key={i} x={px(i)} y={H - B + 22} className="m" fontSize="10.5" fill="var(--mut)"
+        <text key={i} x={px(i)} y={H - B + 20} className="m" fontSize="10.5" fill="var(--mut)"
           textAnchor={k === 0 ? 'start' : k === marks.length - 1 ? 'end' : 'middle'}>{dlab(series[i].at)}</text>
       ))}
       {day && (
@@ -99,8 +142,7 @@ export function SpendChart({ series }) {
       )}
     </svg>
     {day && (
-      <div className={`charttip${px(at) > W * 0.62 ? ' left' : ''}`}
-        style={{ left: `${(px(at) / W) * 100}%` }} aria-live="polite">
+      <div className={tipClass} style={tipStyle} aria-live="polite">
         <div className="tipday">{dfull(day.at)}</div>
         <div className="tiprow"><span className="tipkey"><i className="tipdot paid" />What you paid</span>
           <span className="tipval">{usd(day.paid)}</span></div>
@@ -176,25 +218,42 @@ function niceTop(v) {
 
 /** Waiting for a first full day, drawn as an axis rather than a fake line. */
 export function WaitingChart({ message }) {
+  const [box, width] = useWidth();
+  const { W, H, L, R, T, B, narrow } = spendFrame(width);
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label={message}>
-      {[0, 1, 2, 3, 4].map((k) => (
-        <line key={k} x1={L} y1={T + (k * (H - B - T)) / 4} x2={W - R} y2={T + (k * (H - B - T)) / 4}
-          stroke="var(--line)" strokeWidth="1" />
-      ))}
-      <line x1={L} y1={H - B} x2={W - R} y2={H - B} stroke="var(--line-strong)" strokeWidth="1.2" />
-      <text x={W / 2} y={(T + H - B) / 2 + 4} textAnchor="middle" fontSize="13" fill="var(--mut-read)">{message}</text>
-    </svg>
+    <div ref={box}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label={message}>
+        {[0, 1, 2, 3, 4].map((k) => (
+          <line key={k} x1={L} y1={T + (k * (H - B - T)) / 4} x2={W - R} y2={T + (k * (H - B - T)) / 4}
+            stroke="var(--line)" strokeWidth="1" />
+        ))}
+        <line x1={L} y1={H - B} x2={W - R} y2={H - B} stroke="var(--line-strong)" strokeWidth="1.2" />
+        {!narrow && (
+          <text x={(L + W - R) / 2} y={(T + H - B) / 2 + 4} textAnchor="middle" fontSize="13" fill="var(--mut-read)">{message}</text>
+        )}
+      </svg>
+      {/* On a phone the sentence would not fit on one line of a drawing, so it is written under it. */}
+      {narrow && <p className="waitnote">{message}</p>}
+    </div>
   );
 }
 
-/* Every model tried, placed by what it costs and how far it drifted. Under the line passed. */
-const CW = 980;
-const CH = 400;
-const CL = 64;
-const CR = 168;
-const CT = 34;
-const CB = 56;
+/* Every model tried, placed by what it costs and how far it drifted. Under the line passed.
+   The frame for a given width: a narrow chart keeps the words about the bar inside the plot
+   rather than in a margin of their own, which on a phone would have taken half the width. */
+function candFrame(width) {
+  const CW = width > 0 ? width : 980;
+  const narrow = CW < NARROW;
+  return {
+    CW,
+    narrow,
+    CH: narrow ? 300 : 400,
+    CL: narrow ? 42 : 64,
+    CR: narrow ? 12 : 168,
+    CT: 34,
+    CB: narrow ? 50 : 56,
+  };
+}
 
 /* The models the chart can place: every one the measurement judged, and the model the bar
    came from. The page asks this too, before deciding whether to draw the chart at all, so
@@ -230,8 +289,10 @@ const RESULT = {
 
 export function CandidateChart({ results, floor, reference, referenceCostMonth }) {
   const [at, setAt] = useState(null);
+  const [box, width] = useWidth();
   const points = chartPoints(results, reference, referenceCostMonth);
-  if (points.length < 2) return null;
+  if (points.length < 2) return <div ref={box} />;
+  const { CW, CH, CL, CR, CT, CB, narrow } = candFrame(width);
   const x = costScale(points.map((p) => p.costMonth), CL, CW - CR);
   // keep the bar visible without squashing every candidate onto the baseline
   const ymax = niceTop(Math.max(...points.map((p) => p.gap), floor * 1.6, 1));
@@ -246,19 +307,27 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
   const colour = { cur: 'var(--mut)', pass: 'var(--brand)', near: 'var(--warn)', fail: 'var(--bad)' };
 
   const barText = `YOUR BAR · ${floor.toFixed(2)}%`;
+  /* Where the words marking the bar go: in their own margin on a wide chart, and just above the
+     line at its right-hand end on a narrow one, where the margin would have eaten the plot. */
+  const barAt = narrow
+    ? { x: CW - CR - 2, y: py(floor) - 6, anchor: 'end' }
+    : { x: CW - CR + 10, y: py(floor) + 3.5, anchor: 'start' };
+  const barBox = narrow
+    ? { l: barAt.x - 6.2 * barText.length, r: barAt.x + 2, t: barAt.y - 10, b: barAt.y + 3 }
+    : { l: CW - CR + 8, r: CW - CR + 12 + 6.2 * barText.length, t: py(floor) - 8, b: py(floor) + 8 };
   /* Where names may go: inside the plot, clear of the title above it and the prices below
      it, and never over the words that say where the bar is. */
   const area = { l: CL - 2, r: CW - 4, t: CT - 8, b: py(0) + 8 };
-  const avoid = [{ l: CW - CR + 8, r: CW - CR + 12 + 6.2 * barText.length, t: py(floor) - 8, b: py(floor) + 8 }];
-  const labels = placed(points, px, py, area, avoid);
+  const labels = placed(points, px, py, area, [barBox]);
   const named = labels.filter((l) => !l.hidden);
   const unnamed = labels.length - named.length;
   // the dot being read, by pointer or by the arrow keys; kept in range if the data changes
   const cur = at === null ? null : labels[Math.min(at, labels.length - 1)];
   const step = (by) => setAt((i) => Math.max(0, Math.min(labels.length - 1, (i === null ? -1 : i) + by)));
+  const refName = String(narrow ? shortModel(reference || 'your model') : (reference || 'your model')).toUpperCase();
 
   return (
-    <div className="chartwrap" tabIndex={0} role="group"
+    <div className="chartwrap" ref={box} tabIndex={0} role="group"
       aria-label="Every model tried. Point at a dot, or use the left and right arrow keys, to read what it is."
       onPointerLeave={() => setAt(null)}
       onKeyDown={(e) => {
@@ -275,28 +344,33 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
       {yticks.map((v) => (
         <g key={v}>
           <line x1={CL} y1={py(v)} x2={CW - CR} y2={py(v)} stroke="var(--line)" strokeWidth="1" />
-          <text x={CL - 10} y={py(v) + 3.5} className="m" textAnchor="end" fontSize="10" fill="var(--mut)">{v.toFixed(0)}%</text>
+          {/* a step of 2.5 is written 2.5%: rounded to "3%" it sat just under a bar of 3.00% */}
+          <text x={CL - 8} y={py(v) + 3.5} className="m" textAnchor="end" fontSize="10" fill="var(--mut)">
+            {Number.isInteger(Math.round(v * 1000) / 1000) ? v.toFixed(0) : v.toFixed(1)}%
+          </text>
         </g>
       ))}
       <rect x={CL} y={py(floor)} width={CW - CL - CR} height={py(0) - py(floor)} fill="var(--brand)" opacity="0.07" />
       <line x1={CL} y1={py(floor)} x2={CW - CR} y2={py(floor)} stroke="var(--brand)" strokeWidth="1.6" strokeDasharray="6 5" />
-      <text x={CW - CR + 10} y={py(floor) + 3.5} className="m" fontSize="10" fontWeight="700" fill="var(--brand)">
+      <text x={barAt.x} y={barAt.y} textAnchor={barAt.anchor} className="m" fontSize="10" fontWeight="700" fill="var(--brand)"
+        stroke="var(--raise)" strokeWidth={narrow ? 3.6 : 0} paintOrder="stroke" strokeLinejoin="round">
         {barText}
       </text>
       <line x1={CL} y1={py(0)} x2={CW - CR} y2={py(0)} stroke="var(--line-strong)" strokeWidth="1.2" />
-      {x.ticks.map((v) => (
+      {x.ticks.map((v, k) => (
         <g key={v}>
           <line x1={px(v)} y1={py(0)} x2={px(v)} y2={py(0) + 5} stroke="var(--line-strong)" strokeWidth="1" />
-          <text x={px(v)} y={CH - CB + 20} className="m" fontSize="10" fill="var(--mut)" textAnchor="middle">
+          <text x={px(v)} y={CH - CB + 20} className="m" fontSize="10" fill="var(--mut)"
+            textAnchor={narrow && k === 0 ? 'start' : narrow && k === x.ticks.length - 1 ? 'end' : 'middle'}>
             {x.label(v)}
           </text>
         </g>
       ))}
       <text x={CL} y={CT - 12} className="m" fontSize="10" fontWeight="700" fill="var(--mut)">
-        DISAGREEMENT WITH {String(reference || 'your model').toUpperCase()}, THE MODEL YOUR BAR CAME FROM
+        {narrow ? `DISAGREEMENT WITH ${refName}` : `DISAGREEMENT WITH ${refName}, THE MODEL YOUR BAR CAME FROM`}
       </text>
-      <text x={CW - CR} y={CH - CB + 42} className="m" fontSize="10" fontWeight="700" fill="var(--mut)" textAnchor="end">
-        {x.log ? 'COST A MONTH, EACH STEP TEN TIMES THE ONE BEFORE' : 'COST A MONTH'}
+      <text x={CW - CR} y={CH - CB + (narrow ? 38 : 42)} className="m" fontSize="10" fontWeight="700" fill="var(--mut)" textAnchor="end">
+        {x.log ? (narrow ? 'COST A MONTH, EACH STEP ×10' : 'COST A MONTH, EACH STEP TEN TIMES THE ONE BEFORE') : 'COST A MONTH'}
       </text>
       {/* Drawn in three passes, so nothing is ever painted over something drawn for another
           model: the lines back to a dot first, then every dot, then every name on top. */}
@@ -334,8 +408,8 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
       ))}
     </svg>
     {cur && (
-      <div className={`charttip dotcard${cur.x > CW * 0.6 ? ' left' : ''}`} aria-live="polite"
-        style={{ left: `${(cur.x / CW) * 100}%`, top: `${Math.min(84, Math.max(14, (cur.y / CH) * 100))}%` }}>
+      <div className={narrow ? 'charttip wide' : `charttip dotcard${cur.x > CW * 0.6 ? ' left' : ''}`} aria-live="polite"
+        style={narrow ? undefined : { left: `${(cur.x / CW) * 100}%`, top: `${Math.min(84, Math.max(14, (cur.y / CH) * 100))}%` }}>
         <div className="tipday">{cur.r.name?.label || cur.r.model}</div>
         {isStrategy(cur.r) && cur.r.escalated !== null && cur.r.escalated !== undefined && (
           <div className="tiprow"><span className="tipkey">{cur.r.name.kind === 'cascade' ? 'Sent on after the check' : 'Sent to the dearer model'}</span>
