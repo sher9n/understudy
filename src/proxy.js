@@ -6,7 +6,7 @@ import config, { canRoute } from './config.js';
 import { verifyKey, bearerOf } from './keys.js';
 import { workloadFor, recordCall, addActivity } from './traffic.js';
 import { chat, chatStream, priceCall, UpstreamError, reasonOf, hintApplies } from './openrouter.js';
-import { gateRouting, chargeCall, grantStarterCredit, hold, release, callShape, callBound, withFee } from './billing.js';
+import { gateRouting, chargeCall, grantStarterCredit, hold, release, callShape, callBound, withFee, baseModelId } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
 import { workloadNameOf, pinnedOf } from './classify.js';
@@ -77,24 +77,83 @@ v1.get('/models', async (req, res) => {
    the address changed. Where several makers sell the same name, the one that made it comes first. */
 const MAKERS = ['openai', 'anthropic', 'google', 'meta-llama', 'mistralai', 'deepseek', 'qwen', 'x-ai', 'cohere', 'amazon'];
 const canonical = new Map();
+/* A model is routed only when the catalogue knows it, because only then can what a call costs be bound
+   before it is sent (see holdFor). A name with its maker is looked up as it is, a variant after a colon
+   (":nitro", ":online") as the model it varies; a bare name as its maker names it. Before the catalogue
+   has been read nothing can be priced, and the call waits for it rather than going out unbounded. */
 export async function canonicalModel(name) {
-  if (typeof name !== 'string' || !name.trim() || name.includes('/')) return { model: name, known: true };
+  if (typeof name !== 'string' || !name.trim()) return { model: name, known: true };
   const bare = name.trim();
   const hit = canonical.get(bare);
-  if (hit && Date.now() - hit.at < 600000) return hit.v;
-  const rows = await db.prepare(`SELECT model_id FROM models_catalog WHERE model_id LIKE ?`).all(`%/${bare.replace(/[\\%_]/g, '\\$&')}`);
+  if (hit && Date.now() - hit.at < (hit.v.known ? 600000 : 60000)) return hit.v;
   const any = Number((await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get())?.n ?? 0) > 0;
   let v;
-  if (rows.length) {
-    const rank = (id) => { const i = MAKERS.indexOf(id.split('/')[0]); return i < 0 ? MAKERS.length : i; };
-    v = { model: rows.map((r) => r.model_id).sort((a, b) => rank(a) - rank(b))[0], known: true };
+  if (bare.includes('/')) {
+    const found = !!(await db.prepare('SELECT 1 FROM models_catalog WHERE model_id = ?').get(baseModelId(bare)));
+    v = { model: bare, known: found, empty: !any };
   } else {
-    // with no catalogue read yet nothing can be said, so the name goes through as it came
-    v = { model: bare, known: !any };
+    const rows = await db.prepare(`SELECT model_id FROM models_catalog WHERE model_id LIKE ?`).all(`%/${bare.replace(/[\\%_]/g, '\\$&')}`);
+    if (rows.length) {
+      const rank = (id) => { const i = MAKERS.indexOf(id.split('/')[0]); return i < 0 ? MAKERS.length : i; };
+      v = { model: rows.map((r) => r.model_id).sort((a, b) => rank(a) - rank(b))[0], known: true };
+    } else {
+      v = { model: bare, known: false, empty: !any };
+    }
   }
   canonical.set(bare, { at: Date.now(), v });
   if (canonical.size > 2000) canonical.clear();
   return v;
+}
+
+const unknownModelWords = (m) => (/^openrouter\/auto/i.test(String(m))
+  ? 'openrouter/auto picks a different model for every call, so what a call can cost is not known before it is sent, '
+    + 'and there is nothing to measure a cheaper model against. Name the model you want; every model is listed at GET /v1/models.'
+  : `"${String(m).slice(0, 80)}" is not a model we route to. Name it with its maker, `
+    + 'for example openai/gpt-5.4; every model is listed at GET /v1/models.');
+
+/* What a request asks for whose cost cannot be known before it is sent. A file given by its address can
+   be any length; a plugin we do not know can charge anything. Those calls are refused with a way round,
+   rather than sent unbounded on a balance that has to cover them. */
+const PLUGINS_WE_PRICE = new Set(['web', 'file-parser']);
+function unpriceable(body) {
+  for (const m of Array.isArray(body?.messages) ? body.messages : []) {
+    for (const p of Array.isArray(m?.content) ? m.content : []) {
+      const data = p?.type === 'file' ? (p.file?.file_data ?? p.file?.url) : null;
+      if (typeof data === 'string' && !data.startsWith('data:')) {
+        return 'A file given by its address can be any length, so what the call would cost is not known before it is sent. '
+          + 'Send the file\'s contents inline (as a data URL), or send us a copy of the call instead.';
+      }
+    }
+  }
+  for (const p of Array.isArray(body?.plugins) ? body.plugins : []) {
+    if (!PLUGINS_WE_PRICE.has(p?.id)) {
+      return `The "${String(p?.id).slice(0, 40)}" plugin is not one we can price before a call is sent. `
+        + 'Call without it, or send us a copy of the call instead.';
+    }
+  }
+  return null;
+}
+
+/* Every model a strategy's chain can reach: what serves, what it falls back to, and on to the customer's
+   own model, as routeOnce walks it (chainOf). */
+const chainModels = (strategy) => {
+  const out = new Set();
+  for (let s = strategy, n = 0; s && n < 4; s = s.fallback, n += 1) {
+    const spec = s.spec;
+    if (!spec) continue;
+    if (spec.kind === 'cascade') { out.add(spec.first?.model); out.add(spec.fallback?.model); }
+    else if (spec.kind === 'router') { out.add(spec.cheap?.model); out.add(spec.strong?.model); }
+    else out.add(spec.model);
+  }
+  out.delete(undefined);
+  out.delete(null);
+  return [...out];
+};
+async function allCatalogued(models) {
+  const ids = [...new Set(models.map(baseModelId))];
+  if (!ids.length) return true;
+  const n = Number((await db.prepare('SELECT COUNT(*) AS n FROM models_catalog WHERE model_id = ANY(?::text[])').get(ids))?.n ?? 0);
+  return n === ids.length;
 }
 
 /* Everything a routed call needs before it is sent, or the reason it cannot be, so the
@@ -108,11 +167,23 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
   if (body.model) {
     const named = await canonicalModel(body.model);
     if (!named.known) {
-      return no(400, `"${String(body.model).slice(0, 80)}" is not a model we know. Name it with its maker, `
-        + 'for example openai/gpt-5.4; every model is listed at GET /v1/models.', 'model_not_found');
+      if (named.empty) return no(503, 'The list of models we route to is still being read. Try again in a minute.', 'not_ready');
+      return no(400, unknownModelWords(body.model), 'model_not_found');
     }
     body.model = named.model;
   }
+  // models named to fall back to are each paid for when used, so each has to be one we can price
+  if (body.models !== undefined) {
+    if (!Array.isArray(body.models) || body.models.some((m) => typeof m !== 'string')) {
+      return no(400, '"models" is a list of model ids.', 'invalid_request_error');
+    }
+    for (const m of body.models) {
+      const k = await canonicalModel(m);
+      if (!k.known) return no(k.empty ? 503 : 400, k.empty ? 'The list of models we route to is still being read. Try again in a minute.' : unknownModelWords(m), 'model_not_found');
+    }
+  }
+  const cannot = unpriceable(body);
+  if (cannot) return no(400, cannot, 'unsupported_feature');
   await grantStarterCredit(wsId);
   const gate = await gateRouting(wsId);
   if (!gate.ok) return { error: { status: 402, json: { error: { message: gate.message, type: gate.code } } } };
@@ -124,7 +195,10 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
      way it was measured, or a cascade, or a pick made call by call), or, now and then and within
      the workload's limits, one being tried. None, and the call goes to the model it asked for. */
   // a pinned call is answered by the model it names: no switch, no experiment
-  const strategy = workload && !pinned ? await chooseStrategy(workload, { body }) : null;
+  let strategy = workload && !pinned ? await chooseStrategy(workload, { body }) : null;
+  /* A strategy whose chain reaches a model the catalogue no longer lists cannot be priced, so this call
+     is answered by the model it asked for; watchCatalogue switches the workload back within the hour. */
+  if (strategy && !(await allCatalogued(chainModels(strategy)))) strategy = null;
   const lead = strategy ? leadModel(strategy.spec) : null;
   const served = lead?.model || requested;
   if (!served) return no(400, '"model" is required.', 'invalid_request_error');
@@ -138,15 +212,12 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
 /* Every model one call could end up paying for: the one it is served by, the customer's own model,
    and whatever a strategy may send it on to. */
 function modelsOf(ready) {
-  const out = new Set([ready.served, ready.requested, ready.workload?.reference_model].filter(Boolean));
-  for (const s of [ready.strategy, ready.strategy?.fallback]) {
-    const spec = s?.spec;
-    if (!spec) continue;
-    if (spec.kind === 'cascade') { out.add(spec.first?.model); out.add(spec.fallback?.model); }
-    else if (spec.kind === 'router') { out.add(spec.cheap?.model); out.add(spec.strong?.model); }
-    else out.add(spec.model);
+  // with no strategy only the model asked for answers; with one, its whole chain and the customer's own model
+  const out = new Set([ready.served, ready.requested].filter(Boolean));
+  if (ready.strategy) {
+    if (ready.workload?.reference_model) out.add(ready.workload.reference_model);
+    for (const m of chainModels(ready.strategy)) out.add(m);
   }
-  out.delete(undefined);
   return [...out];
 }
 
@@ -160,7 +231,9 @@ async function holdFor(wsId, body, ready) {
   let worst = 0;
   let priced = false;
   let unbounded = false;
-  for (const m of modelsOf(ready)) {
+  // the models the request itself names to fall back to count too: any of them may answer, and be paid for
+  const fallbacks = Array.isArray(body.models) ? body.models.filter((m) => typeof m === 'string') : [];
+  for (const m of [...new Set([...modelsOf(ready), ...fallbacks])]) {
     const b = await callBound(m, shape, { zdr: ready.zdr });
     if (!b) continue;
     priced = true;
@@ -169,8 +242,11 @@ async function holdFor(wsId, body, ready) {
   }
   if (unbounded && shape.cap === null) body.max_tokens = config.HOLD_MAX_OUTPUT_TOKENS;
   const est = priced ? worst : config.HOLD_UNPRICED_USD;
-  const twice = [ready.strategy?.spec?.kind, ready.strategy?.fallback ? 'fallback' : null].some((k) => k === 'cascade' || k === 'fallback');
-  const h = await hold(wsId, withFee(est * (twice ? 2 : 1)), 'call');
+  /* A strategy can pay for two models on one call (a cheap answer, then the one it sends on to), and a
+     cascade also pays for the check that reads the cheap answer: twice, and a quarter more for that. */
+  const cascade = chainModels(ready.strategy || {}).length && [ready.strategy?.spec?.kind, ready.strategy?.fallback?.spec?.kind].includes('cascade');
+  const twice = !!ready.strategy?.fallback || cascade;
+  const h = await hold(wsId, withFee(est * (cascade ? 2.25 : twice ? 2 : 1)), 'call');
   return { ...h, capped: shape.cap !== null };
 }
 
@@ -281,7 +357,11 @@ async function settle(args) {
   try {
     return await finish(args);
   } catch (err) {
+    /* The answer was sent and could not be charged. Its hold is given back rather than left to freeze the
+       balance for the hold's whole lifetime, and we are told: an uncharged call is a failure of ours. */
     console.error(`bookkeeping for ${args.callId} failed: ${err?.message || err}`);
+    reportCallFailure({ kind: 'charging a call', model: args.served, status: 0, message: err?.message || String(err), workspaceId: args.wsId });
+    await release(args.holdId).catch(() => {});
     return null;
   }
 }

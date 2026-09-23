@@ -248,7 +248,8 @@ and a dispute decided for us gives it back. For that, the Stripe webhook needs t
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
 `checkout.session.async_payment_failed`, `payment_intent.succeeded`,
 `payment_intent.payment_failed`, `charge.refunded`, `charge.dispute.created`,
-`charge.dispute.closed`, `charge.dispute.funds_reinstated` and `customer.subscription.deleted`.
+`charge.dispute.funds_withdrawn`, `charge.dispute.closed`, `charge.dispute.funds_reinstated` and
+`customer.subscription.deleted`. A dispute that is only an inquiry takes nothing off the balance.
 
 A workspace can set daily and monthly spending limits, counted with what calls in flight have set
 aside; calls past one are refused with a message saying when they resume (days and months told in

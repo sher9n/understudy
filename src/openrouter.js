@@ -148,7 +148,8 @@ const timedOut = (message) => Object.assign(new Error(message), { name: 'Timeout
  *  than UPSTREAM_IDLE_MS. One limit on the whole answer used to cut every streamed answer that took
  *  longer than two minutes to write, which a long answer or a model that thinks at length routinely
  *  does, and the customer was left holding half an answer. */
-export async function chatStream(body, model, { signal, recipe = null, retries = 0, pace = false, zdr = null, cacheHint = false } = {}) {
+export async function chatStream(body, model, { signal, recipe = null, retries = 0, pace = false, zdr = null, cacheHint = false,
+  wholeMs = config.UPSTREAM_STREAM_MAX_MS } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
   const payload = buildUpstream(body, model, recipe, { zdr, cacheHint });
   payload.stream = true;
@@ -163,8 +164,21 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
       if (signal.aborted) stop(signal.reason);
       else signal.addEventListener('abort', onOuter, { once: true });
     }
-    const letGo = () => { if (signal) signal.removeEventListener('abort', onOuter); };
-    const toStart = setTimeout(() => stop(timedOut('The provider did not start answering in time.')), config.UPSTREAM_TIMEOUT_MS);
+    /* Every timer of this try, cleared together however it ends: answered in full, broken off, given
+       up by the reader, or refused. A broken stream used to leave its half hour timer and its listener
+       on the caller's signal behind. The whole answer is timed from when this try was sent, after any
+       wait for a turn, so a queue on our side never uses up a try's time. */
+    let whole = null;
+    let quiet = null;
+    const letGo = () => {
+      clearTimeout(whole);
+      clearTimeout(quiet);
+      if (signal) signal.removeEventListener('abort', onOuter);
+    };
+    whole = setTimeout(() => stop(timedOut('The answer took longer than allowed.')), wholeMs);
+    whole.unref?.();
+    const toStart = setTimeout(() => stop(timedOut('The provider did not start answering in time.')),
+      Math.min(config.UPSTREAM_TIMEOUT_MS, wholeMs));
     let res;
     try {
       res = await fetch(`${config.OPENROUTER_BASE}/chat/completions`, {
@@ -193,22 +207,37 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
       try { json = JSON.parse(text); } catch { /* not json */ }
       throw new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
     }
-    // started: from here the answer may take as long as it needs, so long as it keeps coming
-    const whole = setTimeout(() => stop(timedOut('The answer took longer than allowed.')), config.UPSTREAM_STREAM_MAX_MS);
-    let quiet = setTimeout(() => stop(timedOut('The provider stopped sending.')), config.UPSTREAM_IDLE_MS);
-    whole.unref?.();
-    quiet.unref?.();
-    const done = () => { clearTimeout(whole); clearTimeout(quiet); letGo(); };
-    const watched = res.body ? res.body.pipeThrough(new TransformStream({
-      transform(chunk, c) {
-        clearTimeout(quiet);
-        quiet = setTimeout(() => stop(timedOut('The provider stopped sending.')), config.UPSTREAM_IDLE_MS);
-        quiet.unref?.();
-        c.enqueue(chunk);
-      },
-      flush() { done(); },
-    })) : null;
-    if (!watched) done();
+    // started: from here the answer may take as long as it is allowed, so long as it keeps coming
+    const hush = () => {
+      clearTimeout(quiet);
+      quiet = setTimeout(() => stop(timedOut('The provider stopped sending.')), config.UPSTREAM_IDLE_MS);
+      quiet.unref?.();
+    };
+    hush();
+    let watched = null;
+    if (res.body) {
+      const reader = res.body.getReader();
+      watched = new ReadableStream({
+        async pull(c) {
+          try {
+            const { done, value } = await reader.read();
+            if (done) { letGo(); c.close(); return; }
+            hush();
+            c.enqueue(value);
+          } catch (err) {
+            letGo();
+            c.error(err);
+          }
+        },
+        cancel(reason) {
+          letGo();
+          stop(reason);
+          return reader.cancel(reason).catch(() => {});
+        },
+      });
+    } else {
+      letGo();
+    }
     const out = new Response(watched, { status: res.status, statusText: res.statusText, headers: res.headers });
     out.sentAt = sentAt;
     return out;
@@ -222,9 +251,10 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
  * both count as the first thing written; a model's hidden thinking does not, because nobody sees
  * it. Tool calls arrive in pieces and are joined by their index, the way every client joins them. */
 export async function streamCollect(body, model, { recipe = null, retries = 3, signal, pace = true, zdr = null } = {}) {
-  /* One limit on the whole replay, as before: a measurement's heartbeat is written between calls, and
-     a replay allowed the live stream's half hour would read as a measurement nothing is running. */
-  const res = await chatStream(body, model, { recipe, retries, signal: signal ?? AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS), pace, zdr });
+  /* Each try of a replay is held to UPSTREAM_TIMEOUT_MS in all, from when it is sent, as before the live
+     stream's longer limit: a measurement's heartbeat is written between calls, and a replay allowed the
+     live stream's half hour would read as a measurement nothing is running. */
+  const res = await chatStream(body, model, { recipe, retries, signal, pace, zdr, wholeMs: config.UPSTREAM_TIMEOUT_MS });
   /* Timed from when the request actually left, after any spacing, so waiting our turn is
      never counted against a model's speed. */
   const started = res.sentAt ?? Date.now();
@@ -478,7 +508,9 @@ export async function saveZdrEndpoints(rows) {
 
 /** What one call's tokens cost on a given model, from the synced catalogue only. */
 export async function priceCall(modelId, promptTokens, completionTokens) {
-  const m = await db.prepare('SELECT price_in, price_out FROM models_catalog WHERE model_id = ?').get(modelId);
+  // a variant after a colon (":nitro", ":online") is priced as the model it varies
+  const m = await db.prepare('SELECT price_in, price_out FROM models_catalog WHERE model_id = ?')
+    .get(String(modelId || '').replace(/:[a-z0-9._-]+$/i, ''));
   if (!m) return null;
   return m.price_in * promptTokens + m.price_out * completionTokens;
 }

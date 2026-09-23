@@ -94,18 +94,25 @@ export async function handleWebhook(req, res) {
       case 'payment_intent.payment_failed':
         if (wsId && o.metadata?.topup === '1') {
           const code = o.last_payment_error?.decline_code || o.last_payment_error?.code || 'declined';
-          await db.prepare(`UPDATE billing_accounts SET auto_topup = 0, topup_failed_note = ?, updated_at = ?
-                       WHERE workspace_id = ?`).run(code, now(), wsId);
+          /* Switched off here only if it was still on: when the top up job already heard the refusal, it
+             has switched it off and told the owner, and saying it again is a second email about one card. */
+          const wasOn = (await db.prepare(`UPDATE billing_accounts SET auto_topup = 0, topup_failed_note = ?, updated_at = ?
+                       WHERE workspace_id = ? AND auto_topup = 1 RETURNING workspace_id`).run(code, now(), wsId)).rows.length > 0;
+          if (!wasOn) break;
+          const confirm = code === 'authentication_required';
           await addActivity(wsId, {
-            kind: 'bill', title: 'A top up was declined',
-            detail: 'Automatic top up is off until a card is added. Update it in Settings and calls resume.',
+            kind: 'bill', title: confirm ? 'A top up needs your confirmation' : 'A top up was declined',
+            detail: confirm
+              ? 'Your bank asked for you to confirm this one in person. Adding credit again takes care of it, and calls resume.'
+              : 'Automatic top up is off until a card is added. Update it in Settings and calls resume.',
           });
           // a card that stopped working stops every call once the balance runs out, so it is told by email too
           await notify(wsId, 'money', `topup-failed:${o.id}`, {
-            title: 'An automatic top up was declined',
+            title: confirm ? 'An automatic top up needs your confirmation' : 'An automatic top up was declined',
             lines: [
-              `Your card was declined (${code}), so automatic top ups are off.`,
-              'Calls through Understudy stop when the balance runs out. Update the card or add credit in Settings.',
+              confirm ? 'Your bank asked for you to confirm this top up in person, so automatic top ups are off for now.'
+                : `Your card was declined (${code}), so automatic top ups are off.`,
+              'Calls through Understudy stop when the balance runs out. Add credit in Settings to carry on.',
             ],
             path: '/settings', linkText: 'Update your card',
           });
@@ -114,14 +121,28 @@ export async function handleWebhook(req, res) {
       case 'charge.refunded':
         if (wsId) await takeBack(wsId, o.id, (o.amount_refunded ?? 0) / 100, 'refund', 'Refunded to your card');
         break;
+      /* A dispute takes its amount off the balance when the money actually leaves: at once for a
+         chargeback, and never for an inquiry, where the bank only asks a question and Stripe takes nothing
+         (its status starts "warning_"). An inquiry that turns into a chargeback withdraws the money then,
+         which Stripe tells us as funds_withdrawn. Taking it back is keyed on the dispute, so however many
+         of these arrive, it comes off once. Automatic top up goes off with the first money taken. */
       case 'charge.dispute.created':
+      case 'charge.dispute.funds_withdrawn':
         if (wsId) {
-          await takeBack(wsId, o.id, (o.amount ?? 0) / 100, 'dispute', 'Disputed with your bank');
-          await db.prepare('UPDATE billing_accounts SET auto_topup = 0, updated_at = ? WHERE workspace_id = ?').run(now(), wsId);
+          const inquiry = event.type === 'charge.dispute.created' && String(o.status || '').startsWith('warning_');
+          if (inquiry) {
+            await addActivity(wsId, {
+              kind: 'bill', title: 'Your bank asked about a payment',
+              detail: 'Nothing has been taken off your balance. If the question becomes a dispute, the payment\'s credit comes off then.',
+            });
+          } else {
+            await takeBack(wsId, o.id, (o.amount ?? 0) / 100, 'dispute', 'Disputed with your bank');
+            await db.prepare('UPDATE billing_accounts SET auto_topup = 0, updated_at = ? WHERE workspace_id = ?').run(now(), wsId);
+          }
         }
         break;
       /* A dispute the bank decides for us returns the payment to us, so what was taken off the balance
-         when the dispute opened is given back, once. */
+         is given back, once. An inquiry closed for us took nothing, so there is nothing to give back. */
       case 'charge.dispute.closed':
       case 'charge.dispute.funds_reinstated':
         if (wsId && (event.type === 'charge.dispute.funds_reinstated' || o.status === 'won')) {

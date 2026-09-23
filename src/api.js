@@ -1616,6 +1616,10 @@ api.post('/billing/checkout', async (req, res) => {
 api.get('/billing/checkout/:id', async (req, res) => {
   const s = await stripe();
   if (!s) return fail(res, 503, 'Payments are not set up here.');
+  // each lookup asks Stripe, so a workspace asks a few times a minute at most
+  if (!await allow('checkout_lookup', req.workspace.id, { max: 20, windowMs: 600000 })) {
+    return tooMany(res, 'Asked too often. The balance on this page shows the payment once it lands.');
+  }
   const sid = String(req.params.id || '');
   if (!/^cs_[A-Za-z0-9_]+$/.test(sid)) return fail(res, 404, 'No such payment.');
   let session;

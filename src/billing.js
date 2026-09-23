@@ -4,6 +4,7 @@ import { addActivity } from './traffic.js';
 import { enqueue } from './jobs.js';
 import { limitsFor } from './workspace.js';
 import { notify } from './notify.js';
+import { reportCallFailure } from './alerts.js';
 
 const DAY = 86400000;
 
@@ -32,9 +33,22 @@ export async function move(workspaceId, { kind, amountUsd, note = null, ref = nu
        do: measurements run side by side and every live call is charged as it finishes. Twenty
        $1 charges landing together moved a balance by $6. The statement also locks the row until
        this transaction ends, so the ledger row below records the balance this move produced. */
-    const r = await x.prepare(
-      `UPDATE billing_accounts SET balance_usd = ROUND((balance_usd + ?)::numeric, 8)::double precision,
-              updated_at = ? WHERE workspace_id = ? RETURNING balance_usd`).run(amountUsd, now(), workspaceId);
+    /* A call's charge, or a correction to one, also moves the running totals the spending limits read,
+       in the same statement: a limit is then checked against one row, where summing a month of ledger
+       under the account's lock on every call slowed every call of a busy workspace. */
+    const t = now();
+    const r = kind === 'call'
+      ? await x.prepare(
+        `UPDATE billing_accounts SET balance_usd = ROUND((balance_usd + ?)::numeric, 8)::double precision,
+                call_day_usd = ROUND(((CASE WHEN call_day_start = ?::bigint THEN call_day_usd ELSE 0 END) - ?)::numeric, 8)::double precision,
+                call_day_start = ?::bigint,
+                call_month_usd = ROUND(((CASE WHEN call_month_start = ?::bigint THEN call_month_usd ELSE 0 END) - ?)::numeric, 8)::double precision,
+                call_month_start = ?::bigint,
+                updated_at = ? WHERE workspace_id = ? RETURNING balance_usd`)
+        .run(amountUsd, istDayStart(t), amountUsd, istDayStart(t), istMonthStart(t), amountUsd, istMonthStart(t), t, workspaceId)
+      : await x.prepare(
+        `UPDATE billing_accounts SET balance_usd = ROUND((balance_usd + ?)::numeric, 8)::double precision,
+                updated_at = ? WHERE workspace_id = ? RETURNING balance_usd`).run(amountUsd, t, workspaceId);
     const after = r.rows[0].balance_usd;
     await x.prepare(`INSERT INTO ledger (id, workspace_id, kind, amount_usd, balance_after, note, ref, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -100,6 +114,11 @@ export async function available(workspaceId, x = db) {
 /** Set aside up to `amountUsd` for one piece of work. Answers { ok, holdId, amount } or { ok: false, free }. */
 export async function hold(workspaceId, amountUsd, purpose) {
   const want = round8(Math.max(0, Number(amountUsd) || 0));
+  /* The workspace's limits are read before the transaction opens. Read inside it, through the shared
+     pool, a cold cache made the call holding the account's lock wait for a second connection, while
+     every other call of that workspace waited on the lock with a connection of its own: ten calls at
+     once could use the whole pool up and stall every request on the server. */
+  const lim = purpose === 'call' ? await limitsFor(workspaceId) : null;
   return await db.tx(async (tx) => {
     await account(workspaceId, tx);
     // the row lock is what makes two holds arriving together take turns
@@ -115,7 +134,7 @@ export async function hold(workspaceId, amountUsd, purpose) {
        once spent eight times a daily limit of five cents. As with the balance, the last call of a
        period may run alone past what is left, so a limit is overrun by at most one call. */
     if (purpose === 'call') {
-      const over = await overLimit(workspaceId, tx, want, a);
+      const over = await overLimit(workspaceId, tx, want, a, lim);
       if (over) return { ok: false, ...over, free: a.free, inFlight: a.inFlight, want };
     }
     const holdId = id('hold');
@@ -159,34 +178,92 @@ export function callShape(body) {
   const raw = Number(body?.max_completion_tokens ?? body?.max_tokens);
   const cap = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null;
   const n = Math.max(1, Math.min(128, Math.floor(Number(body?.n) || 1)));
-  return { pin, cap, n };
-}
-
-/** The most one call can cost on one model, or null when the model has no known price. */
-export async function callBound(modelId, { pin, cap, n = 1 }, { zdr = true } = {}) {
-  const m = await db.prepare('SELECT price_in, price_out, max_output, context_len FROM models_catalog WHERE model_id = ?').get(modelId);
-  if (!m) return null;
-  let pi = Number(m.price_in) || 0;
-  let po = Number(m.price_out) || 0;
-  let margin = config.HOLD_PRICE_MULTIPLE;
-  let maxOut = Number(m.max_output) > 0 ? Number(m.max_output) : null;
-  if (zdr) {
-    const e = await db.prepare(
-      'SELECT MAX(price_in) AS pi, MAX(price_out) AS po, MAX(max_output) AS mo FROM model_endpoints WHERE model_id = ?').get(modelId);
-    if (e && (Number(e.pi) > 0 || Number(e.po) > 0)) {
-      // every provider it can be sent to is known, so the dearest of them is the bound
-      pi = Math.max(pi, Number(e.pi) || 0);
-      po = Math.max(po, Number(e.po) || 0);
-      margin = 1;
-      if (Number(e.mo) > 0) maxOut = Math.max(maxOut || 0, Number(e.mo));
+  /* What a call can cost beyond the text it carries. A picture given by its address is read by the
+     provider, and counted here at HOLD_IMAGE_TOKENS of prompt; one sent inline is already counted by
+     its size. A file sent inline may be read page by page at a price per page, allowed for by its
+     size (a page is at least a kilobyte, and the dearest reader costs a fifth of a cent a page). Web
+     search is charged per search, allowed for at HOLD_WEB_SEARCH_USD. A prompt cached for an hour costs
+     twice the prompt price to write, where the five minute cache costs a quarter more. */
+  let images = 0;
+  let fileChars = 0;
+  let longCache = false;
+  for (const m of Array.isArray(body?.messages) ? body.messages : []) {
+    for (const p of Array.isArray(m?.content) ? m.content : []) {
+      if (p?.type === 'image_url') {
+        const u = typeof p.image_url === 'string' ? p.image_url : p.image_url?.url;
+        if (typeof u === 'string' && !u.startsWith('data:')) images += 1;
+      }
+      if (p?.type === 'file' && typeof p.file?.file_data === 'string' && p.file.file_data.startsWith('data:')) {
+        fileChars += p.file.file_data.length;
+      }
+      if (p?.cache_control?.ttl === '1h') longCache = true;
     }
   }
-  // the longest answer the model can write: what it publishes, else its whole window
-  const limit = maxOut ?? (Number(m.context_len) > 0 ? Number(m.context_len) : null);
+  const web = (Array.isArray(body?.plugins) && body.plugins.some((p) => p?.id === 'web'))
+    || !!body?.web_search_options || /:online$/i.test(String(body?.model || ''));
+  return {
+    pin, cap, n, longCache,
+    extraIn: images * config.HOLD_IMAGE_TOKENS,
+    extraUsd: (web ? config.HOLD_WEB_SEARCH_USD : 0) + fileChars * 1.5e-6,
+  };
+}
+
+/* A model's own id without the variant OpenRouter reads after a colon (":nitro", ":online",
+   ":free"): the catalogue lists the model once, and a variant is priced as the model. */
+export const baseModelId = (modelId) => String(modelId || '').replace(/:[a-z0-9._-]+$/i, '');
+
+/* The dearest a price can be. A long prompt can cost more from some size up, and some prices change
+   with the hour; a bound is the dearest of all of them, never an average. */
+function dearest(pin, pout, overridesJson) {
+  let list = [];
+  try { list = JSON.parse(overridesJson || '[]'); } catch { list = []; }
+  let i = pin;
+  let o = pout;
+  for (const x of Array.isArray(list) ? list : []) {
+    if (Number.isFinite(Number(x?.prompt))) i = Math.max(i, Number(x.prompt));
+    if (Number.isFinite(Number(x?.completion))) o = Math.max(o, Number(x.completion));
+  }
+  return [i, o];
+}
+
+/** The most one call can cost on one model, or null when the model is not in the catalogue. */
+export async function callBound(modelId, shape, { zdr = true } = {}) {
+  const { pin, cap, n = 1, extraIn = 0, extraUsd = 0, longCache = false } = shape;
+  const base = baseModelId(modelId);
+  const m = await db.prepare(
+    'SELECT price_in, price_out, context_len, overrides_json FROM models_catalog WHERE model_id = ?').get(base);
+  if (!m) return null;
+  let [pi, po] = dearest(Number(m.price_in) || 0, Number(m.price_out) || 0, m.overrides_json);
+  let margin = config.HOLD_PRICE_MULTIPLE;
+  let window = Number(m.context_len) > 0 ? Number(m.context_len) : null;
+  /* The longest answer is a bound only when it holds for every provider the call can reach. With zero
+     retention required, those are the providers that keep nothing, each listed with its own prices and
+     limits, so the dearest price is the bound (no margin) and the longest answer is theirs, if every
+     one of them publishes one. Otherwise the call could reach a provider we know nothing about: the
+     list price with a margin, and the model's whole window as the longest answer. */
+  let maxOut = null;
+  if (zdr) {
+    const rows = await db.prepare(
+      'SELECT price_in, price_out, max_output, context_len, overrides_json FROM model_endpoints WHERE model_id = ?').all(base);
+    if (rows.length) {
+      margin = 1;
+      let every = true;
+      let longest = 0;
+      for (const r of rows) {
+        const [ei, eo] = dearest(Number(r.price_in) || 0, Number(r.price_out) || 0, r.overrides_json);
+        pi = Math.max(pi, ei);
+        po = Math.max(po, eo);
+        if (Number(r.max_output) > 0) longest = Math.max(longest, Number(r.max_output)); else every = false;
+        if (Number(r.context_len) > 0) window = Math.max(window || 0, Number(r.context_len));
+      }
+      if (every && longest > 0) maxOut = longest;
+    }
+  }
+  // the longest answer the model can write here: what every provider publishes, else its whole window
+  const limit = maxOut ?? window;
   const known = cap !== null || limit !== null;
   const each = cap !== null ? (limit ? Math.min(cap, limit) : cap) : (limit ?? config.HOLD_MAX_OUTPUT_TOKENS);
-  if (!(pi > 0) && !(po > 0)) return { usd: 0, each, known };
-  const usd = (pin * pi * 1.25 + each * n * po) * margin;
+  const usd = ((pin + extraIn) * pi * (longCache ? 2 : 1.25) + each * n * po) * margin + extraUsd;
   return { usd, each, known };
 }
 
@@ -220,66 +297,58 @@ export async function gateRouting(workspaceId) {
   return { ok: true, balance: a.balance };
 }
 
-/* What this workspace's calls have cost through us today and this month, days and months told in IST.
-   Read from the ledger at most every fifteen seconds, and kept up to date between readings by every
-   charge made here, so a burst of calls cannot run far past a limit while the reading waits. */
+/* What this workspace's calls have cost through us today and this month, days and months told in IST:
+   the running totals every call charge moves (see move), read from one row. */
 const IST = 5.5 * 3600000;
 const istDayStart = (t) => Math.floor((t + IST) / DAY) * DAY - IST;
 const istMonthStart = (t) => { const d = new Date(t + IST); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) - IST; };
-const spendMemo = new Map();
-export async function spentOnCalls(workspaceId) {
-  const t = now();
-  const day = istDayStart(t);
-  const month = istMonthStart(t);
-  const hit = spendMemo.get(workspaceId);
-  if (hit && Date.now() - hit.at < 15000 && hit.dayStart === day && hit.monthStart === month) return hit;
-  const r = await db.prepare(
-    `SELECT COALESCE(-SUM(amount_usd) FILTER (WHERE created_at >= ?), 0) AS day,
-            COALESCE(-SUM(amount_usd), 0) AS month
-       FROM ledger WHERE workspace_id = ? AND kind = 'call' AND created_at >= ?`).get(day, workspaceId, Math.min(day, month));
-  const v = { at: Date.now(), dayStart: day, monthStart: month, day: round8(Number(r?.day || 0)), month: round8(Number(r?.month || 0)) };
-  spendMemo.set(workspaceId, v);
-  if (spendMemo.size > 5000) spendMemo.clear();
-  return v;
-}
-/* Whether one more call would take the workspace past its own daily or monthly limit, counting what
-   has been charged and what calls in flight have set aside. Read inside the hold's lock, from the
-   ledger itself rather than the fifteen second reading gateRouting uses. */
-async function overLimit(workspaceId, x, want, a) {
-  const lim = await limitsFor(workspaceId);
-  if (lim.dailyLimit === null && lim.monthlyLimit === null) return null;
+export async function spentOnCalls(workspaceId, x = db) {
   const t = now();
   const day = istDayStart(t);
   const month = istMonthStart(t);
   const r = await x.prepare(
-    `SELECT COALESCE(-SUM(amount_usd) FILTER (WHERE created_at >= ?), 0) AS day,
-            COALESCE(-SUM(amount_usd), 0) AS month
-       FROM ledger WHERE workspace_id = ? AND kind = 'call' AND created_at >= ?`).get(day, workspaceId, Math.min(day, month));
+    'SELECT call_day_start, call_day_usd, call_month_start, call_month_usd FROM billing_accounts WHERE workspace_id = ?').get(workspaceId);
+  return {
+    dayStart: day, monthStart: month,
+    day: r && Number(r.call_day_start) === day ? round8(Number(r.call_day_usd || 0)) : 0,
+    month: r && Number(r.call_month_start) === month ? round8(Number(r.call_month_usd || 0)) : 0,
+  };
+}
+/* Whether one more call would take the workspace past its own daily or monthly limit, counting what
+   has been charged and what calls in flight have set aside, read inside the hold's lock. */
+async function overLimit(workspaceId, x, want, a, lim) {
+  if (!lim || (lim.dailyLimit === null && lim.monthlyLimit === null)) return null;
+  const spent = await spentOnCalls(workspaceId, x);
   const h = await x.prepare(
     `SELECT COALESCE(SUM(amount_usd), 0) AS s FROM balance_holds
-      WHERE workspace_id = ? AND purpose = 'call' AND expires_at > ?`).get(workspaceId, t);
+      WHERE workspace_id = ? AND purpose = 'call' AND expires_at > ?`).get(workspaceId, now());
   const held = Number(h?.s || 0);
   const periods = [
-    ['day', lim.dailyLimit, Number(r?.day || 0), day],
-    ['month', lim.monthlyLimit, Number(r?.month || 0), month],
+    ['day', lim.dailyLimit, spent.day, spent.dayStart],
+    ['month', lim.monthlyLimit, spent.month, spent.monthStart],
   ];
-  for (const [period, limit, spent, start] of periods) {
+  for (const [period, limit, used, start] of periods) {
     if (limit === null) continue;
-    const committed = spent + held;
+    const committed = used + held;
     if (committed + want <= limit) continue;
     // nothing else in flight and something left: the last call of the period runs alone
     if (a.inFlight === 0 && committed < limit) continue;
-    const reached = spent >= limit;
+    const reached = used >= limit;
     if (reached) tellLimit(workspaceId, period, start, limit);
     const when = period === 'day' ? 'at midnight IST' : 'on the 1st (IST)';
     const which = period === 'day' ? 'daily' : 'monthly';
-    return {
-      code: period === 'day' ? 'daily_limit' : 'monthly_limit', limit, spent,
-      message: reached
-        ? `Your ${which} limit of $${limit.toFixed(2)} is reached. Calls resume ${when}, or raise the limit in Settings.`
-        : `Calls in flight have set aside what is left of your ${which} limit of $${limit.toFixed(2)}. `
-          + 'Try again in a moment, send fewer calls at once, or raise the limit in Settings.',
-    };
+    let message;
+    if (reached) {
+      message = `Your ${which} limit of $${limit.toFixed(2)} is reached. Calls resume ${when}, or raise the limit in Settings.`;
+    } else if (used + want > limit) {
+      // this call alone is more than is left, whatever else is in flight
+      message = `This call could cost up to $${want.toFixed(2)}, more than the $${Math.max(0, limit - used).toFixed(2)} left of your ${which} `
+        + `limit, so it can only run when no other call is in flight. Setting max_tokens on it sets aside less, or raise the limit in Settings.`;
+    } else {
+      message = `Calls in flight have set aside what is left of your ${which} limit of $${limit.toFixed(2)}. `
+        + 'Try again in a moment, send fewer calls at once, or raise the limit in Settings.';
+    }
+    return { code: period === 'day' ? 'daily_limit' : 'monthly_limit', limit, spent: used, message };
   }
   return null;
 }
@@ -302,10 +371,6 @@ function tellLimit(workspaceId, period, start, limit) {
   }).catch(() => {});
 }
 
-const noteSpend = (workspaceId, amount) => {
-  const hit = spendMemo.get(workspaceId);
-  if (hit) { hit.day = round8(hit.day + amount); hit.month = round8(hit.month + amount); }
-};
 
 /* The monthly plan's measuring allowance ---------------------------------------------
 
@@ -398,7 +463,6 @@ export async function chargeCall(workspaceId, costUsd, note, { holdId = null } =
       }).catch(() => {});
     }
   }
-  if (amount > 0) noteSpend(workspaceId, amount);
   await maybeTopUp(workspaceId);
   return amount;
 }
@@ -476,7 +540,24 @@ export async function maybeTopUp(workspaceId) {
   return true;
 }
 
-export async function runTopUp(workspaceId) {
+/* Whose problem a Stripe error is. The card's (declined, expired, the bank wants the customer there,
+   the saved card has gone): automatic top up goes off and the owner is told. Passing (Stripe down or
+   busy, the network, two tries at once): tried again later. Ours (our key, our permissions, a request we
+   built wrong): never the customer's card, so we are alerted and the customer is left alone. */
+export function stripeErrorKind(err) {
+  const type = err?.type || err?.rawType || '';
+  const code = err?.code || err?.raw?.code || '';
+  if (type === 'StripeCardError' || code === 'authentication_required' || err?.raw?.decline_code) return 'card';
+  if (['card_declined', 'expired_card', 'payment_intent_authentication_failure', 'payment_method_unexpected_state',
+    'payment_method_not_available'].includes(code)) return 'card';
+  if (code === 'resource_missing' && /payment_method/.test(String(err?.param || err?.raw?.param || ''))) return 'card';
+  if (['StripeAPIError', 'StripeConnectionError', 'StripeRateLimitError', 'StripeIdempotencyError'].includes(type)
+    || ['idempotency_key_in_use', 'lock_timeout', 'rate_limit'].includes(code)
+    || Number(err?.statusCode) === 429 || Number(err?.statusCode) >= 500) return 'retry';
+  return 'ours';
+}
+
+export async function runTopUp(workspaceId, { attempt = 0 } = {}) {
   const s = await stripe();
   const acct = await account(workspaceId);
   if (!s || !canBill() || !acct.payment_method || !acct.stripe_customer || !acct.auto_topup) return { ok: false, code: 'no_card' };
@@ -503,9 +584,21 @@ export async function runTopUp(workspaceId) {
      the first top up has been credited, replays the same charge instead of making a new one; once it
      has been credited the next one is new. The old key was the clock hour, which made a second top
      up within the hour replay the first one and add nothing, so a busy workload simply ran dry. */
-  const lastCredit = (await db.prepare(
-    `SELECT id FROM ledger WHERE workspace_id = ? AND kind = 'credit' ORDER BY created_at DESC LIMIT 1`)
-    .get(workspaceId))?.id ?? 'none';
+  const last = await db.prepare(
+    `SELECT id, created_at FROM ledger WHERE workspace_id = ? AND kind = 'credit' ORDER BY created_at DESC LIMIT 1`)
+    .get(workspaceId);
+  const lastCredit = last?.id ?? 'none';
+  /* A try that failed on Stripe's side may still have charged the card. Stripe keeps the answer it gave
+     a key, even an error, for a day, so trying again under the same key only hears the same error; each
+     try has a key of its own instead, and before it, Stripe is asked whether a top up since the last
+     credit is already under way, so a card is never charged twice for one low balance. */
+  if (attempt > 0) {
+    const since = Math.floor((Number(last?.created_at) || now() - DAY) / 1000);
+    const recent = await s.paymentIntents.list({ customer: acct.stripe_customer, created: { gte: since }, limit: 20 });
+    const going = (recent?.data || []).find((p) => p?.metadata?.topup === '1' && p?.metadata?.workspace_id === workspaceId
+      && ['succeeded', 'processing', 'requires_capture'].includes(p.status));
+    if (going) return { ok: true, intent: going.id, already: true };
+  }
   try {
     const pi = await s.paymentIntents.create({
       amount: Math.round(amount * 100),
@@ -517,20 +610,22 @@ export async function runTopUp(workspaceId) {
       /* The webhook credits on this. Without it an automatic top up is charged to the card
          and never appears as balance, which is the worst possible half of the two. */
       metadata: { topup: '1', workspace_id: workspaceId },
-    }, { idempotencyKey: `topup:${workspaceId}:${lastCredit}:${Math.round(amount * 100)}` });
+    }, { idempotencyKey: `topup:${workspaceId}:${lastCredit}:${Math.round(amount * 100)}:${attempt}` });
     // the credit itself is written by the webhook, keyed on the intent, so it lands once
     return { ok: true, intent: pi.id };
   } catch (err) {
-    /* Only a problem with the card itself switches automatic top up off. Every error used to, so a
-       network blip, a Stripe outage, a rate limit or two top ups racing on one key told the customer
-       their card was declined and stopped their calls when the balance ran out. Those are thrown
-       instead, and the job tries again later. */
-    const type = err?.type || err?.rawType || '';
-    const transient = ['StripeAPIError', 'StripeConnectionError', 'StripeRateLimitError', 'StripeIdempotencyError'].includes(type)
-      || err?.code === 'idempotency_key_in_use' || err?.code === 'lock_timeout' || err?.code === 'rate_limit'
-      || Number(err?.statusCode) === 429 || Number(err?.statusCode) >= 500;
-    if (transient) throw err;
+    /* Only a problem with the card itself switches automatic top up off (see stripeErrorKind). A passing
+       one is thrown, and the job tries again. One of ours is thrown too, after telling us: the
+       customer's card is not at fault, and saying it was would be both wrong and alarming. */
+    const kind = stripeErrorKind(err);
+    if (kind === 'ours') {
+      reportCallFailure({ kind: 'automatic top up', model: 'stripe', status: Number(err?.statusCode) || 0,
+        message: `${err?.type || 'error'}: ${err?.message || err}`, workspaceId });
+    }
+    if (kind !== 'card') throw err;
     const code = err?.raw?.decline_code || err?.code || 'card_declined';
+    // the payment Stripe made and refused, when it made one: the webhook's word about it is then the same message
+    const intentId = err?.raw?.payment_intent?.id || err?.payment_intent?.id || null;
     /* Stripe distinguishes "the bank wants the customer present" from "this card is no
        good". The recovery is the same screen either way, but the sentence is not, and
        telling somebody their card failed when their bank simply wanted them to confirm is
@@ -538,8 +633,10 @@ export async function runTopUp(workspaceId) {
     const why = code === 'authentication_required'
       ? 'Your bank asked for you to confirm this one in person. Adding credit again takes care of it, and calls resume.'
       : 'Automatic top up is off until a card is added. Update it in Settings and calls resume.';
-    await db.prepare(`UPDATE billing_accounts SET auto_topup = 0, topup_failed_note = ?, updated_at = ?
-                 WHERE workspace_id = ?`).run(code, now(), workspaceId);
+    const wasOn = (await db.prepare(`UPDATE billing_accounts SET auto_topup = 0, topup_failed_note = ?, updated_at = ?
+                 WHERE workspace_id = ? AND auto_topup = 1 RETURNING workspace_id`).run(code, now(), workspaceId)).rows.length > 0;
+    // said once: the webhook about the same refused payment finds top up already off and says nothing more
+    if (!wasOn) return { ok: false, code };
     await addActivity(workspaceId, {
       kind: 'bill',
       title: code === 'authentication_required' ? 'A top up needs your confirmation' : 'A top up was declined',
@@ -547,7 +644,7 @@ export async function runTopUp(workspaceId) {
     });
     /* Told by email too. The low balance email is skipped while automatic top up is on, so without
        this nobody heard anything until calls stopped. */
-    await notify(workspaceId, 'money', `topup-failed:${workspaceId}:${lastCredit}`, {
+    await notify(workspaceId, 'money', `topup-failed:${intentId || `${workspaceId}:${lastCredit}`}`, {
       title: code === 'authentication_required' ? 'An automatic top up needs your confirmation' : 'An automatic top up did not go through',
       lines: [why, 'Calls through Understudy stop when the balance runs out.'],
       path: '/settings', linkText: 'Open Settings',

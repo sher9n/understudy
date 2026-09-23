@@ -42,7 +42,10 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
      after it was made. While we have it, everything shows it in full and the snippet is
      something that will actually run; otherwise the prefix stands in for it and the page
      says how to get one that works rather than handing over a key with a gap in it. */
-  const usable = freshKey || data.key || null;
+  /* The key the page names is the one it shows and replaces: the server's own reading of it, or a key
+     made a moment ago in this session when this deployment cannot show keys again, but only when it is
+     that same key. A key made at sign-up showed here beside the name of a newer one. */
+  const usable = data.key || (freshKey && data.keyPrefix && String(freshKey).startsWith(data.keyPrefix) ? freshKey : null);
   const shown = usable || (data.keyPrefix ? `${data.keyPrefix}…` : null);
   const lines = snippet(way, lang, { baseUrl: data.baseUrl, key: shown });
 

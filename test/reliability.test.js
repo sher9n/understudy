@@ -106,8 +106,9 @@ test.after(async () => {
 });
 
 test('a burst of a brand new kind of call is answered, every one', async () => {
+  // a sorting call names a short answer, as it would: an uncapped one sets aside its model's whole window
   const statuses = await Promise.all(Array.from({ length: 25 }, (_, i) => call({
-    model: REF, messages: [{ role: 'system', content: 'Sort the parcel note into late, damaged or fine.' }, { role: 'user', content: `note ${i}` }],
+    model: REF, max_tokens: 20, messages: [{ role: 'system', content: 'Sort the parcel note into late, damaged or fine.' }, { role: 'user', content: `note ${i}` }],
   }).then((r) => r.status)));
   assert.deepEqual([...new Set(statuses)], [200], JSON.stringify(statuses));
   const w = await workloadOf('Sort the parcel note');
@@ -121,7 +122,7 @@ test('a model named the way its maker names it is found, and an unknown one is r
   assert.equal(seen.at(-1).model, REF, 'sent under the catalogue\'s name');
   const bad = await call({ model: 'gpt-imaginary', messages: [{ role: 'user', content: 'hello' }] });
   assert.equal(bad.status, 400);
-  assert.match((await bad.json()).error.message, /not a model we know/);
+  assert.match((await bad.json()).error.message, /not a model we route to/);
 });
 
 test('a body that is not JSON, or too big, is the caller\'s problem, said as one', async () => {

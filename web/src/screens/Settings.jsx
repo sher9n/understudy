@@ -17,7 +17,7 @@ const modelChoices = (max) => [3, 5, 10, 15, 20].filter((n) => n <= max);
 const MODES = [
   { mode: 'ask', label: 'Ask me first', note: 'A model that clears is shown to you, and nothing is switched until you approve it.' },
   { mode: 'auto', label: 'Switch on its own', note: 'A model that clears twice is switched to by itself, on a small share of calls first, growing while its calls hold up.' },
-  { mode: 'off', label: 'Never switch', note: 'Workloads are measured and nothing is ever switched.' },
+  { mode: 'off', label: 'Never switch', note: 'Workloads are measured and what is found is shown, with no email asking you to approve it. Nothing is switched unless you approve it yourself.' },
 ];
 const money = (v) => (v === null || v === undefined || v === '' ? '' : String(v));
 /* An amount as typed: empty for none, or dollars with at most two places. Anything else is refused
@@ -235,7 +235,9 @@ function Money({ data, busy, run, setErr }) {
      again; older pages are added below it and let go whenever the first page changes. */
   const [older, setOlder] = useState([]);
   const [ended, setEnded] = useState(false);
-  useEffect(() => { setOlder([]); setEnded(false); }, [data.ledger]);
+  // let go of older pages only when the newest movement changes, not on every reading of Settings
+  const newest = data.ledger?.[0]?.id ?? null;
+  useEffect(() => { setOlder([]); setEnded(false); }, [newest]);
   const ledger = [...(data.ledger || []), ...older];
   const buy = async (amountUsd) => {
     setPaying(amountUsd); setErr(null);
@@ -316,7 +318,8 @@ function Money({ data, busy, run, setErr }) {
           </span>
         </span>
         <span className="kva">
-          <Sw label="Automatic top up" on={data.autoTopUp} busy={busy || !data.canBill || !topUpCard}
+          {/* switching it on needs a card saved for top ups; switching it off never needs anything */}
+          <Sw label="Automatic top up" on={data.autoTopUp} busy={busy || !data.canBill || (!data.autoTopUp && !topUpCard)}
             onClick={run(() => api.setTopUp({ enabled: !data.autoTopUp, amountUsd: data.topUpAmount }))} />
         </span>
       </div>

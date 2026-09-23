@@ -281,7 +281,7 @@ export default function App() {
     const ask = () => {
       if (!ARRIVED_CREDIT.session) return;
       api.checkoutSession(ARRIVED_CREDIT.session)
-        .then((r) => { if (live) setCredit((c) => (c ? { ...c, amount: r.amount || null, credited: !!r.credited } : c)); })
+        .then((r) => { if (live) setCredit((c) => (c ? { ...c, amount: r.amount || null, credited: !!r.credited, paid: r.paid !== false } : c)); })
         .catch(() => {});
     };
     ask();
@@ -393,7 +393,9 @@ export default function App() {
       ) : (
         <>
           <b>Thank you. Your payment{credit.amount ? ` of ${usd(credit.amount)}` : ''} {credit.credited ? 'is on your balance.' : 'is with Stripe.'}</b>
-          {credit.credited ? null : <>{' '}It is added to your balance as soon as Stripe confirms it, usually within a minute.</>}
+          {credit.credited ? null : credit.paid === false
+            ? <>{' '}Your bank is still sending it, which can take a few days for a bank payment. It is added to your balance when it arrives.</>
+            : <>{' '}It is added to your balance as soon as Stripe confirms it, usually within a minute.</>}
         </>
       )}
     </Notice>
@@ -456,8 +458,8 @@ export default function App() {
 
   const pwNoteEl = pwNote && (
     <Notice key="pw" tone="warn" onClose={() => setPwNote(false)}>
-      <b>Your email is confirmed.</b> It was confirmed in a different browser from the one you signed up in, so the
-      password typed there was not kept.{' '}
+      <b>Your email is confirmed.</b> It was confirmed with a sign-in code, or in a different browser from the one you
+      signed up in, so the password typed at sign-up was not kept.{' '}
       <a href={href('settings')} onClick={plainClick(() => go('settings'))}>Choose a password in Settings</a> for next time.
     </Notice>
   );

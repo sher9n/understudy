@@ -282,9 +282,13 @@ export async function requestEmailChange(user, newEmail, { ip = null } = {}) {
 }
 
 /** The newest live row for an address and purpose, if there is one. */
-const liveCode = (addr, purposes) => db.prepare(
-  `SELECT * FROM login_codes WHERE email = ? AND consumed_at IS NULL AND expires_at > ?
-      AND purpose = ANY(?) ORDER BY created_at DESC LIMIT 1`).get(addr, now(), purposes);
+/* The newest live code of each kind for an address. A sign-up code and a sign-in code can both be
+   live: somebody asking for a sign-in code while a sign-up waited used to leave only the newest one
+   working, so the person who signed up found their own code refused, and the sign-in code they used
+   instead cleared the password they had chosen. */
+const liveCodes = (addr, purposes) => db.prepare(
+  `SELECT DISTINCT ON (purpose) * FROM login_codes WHERE email = ? AND consumed_at IS NULL AND expires_at > ?
+      AND purpose = ANY(?) ORDER BY purpose, created_at DESC`).all(addr, now(), purposes);
 
 /* What a code or link that came back means, once it is known to be right: the account is the
    holder's from now on. A sign-up code sets the password chosen with it. A sign-in code for an
@@ -324,10 +328,12 @@ async function redeem(row, { nonce = null } = {}) {
     }
     await db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
   }
-  // a new account gets its first key when its email answers, never before
+  /* A new account gets its first key when its email answers, never before; and only a workspace that
+     never had a key gets one this way, so revoking every key and then signing in by code does not
+     quietly bring one back. */
   const ws = await db.prepare('SELECT id FROM workspaces WHERE owner_user_id = ?').get(user.id);
   let key = null;
-  if (ws && !await db.prepare('SELECT 1 FROM api_keys WHERE workspace_id = ? AND revoked_at IS NULL').get(ws.id)) {
+  if (ws && !await db.prepare('SELECT 1 FROM api_keys WHERE workspace_id = ?').get(ws.id)) {
     key = (await issueKey(ws.id)).secret;
   }
   return { ok: true, user, token: await startSession(user.id), fresh, key, passwordKept };
@@ -336,23 +342,31 @@ async function redeem(row, { nonce = null } = {}) {
 /** Type the code in. Five tries a code, counted in the same step that checks them. */
 export async function verifyLoginCode(email, code, { purposes = ['sign_in', 'verify'], nonce = null, userId = null } = {}) {
   const addr = cleanEmail(email);
-  const row = await liveCode(addr, purposes);
-  if (!row) return { ok: false, reason: 'expired' };
+  let rows = await liveCodes(addr, purposes);
   // a code to confirm a new address is only ever the account's that asked for it
-  if (userId && row.user_id !== userId) return { ok: false, reason: 'expired' };
-  const tried = await db.prepare(
-    `UPDATE login_codes SET attempts = attempts + 1
-      WHERE id = ? AND consumed_at IS NULL AND attempts < ? RETURNING attempts`).run(row.id, config.LOGIN_CODE_MAX_ATTEMPTS);
-  if (!tried.rows.length) {
-    await db.prepare('UPDATE login_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(now(), row.id);
-    return { ok: false, reason: 'too_many_attempts' };
+  if (userId) rows = rows.filter((r) => r.user_id === userId);
+  if (!rows.length) return { ok: false, reason: 'expired' };
+  /* The code typed is compared with each live code, and each counts the try, so no code allows more
+     than its five: guessing gains nothing from two codes being live, beyond the second code itself. */
+  const typed = String(code || '').trim();
+  let left = 0;
+  let counted = false;
+  for (const row of rows) {
+    const tried = await db.prepare(
+      `UPDATE login_codes SET attempts = attempts + 1
+        WHERE id = ? AND consumed_at IS NULL AND attempts < ? RETURNING attempts`).run(row.id, config.LOGIN_CODE_MAX_ATTEMPTS);
+    if (!tried.rows.length) {
+      await db.prepare('UPDATE login_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(now(), row.id);
+      continue;
+    }
+    counted = true;
+    if (sameString(row.code_hash, codeHash(row.id, typed))) return redeem(row, { nonce });
+    const mine = config.LOGIN_CODE_MAX_ATTEMPTS - tried.rows[0].attempts;
+    if (mine <= 0) await db.prepare('UPDATE login_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(now(), row.id);
+    left = Math.max(left, mine);
   }
-  if (!sameString(row.code_hash, codeHash(row.id, String(code || '').trim()))) {
-    const left = config.LOGIN_CODE_MAX_ATTEMPTS - tried.rows[0].attempts;
-    if (left <= 0) await db.prepare('UPDATE login_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(now(), row.id);
-    return { ok: false, reason: 'wrong', triesLeft: Math.max(0, left) };
-  }
-  return redeem(row, { nonce });
+  if (!counted) return { ok: false, reason: 'too_many_attempts' };
+  return { ok: false, reason: 'wrong', triesLeft: Math.max(0, left) };
 }
 
 /** Confirm a new email address with the code sent to it. */

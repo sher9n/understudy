@@ -259,7 +259,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
               the workspace's schedule checks its answers again; either switches it back. */}
           {[['auto', 'Optimize automatically', 'We switch once a candidate clears your bar twice, the second time on calls it had never seen. It starts on a small share of your calls and takes more while they hold up, and goes back on its own if it stops clearing your bar, fails calls or slows down. You can switch back yourself at any time.'],
             ['ask', 'Ask me first', 'We test and recommend, and email you when one clears. Nothing is switched until you approve it.'],
-            ['off', 'Never switch', 'We measure and show what we find here, and nothing asks for your approval. Nothing is switched unless you approve it yourself.']].map(([mode, t, s]) => (
+            ['off', 'Never switch', 'We measure and show what we find here, and never email you to approve it. Nothing is switched unless you approve it yourself.']].map(([mode, t, s]) => (
             <button key={mode} type="button" className={`choicebox${w.optimizeMode === mode ? ' picked' : ''}`} aria-pressed={w.optimizeMode === mode}
               disabled={busy} onClick={act(() => api.setMode(w.id, mode))}>
               <span className="cbt">{t}</span><span className="cbs">{s}</span>
@@ -454,7 +454,8 @@ function confirmWords(c) {
   if (c.verdict === 'not_reached') return 'Second look: not reached in this measurement, so it is not switched to by itself';
   if (c.verdict === 'insufficient' && !c.runs) return 'Second look: not enough calls it had not seen yet';
   const pct = (x) => (x === null || x === undefined ? '?' : `${Number(x).toFixed(2)}%`);
-  const said = c.verdict === 'cleared' ? 'cleared again' : c.verdict === 'missed' ? 'did not hold up' : 'needs a look';
+  const said = c.verdict === 'cleared' ? 'cleared again' : c.verdict === 'missed' ? 'did not hold up'
+    : c.verdict === 'review' ? 'close to your bar, not clearly inside it' : c.verdict === 'insufficient' ? 'too few calls to decide' : 'needs a look';
   return `Second look on ${num(c.runs)} calls it had never seen: ${pct(c.gap)}, at most ${pct(c.hi)}${c.floor ? ` against ${pct(c.floor)}` : ''}, ${said}`;
 }
 
@@ -549,7 +550,11 @@ const blurb = (w, cand, switched) => {
       ? 'the measurement ended before it could be looked at again on calls it had never seen'
       : c.verdict === 'insufficient' && !c.runs
         ? 'there were not yet enough calls it had never seen to look at it again'
-        : `it did not hold up again on calls it had never seen (${confirmWords(c).replace(/^Second look on /, 'on ')})`;
+        : c.verdict === 'insufficient'
+          ? `too few calls it had never seen were left to decide (${confirmWords(c).replace(/^Second look on /, 'on ')})`
+          : c.verdict === 'review'
+            ? `on calls it had never seen it came close to your bar without being clearly inside it (${confirmWords(c).replace(/^Second look on /, 'on ')})`
+            : `it did not hold up again on calls it had never seen (${confirmWords(c).replace(/^Second look on /, 'on ')})`;
     return `It cleared your bar on the calls it was measured on, but ${why}. A model that clears once can be lucky, so nothing was `
       + `switched on its own. ${w.optimizeMode === 'off' ? 'This workload is set never to switch; approve it yourself if you want it.'
         : 'Approve it if you are satisfied, or the next measurement looks again.'}`;

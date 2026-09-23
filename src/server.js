@@ -10,6 +10,7 @@ import { forgetFacts } from './models/facts.js';
 import { syncArena } from './models/arena.js';
 import { planFor, onMissingFits } from './eval/plan.js';
 import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './alerts.js';
+import { notify } from './notify.js';
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
@@ -136,7 +137,28 @@ onMissingFits((workloadId) => {
   void enqueue('model_fit', { workloadId }, { unique: true }).catch(() => {});
 });
 
-handle('topup', async ({ workspaceId }) => await runTopUp(workspaceId));
+/* A top up that keeps failing for a reason that is not the card (Stripe down, our key refused) used to
+   end after five tries in silence, with top up still on and the low balance email held back because of
+   it, so calls simply stopped at zero. The last try tells the owner, and us. */
+handle('topup', async ({ workspaceId }, job) => {
+  try {
+    return await runTopUp(workspaceId, { attempt: Math.max(0, Number(job?.attempts || 1) - 1) });
+  } catch (err) {
+    if (Number(job?.attempts || 0) >= 5) {
+      reportCallFailure({ kind: 'automatic top up', model: 'stripe', status: Number(err?.statusCode) || 0,
+        message: `gave up after 5 tries: ${err?.message || err}`, workspaceId });
+      await notify(workspaceId, 'money', `topup-gaveup:${job?.id}`, {
+        title: 'An automatic top up could not be made',
+        lines: [
+          'We could not reach the card processor to top up your balance, after trying five times.',
+          'Calls through Understudy stop when the balance runs out. Add credit in Settings to carry on.',
+        ],
+        path: '/settings', linkText: 'Add credit',
+      }).catch(() => {});
+    }
+    throw err;
+  }
+});
 
 /* Workloads that existed before calls were grouped by shape.
  *

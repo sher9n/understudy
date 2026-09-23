@@ -728,3 +728,186 @@ test('two top ups booked at the same moment are one job', async () => {
   assert.equal(new Set(ids).size, 1);
   assert.equal(Number((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'topup' AND payload LIKE ?`).get(`%${workspace.id}%`)).n), 1);
 });
+
+/* The second review of the money fixes ------------------------------------------------------------- */
+
+const { streamCollect, saveZdrEndpoints } = await import('../src/openrouter.js');
+
+test('only models the catalogue knows are routed, fallbacks included, and a variant is priced as its model', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'catalogue@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  const unknown = await call(key.secret, { model: 'nobody/never-heard-of', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(unknown.status, 400);
+  assert.equal((await unknown.json()).error.type, 'model_not_found');
+  const auto = await call(key.secret, { model: 'openrouter/auto', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(auto.status, 400);
+  assert.match((await auto.json()).error.message, /picks a different model for every call/);
+  const fallbackUnknown = await call(key.secret, { model: NOCOST, models: ['nobody/else'], messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(fallbackUnknown.status, 400, 'a fallback we cannot price is refused too');
+  const variant = await call(key.secret, { model: `${NOCOST}:nitro`, messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(variant.status, 200, 'a variant is its model');
+});
+
+test('a fallback list, web search, pictures by address and price tiers all count in what a call sets aside', async () => {
+  const shape = billing.callShape({ messages: [{ role: 'user', content: 'x' }] });
+  const plain = await billing.callBound(NOCOST, shape, { zdr: true });
+  const web = await billing.callBound(NOCOST, billing.callShape({ plugins: [{ id: 'web' }], messages: [{ role: 'user', content: 'x' }] }), { zdr: true });
+  assert.ok(web.usd >= plain.usd + config.HOLD_WEB_SEARCH_USD - 1e-12, 'web search is allowed for');
+  const pics = await billing.callBound(NOCOST, billing.callShape({ messages: [{ role: 'user', content: [
+    { type: 'text', text: 'x' }, { type: 'image_url', image_url: { url: 'https://example.test/a.png' } }] }] }), { zdr: true });
+  assert.ok(pics.usd > plain.usd, 'a picture by address is allowed for');
+  // a dearer tier for long prompts, and a dearer hour: the bound takes the dearest
+  await saveCatalog([
+    { model_id: MODEL, name: 'gpt-5.4', context_len: 200000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1 },
+    { model_id: LONG, name: 'long writer', context_len: 200000, price_in: 1e-6, price_out: 1e-5, open_weights: 0, zdr: 1, max_output: 45000 },
+    { model_id: NOCOST, name: 'no cost', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
+    { model_id: NOLIMIT, name: 'no limit', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
+    { model_id: NOWINDOW, name: 'no window', context_len: null, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
+    { model_id: STREAMY, name: 'streamy', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
+    { model_id: 'test/tiered', name: 'tiered', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 1000,
+      overrides_json: JSON.stringify([{ min_prompt_tokens: 100000, prompt: '0.000004', completion: '0.00001' },
+        { utc_days: ['monday'], utc_start: '0900', utc_end: '1200', prompt: '0.000003', completion: '0.00003' }]) },
+  ]);
+  const tiered = await billing.callBound('test/tiered', { pin: 10, cap: null, n: 1 }, { zdr: false });
+  // the dearest completion price is the hour's, 3e-5, over the longest answer, 1000, with the margin of 2
+  assert.ok(tiered.usd >= 1000 * 3e-5 * 2, `the dearest tier: ${tiered.usd}`);
+  // a fallback list reaches the dearer model, so a small balance cannot cover it while another call is in flight
+  const { workspace, key } = await auth.createAccount({ email: 'fallbacks@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 0.2, note: 'test credit' });
+  const outs = await Promise.all([0, 1].map((i) => call(key.secret, { model: NOCOST, models: [LONG],
+    messages: [{ role: 'user', content: `fall back ${i}` }] }).then((r) => r.status)));
+  assert.ok(outs.includes(402), `the fallback's cost was set aside: ${outs.join(',')}`);
+});
+
+test('a provider that publishes no longest answer means the whole window is the bound', async () => {
+  await saveZdrEndpoints([
+    { model_id: NOCOST, tag: 'a', provider: 'A', price_in: 1e-6, price_out: 2e-6, context_len: 200000, max_output: 8000 },
+    { model_id: NOCOST, tag: 'b', provider: 'B', price_in: 1e-6, price_out: 2e-6, context_len: 200000, max_output: null },
+  ]);
+  const b = await billing.callBound(NOCOST, { pin: 10, cap: null, n: 1 }, { zdr: true });
+  assert.equal(b.each, 200000, 'one provider could write to the end of the window');
+  await saveZdrEndpoints([]);
+});
+
+test('a file given by its address, or a plugin we cannot price, is refused with a way round', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'files@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  const byUrl = await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: [
+    { type: 'file', file: { filename: 'a.pdf', file_data: 'https://example.test/a.pdf' } }] }] });
+  assert.equal(byUrl.status, 400);
+  assert.match((await byUrl.json()).error.message, /inline/);
+  const plugin = await call(key.secret, { model: NOCOST, plugins: [{ id: 'something-new' }], messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(plugin.status, 400);
+  const web = await call(key.secret, { model: NOCOST, plugins: [{ id: 'web' }], messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(web.status, 200, 'web search is priced, so it goes through');
+});
+
+test('a replay\'s time limit starts when it is sent, not while it waits its turn', async () => {
+  const was = { gap: config.MODEL_MIN_GAP_MS, start: config.UPSTREAM_TIMEOUT_MS };
+  config.MODEL_MIN_GAP_MS = 300;
+  config.UPSTREAM_TIMEOUT_MS = 700;
+  try {
+    const outs = await Promise.allSettled([0, 1, 2, 3, 4].map((i) => streamCollect(
+      { messages: [{ role: 'user', content: `replay ${i}` }] }, STREAMY, { retries: 0, pace: true })));
+    assert.deepEqual(outs.map((o) => o.status), ['fulfilled', 'fulfilled', 'fulfilled', 'fulfilled', 'fulfilled'],
+      outs.map((o) => o.reason?.message).join(' / '));
+  } finally {
+    config.MODEL_MIN_GAP_MS = was.gap;
+    config.UPSTREAM_TIMEOUT_MS = was.start;
+  }
+});
+
+test('a bank inquiry takes nothing; a dispute takes its money when it is withdrawn and gives it back when won', async () => {
+  const { workspace } = await auth.createAccount({ email: 'inquiry@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 30, note: 'test credit', ref: 'pi_inquiry' });
+  await webhook(event('charge.dispute.created', { id: 'dp_inq', object: 'dispute', amount: 1000, status: 'warning_needs_response', metadata: { workspace_id: workspace.id } }));
+  assert.equal((await billing.account(workspace.id)).balance_usd, 30, 'an inquiry takes nothing');
+  await webhook(event('charge.dispute.closed', { id: 'dp_inq', object: 'dispute', amount: 1000, status: 'warning_closed', metadata: { workspace_id: workspace.id } }));
+  assert.equal((await billing.account(workspace.id)).balance_usd, 30, 'and closing it gives nothing extra');
+  // an inquiry that became a chargeback: the money comes off when it is withdrawn
+  await webhook(event('charge.dispute.created', { id: 'dp_esc', object: 'dispute', amount: 500, status: 'warning_needs_response', metadata: { workspace_id: workspace.id } }));
+  await webhook(event('charge.dispute.funds_withdrawn', { id: 'dp_esc', object: 'dispute', amount: 500, status: 'needs_response', metadata: { workspace_id: workspace.id } }));
+  assert.equal((await billing.account(workspace.id)).balance_usd, 25);
+  await webhook(event('charge.dispute.closed', { id: 'dp_esc', object: 'dispute', amount: 500, status: 'won', metadata: { workspace_id: workspace.id } }));
+  assert.equal((await billing.account(workspace.id)).balance_usd, 30);
+});
+
+test('a declined top up is told once, and a problem of ours never blames the customer\'s card', async () => {
+  const { workspace } = await auth.createAccount({ email: 'toldonce@example.test', password: 'password-123' });
+  const s = await billing.stripe();
+  const arm = () => db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_t', payment_method = 'pm_t', card_for_topups = 1,
+                     balance_usd = 1, auto_topup = 1, topup_failed_note = NULL WHERE workspace_id = ?`).run(workspace.id);
+  await arm();
+  // our own key refused: the customer is told nothing, top up stays on, and the job tries again
+  s.paymentIntents.create = async () => { const e = new Error('Invalid API Key provided'); e.type = 'StripeAuthenticationError'; e.statusCode = 401; throw e; };
+  let before = mail.filter((m) => m.includes('to: toldonce@example.test')).length;
+  await assert.rejects(billing.runTopUp(workspace.id), /Invalid API Key/);
+  assert.equal((await billing.account(workspace.id)).auto_topup, 1);
+  assert.equal(mail.filter((m) => m.includes('to: toldonce@example.test')).length, before, 'the owner is not told their card failed');
+  // a decline, then Stripe's own word about the same payment: one email, one activity row
+  s.paymentIntents.create = async () => { const e = new Error('Your card was declined.'); e.type = 'StripeCardError'; e.code = 'card_declined';
+    e.raw = { decline_code: 'insufficient_funds', payment_intent: { id: 'pi_declined_once' } }; throw e; };
+  before = mail.filter((m) => m.includes('to: toldonce@example.test')).length;
+  await billing.runTopUp(workspace.id);
+  await webhook(event('payment_intent.payment_failed', { id: 'pi_declined_once', object: 'payment_intent', metadata: { topup: '1', workspace_id: workspace.id },
+    last_payment_error: { code: 'card_declined', decline_code: 'insufficient_funds' } }));
+  assert.equal(mail.filter((m) => m.includes('to: toldonce@example.test')).length - before, 1, 'told once');
+  const rows = Number((await db.prepare(`SELECT COUNT(*) AS n FROM activity WHERE workspace_id = ? AND title = 'A top up was declined'`).get(workspace.id)).n);
+  assert.equal(rows, 1);
+});
+
+test('a top up tried again after an error does not charge twice for one low balance', async () => {
+  const { workspace } = await auth.createAccount({ email: 'twicecharge@example.test', password: 'password-123' });
+  const s = await billing.stripe();
+  await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_2', payment_method = 'pm_2', card_for_topups = 1,
+                     balance_usd = 1, auto_topup = 1 WHERE workspace_id = ?`).run(workspace.id);
+  let made = 0;
+  const keys = [];
+  s.paymentIntents.create = async (_b, opts) => { made += 1; keys.push(opts.idempotencyKey); return { id: `pi_made_${made}` }; };
+  // Stripe says a top up is already under way from the try that timed out
+  s.paymentIntents.list = async () => ({ data: [{ id: 'pi_earlier', status: 'processing', metadata: { topup: '1', workspace_id: workspace.id } }] });
+  const out = await billing.runTopUp(workspace.id, { attempt: 1 });
+  assert.equal(out.already, true);
+  assert.equal(made, 0, 'no second charge');
+  s.paymentIntents.list = async () => ({ data: [] });
+  await billing.runTopUp(workspace.id, { attempt: 2 });
+  assert.equal(made, 1);
+  assert.match(keys[0], /:2$/, 'a fresh key for the new try');
+});
+
+test('a sign-up code still works when a sign-in code was asked for meanwhile, and keeps the password', async () => {
+  const email = 'meanwhile@example.test';
+  const r = await post('/api/auth/sign-up', { email, password: 'chosen-at-sign-up' }, { ip: '198.51.100.90' });
+  const mine = signupOf(r);
+  const code = lastCodeFor(email);
+  await post('/api/auth/code/request', { email }, { ip: '198.51.100.91' });
+  const v = await post('/api/auth/code/verify', { email, code }, { ip: '198.51.100.90', cookie: mine });
+  assert.equal(v.status, 200);
+  assert.equal((await v.json()).passwordKept, true);
+  assert.ok(await auth.checkPassword(email, 'chosen-at-sign-up'));
+});
+
+test('revoking every key and signing in by code does not bring a key back', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'nokeys@example.test', password: 'password-123' });
+  const keys = await import('../src/keys.js');
+  await keys.revokeKey(workspace.id, key.id);
+  const asked = await auth.requestLoginCode('nokeys@example.test');
+  const out = await auth.verifyLoginCode('nokeys@example.test', asked.send.code);
+  assert.equal(out.ok, true);
+  assert.equal(out.key, null);
+  assert.equal(Number((await db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE workspace_id = ? AND revoked_at IS NULL').get(workspace.id)).n), 0);
+});
+
+test('spending limits read running totals that every charge moves', async () => {
+  const { workspace } = await auth.createAccount({ email: 'totals@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 10, note: 'test credit' });
+  await billing.chargeCall(workspace.id, 0.5, 'a call');
+  await billing.chargeCall(workspace.id, 0.25, 'another');
+  const spent = await billing.spentOnCalls(workspace.id);
+  const fee = 1 + config.ROUTING_FEE_PCT / 100;
+  assert.ok(Math.abs(spent.day - 0.75 * fee) < 1e-9, `day ${spent.day}`);
+  assert.ok(Math.abs(spent.month - 0.75 * fee) < 1e-9);
+  // a correction that gives money back lowers them
+  await billing.move(workspace.id, { kind: 'call', amountUsd: 0.1, note: 'given back' });
+  assert.ok(Math.abs((await billing.spentOnCalls(workspace.id)).day - (0.75 * fee - 0.1)) < 1e-9);
+});
