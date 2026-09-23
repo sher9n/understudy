@@ -634,3 +634,16 @@ test('our own account refused during the second look ends the run as interrupted
   assert.match(run.error, /account/);
   assert.equal((await load(workload.id)).routed_model, null);
 });
+
+test('a model finished for a strategy goes on from where it stopped, and nothing it bought counts as reused', async () => {
+  const { workload } = await seed({ enabled: ['vendor/eighth-small'] });
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const eighth = await resultOf(out.runId, 'vendor/eighth-small');
+  assert.equal(eighth.stopped, 'bar', 'dropped part way, then finished for a strategy');
+  const twice = await db.prepare(`SELECT call_id FROM eval_replays WHERE run_id = ? AND model_id = ? GROUP BY call_id HAVING COUNT(*) > 1`)
+    .all(out.runId, 'vendor/eighth-small');
+  assert.equal(twice.length, 0, `${twice.length} of its answers were kept twice`);
+  const run = await runOf(out.runId);
+  assert.equal(run.reused, run.recorded_refs, 'a first measurement reused nothing an earlier one bought');
+});

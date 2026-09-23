@@ -878,14 +878,19 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
 
   /* One model's run through the calls, until it finishes or cannot win. With `noDrop` it answers
      every call whatever its answers are like: a model a cascade might rescue is only worth
-     judging on all of them. */
-  const tryModel = async (cand, { noDrop = false } = {}) => {
-    const st = {
+     judging on all of them. With `resume`, the run of it this measurement already has goes on from
+     the call it stopped at: going through it again from the start re-read every answer it had just
+     bought, counted each as an earlier measurement's saving, and kept each a second time. */
+  const tryModel = async (cand, { noDrop = false, resume = null } = {}) => {
+    const st = resume || {
       runs: 0, counted: 0, sum: 0, failures: 0, errors: 0, errorText: null, lat: [], ttft: [], reused: 0,
       candCost: 0, refCost: 0, kinds: new Map(), pairs: [], stopped: null, calls: [],
       // which providers answered it, by name, and how often
       providers: new Map(),
+      // the next of the calls to put to it
+      next: 0,
     };
+    if (resume) st.stopped = null;
     const key = keyOf(cand);
     /* A model already serving this workload is re-checked on fresh answers, so a change in it shows:
        it answers every call afresh, and when it is finished after being dropped, only the answers it
@@ -895,8 +900,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const recheck = serves(cand);
     const reuse = noDrop || !recheck;
     const reuseSince = recheck ? runStartedAt : 0;
-    answered.set(key, 0);
+    answered.set(key, st.runs);
     for (const [i, p] of kept.entries()) {
+      if (i < (st.next ?? 0)) continue;
       if (halt) { st.stopped = halt === 'budget' ? 'budget' : 'user'; break; }
       /* Never past the most one measurement may spend, whatever it was quoted at: the quote counts
          a few calls for each model dropped early, and a model can be dropped late. */
@@ -953,6 +959,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
           counted = true;
           if (st.stopped === 'user') {
             await keepReplay(run.id, p.s.id, key, 0, r, { score: null, judged: null, failure: null });
+            st.next = i + 1;
             break;
           }
           judged = yardstick === 'quality'
@@ -997,6 +1004,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         json: r.ok ? r.json : null, cost: r.ok ? paid(r) : 0, latency: r.latencyMs ?? null, ttft: r.ttftMs ?? r.latencyMs ?? null,
       });
       await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure });
+      st.next = i + 1;
       /* The best it could still do is get every remaining call right. When even that leaves it
          outside the review band, it cannot win, and every further call would be money spent on
          nothing. Never the one serving: that is a point estimate on part of the calls, and for what
@@ -1475,8 +1483,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
           if (halt) break;
           let { cand, st } = stats.get(r.model_id);
           if (st.runs < kept.length) {
-            // finishes the calls it was dropped before; the ones already answered cost nothing again
-            const more = await tryModel(cand, { noDrop: true });
+            // finishes the calls it was dropped before, going on from where it stopped
+            const more = await tryModel(cand, { noDrop: true, resume: st });
             answered.delete(keyOf(cand));
             if (more.runs < kept.length || more.stopped) continue;
             st = more;
