@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import PeriodChip from '../PeriodChip.jsx';
 import { num, ago, feedDot, timeIST } from '../api.js';
-import { usd } from '../money.js';
-import { savedTile } from '../savings.js';
+import { savedTile, spendTile } from '../savings.js';
 import { usePoll } from '../poll.js';
 import { SpendChart, WaitingChart } from '../Charts.jsx';
 import WorkloadTable from '../WorkloadTable.jsx';
@@ -10,6 +9,16 @@ import WorkloadTable from '../WorkloadTable.jsx';
 const Tile = ({ k, v, s }) => (
   <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="s">{s}</div></div>
 );
+
+/* How the window's calls reached us. Only a routed call can be answered more cheaply, so a
+   workspace that sends only copies reads that here, beside a saving that has not started. */
+function callsNote({ calls, savings }) {
+  const routed = savings && Number.isFinite(Number(savings.routedCalls)) ? Number(savings.routedCalls) : null;
+  if (routed === null || !calls) return 'routed or sent as copies';
+  if (routed === 0) return 'all sent as copies';
+  if (routed >= calls) return 'all routed through us';
+  return `${num(routed)} routed, ${num(calls - routed)} as copies`;
+}
 
 /* Said while the dashboard cannot read itself: that it is trying again, how old the figures on
    the screen are, and a way to try now rather than wait. */
@@ -48,7 +57,6 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
      and checking only that told them to come back tomorrow while sitting on a month of real
      numbers about what their own models cost. */
   const hasDay = data.priced && data.series.some((d) => d.paid > 0 || d.would > 0);
-  const runRate = data.days ? (data.spend / data.days) * 30 : 0;
   // how calls turned out, the way every workload page counts it
   const oc = data.outcomes;
   const judged = oc ? oc.calls - oc.recent : 0;
@@ -60,9 +68,7 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
       {trouble && <Reconnecting trouble={trouble} since={since} retry={retry} />}
 
       <div className="tiles five">
-        <Tile k={`Spend · last ${data.days} days`} v={data.priced ? usd(data.spend) : 'Not priced'}
-          s={!data.priced ? 'prices sync once a provider key is set'
-            : data.spend > 0 ? `on track for ${usd(runRate)} a month` : 'nothing charged yet'} />
+        <Tile k={`Spend · last ${data.days} days`} {...spendTile(data)} />
         {/* what you are actually ahead by, which can be below zero while measuring is paid for */}
         <Tile k={`Saved · last ${data.days} days`} {...savedTile(data)} />
         <Tile k="Workloads" v={num(data.workloads)}
@@ -72,7 +78,8 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
         <Tile k="Worked" v={oc && oc.rate !== null ? `${(oc.rate * 100).toFixed(1)}%` : 'Not yet'}
           s={!oc || !judged ? 'how calls turned out, once they arrive'
             : oc.problem ? `${num(oc.problem)} of ${num(judged)} calls had a problem` : `of ${num(judged)} calls, no problem seen`} />
-        <Tile k="Calls" v={num(data.calls)} s="since you connected" />
+        {/* counted over the same days as the rest, so not "since you connected" */}
+        <Tile k={`Calls · last ${data.days} days`} v={num(data.calls)} s={callsNote(data)} />
       </div>
 
       <div className="split2">

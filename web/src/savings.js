@@ -45,3 +45,15 @@ export function savedTile(data) {
   const parts = [onCalls < 0 && `${usd(-onCalls)} in fees`, measuring && `${measuring} on measuring`].filter(Boolean);
   return { v: usd(net), s: parts.length ? `${lead}; ${parts.join(' and ')}` : lead };
 }
+
+/* The "Spend" tile beside it counts what calls cost and nothing else; what measuring cost is in the
+ * Saved tile's words. So it says "on calls": a workspace that had paid only for measuring read
+ * "nothing charged yet" right beside a saving below zero for what measuring had cost it. */
+export function spendTile(data) {
+  if (!data.priced) return { v: 'Not priced', s: 'prices sync once a provider key is set' };
+  const runRate = data.days ? (data.spend / data.days) * 30 : 0;
+  return {
+    v: usd(data.spend),
+    s: data.spend > 0 ? `on calls, on track for ${usd(runRate)} a month` : 'no calls charged yet',
+  };
+}
