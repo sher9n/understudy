@@ -106,9 +106,21 @@
       .lp section { padding-top: 56px; }
       .three { grid-template-columns: minmax(0, 1fr); }
       .top { padding: 16px 18px; gap: 16px; }
-      .top nav { display: none; }
+      /* the header's nav carries its own inline display, which only an important rule outweighs */
+      .top nav { display: none !important; }
+      .top .btn, .top .plain { white-space: nowrap; }
       .foot { padding: 22px 18px; flex-wrap: wrap; gap: 10px; }
       .lp-cta .btn { flex: 1 1 auto; text-align: center; }
+    }
+    /* the narrowest phones: the header's four items fit on one line with a little less room between them */
+    @media (max-width: 420px) {
+      .top { gap: 10px; padding: 14px 14px; }
+      .top .btn { padding-left: 12px; padding-right: 12px; }
+    }
+    /* the very narrowest: the theme switch gives way, so signing in and the call to action still fit on one
+       line; a theme chosen before stays as it was */
+    @media (max-width: 340px) {
+      .top .ni { display: none; }
     }
 
     .split.rev { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); }
