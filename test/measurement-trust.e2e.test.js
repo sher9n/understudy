@@ -257,6 +257,10 @@ test('re-checks that change nothing space out, and a change brings the next one 
   await db.prepare('UPDATE workspaces SET measure_every_days = 7 WHERE id = ?').run(workspace.id);
   const at = await deferAutomatic(workload.id, { waitMs: 3 * DAY });
   assert.ok(Math.abs(at - (now() + 3 * DAY)) < 60000);
+  // a wait worked out from a daily pace is a fraction of a millisecond, and a bigint column refuses that
+  const odd = await deferAutomatic(workload.id, { waitMs: (10 / 3) * DAY + 0.5 });
+  assert.equal(Number.isInteger(odd), true);
+  assert.equal(Number((await load(workload.id)).recheck_after), odd);
 });
 
 test('a new cheaper model brings forward the next measurement of the workloads it could matter to', async () => {

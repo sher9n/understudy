@@ -29,7 +29,8 @@ export async function scheduleNext(workloadId, { changed }) {
   if (!w) return null;
   const cadence = await cadenceOf(w.workspace_id);
   const streak = changed ? 0 : Math.min(config.EVAL_BACKOFF_MAX_DOUBLINGS, Number(w.recheck_streak || 0) + 1);
-  const at = cadence ? now() + cadence * DAY * 2 ** streak : null;
+  // whole milliseconds: the column is a bigint, and a fraction of one is refused
+  const at = cadence ? Math.round(now() + cadence * DAY * 2 ** streak) : null;
   await db.prepare('UPDATE workloads SET recheck_after = ?, recheck_streak = ? WHERE id = ?').run(at, streak, workloadId);
   return at;
 }
@@ -43,7 +44,7 @@ export async function deferAutomatic(workloadId, { waitMs = null } = {}) {
   const cadence = (await cadenceOf(w.workspace_id)) || 7;
   const wait = waitMs !== null && Number.isFinite(waitMs)
     ? Math.max(6 * HOUR, Math.min(cadence * DAY, waitMs)) : cadence * DAY;
-  const at = now() + wait;
+  const at = Math.round(now() + wait);
   await db.prepare('UPDATE workloads SET recheck_after = ? WHERE id = ?').run(at, workloadId);
   return at;
 }
@@ -52,8 +53,8 @@ export async function deferAutomatic(workloadId, { waitMs = null } = {}) {
    within EVAL_NUDGE_HOURS, unless one ran in the last EVAL_NUDGE_MIN_DAYS. Answers how many moved. */
 export async function nudge(workloadIds) {
   let moved = 0;
-  const at = now() + config.EVAL_NUDGE_HOURS * HOUR;
-  const recent = now() - config.EVAL_NUDGE_MIN_DAYS * DAY;
+  const at = Math.round(now() + config.EVAL_NUDGE_HOURS * HOUR);
+  const recent = Math.round(now() - config.EVAL_NUDGE_MIN_DAYS * DAY);
   for (const id of new Set(workloadIds)) {
     moved += (await db.prepare(
       `UPDATE workloads w SET recheck_after = ?, recheck_streak = 0
