@@ -462,7 +462,15 @@ const CALL_COLUMNS = `id, source, requested_model, served_model, status_code, pr
    is not called optimized. */
 const statusLabel = (w, carries = true) => {
   if (w.routed_model) return carries ? { label: 'Optimized', tone: 'ok' } : { label: 'Waiting for routing', tone: 'wait' };
-  if (w.status === 'certified') return { label: 'Ready to optimize', tone: 'go' };
+  /* "Certified" covers three things, and only one of them is ready: a candidate that cleared, one that
+     cleared once and waits for its second look, and one only close to the bar. The last two used to say
+     "Ready to optimize" over a page with nothing to approve. */
+  if (w.status === 'certified') {
+    const note = String(w.status_note || '');
+    if (/second look/i.test(note)) return { label: 'Needs a second look', tone: 'wait' };
+    if (/close/i.test(note)) return { label: 'Close to clearing', tone: 'wait' };
+    return { label: 'Ready to optimize', tone: 'go' };
+  }
   if (w.status === 'measuring') return { label: 'Measuring', tone: 'wait' };
   if (w.status === 'no_match') return { label: 'Nothing cleared yet', tone: 'q' };
   return { label: 'Not optimized yet', tone: 'q' };
@@ -528,7 +536,8 @@ async function overview(workspaceId, days = 30) {
     // switched, and some calls come through us to be switched; a switch on copies alone is waiting
     optimized: rows.filter((w) => w.routed_model && carriesOf({ mode: w.ws_mode, routed: w.recent_routed })).length,
     waiting: rows.filter((w) => w.routed_model && !carriesOf({ mode: w.ws_mode, routed: w.recent_routed })).length,
-    ready: rows.filter((w) => !w.routed_model && w.status === 'certified').length,
+    // ready is what the label calls ready: cleared, not merely close or waiting for a second look
+    ready: rows.filter((w) => !w.routed_model && statusLabel(w).tone === 'go').length,
     measuring: rows.filter((w) => w.status === 'measuring').length,
     series,
     // how calls turned out over the window, in the same four groups each workload page shows
