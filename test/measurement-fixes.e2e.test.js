@@ -265,6 +265,41 @@ test('a poet as good as the customer\'s own still clears both looks and is switc
   assert.equal((await load(workload.id)).routed_model, 'vendor/poet-small');
 });
 
+/* 2. What serves, re-checked ------------------------------------------------------------------ */
+
+test('what serves is judged on its range over every call, and one that came close is not switched back', async () => {
+  const { workload } = await seed({ enabled: ['vendor/twin-small'], mode: 'auto' });
+  await promote(await load(workload.id), 'vendor/twin-small', { recipe: null, rollout: false });
+  asks.set('vendor/twin-small', 0);
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const run = await runOf(out.runId);
+  const twin = await resultOf(out.runId, 'vendor/twin-small');
+  // dropped at its fourth difference, as soon as the best it could still do was past 3.75%, it was "missed"
+  assert.equal(twin.runs, run.sample_size, 'what serves answers every call, never dropped part way');
+  assert.equal(twin.stopped, null);
+  assert.equal(twin.verdict, 'review', `${twin.gap_pct}% against a ${run.floor_pct}% bar, at least ${twin.gap_lo}%`);
+  const w = await load(workload.id);
+  assert.equal(w.routed_model, 'vendor/twin-small', 'still serving');
+  assert.equal(w.status, 'promoted');
+  assert.equal(await reverts(workload.id), 0, 'and not switched back, for good or otherwise');
+  const said = await db.prepare(`SELECT title FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(workload.id);
+  assert.match(said.title, /came close to your bar/);
+});
+
+test('what serves and really is worse is still switched back, for good', async () => {
+  const { workload } = await seed({ enabled: ['vendor/worse-small'], mode: 'auto' });
+  await promote(await load(workload.id), 'vendor/worse-small', { recipe: null, rollout: false });
+  asks.set('vendor/worse-small', 0);
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const worse = await resultOf(out.runId, 'vendor/worse-small');
+  assert.equal(worse.verdict, 'missed', `${worse.gap_pct}%, at least ${worse.gap_lo}%`);
+  assert.equal((await load(workload.id)).routed_model, null);
+  const back = await db.prepare(`SELECT action FROM promotions WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(workload.id);
+  assert.equal(back.action, 'auto_revert');
+});
+
 /* 3. Stops that stick, failures that back off, retries that use what was bought ---------------- */
 
 test('a new workload\'s first measurement, stopped, is not started again by the hourly pass', async () => {
@@ -529,4 +564,57 @@ test('a job whose run was interrupted runs again, and closes the dead run first'
   assert.equal(out.ok, true, JSON.stringify(out));
   assert.equal((await runOf(dead)).outcome, 'interrupted');
   assert.equal(await runsOf(workload.id), 2);
+});
+
+/* Lower severity ------------------------------------------------------------------------------ */
+
+test('when the customer\'s model turns out not to think, only "thinking less" goes, not "from its cheapest provider"', async () => {
+  thinkerReasoning = 0;
+  const { workload } = await seed({ model: THINKER, enabled: [] });
+  const plan = await planFor(workload, { canRoute: true });
+  assert.deepEqual(plan.order.map((o) => o.key).sort(), [`${THINKER}#cheapest`, `${THINKER}#lighter`], 'both planned');
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const ids = (await results(out.runId)).map((r) => r.model_id);
+  assert.ok(ids.includes(`${THINKER}#cheapest`), `measured from its cheapest provider: ${ids.join(', ')}`);
+  assert.ok(!ids.includes(`${THINKER}#lighter`), 'thinking less means nothing for a model that does not think');
+});
+
+test('the customer\'s own model from its cheapest provider is measured as that, while thinking less serves', async () => {
+  thinkerReasoning = 50;
+  try {
+    const { workload } = await seed({ model: THINKER, enabled: [] });
+    await promote(await load(workload.id), `${THINKER}#lighter`, { spec: { kind: 'model', model: THINKER, recipe: { reasoning: { effort: 'low' } } }, rollout: false });
+    const out = await runEvaluation(workload.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const cheapest = await resultOf(out.runId, `${THINKER}#cheapest`);
+    assert.ok(cheapest, 'measured');
+    const recipe = JSON.parse(cheapest.recipe_json);
+    assert.equal(recipe.pinned, true, `its own recipe, not the one serving: ${cheapest.recipe_json}`);
+    assert.equal(recipe.reasoning, undefined);
+    assert.ok(await resultOf(out.runId, `${THINKER}#lighter`), 'and what serves is re-checked under its own name');
+  } finally {
+    thinkerReasoning = 0;
+  }
+});
+
+test('a workload set never to switch is measured, never switched and never asked about', async () => {
+  const { workspace, workload } = await seed({ enabled: ['vendor/steady-small'], mode: 'off' });
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal((await resultOf(out.runId, 'vendor/steady-small')).confirm_verdict, 'cleared');
+  assert.equal((await load(workload.id)).routed_model, null);
+  const waiting = await db.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE workspace_id = ? AND kind = 'waiting'`).get(workspace.id);
+  assert.equal(Number(waiting.n), 0, 'no "waiting for your approval" email');
+  const said = await db.prepare(`SELECT detail FROM activity WHERE workload_id = ? AND title LIKE '%cleared your bar%'`).get(workload.id);
+  assert.match(said.detail, /set never to switch/);
+  assert.doesNotMatch(said.detail, /approve it/i);
+});
+
+test('a workload that asks first still gets its email', async () => {
+  const { workspace, workload } = await seed({ enabled: ['vendor/steady-small'], mode: 'ask' });
+  await runEvaluation(workload.id);
+  const waiting = await db.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE workspace_id = ? AND kind = 'waiting'`).get(workspace.id);
+  assert.equal(Number(waiting.n), 1);
+  assert.equal((await load(workload.id)).routed_model, null);
 });

@@ -796,27 +796,47 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const served = (() => {
     try { return workload.routed_recipe ? JSON.parse(workload.routed_recipe) : null; } catch { return null; }
   })();
+  /* What serves the workload now, by the name its result carries (see servingKey), and for a
+     strategy the name of its lead model's own result, which is measured to work the strategy out
+     again. Matched by name, never by model: the customer's own model thinking less and the same
+     model from its cheapest provider are both the customer's model, and matched by model both were
+     given the serving recipe, so the other one was measured as a copy of what serves and could "win"
+     a switch to the very strategy already serving. */
+  const servingNow = workload.routed_model ? await servingKey(workload) : null;
+  const servingArmNow = workload.routed_arm_id ? await armById(workload.routed_arm_id) : null;
+  const servingKind = ['cascade', 'router'].includes(servingArmNow?.spec?.kind) ? servingArmNow.spec.kind : null;
+  const leadPart = servingKind ? leadModel(servingArmNow.spec) : null;
+  const leadKey = leadPart ? (leadPart.model === reference && leadPart.recipe?.reasoning ? `${reference}#lighter`
+    : leadPart.model === reference && leadPart.recipe?.pinned ? `${reference}#cheapest` : leadPart.model) : null;
+  const serves = (cand) => !!servingNow && (keyOf(cand) === servingNow || (leadKey !== null && keyOf(cand) === leadKey));
+  const isLighter = (cand) => String(cand.key || '').endsWith('#lighter');
   let reasked = false;
+  let droppedLighter = false;
   if (refThinks !== plan.refThinks) {
     const facts = await loadFacts();
-    // the customer's model thinking less only means something when it thinks at all
+    /* The customer's model thinking less only means something when it thinks at all, so that one goes.
+       Only that one: the same model from its cheapest provider does not depend on thinking, and used to
+       go with it. One serving now stays either way, to be checked the way it is served. */
     if (refThinks === false) {
-      for (let k = queue.length - 1; k >= 0; k -= 1) if (queue[k].key) queue.splice(k, 1);
+      for (let k = queue.length - 1; k >= 0; k -= 1) {
+        if (isLighter(queue[k]) && !serves(queue[k])) { queue.splice(k, 1); droppedLighter = true; }
+      }
     }
     for (const cand of queue) {
-      if (cand.model === workload.routed_model || cand.key) continue;
+      if (serves(cand) || cand.key) continue;
       const m = facts.models.get(cand.model);
       const t = m ? thinkingFit(m, plan.profile, config.EVAL_THINKING_ROOM_TOKENS, refThinks) : null;
       if (t?.ok) { cand.recipe = t.recipe; cand.note = t.note || null; reasked = true; }
     }
   }
   for (const cand of queue) {
-    if (cand.model === workload.routed_model) cand.recipe = served;
+    if (serves(cand)) cand.recipe = served;
   }
-  if (reasked) {
+  if (reasked || droppedLighter) {
     planRecord.refThinks = { planned: plan.refThinks, measured: refThinks };
-    planRecord.order = planRecord.order.map((o) => {
-      const c = queue.find((q) => q.model === o.model);
+    const nameOf = (o) => o.key || o.model;
+    planRecord.order = planRecord.order.filter((o) => queue.some((q) => keyOf(q) === nameOf(o))).map((o) => {
+      const c = queue.find((q) => keyOf(q) === nameOf(o));
       return { ...o, recipe: c?.recipe ?? null, note: c ? c.note ?? null : o.note };
     });
     await db.prepare('UPDATE eval_runs SET plan_json = ? WHERE id = ?').run(JSON.stringify(planRecord), run.id);
@@ -867,11 +887,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       providers: new Map(),
     };
     const key = keyOf(cand);
-    // a model already serving this workload is re-checked on fresh answers, so a change in it shows
     /* A model already serving this workload is re-checked on fresh answers, so a change in it shows:
        it answers every call afresh, and when it is finished after being dropped, only the answers it
-       gave in this very run are used again, never ones from an earlier measurement. */
-    const recheck = cand.model === workload.routed_model && !cand.key;
+       gave in this very run are used again, never ones from an earlier measurement. The customer's
+       own model thinking less, or from its cheapest provider, is re-checked the same way when it is
+       what serves. */
+    const recheck = serves(cand);
     const reuse = noDrop || !recheck;
     const reuseSince = recheck ? runStartedAt : 0;
     answered.set(key, 0);
@@ -978,11 +999,14 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure });
       /* The best it could still do is get every remaining call right. When even that leaves it
          outside the review band, it cannot win, and every further call would be money spent on
-         nothing. */
-      if (!noDrop && !st.stopped && (st.sum / kept.length) * 100 > floor * reviewBand) st.stopped = 'bar';
+         nothing. Never the one serving: that is a point estimate on part of the calls, and for what
+         serves "missed" means a switch back held for months, so it answers every call and is judged
+         on its range (see record). A serving model exactly as good as the customer's own was
+         switched back on about one re-check in seven this way. */
+      if (!noDrop && !st.stopped && !serves(cand) && (st.sum / kept.length) * 100 > floor * reviewBand) st.stopped = 'bar';
       /* The model serving the workload is timed on every call before anything is decided about its
          speed: a few slow calls early would otherwise switch a customer back on the least evidence. */
-      if (!noDrop && !st.stopped && cand.model !== workload.routed_model && tooSlow(st)) st.stopped = 'speed';
+      if (!noDrop && !st.stopped && !serves(cand) && tooSlow(st)) st.stopped = 'speed';
       // a judgement that went out is a model call too, and is counted like one
       const judgeCalls = judged && judged.cost > 0 ? 1 : 0;
       answered.set(key, st.stopped ? kept.length : st.runs);
@@ -1006,7 +1030,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     let verdict;
     if (st.stopped === 'refused' || st.stopped === 'errors') verdict = 'failed';
     else if (st.stopped === 'speed') verdict = 'slower';
-    else if (st.stopped === 'bar') verdict = 'missed';
+    /* Dropped part way because even every remaining call right could not bring it inside the review
+       band: it cannot win. Only a candidate is ever dropped that way, never what serves (see
+       tryModel). One that answered every call is judged on its range like any other, whatever its
+       last call did: turning every such stop into "missed" put a point estimate where the range
+       should have decided. */
+    else if (st.stopped === 'bar' && st.runs < kept.length) verdict = 'missed';
     else {
       verdict = read.verdict;
       if ((verdict === 'cleared' || verdict === 'review') && tooSlow(st, { final: true })) verdict = 'slower';
@@ -1412,14 +1441,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   };
 
   let strategyLeft = 0;
-  /* The strategy serving this workload now is always worked out again, from its lead model's run,
-     whatever that model did on its own: otherwise a cascade or router whose answers had slipped was
-     never written down, and so never switched back. */
-  const servingArmNow = workload.routed_arm_id ? await armById(workload.routed_arm_id) : null;
-  const servingKind = ['cascade', 'router'].includes(servingArmNow?.spec?.kind) ? servingArmNow.spec.kind : null;
-  const leadPart = servingKind ? leadModel(servingArmNow.spec) : null;
-  const leadKey = leadPart ? (leadPart.model === reference && leadPart.recipe?.reasoning ? `${reference}#lighter`
-    : leadPart.model === reference && leadPart.recipe?.pinned ? `${reference}#cheapest` : leadPart.model) : null;
+  /* The strategy serving this workload now is always worked out again, from its lead model's run
+     (see leadKey), whatever that model did on its own: otherwise a cascade or router whose answers
+     had slipped was never written down, and so never switched back. */
   if (!halt) {
     const cheaper = (r) => r.cost_month_usd !== null && (refMonthly === null || r.cost_month_usd < refMonthly);
     // one model, or the customer's own thinking less; never a strategy built on a strategy
@@ -1492,7 +1516,6 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   /* What serves the workload now is not looked at twice: its live calls are watched every hour, and a
      second look would pay again to learn what they already show. Cheaper ones are tried first, at most
      EVAL_CONFIRM_TRIES of them, and the one serving ends the search when it is reached. */
-  const servingNow = workload.routed_model ? await servingKey(workload) : null;
   let tries = 0;
   try {
     for (const r of cleared) {
@@ -1562,10 +1585,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      reason at all on its own: that is one reading, and the live watch sees how it really does. */
   const serving = workload.routed_model;
   let switchedBack = false;
+  /* Only "missed" switches back for good, and that verdict comes from the range of what serves on
+     every call (see record): the range says the gap is past the review band. One that came close
+     ("review") is not switched back: that is a sample straddling the bar, not a finding. */
   if (serving) {
     // the strategy serving it, by the name its result carries: a cascade's is its own row
-    const servingAs = await servingKey(workload);
-    let mine = results.find((r) => r.model_id === servingAs);
+    let mine = results.find((r) => r.model_id === servingNow);
     if (!mine && servingKind) {
       /* A strategy that could not be worked out again is judged by what its lead model did alone,
          where that says something about the strategy as well: a provider that refused it, or a model
@@ -1615,6 +1640,26 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const stillServing = !!best && best.model_id === servingNow && !switchedBack;
   if (best && best.model_id === servingNow && switchedBack) best = null;
   const second = !best && confirmations.length && !confirmations[0].c.serving ? confirmations[0] : null;
+  // one that cleared, and that the run ended before it could look at again: never read as confirmed
+  const unlooked = !best && !second ? cleared.find((r) => r.model_id !== servingNow && r.confirm_verdict === 'not_reached') : null;
+  // what serves it came close to the bar on its re-check, and nothing cheaper cleared
+  const servingRow = serving && !switchedBack ? results.find((r) => r.model_id === servingNow) : null;
+  const servingClose = !best && !second && !unlooked && servingRow?.verdict === 'review';
+  /* How this workload switches: on its own ('auto'), when a person approves ('ask'), or never
+     ('off': measured, never switched on its own and never asked about, though a person may still
+     switch it by hand, and a switch back for safety still happens). Anything else is read as asking
+     first, never as switching on its own. */
+  const mode = ['auto', 'ask', 'off'].includes(workload.optimize_mode) ? workload.optimize_mode : 'ask';
+  const nextStep = mode === 'off'
+    ? 'This workload is set never to switch, and the next measurement looks again.'
+    : 'Approve it on the workload page, or the next measurement looks again.';
+  /* The status the run ends with, the way restingStatus reads it again later: a workload that still
+     has a switch says so, whatever this run found about cheaper models, rather than "Ready to
+     optimize" over a page that shows the switch serving. */
+  const settleStatus = async (status, note) => db.prepare(
+    `UPDATE workloads SET status = CASE WHEN routed_model IS NOT NULL THEN 'promoted' ELSE ?::text END,
+            status_note = CASE WHEN routed_model IS NOT NULL THEN NULL ELSE ?::text END, updated_at = ?
+      WHERE id = ?`).run(status, note, now(), workloadId);
 
   if (stillServing) {
     const failedLooks = confirmations.filter((x) => !x.c.serving && x.c.verdict !== 'cleared');
@@ -1631,8 +1676,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const saving = refMonthly === null ? null : round8(refMonthly - best.cost_month_usd);
     // calls that reach us as copies cannot be switched by us, so for them this is advice
     const traffic = await trafficOf(workload);
-    await db.prepare(`UPDATE workloads SET status = 'certified', status_note = NULL, updated_at = ? WHERE id = ?`)
-      .run(now(), workloadId);
+    await settleStatus('certified', null);
     const conf = confirmations.find((x) => x.r === best)?.c;
     await addActivity(workload.workspace_id, {
       kind: 'ok',
@@ -1642,11 +1686,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         + (saving ? `, about $${saving.toFixed(2)} a month less` : '')
         + (reusedCount - recordedRefs > 0 ? `. ${reusedCount - recordedRefs} answers were reused from earlier measurements` : '')
         + (recordedRefs ? `. ${recordedRefs} of your own model's answers were read from your calls rather than paid for again` : '')
-        + (traffic.carries ? '' : '. Your calls reach us as copies, so a switch starts with the first call that comes through Understudy'),
+        + (traffic.carries ? '' : '. Your calls reach us as copies, so a switch starts with the first call that comes through Understudy')
+        + (mode === 'off' ? '. This workload is set never to switch, so nothing was switched' : ''),
       workloadId,
     });
-    if (workload.optimize_mode !== 'auto' && !stillServing) {
-      // waiting for somebody's say: worth an email, once for this measurement
+    if (mode === 'ask') {
+      // waiting for somebody's say: worth an email, once for this measurement; never for a workload set never to switch
       await notify(workload.workspace_id, 'waiting', `${workloadId}:${run.id}`, {
         title: `${best.model_id} cleared your bar on ${workload.slug}`,
         lines: [
@@ -1657,36 +1702,41 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         path: `/workloads/${workloadId}`, linkText: 'Review and approve',
       });
     }
-    if (workload.optimize_mode === 'auto') {
+    if (mode === 'auto') {
       const recipe = best.recipe_json ? JSON.parse(best.recipe_json) : null;
       await promote(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId), best.model_id, {
         runId: run.id, reason: 'cleared your bar', auto: true, recipe,
       });
     }
-  } else if (second) {
-    /* It cleared once and did not hold up on fresh calls, or there were not enough fresh calls to
-       look again. Nothing is switched on one look; a person decides, or the next measurement does. */
-    const why = second.c.note
-      || `on ${second.c.runs} calls it had never seen it differed ${second.c.gap.toFixed(2)}% of the time, and could be as high as ${second.c.hi.toFixed(2)}% against a ${second.c.floor.toFixed(2)}% bar`;
-    await db.prepare(`UPDATE workloads SET status = 'certified', status_note = ?, updated_at = ? WHERE id = ?`)
-      .run('A candidate cleared once and needs a second look', now(), workloadId);
+  } else if (second || unlooked) {
+    /* It cleared once and did not hold up on fresh calls, there were not enough fresh calls to look
+       again, or the run ended before it could look. Nothing is switched on one look; a person decides,
+       or the next measurement does. */
+    const r = second ? second.r : unlooked;
+    const cut = halt === 'balance' ? 'your balance ran out' : 'it reached the most one measurement may spend';
+    const why = unlooked ? `the measurement ended before it could look at it again on calls it had never seen (${cut})`
+      : second.c.note
+        || `on ${second.c.runs} calls it had never seen it differed ${second.c.gap.toFixed(2)}% of the time, and could be as high as ${second.c.hi.toFixed(2)}% against a ${second.c.floor.toFixed(2)}% bar`;
+    await settleStatus('certified', 'A candidate cleared once and needs a second look');
     await addActivity(workload.workspace_id, {
       kind: 'floor',
-      title: `${second.r.model_id} cleared your bar on ${workload.slug} once`,
-      detail: `${second.r.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar, but ${why}. Nothing was switched: `
-        + 'approve it on the workload page, or the next measurement looks again.',
+      title: `${r.model_id} cleared your bar on ${workload.slug} once`,
+      detail: `${r.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar, but ${why}. Nothing was switched. ${nextStep}`,
       workloadId,
     });
   } else {
     const anyReview = results.some((r) => r.verdict === 'review');
     // matched and too slow, which only a model that answered every call can be said to have done
     const anySlower = results.some((r) => r.verdict === 'slower' && !r.stopped);
-    await db.prepare(`UPDATE workloads SET status = ?, status_note = ?, updated_at = ? WHERE id = ?`)
-      .run(anyReview ? 'certified' : 'no_match',
-           anyReview ? 'A candidate is close and needs a look'
-             : anySlower ? 'A model matched, but is slower than yours' : 'Nothing cleared your bar yet',
-           now(), workloadId);
-    await addActivity(workload.workspace_id, {
+    await settleStatus(anyReview ? 'certified' : 'no_match',
+      anyReview ? 'A candidate is close and needs a look'
+        : anySlower ? 'A model matched, but is slower than yours' : 'Nothing cleared your bar yet');
+    await addActivity(workload.workspace_id, servingClose ? {
+      kind: 'floor', title: `${servingNow} came close to your bar on ${workload.slug}`,
+      detail: `${servingRow.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar on calls it answered afresh, which is too close `
+        + 'to call either way, so it keeps serving. Its live calls are still watched, and the next measurement looks again.',
+      workloadId,
+    } : {
       kind: 'floor', title: `Nothing cleared your bar on ${workload.slug}`,
       detail: `${results.length} models tried against a ${floor.toFixed(2)}% bar`
         + (dropped ? `, ${dropped} of them stopped early once they could not win` : ''),
@@ -1699,7 +1749,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     { runId: run.id, results, refMonthly, floor });
   /* The next measurement: the workspace's rhythm when this one changed something or somebody asked for
      it, further out when it only found what the last one did. */
-  await scheduleNext(workloadId, { changed: !automatic || switchedBack || !!second || (!!best && !stillServing) });
+  await scheduleNext(workloadId, {
+    changed: !automatic || switchedBack || !!second || !!unlooked || servingClose || (!!best && !stillServing),
+  });
   return { ok: true, runId: run.id, floor, results: results.length, partial: halt === 'balance', reused: reusedCount };
 }
 

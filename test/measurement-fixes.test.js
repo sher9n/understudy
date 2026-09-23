@@ -34,3 +34,52 @@ test('a result never looked at twice is never offered before one that was', () =
   ];
   assert.deepEqual(cheaperCleared(rows).map((r) => r.model_id), ['twice', 'cascade:live', 'never', 'old']);
 });
+
+test('the customer\'s own model thinking less, serving, counts as what is saved now, not as a saving still to find', () => {
+  const ranked = [
+    { model: 'x/ref', key: 'x/ref#lighter', savingShare: 0.4, chance: 0.6 },
+    { model: 'y/cheap', savingShare: 0.5, chance: 0.5 },
+  ];
+  const w = worthOf({ ranked, refPer: 0.001, month: { calls: 1000, cost: 0 }, serving: 'x/ref', servingAs: 'x/ref#lighter', tries: 5, fee: 0 });
+  assert.ok(Math.abs(w.protectedMonthlyUsd - 0.4) < 1e-9, `what it saves now: ${w.protectedMonthlyUsd}`);
+  // only the tenth beyond what serves, half the time
+  assert.ok(Math.abs(w.expectedMonthlyUsd - 0.05) < 1e-9, `${w.expectedMonthlyUsd}`);
+  // a plain model serving is found as before
+  const plain = worthOf({ ranked, refPer: 0.001, month: { calls: 1000, cost: 0 }, serving: 'y/cheap', servingAs: 'y/cheap', tries: 5, fee: 0 });
+  assert.ok(Math.abs(plain.protectedMonthlyUsd - 0.5) < 1e-9);
+  assert.equal(plain.expectedMonthlyUsd, 0);
+});
+
+/* The customer's model, which thinks by default and is sold by two providers, one at a quarter of the price. */
+const ep = (over) => ({ tag: 'p', provider: 'P', price_in: 2e-6, price_out: 8e-6, overrides: null, status: 0, uptime_1d: 100, uptime_30m: 100, ...over });
+const refModel = {
+  id: 'x/ref', name: 'ref', priceIn: 2e-6, priceOut: 8e-6, overrides: null, params: null, inputs: ['text'], contextLen: 128000,
+  maxOutput: 16000, reasoning: { default_enabled: true, supported_efforts: ['low', 'medium'], default_effort: 'medium' }, expiresAt: null,
+  endpoints: [ep({ tag: 'cheap', provider: 'Cheap', price_in: 0.5e-6, price_out: 2e-6 }), ep({ tag: 'full', provider: 'Full' })],
+};
+const profile = { tools: false, toolChoice: false, json: 'none', images: false, outCap: null, promptAvg: 100, promptMax: 200,
+  outAvg: 50, outP50: 50, outP95: 90, hours: null, streamed: false };
+const base = { facts: { models: new Map([['x/ref', refModel]]), zdrKnown: true }, profile, reference: 'x/ref', enabled: new Set(),
+  want: 3, config, at: Date.now(), zdrOnly: false, refThinks: true };
+
+test('what serves goes first by its own name, and the fixed guesses carry no raw chance', () => {
+  const sel = selectCandidates({ ...base, serving: 'x/ref', servingAs: 'x/ref#cheapest', servingRecipe: { providers: ['cheap'], pinned: true } });
+  // both are the customer's model by name, and both used to be put first as the one serving, the other one ahead
+  assert.equal(sel.order[0].key, 'x/ref#cheapest');
+  assert.equal(sel.order[1].key, 'x/ref#lighter');
+  const cheapest = sel.order[0];
+  assert.equal(cheapest.rawChance, null, 'eight in ten is a guess, not a reading of any evidence');
+  assert.deepEqual(cheapest.recipe, { providers: ['cheap'], pinned: true });
+});
+
+test('what serves is always checked again, even when the customer\'s model no longer reads as thinking', () => {
+  const sel = selectCandidates({ ...base, refThinks: false, serving: 'x/ref', servingAs: 'x/ref#lighter', servingRecipe: { reasoning: { effort: 'low' } } });
+  const lighter = sel.order.find((r) => r.key === 'x/ref#lighter');
+  assert.ok(lighter, 'what serves is measured again');
+  assert.deepEqual(lighter.recipe, { reasoning: { effort: 'low' } }, 'as it is served');
+  // and nobody else thinking less is offered for a model that does not think
+  assert.equal(selectCandidates({ ...base, refThinks: false }).order.some((r) => r.key === 'x/ref#lighter'), false);
+  // the provider serving it now is re-checked there, even once another has become cheaper
+  const pinned = selectCandidates({ ...base, serving: 'x/ref', servingAs: 'x/ref#cheapest', servingRecipe: { providers: ['full'], pinned: true } });
+  assert.deepEqual(pinned.order[0].recipe, { providers: ['full'], pinned: true });
+});

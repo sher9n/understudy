@@ -80,7 +80,13 @@ export async function servingKey(workload) {
     const arm = await armById(workload.routed_arm_id);
     if (arm?.spec) return keyOfSpec(arm.spec, workload.reference_model);
   }
-  return workload.routed_model;
+  /* A switch made before strategies were kept names only a model and how it was asked. The
+     customer's own model asked to think less, or pinned to its cheapest provider, is still a
+     strategy of its own, and named as one: by the model alone it read as the customer's model,
+     which is served by nothing. */
+  let recipe = null;
+  try { recipe = workload.routed_recipe ? JSON.parse(workload.routed_recipe) : null; } catch { recipe = null; }
+  return keyOfSpec({ kind: 'model', model: workload.routed_model, recipe }, workload.reference_model);
 }
 
 export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined, spec: given = null, detail = null, rollout = true } = {}) {

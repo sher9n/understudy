@@ -12,7 +12,10 @@ import { historyFor, fleetHistory } from './history.js';
 import { judgementsFor, judgementCost } from './judge.js';
 import { callsToClear } from './compare.js';
 import { calibrationFor } from './calibrate.js';
+import { servingKey } from './promote.js';
 import { armKey, referenceSpec } from '../learn/arms.js';
+
+const parseRecipe = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
 
 /* What a measurement WOULD do, worked out before anything is spent.
  *
@@ -74,12 +77,19 @@ async function monthOf(workloadId) {
    slipped is caught), which counts for EVAL_PROTECT_SHARE of it.
 
    A measurement nobody asked for runs only when that pays for it within EVAL_PAYBACK_MONTHS, and our
-   fee is taken off the saving first, because the saving is only worth what the customer keeps. */
-export function worthOf({ ranked, refPer, month, serving, tries, fee = config.ROUTING_FEE_PCT }) {
+   fee is taken off the saving first, because the saving is only worth what the customer keeps.
+
+   What serves is found by its own name (`servingAs`, see servingKey): the customer's own model
+   thinking less, or from its cheapest provider, is the reference by model, and looked for by model it
+   was never found, so its saving counted as protecting nothing and it was counted again as a new
+   saving to find. A strategy is known by its lead model's row, the nearest there is. */
+export function worthOf({ ranked, refPer, month, serving, servingAs = null, tries, fee = config.ROUTING_FEE_PCT }) {
   const perMonth = refPer > 0 ? refPer * month.calls : month.cost;
-  const servingRow = serving ? ranked.find((r) => r.model === serving && !r.key) : null;
+  const nameOf = (r) => r.key || r.model;
+  const servingRow = serving ? (ranked.find((r) => servingAs && nameOf(r) === servingAs)
+    || ranked.find((r) => r.model === serving && !r.key)) : null;
   const servingShare = serving ? Math.max(0, Number(servingRow?.savingShare ?? 0)) : 0;
-  const pool = ranked.filter((r) => r.savingShare !== null && r.savingShare > servingShare && !(serving && r.model === serving && !r.key))
+  const pool = ranked.filter((r) => r.savingShare !== null && r.savingShare > servingShare && r !== servingRow)
     .slice(0, Math.max(1, tries))
     .sort((a, b) => b.savingShare - a.savingShare);
   let none = 1;
@@ -199,9 +209,11 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   plan.profile = profile;
   plan.speed = speed;
   plan.refThinks = refThinks;
+  const servingAs = workload.routed_model ? await servingKey(workload) : null;
   const base = {
     facts, profile, reference: workload.reference_model, enabled, want: models,
-    tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, serving: workload.routed_model,
+    tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, serving: workload.routed_model, servingAs,
+    servingRecipe: parseRecipe(workload.routed_recipe),
     history, speed, refThinks, speedHistory: fleet.speed, busy: fleet.busy, config, at: now(),
     zdrOnly: await zdrFor(workload.workspace_id),
     calibration: await calibrationFor(workload.workspace_id),
@@ -216,7 +228,7 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const month = await monthOf(workload.id);
   const tries = Math.max(models, Math.round(models * config.EVAL_TRY_MULTIPLE));
   plan.cachedBar = await cachedBarShare(workload, sample);
-  plan.worth = worthOf({ ranked: first.ranked, refPer: first.refPrice ?? 0, month, serving: workload.routed_model, tries });
+  plan.worth = worthOf({ ranked: first.ranked, refPer: first.refPrice ?? 0, month, serving: workload.routed_model, servingAs, tries });
   /* A measurement nobody asked for waits until it has enough calls to show anything: on too few, even a
      model that matched every answer could not clear the bar, and all it would buy is a bar. */
   if (automatic) {
@@ -275,7 +287,7 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   }
 
   plan.estimateUsd = estimate(plan, profile, facts, workload);
-  plan.worth = worthOf({ ranked: sel.ranked, refPer: sel.refPrice ?? 0, month, serving: workload.routed_model, tries });
+  plan.worth = worthOf({ ranked: sel.ranked, refPer: sel.refPrice ?? 0, month, serving: workload.routed_model, servingAs, tries });
   plan.ceilingUsd = ceilingFor(plan.worth);
   plan.worth.worthIt = plan.estimateUsd <= plan.worth.budgetUsd;
   if (plan.estimateUsd > plan.ceilingUsd) {
