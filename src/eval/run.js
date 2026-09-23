@@ -309,7 +309,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await addActivity(workload.workspace_id, {
       kind: 'floor', title: `Measuring ${workload.slug} is waiting`, detail: gate.message, workloadId,
     });
-    return { snoozeMs: 30 * 60000, note: gate.code };
+    /* Somebody who pressed Measure now is waiting on this, so it looks again in half an hour; one nobody
+       asked for waits six hours, since a balance that is empty now is rarely full half an hour later. */
+    return { snoozeMs: (automatic ? 6 * 60 : 30) * 60000, note: gate.code };
   }
 
   const planRecord = {

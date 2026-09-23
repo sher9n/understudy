@@ -145,8 +145,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
   /* Approval is offered wherever nothing will switch by itself: a workload that asks first or never
      switches, a candidate the second look did not confirm, and one switched back from before. In
      automatic mode the last two used to say "approve it" with no button to press. */
-  const waitsForPerson = hot && (w.optimizeMode !== 'auto'
-    || (cand.confirm && cand.confirm.verdict !== 'cleared') || !!cand.heldBack);
+  const waitsForPerson = hot && (w.optimizeMode !== 'auto' || !confirmedLook(cand.confirm) || !!cand.heldBack);
   /* Its calls reach us as copies, after the customer's own provider has answered them: a switch
      here is set up and waits for the first call that comes through Understudy. */
   const copiesOnly = !!w.traffic && !w.traffic.carries;
@@ -450,7 +449,13 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
 }
 
 /* The second look, in a few words under a verdict. */
+/* A second look that confirmed: cleared again on calls never seen, or, for a way of serving that is
+   checked as it runs, looked at on live calls a small share at a time once switched. No second look at
+   all (a measurement from before there were any) reads as confirmed, as it did then. */
+const confirmedLook = (c) => !c || c.verdict === 'cleared' || c.verdict === 'live';
+
 function confirmWords(c) {
+  if (c.verdict === 'live') return 'Second look: on live calls, a small share at a time once switched';
   if (c.verdict === 'not_reached') return 'Second look: not reached in this measurement, so it is not switched to by itself';
   if (c.verdict === 'insufficient' && !c.runs) return 'Second look: not enough calls it had not seen yet';
   const pct = (x) => (x === null || x === undefined ? '?' : `${Number(x).toFixed(2)}%`);
@@ -513,7 +518,7 @@ const headline = (w, cand, switched) => {
   if (cand && cand.name?.kind === 'cascade') return `A checked cheaper model cleared your bar`;
   if (cand && cand.name?.kind === 'router') return `Picking a model call by call cleared your bar`;
   if (cand && cand.name?.kind === 'lighter') return `${short(w.reference)} thinking less cleared your bar`;
-  if (cand && cand.confirm && cand.confirm.verdict !== 'cleared') return `${short(cand.model)} cleared your bar once, and needs a second look`;
+  if (cand && !confirmedLook(cand.confirm)) return `${short(cand.model)} cleared your bar once, and needs a second look`;
   if (cand) return `${short(cand.model)} cleared your bar`;
   if (w.label === 'Measuring') return 'We are still learning your bar';
   if (w.certificate?.outcome === 'unmeasurable' || w.certificate?.outcome === 'refused') return 'We could not set a bar for this workload';
@@ -544,7 +549,7 @@ const blurb = (w, cand, switched) => {
         : `The same model, asked to think less before it answers.`;
     return `${lead} Worked out on your own calls, it stayed inside your bar. ${whatNext(w, cand)}`;
   }
-  if (cand && cand.confirm && cand.confirm.verdict !== 'cleared') {
+  if (cand && !confirmedLook(cand.confirm)) {
     const c = cand.confirm;
     const why = c.verdict === 'not_reached'
       ? 'the measurement ended before it could be looked at again on calls it had never seen'

@@ -163,8 +163,11 @@ find pays for it within `EVAL_PAYBACK_MONTHS`, net of our fee. A person can alwa
 workspace can also set its own thirty-day optimizing budget.
 
 Re-checks that keep finding what the last one did space themselves out, doubling up to eight
-times the workspace's rhythm. A new or much cheaper model, or a price rise on the model serving a
-workload, brings its next measurement forward (never sooner than a week after the last).
+times the workspace's rhythm. A new or much cheaper model brings a workload's next measurement
+forward only when a measurement of that workload would actually try it, never sooner than the
+workspace's own rhythm after the last one, and never for a workspace that measures only when asked;
+a price rise on the model serving a workload does the same. A workspace that measures only when
+asked is never measured by itself, its first measurement included.
 
 ## How the models to test are chosen
 
@@ -279,8 +282,11 @@ at most ten a day, each kind switchable in Settings.
 A running measurement has a Stop button. It stops at its next step: the call in flight comes back
 and is charged like the rest, every model that answered all of its calls keeps its result, and
 nothing is switched on the strength of a measurement that did not finish. One still waiting its
-turn is taken out of the queue and costs nothing. A run a deploy left behind goes quiet, and is
-closed as interrupted once it has been quiet for `EVAL_STALE_MIN` minutes.
+turn is taken out of the queue and costs nothing. After a stop, the next measurement nobody asks
+for waits a whole rhythm; after an outage or a failure it tries again after a few hours, longer
+each time. A deploy hands the measurements in flight to the new process, which closes the old run
+and starts again at once; one a process died in without handing over is closed as interrupted once
+it has been quiet for `EVAL_STALE_MIN` minutes. Two measurements of one workload never run at once.
 
 ## What is kept, and for how long
 
