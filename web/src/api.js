@@ -1,13 +1,76 @@
+/* The browser's one way to talk to the server.
+ *
+ * Every failure becomes an ApiError that carries a sentence somebody can read, the status it came
+ * with, and whether the request never arrived at all. The server words its refusals two ways,
+ * {error: "..."} from the screens' own routes and {error: {message}} from the model routes and
+ * from its last-resort crash handler, and passing the second straight to `new Error` is what
+ * printed "[object Object]" on the page. Anything without words of its own gets plain words
+ * chosen by its status, never a bare number. */
+
+export class ApiError extends Error {
+  constructor(message, { status = 0, network = false, signedOut = false } = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;          // 0 when the request never got an answer
+    this.network = network;        // true when the server could not be reached at all
+    this.signedOut = signedOut;    // true when the session behind the request has ended
+  }
+}
+
+const WORDS = {
+  400: 'That was not accepted. Check it and try again.',
+  401: 'Your session has ended. Sign in to continue.',
+  403: 'That is not allowed from this account.',
+  404: 'That could not be found. It may have been removed.',
+  408: 'Understudy took too long to answer. Try again in a moment.',
+  409: 'That clashes with something that already exists.',
+  413: 'That is larger than Understudy can take.',
+  429: 'Too many requests in a short time. Wait a moment, then try again.',
+  502: 'Understudy could not get an answer from a service it depends on. Try again in a moment.',
+  503: 'That part of Understudy is not available right now. Try again in a moment.',
+  504: 'Understudy took too long to answer. Try again in a moment.',
+};
+export const OFFLINE = 'Understudy could not be reached. Check your connection, then try again.';
+
+/** The sentence a failed answer carries, whichever way the server worded it. */
+export function messageOf(json, status) {
+  const e = json?.error;
+  if (typeof e === 'string' && e.trim()) return e.trim();
+  if (e && typeof e === 'object' && typeof e.message === 'string' && e.message.trim()) return e.message.trim();
+  if (typeof json?.message === 'string' && json.message.trim()) return json.message.trim();
+  return WORDS[status] || (status >= 500
+    ? 'Something went wrong on our side. Try again in a moment.'
+    : `That did not work. The server answered ${status}.`);
+}
+
+/* A session that ends while somebody is using the app, told once to whoever is listening: the
+   frame, which offers a way to sign in again and come back to the same page. The sign-in routes
+   themselves answer 401 for a wrong password, which is not a session ending. */
+const endedListeners = new Set();
+export const onSignedOut = (fn) => {
+  endedListeners.add(fn);
+  return () => endedListeners.delete(fn);
+};
+
 const send = async (method, path, body) => {
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
+  let res;
+  try {
+    res = await fetch(`/api${path}`, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw new ApiError(OFFLINE, { network: true });
+  }
+  const text = await res.text().catch(() => '');
   let json = null;
-  try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
-  if (!res.ok) throw new Error(json?.error || `Something went wrong (${res.status}).`);
+  try { json = text ? JSON.parse(text) : null; } catch { /* not json: a proxy's error page, say */ }
+  if (!res.ok) {
+    const signedOut = res.status === 401 && !path.startsWith('/auth/') && path !== '/me';
+    if (signedOut) for (const fn of endedListeners) fn();
+    throw new ApiError(messageOf(json, res.status), { status: res.status, signedOut });
+  }
   return json;
 };
 
@@ -26,8 +89,9 @@ const told = (id) => (w) => {
 /* The one address outside /api the screens read: the plain health check, which answers as long
    as the application and its database do. */
 const health = async () => {
-  const res = await fetch('/health', { cache: 'no-store' });
-  if (!res.ok) throw new Error(`The health check answered ${res.status}.`);
+  let res;
+  try { res = await fetch('/health', { cache: 'no-store' }); } catch { throw new ApiError(OFFLINE, { network: true }); }
+  if (!res.ok) throw new ApiError(messageOf(null, res.status), { status: res.status });
   return res.json();
 };
 

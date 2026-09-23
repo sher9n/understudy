@@ -89,7 +89,12 @@ const FOOT = [
   ['Talk to us', [['contact', 'Contact us']]],
 ];
 
-export function PublicFooter({ go }) {
+export function PublicFooter({ go, me }) {
+  /* The home page is where somebody signed in is never sent (it takes them to their dashboard),
+     so its "How it works" is only offered to people who can read it. */
+  const cols = me?.signedIn
+    ? FOOT.map(([head, links]) => [head, links.filter(([to]) => to !== 'home')])
+    : FOOT;
   return (
     <footer className="pubfoot">
       <div className="pubfootin">
@@ -102,7 +107,7 @@ export function PublicFooter({ go }) {
           </p>
         </div>
         <nav className="pubcols" aria-label="More about Understudy">
-          {FOOT.map(([head, links]) => (
+          {cols.map(([head, links]) => (
             <div key={head}>
               <span className="pubcolh">{head}</span>
               <ul>
@@ -124,7 +129,7 @@ export function PublicPage({ me, go, dark, setDark, here, children }) {
     <div className="pubpage">
       <PublicHeader me={me} go={go} dark={dark} setDark={setDark} here={here} />
       {children}
-      <PublicFooter go={go} />
+      <PublicFooter go={go} me={me} />
     </div>
   );
 }

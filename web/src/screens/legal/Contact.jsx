@@ -32,7 +32,7 @@ const topicFromUrl = () => {
    (a bad address, a message too short, too many messages from one place), so those are shown as
    they are; only a request that never arrived needs words of its own. */
 const reasonOf = (e) => {
-  if (e instanceof TypeError) return 'We could not reach Understudy just now. Check your connection, then send it again.';
+  if (e?.network) return 'We could not reach Understudy just now. Check your connection, then send it again.';
   return e?.message || 'That did not send. Try again in a minute.';
 };
 

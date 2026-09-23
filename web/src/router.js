@@ -59,6 +59,29 @@ export function onPop(fn) {
   return () => window.removeEventListener('popstate', fn);
 }
 
+/* Where to go after signing in, when the sign-in screen was reached from a page that needed
+   it. Only an address on this site, written as a path: anything else (another host, a
+   protocol-relative "//host", a backslash, a control character) is ignored, so a crafted link
+   can never use the sign-in screen to send somebody somewhere else. */
+export function safeNext(raw) {
+  if (typeof raw !== 'string' || !raw) return null;
+  if (!raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) return null;
+  if (/\p{Cc}/u.test(raw)) return null;
+  let url;
+  try { url = new URL(raw, window.location.origin); } catch { return null; }
+  if (url.origin !== window.location.origin) return null;
+  const where = parse(url.pathname);
+  if (where.screen === 'signin' || where.screen === 'signup' || where.screen === 'signincode'
+    || where.screen === 'notfound' || where.screen === 'home') return null;
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+/** The address somebody is on now, to come back to after signing in. */
+export const here = () => `${window.location.pathname}${window.location.search}`;
+
+/** The sign-in address that comes back to `path` afterwards. */
+export const signInHref = (path) => `/signin?next=${encodeURIComponent(path)}`;
+
 /* What the browser tab says. One name per screen, so a row of tabs, the history list and a
    bookmark each say which screen they are, rather than every one of them reading "Understudy".
    A workload's page is named after the workload once its name is known. */
