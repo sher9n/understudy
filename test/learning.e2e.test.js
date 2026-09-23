@@ -47,6 +47,7 @@ process.env.SHADOW_SHARE = '1';
 process.env.LEARN_SETTLE_MIN = '0';
 
 const { db, now } = await import('../src/db/index.js');
+const { default: config } = await import('../src/config.js');
 const { default: migrate } = await import('../src/db/migrate.js');
 const { createAccount } = await import('../src/auth.js');
 const { issueKey } = await import('../src/keys.js');
@@ -76,17 +77,31 @@ const answerOf = (model, i) => (model === CHEAPER && i % 4 === 1 ? { total: 0, c
 
 // models the provider refuses, to see what an experiment that fails does
 const failing = new Set();
+/* Models the provider says are busy: every time (alwaysBusy), or the first time each request reaches
+   them and not when it is sent again (busyOnce), with how many requests each model was sent. */
+const busyOnce = new Set();
+const alwaysBusy = new Set();
+const triedOnce = new Set();
+const hits = new Map();
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
     const payload = JSON.parse(body || '{}');
+    hits.set(payload.model, (hits.get(payload.model) || 0) + 1);
     if (failing.has(payload.model)) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'Provider is overloaded' } }));
       return;
     }
     const text = payload.messages.find((m) => m.role === 'user')?.content || '';
+    const once = `${payload.model}|${text}`;
+    if (alwaysBusy.has(payload.model) || (busyOnce.has(payload.model) && !triedOnce.has(once))) {
+      triedOnce.add(once);
+      res.writeHead(429, { 'Content-Type': 'application/json', 'retry-after': '0.01' });
+      res.end(JSON.stringify({ error: { message: 'Rate limited, try again shortly' } }));
+      return;
+    }
     const i = Number((text.match(/#(\d+)/) || [])[1] || 0);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ id: `gen-${i}`, model: payload.model,
@@ -505,4 +520,39 @@ test('a call the provider failed is listed with its reason, never breaks the lis
   assert.ok(o.failures.every((f) => Array.isArray(f.why)), 'every reason is a list');
   assert.ok(o.failures.some((f) => f.why[0] === 'the provider failed the call (503)'));
   assert.ok(o.failures.some((f) => f.why[0] === 'the provider could not be reached'));
+});
+
+test('an experiment is held to the same call policy as what serves: a busy reply is retried once whichever way a call is served', async () => {
+  const s = await shop('policy');
+  for (const m of [REF, STEADY, CHEAPER]) busyOnce.add(m);
+  try {
+    const ids = [];
+    for (let i = 0; i < 30; i += 1) ids.push(await send(s.secret, request(7000 + i)));
+    const busy = await db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND status_code = 429').get(s.workload.id);
+    assert.equal(Number(busy.n), 0, 'no try was given up after one busy reply, the yardstick\'s and the runner-up\'s included');
+    const rows = await db.prepare('SELECT served_model, explored FROM calls WHERE id = ANY(?::text[])').all(ids);
+    assert.ok(rows.some((r) => r.served_model === REF && Number(r.explored) === 1), 'the yardstick answered some, after its retry');
+    assert.ok(rows.some((r) => r.served_model === STEADY && Number(r.explored) === 0), 'and what serves answered the rest, after its own');
+  } finally {
+    busyOnce.clear();
+    triedOnce.clear();
+  }
+});
+
+test('a router serving a live call waits on a busy provider as a live call does, not as a measurement does', async () => {
+  const s = await shop('router-policy', { explore: 'off' });
+  const zeros = [0, 0, 0, 0, 0, 0];
+  const router = { kind: 'router', cheap: { model: CHEAPER, recipe: null }, strong: { model: REF, recipe: null }, threshold: 0.5,
+    weights: zeros, bias: 5, means: zeros, sds: zeros.map(() => 1) };
+  const r = await promote(s.workload, `router:${CHEAPER}`, { spec: router, auto: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  alwaysBusy.add(CHEAPER);
+  hits.clear();
+  try {
+    const id = await send(s.secret, request(7100));
+    assert.equal(hits.get(CHEAPER), 1 + config.LIVE_RETRIES, 'one try and the live retries, then the customer\'s own model');
+    assert.equal((await db.prepare('SELECT served_model FROM calls WHERE id = ?').get(id)).served_model, REF);
+  } finally {
+    alwaysBusy.clear();
+  }
 });

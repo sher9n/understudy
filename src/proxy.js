@@ -241,10 +241,16 @@ export function worthFallback(err) {
 
 /* How long a live call waits on a busy provider. A measurement can wait out a rate limit; somebody
    whose app is waiting on this call cannot, so a live call gets one short retry and then the next
-   strategy in its chain, and an experiment gets none and a time limit. */
-const liveOpts = (strategy) => (strategy?.explored
-  ? { retries: 0, signal: AbortSignal.timeout(config.EXPERIMENT_TIMEOUT_MS) }
-  : { retries: config.LIVE_RETRIES, maxWaitMs: config.LIVE_RETRY_WAIT_MAX_MS });
+   strategy in its chain.
+
+   Every way of serving a call gets the same, the ones an experiment tries included. Learning compares
+   them on how often their calls fail, and a rate limit or a timeout counts as a failure, so an
+   experiment given no retry and a shorter time limit failed more often than what it was compared with
+   for no reason of its own: at one busy reply in twenty the customer's own model, as the yardstick,
+   failed about one call in twenty against one in four hundred for what serves, so a strategy several
+   points worse was never switched back, and on a workload whose answers take longer than the old limit
+   the yardstick failed every call. A cascade or a router is held to the same through serveWith. */
+const liveOpts = () => ({ retries: config.LIVE_RETRIES, maxWaitMs: config.LIVE_RETRY_WAIT_MAX_MS });
 
 /* The bookkeeping after an answer, apart from the provider's part: a slip in it is logged, and never
    turns an answer the customer has already been sent, and paid for, into an error. */
@@ -281,9 +287,9 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     let out;
     try {
       if (strategy && strategy.spec.kind !== 'model') {
-        out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr });
+        out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr, call: liveOpts() });
       } else {
-        const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: ready.cacheHint, ...liveOpts(strategy) });
+        const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: ready.cacheHint, ...liveOpts() });
         out = { json: r.json, served, cost: Number(r.json?.usage?.cost ?? 0), latencyMs: r.latencyMs ?? Date.now() - started };
       }
     } catch (err) {
@@ -390,7 +396,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
        would have; a measurement holds a cascade to the workload's speed setting on exactly that. */
     let out;
     try {
-      out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr });
+      out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr, call: liveOpts() });
     } catch (err) {
       return { ok: false, err, served };
     }
