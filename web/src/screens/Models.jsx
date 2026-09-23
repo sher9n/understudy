@@ -1,5 +1,6 @@
 import React, { memo, useCallback, useDeferredValue, useMemo, useState } from 'react';
-import { api, num, usd } from '../api.js';
+import { api, num } from '../api.js';
+import { usd } from '../money.js';
 import '../models.css';
 
 /* The models a measurement may try, and which of them this workspace allows.

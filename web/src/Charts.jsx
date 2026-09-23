@@ -1,5 +1,5 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { usd } from './api.js';
+import { usd } from './money.js';
 
 /* The charts are drawn at the width they are given.
  *
@@ -45,7 +45,6 @@ function spendFrame(width) {
 const dlab = (ms) => new Date(ms).toLocaleDateString('en-GB',
   { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
 
-const money = (v, max) => (max <= 0.05 ? `$${v.toFixed(3)}` : max <= 5 ? `$${v.toFixed(2)}` : `$${Math.round(v)}`);
 
 /* The day the pointer is over, as a whole date. The axis only labels four days, so the
    tooltip has to say which one this is rather than leaving somebody counting gridlines.
@@ -64,7 +63,13 @@ export function SpendChart({ series }) {
   const n = series.length;
   const [box, width] = useWidth();
   const [at, setAt] = useState(null);
-  const { W, H, L, R, T, B, narrow } = spendFrame(width);
+  const frame = spendFrame(width);
+  const { W, H, R, T, B, narrow } = frame;
+  const top = n ? Math.max(...series.map((d) => Math.max(d.paid, d.would)), 0.02) : 0.02;
+  const max = niceTop(top);
+  const ticks = [0, max / 4, max / 2, (max * 3) / 4, max];
+  // room on the left for the widest price on the axis, written the way every price is
+  const L = Math.max(frame.L, Math.ceil(14 + 6.1 * Math.max(...ticks.map((v) => usd(v).length))));
 
   /* Which day is under the pointer. The drawing's own units are put back from the pointer's
      position on the screen, which works whatever width the chart is drawn at. */
@@ -85,9 +90,6 @@ export function SpendChart({ series }) {
   });
 
   if (!n) return <div className="chartwrap" ref={box} />;
-  const top = Math.max(...series.map((d) => Math.max(d.paid, d.would)), 0.02);
-  const max = niceTop(top);
-  const ticks = [0, max / 4, max / 2, (max * 3) / 4, max];
   const px = (i) => L + (i * (W - L - R)) / Math.max(1, n - 1);
   const py = (v) => H - B - (v / max) * (H - B - T);
   const path = (key) => series.map((d, i) => `${px(i).toFixed(1)} ${py(d[key]).toFixed(1)}`).join(' L');
@@ -118,7 +120,7 @@ export function SpendChart({ series }) {
       {ticks.map((v) => (
         <g key={v}>
           <line x1={L} y1={py(v)} x2={W - R} y2={py(v)} stroke="var(--line)" strokeWidth="1" />
-          <text x={L - 9} y={py(v) + 3.5} className="m" textAnchor="end" fontSize="10" fill="var(--mut)">{money(v, max)}</text>
+          <text x={L - 9} y={py(v) + 3.5} className="m" textAnchor="end" fontSize="10" fill="var(--mut)">{usd(v)}</text>
         </g>
       ))}
       <path d={`M${path('would')}`} fill="none" stroke="var(--line-strong)" strokeWidth="2" strokeDasharray="6 5" />
@@ -452,8 +454,9 @@ export function CandidateChart({ results, floor, reference, referenceCostMonth }
  * cheapest or more, which is the usual case because the models tried are spread from just
  * below yours down to the cheapest there is, a straight line put every candidate in the left
  * fifth of the chart, on top of one another, with your own model alone on the far right. So
- * the axis then counts in steps of ten ($0.01, $0.10, $1, $10): every candidate gets room of
- * its own, and it still reads left to right from cheaper to dearer. */
+ * the axis then counts in steps of ten ($0.01, $0.10, $1.00, $10.00): every candidate gets room
+ * of its own, and it still reads left to right from cheaper to dearer. Every price on the axis
+ * is written the way money is written everywhere else in the app. */
 function costScale(values, x0, x1) {
   const lo = Math.min(...values);
   const hi = Math.max(...values);
@@ -468,27 +471,14 @@ function costScale(values, x0, x1) {
     const at = (v) => x0 + inset + ((Math.log10(v) - a) / (b - a)) * (x1 - x0 - 2 * inset);
     const ticks = [];
     for (let k = a; k <= b; k += 1) ticks.push(10 ** k);
-    return { log: true, at, ticks, label: stepPrice };
+    return { log: true, at, ticks, label: usd };
   }
   const top = niceTop(Math.max(hi, 0.01));
   const step = top / 4;
-  const whole = Math.abs(step - Math.round(step)) < 1e-9;
-  /* As many places as the step needs and no more: a step of 0.005 is written $0.005 and
-     one of 0.0025 is written $0.0025, never with a zero on the end that means nothing. */
-  const mag = Math.floor(Math.log10(step) + 1e-9);
-  const lead = step / 10 ** mag;
-  const places = Math.max(2, -mag + (Math.abs(lead - Math.round(lead)) < 1e-6 ? 0 : 1));
   return {
     log: false,
     at: (v) => x0 + (v / top) * (x1 - x0),
     ticks: [0, step, step * 2, step * 3, top],
-    // every price on one axis written to the same places, so $2.50 never sits beside $5
-    label: (v) => (whole ? `$${Math.round(v).toLocaleString('en-US')}` : `$${v.toFixed(places)}`),
+    label: usd,
   };
 }
-
-/* A power of ten written as a price: whole dollars bare, cents to two places, and a fraction
-   of a cent to as many places as it takes not to read as zero. */
-const stepPrice = (v) => (v >= 1
-  ? `$${Math.round(v).toLocaleString('en-US')}`
-  : `$${v.toFixed(Math.max(2, -Math.floor(Math.log10(v) + 1e-9)))}`);

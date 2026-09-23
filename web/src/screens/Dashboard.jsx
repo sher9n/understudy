@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import PeriodChip from '../PeriodChip.jsx';
-import { usd, num, ago, feedDot, timeIST } from '../api.js';
+import { num, ago, feedDot, timeIST } from '../api.js';
+import { usd } from '../money.js';
 import { usePoll } from '../poll.js';
 import { SpendChart, WaitingChart } from '../Charts.jsx';
 import WorkloadTable from '../WorkloadTable.jsx';
@@ -58,17 +59,17 @@ export default function Dashboard({ data, onOpen, onPeriod, busy, onTick }) {
       {trouble && <Reconnecting trouble={trouble} since={since} retry={retry} />}
 
       <div className="tiles five">
-        <Tile k={`Spend · last ${data.days} days`} v={data.priced ? usd(data.spend) : '—'}
+        <Tile k={`Spend · last ${data.days} days`} v={data.priced ? usd(data.spend) : 'Not priced'}
           s={!data.priced ? 'prices sync once a provider key is set'
             : data.spend > 0 ? `on track for ${usd(runRate)} a month` : 'nothing charged yet'} />
-        <Tile k={`Saved · last ${data.days} days`} v={data.priced && data.saved > 0 ? usd(data.saved) : '—'}
+        <Tile k={`Saved · last ${data.days} days`} v={data.priced ? usd(data.saved) : 'Not priced'}
           s={!data.priced ? 'waiting on prices' : data.saved > 0 ? 'against your own models'
             : data.optimized ? 'no calls on a switched model yet' : 'nothing optimized yet'} />
         <Tile k="Workloads" v={num(data.workloads)}
           s={data.workloads
             ? `${data.optimized} optimized${data.waiting ? `, ${data.waiting} waiting for routing` : ''}, ${data.ready} ready, ${data.measuring} measuring`
             : 'found automatically from your calls'} />
-        <Tile k="Worked" v={oc && oc.rate !== null ? `${(oc.rate * 100).toFixed(1)}%` : '—'}
+        <Tile k="Worked" v={oc && oc.rate !== null ? `${(oc.rate * 100).toFixed(1)}%` : 'Not yet'}
           s={!oc || !judged ? 'how calls turned out, once they arrive'
             : oc.problem ? `${num(oc.problem)} of ${num(judged)} calls had a problem` : `of ${num(judged)} calls, no problem seen`} />
         <Tile k="Calls" v={num(data.calls)} s="since you connected" />

@@ -1,6 +1,7 @@
 import React from 'react';
 import PeriodChip from '../PeriodChip.jsx';
-import { usd, num } from '../api.js';
+import { num } from '../api.js';
+import { usd } from '../money.js';
 import WorkloadTable from '../WorkloadTable.jsx';
 
 const Tile = ({ k, v, s }) => (
@@ -18,9 +19,9 @@ export default function Workloads({ data, onOpen, onPeriod, busy }) {
         <Tile k="Optimized" v={num(data.optimized)}
           s={data.waiting ? `${data.waiting} more switched, waiting for routed calls`
             : data.ready ? `${data.ready} more ready to switch` : 'nothing else ready yet'} />
-        <Tile k={`Saved · last ${data.days} days`} v={data.priced && data.saved > 0 ? usd(data.saved) : '—'}
+        <Tile k={`Saved · last ${data.days} days`} v={data.priced ? usd(data.saved) : 'Not priced'}
           s={data.priced ? 'against your own models' : 'waiting on prices'} />
-        <Tile k={`Spend · last ${data.days} days`} v={data.priced ? usd(data.spend) : '—'}
+        <Tile k={`Spend · last ${data.days} days`} v={data.priced ? usd(data.spend) : 'Not priced'}
           s={!data.priced ? 'prices sync once a provider key is set'
             : data.spend > 0 ? `on track for ${usd(runRate)} a month` : 'nothing charged yet'} />
       </div>

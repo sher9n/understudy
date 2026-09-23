@@ -11,7 +11,7 @@ import { useWidth, NARROW } from './Charts.jsx';
  * the spend chart it sits beside in spirit, and reads the same way under the pointer and the keys. */
 
 const short = (m) => String(m || '').split('/').pop();
-export const pct = (x, dp = 0) => (x === null || x === undefined ? '–' : `${(x * 100).toFixed(dp)}%`);
+export const pct = (x, dp = 0) => (x === null || x === undefined ? 'not known' : `${(x * 100).toFixed(dp)}%`);
 /* A share of calls in words a person reads at a glance: "12 in 100" is easier to picture than a
    percentage for the small shares experiments and a cascade's sent-on calls come to. */
 export const inHundred = (x) => {
@@ -185,7 +185,7 @@ export function RateRows({ rows }) {
               </>
             ) : <em className="rnone">no calls yet</em>}
           </span>
-          <span role="cell" className="rnum rstrong" data-label="worked">{r.calls > 0 ? pct(shown, 1) : bg ? <>{pct(bgShare, 1)}<small>the same</small></> : '–'}</span>
+          <span role="cell" className="rnum rstrong" data-label="worked">{r.calls > 0 ? pct(shown, 1) : bg ? <>{pct(bgShare, 1)}<small>the same</small></> : 'none yet'}</span>
           <span role="cell" className="rnum" data-label="calls">{bg ? <>{num(r.bg.calls)}<small>background</small></> : num(r.calls)}</span>
           <span role="cell" className="rnum" data-label="cost">{ofYours(r.ratio)}</span>
         </div>

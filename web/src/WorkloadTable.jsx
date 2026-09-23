@@ -1,7 +1,8 @@
 import React from 'react';
 import { href } from './router.js';
 import { plainClick } from './nav.jsx';
-import { usd, num } from './api.js';
+import { num } from './api.js';
+import { usd } from './money.js';
 
 const CHEV = (
   <span className="chev">

@@ -1,5 +1,12 @@
 import React from 'react';
+import { usd } from '../../money.js';
 import { Doc, Sec, To } from './Public.jsx';
+
+/* The figures, written the way every amount in the app is written. */
+const PLAN = usd(49);
+const PLAN_MEASURING = usd(10);
+const TOPUP_LOW = usd(5);
+const TOPUP_HIGH = usd(500);
 
 /* What Understudy costs, all of it on one page.
  *
@@ -18,8 +25,8 @@ export default function Pricing({ go }) {
           <div className="pricecard">
             <div className="pricek">Calls we route</div>
             <div className="pricefig">Provider price + 1%</div>
-            <p>What the model provider charges for the call, plus a 1% fee. If the provider charges $1.00 for a
-              set of calls, you pay $1.01.</p>
+            <p>What the model provider charges for the call, plus a 1% fee. If the provider charges {usd(1)} for a
+              set of calls, you pay {usd(1.01)}.</p>
           </div>
           <div className="pricecard pricefree">
             <div className="pricek">Copies you send us</div>
@@ -42,8 +49,8 @@ export default function Pricing({ go }) {
           </div>
           <div className="pricecard">
             <div className="pricek">Monthly plan</div>
-            <div className="pricefig">$49 a month</div>
-            <p>Includes $10 of measurement each month.</p>
+            <div className="pricefig">{PLAN} a month</div>
+            <p>Includes {PLAN_MEASURING} of measurement each month.</p>
           </div>
         </div>
         <p>
@@ -56,7 +63,7 @@ export default function Pricing({ go }) {
       <Sec id="balance" title="Your balance">
         <ul>
           <li><b>Prepaid.</b> Charges come out of a balance you add credit to in Settings.</li>
-          <li><b>Top-ups from $5 to $500</b> at a time.</li>
+          <li><b>Top-ups from {TOPUP_LOW} to {TOPUP_HIGH}</b> at a time.</li>
           <li>
             <b>Automatic top-up is optional.</b> It is off until you have saved a card and switched it on, and you
             can switch it off again in Settings at any time.

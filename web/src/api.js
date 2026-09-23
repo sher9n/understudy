@@ -143,51 +143,10 @@ export const api = {
   tasks: (id) => send('GET', `/workloads/${id}/tasks`),
 };
 
-/* Money, at a precision where the number can actually be seen.
- *
- * Two decimals is right for a bill and wrong for this product. A model call costs a fraction
- * of a cent, so a real spend of $0.00207809 printed as "$0.00", and a balance that had gone
- * down from $10 to $9.99792191 printed as though nothing had happened. Three decimals would
- * still have shown one of those calls as $0.000.
- *
- * So the precision follows the size of the number. Ordinary amounts get two decimals and
- * read as ordinary money. Small ones get four. Anything under a cent gets however many
- * decimals it takes to show two real digits, because that is the whole point: a number small
- * enough to round away is exactly the one somebody is squinting at. Nothing is ever printed
- * as zero unless it is zero, and the minus sign goes before the dollar, not after it.
- */
-const FLOOR_DP = 2;      // ordinary money never reads as $10.5
-const SMALL_DP = 4;      // under a dollar, four is enough to see a charge move
-const MOST_DP = 8;       // and this is as far as it is worth going
-
-export const usd = (n) => {
-  const v = Number(n) || 0;
-  const sign = v < 0 ? '-' : '';
-  const a = Math.abs(v);
-  if (a === 0) return '$0.00';
-
-  let dp;
-  if (a >= 100) dp = FLOOR_DP;                       // sub-cent digits on a hundred are noise
-  else if (a >= 0.01) dp = SMALL_DP;
-  else dp = Math.min(MOST_DP, -Math.floor(Math.log10(a)) + 1);   // two real digits, wherever they start
-
-  const body = a.toFixed(dp).replace(/0+$/, '');
-  const [whole, tail = ''] = body.split('.');
-  if (Number(whole) === 0 && tail === '') return `${sign}<$${(10 ** -MOST_DP).toFixed(MOST_DP)}`;
-  return `${sign}$${Number(whole).toLocaleString('en-US')}.${tail.padEnd(FLOOR_DP, '0')}`;
-};
-
-/* A balance is money you HAVE, so it is only ever rounded DOWN. Showing $10.00 for an
-   account holding $9.99997989 overstates it, and the balance is the one number where "why
-   has it not moved" is a question somebody actually asks. Rounding down answers it: the
-   figure is always something you can spend, and it goes down the moment anything is spent. */
-export const usdHeld = (n) => {
-  const v = Number(n) || 0;
-  if (v <= 0) return usd(v);
-  const dp = v >= 100 ? 2 : (v >= 0.01 ? 4 : Math.min(8, -Math.floor(Math.log10(v)) + 1));
-  return usd(Math.floor(v * 10 ** dp) / 10 ** dp);
-};
-
+/* Money is written by one formatter, in money.js, and every screen that imports it from here
+   gets the same one: two decimals from a dollar up, up to four significant figures below it,
+   the minus sign before the dollar, and a balance never shown as more than it is. */
+export { usd, usdHeld } from './money.js';
 export const num = (n) => (Number(n) || 0).toLocaleString('en-US');
 
 /** Relative time, for the activity feed. */

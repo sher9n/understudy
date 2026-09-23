@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { api, onWorkloadName, onSignedOut, usd } from './api.js';
+import { api, onWorkloadName, onSignedOut } from './api.js';
+import { usd } from './money.js';
 import { parse, go as navigate, onPop, PUBLIC, titleFor, safeNext, here as hereNow, signInHref,
   href } from './router.js';
 import { plainClick } from './nav.jsx';
