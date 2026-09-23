@@ -223,3 +223,28 @@ test('background work runs a few at a time, and measurements fewer still', async
   assert.ok(mostEval <= config.EVAL_CONCURRENCY, `at most ${config.EVAL_CONCURRENCY} measurements at once, saw ${mostEval}`);
   assert.ok(most >= 2, 'and more than one at a time when there is work');
 });
+
+test('a restart does not start again a measurement a person stopped, nor one something is still running', async () => {
+  const t = now();
+  await db.prepare(`INSERT INTO workloads (id, workspace_id, slug, fingerprint, shape_kind, reference_model, sample_prompt, created_at, updated_at)
+                     VALUES ('wl_boot', ?, 'boot', 'fp_boot', 'free_text', ?, 'x', ?, ?)`).run(ws.id, REF, t, t);
+  const claimedLongAgo = t - 30 * 60000;
+  const job = (id, kind = 'eval_run') => db.prepare(`INSERT INTO jobs (id, kind, payload, status, attempts, run_after, claimed_at, created_at)
+                     VALUES (?, ?, ?, 'claimed', 1, ?, ?, ?)`).run(id, kind, JSON.stringify({ workloadId: 'wl_boot', n: id }), claimedLongAgo, claimedLongAgo, claimedLongAgo);
+  const run = (id, jobId, { stop = null, heartbeat }) => db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind,
+                     reference_model, created_at, job_id, stop_requested_at, heartbeat_at)
+                     VALUES (?, ?, 'wl_boot', 'running', 'free_text', ?, ?, ?, ?, ?)`).run(id, ws.id, REF, claimedLongAgo, jobId, stop, heartbeat);
+  await job('job_boot_stopped');
+  await run('run_boot_stopped', 'job_boot_stopped', { stop: t - 20 * 60000, heartbeat: t - 25 * 60000 });
+  await job('job_boot_live');
+  await run('run_boot_live', 'job_boot_live', { heartbeat: t - 60000 });
+  await job('job_boot_dead');
+  await run('run_boot_dead', 'job_boot_dead', { heartbeat: t - 25 * 60000 });
+  await job('job_boot_other', 'catalog_sync');
+  await jobs.requeueStale();
+  const status = async (id) => (await db.prepare('SELECT status FROM jobs WHERE id = ?').get(id)).status;
+  assert.equal(await status('job_boot_stopped'), 'cancelled', 'a person said stop');
+  assert.equal(await status('job_boot_live'), 'claimed', 'something may still be running it');
+  assert.equal(await status('job_boot_dead'), 'queued', 'nothing is, so it can go again');
+  assert.equal(await status('job_boot_other'), 'queued', 'other work goes back as before');
+});

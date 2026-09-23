@@ -151,9 +151,22 @@ export async function stopJobs() {
   if (timer) { clearInterval(timer); timer = null; }
 }
 
-/** Anything claimed when the process died goes back in the queue at boot. */
+/* Anything claimed when the process died goes back in the queue at boot, with two exceptions for
+   measurements. One a person stopped is not started again: its job ends here, where putting it back
+   used to start a fresh measurement of the same workload over the Stop that had been pressed. And one
+   something may still be running (its run wrote a heartbeat within EVAL_STALE_MIN, as the process a
+   deploy is replacing still can) is left alone, so two measurements of one workload never run side by
+   side; once its heartbeat is old, closeAbandoned closes it and lets its job go. */
 export async function requeueStale() {
+  const stale = now() - 600000;
+  await db.prepare(
+    `UPDATE jobs SET status = 'cancelled', error = 'stopped by you'
+      WHERE kind = 'eval_run' AND status = 'claimed' AND claimed_at < ?
+        AND EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id
+                     AND (r.stop_requested_at IS NOT NULL OR r.status = 'stopped'))`).run(stale);
   return (await db.prepare(
-    `UPDATE jobs SET status = 'queued' WHERE status = 'claimed' AND claimed_at < ?`)
-    .run(now() - 600000)).changes;
+    `UPDATE jobs SET status = 'queued' WHERE status = 'claimed' AND claimed_at < ?
+        AND NOT (kind = 'eval_run' AND EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id
+                   AND r.status = 'running' AND r.heartbeat_at >= ?))`)
+    .run(stale, now() - config.EVAL_STALE_MIN * 60000)).changes;
 }
