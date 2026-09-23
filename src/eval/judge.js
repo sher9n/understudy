@@ -3,6 +3,7 @@ import config, { canJev } from '../config.js';
 import { chat } from '../openrouter.js';
 import { db, now } from '../db/index.js';
 import { ask, clip, jevUsable } from '../jev.js';
+import { callPrice } from '../models/facts.js';
 
 /* Deciding whether two written answers say the same thing.
  *
@@ -403,17 +404,21 @@ export async function judgeQuality(request, answer, reference, { scope = null } 
   return out;
 }
 
-/* How many judgements a run will need, so the price on the button and the progress bar both
-   account for them. Structured shapes need none. */
-export function judgementsFor(shapeKind, sample, candidates) {
-  if (shapeKind !== 'free_text' || !canJudge()) return 0;
-  // one per sampled call for the bar, one per candidate answer (each against both of the bar's answers)
-  return sample + sample * candidates;
-}
-
-/** What one judgement costs, roughly, for a workload's average call. For the estimate only. */
-export function judgementCost(promptTokens, answerTokens, priceOfLlm) {
-  const read = Math.min(promptTokens, 700) + 3 * Math.min(answerTokens, 700) + 450;
-  if (jevUsable()) return (read * config.JEV_PRICE_PER_MTOK) / 1e6 + 0.1 * (priceOfLlm ?? 0);
-  return priceOfLlm ?? 0;
+/* What one judgement of each kind costs, roughly, for a workload's average call, so a quote counts
+   what a run will actually ask. `llm` is the judge model's catalogue entry. The language model reads
+   its instructions, the request and the two answers it compares, each cut the way the judges cut
+   them (about a thousand tokens each). Jev reads the same, shorter, and hands the ones it is unsure
+   of (about one in ten) to the language model. A candidate's answer is held to both of the
+   customer's answers: one reading by Jev, or two calls when the language model judges alone. "At
+   least as good" is always the language model's, however Jev is doing. The quote used to price every
+   judgement as the cheap blend, one call each, which on a workload judged without Jev was half of
+   what its candidates' judgements cost. */
+export function judgePrices(promptTokens, answerTokens, llm) {
+  const request = Math.min(Number(promptTokens) || 0, 1000);
+  const answer = Math.min(Number(answerTokens) || 0, 1000);
+  const pair = llm ? callPrice(llm, 200 + request + 2 * answer, 6) : 0;
+  const jev = (answers) => ((Math.min(Number(promptTokens) || 0, 625) + answers * Math.min(Number(answerTokens) || 0, 625) + 450)
+    * config.JEV_PRICE_PER_MTOK) / 1e6;
+  if (jevUsable()) return { bar: jev(2) + 0.1 * pair, candidate: jev(3) + 0.2 * pair, quality: pair };
+  return { bar: pair, candidate: 2 * pair, quality: pair };
 }

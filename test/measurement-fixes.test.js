@@ -83,3 +83,16 @@ test('what serves is always checked again, even when the customer\'s model no lo
   const pinned = selectCandidates({ ...base, serving: 'x/ref', servingAs: 'x/ref#cheapest', servingRecipe: { providers: ['full'], pinned: true } });
   assert.deepEqual(pinned.order[0].recipe, { providers: ['full'], pinned: true });
 });
+
+test('a judgement is priced at what it costs: two calls for a candidate without Jev, the language model for "at least as good"', () => {
+  const llm = { priceIn: 1e-6, priceOut: 2e-6 };
+  const p = judgePrices(800, 60, llm);
+  // instructions, the request, and both answers, and a word back
+  const pair = 1e-6 * (200 + 800 + 2 * 60) + 2e-6 * 6;
+  assert.ok(Math.abs(p.bar - pair) < 1e-12, `${p.bar}`);
+  assert.ok(Math.abs(p.candidate - 2 * pair) < 1e-12, `${p.candidate}`);
+  assert.ok(Math.abs(p.quality - pair) < 1e-12, `${p.quality}`);
+  // long requests and answers are cut the way the judges cut them
+  const long = judgePrices(50000, 9000, llm);
+  assert.ok(Math.abs(long.bar - (1e-6 * (200 + 1000 + 2000) + 2e-6 * 6)) < 1e-12);
+});

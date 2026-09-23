@@ -507,6 +507,43 @@ test('a job split away is never folded back, and the workload\'s own job is neve
   assert.equal((await workloadFor(workspace.id, job(A, 5003))).id, parent.id, 'A, the workload\'s own job, stays with it');
 });
 
+/* 8. Quotes are not below what runs spend ------------------------------------------------------ */
+
+test('a re-check is quoted what it spends: its bar, and both second looks it may take', async () => {
+  const { workload } = await seed({ n: 900, enabled: ['vendor/steady-small', 'vendor/fifth-small'] });
+  const first = await runEvaluation(workload.id);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const one = await runOf(first.runId);
+  assert.ok(one.spend_usd <= one.quote_usd + 1e-9, `the first: spent $${one.spend_usd}, quoted $${one.quote_usd}`);
+  // the re-check draws calls no measurement used, so nothing it needs is paid for yet
+  const plan = await planFor(await load(workload.id), { canRoute: true });
+  assert.ok(plan.cachedBar < 0.05, `the re-check's bar is not already paid for: ${plan.cachedBar}`);
+  const again = await runEvaluation(workload.id);
+  assert.equal(again.ok, true, JSON.stringify(again));
+  const two = await runOf(again.runId);
+  assert.ok((await resultOf(again.runId, 'vendor/steady-small')).confirm_runs > 0, 'it took a second look');
+  // it used to be quoted a nearly free bar, and then pay for all of it
+  assert.ok(two.spend_usd <= two.quote_usd + 1e-9, `the re-check: spent $${two.spend_usd}, quoted $${two.quote_usd}`);
+});
+
+test('a measurement that looks at two models again is quoted both looks', async () => {
+  luckyAfter = 120;
+  try {
+    const { workload } = await seed({ n: 400, enabled: ['vendor/lucky-a', 'vendor/lucky-b'] });
+    asks.set('vendor/lucky-a', 0);
+    asks.set('vendor/lucky-b', 0);
+    const out = await runEvaluation(workload.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const run = await runOf(out.runId);
+    const [a, b] = await Promise.all(['vendor/lucky-a', 'vendor/lucky-b'].map((m) => resultOf(out.runId, m)));
+    assert.ok(a.confirm_runs > 0 && b.confirm_runs > 0, 'both were looked at again');
+    // one look used to be quoted, though a run takes two
+    assert.ok(run.spend_usd <= run.quote_usd + 1e-9, `spent $${run.spend_usd}, quoted $${run.quote_usd}`);
+  } finally {
+    luckyAfter = 100;
+  }
+});
+
 /* 10. Never two measurements of one workload, and a stopped one stays stopped -------------------- */
 
 async function orphan(workload, workspace, { stopped = false, heartbeatAgo = 20 * 60000, jobId = null, status = 'running' } = {}) {
