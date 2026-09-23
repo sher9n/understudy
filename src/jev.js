@@ -42,22 +42,36 @@ export const jevUsable = () => canJev() && Date.now() >= restingUntil;
 export const jevResting = () => (Date.now() < restingUntil ? restingWhy : null);
 
 /* How many questions are out at once. Jev allows 1,200 requests a minute today and says the
-   limit is moving, so this is kept well under it and a refusal is waited out, not retried hard. */
+   limit is moving, so this is kept well under it and a refusal is waited out, not retried hard.
+
+   Some places are kept for questions a live call is waiting on (JEV_LIVE_RESERVED). Work nobody is
+   waiting on (a measurement's checks, reading answers in the background, reading follow-ups) queues
+   for the rest. With one shared pool, a measurement filling every place made each cascade's live
+   check answer "busy", and every call was sent on to the customer's own model at its full price. */
 let active = 0;
+let background = 0;
 const waiting = [];
+const backgroundLimit = () => Math.max(1, config.JEV_CONCURRENCY - Math.max(0, config.JEV_LIVE_RESERVED));
 const acquire = () => new Promise((resolve) => {
-  if (active < config.JEV_CONCURRENCY) { active += 1; resolve(); return; }
+  if (active < config.JEV_CONCURRENCY && background < backgroundLimit()) { active += 1; background += 1; resolve(); return; }
   waiting.push(resolve);
 });
-// a place now or not at all, for a question somebody's call is waiting on
+// a place now or not at all, for a question somebody's call is waiting on: any free place, reserved ones too
 const tryAcquire = () => {
   if (active < config.JEV_CONCURRENCY) { active += 1; return true; }
   return false;
 };
-const release = () => {
-  const next = waiting.shift();
-  if (next) next(); else active -= 1;
+const release = (wasBackground) => {
+  active -= 1;
+  if (wasBackground) background -= 1;
+  while (waiting.length && active < config.JEV_CONCURRENCY && background < backgroundLimit()) {
+    active += 1;
+    background += 1;
+    waiting.shift()();
+  }
 };
+/** How the places are being used, for a health page and for tests. */
+export const jevSlots = () => ({ active, background, waiting: waiting.length, reservedForLive: config.JEV_CONCURRENCY - backgroundLimit() });
 
 /** What a request cost: as OpenRouter reports it, or from the tokens Jev read. Output is free. */
 export const jevCost = (usage) => {
@@ -114,6 +128,7 @@ export async function ask(state, questions, { retries = 3, model = config.JEV_MO
      it is answered "busy" at once, and the call goes on without it. */
   if (wait) await acquire();
   else if (!tryAcquire()) throw new JevError(503, 'busy');
+  const heldBackground = !!wait;
   try {
     for (let attempt = 0; ; attempt += 1) {
       const started = Date.now();
@@ -160,7 +175,7 @@ export async function ask(state, questions, { retries = 3, model = config.JEV_MO
       };
     }
   } finally {
-    release();
+    release(heldBackground);
   }
 }
 

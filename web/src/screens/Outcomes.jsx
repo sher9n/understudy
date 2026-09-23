@@ -58,7 +58,7 @@ export default function Outcomes({ w }) {
         </div>
         <div className="cbody">
           <div className="tiles otiles">
-            <Tile k="Worked" v={o.rate === null ? '–' : pct(o.rate, 1)}
+            <Tile k="Worked" v={o.rate === null ? 'not yet' : pct(o.rate, 1)}
               s={judged ? `of ${num(judged)} calls old enough to tell` : 'no calls old enough yet'} tone="good" />
             <Tile k="A problem was seen" v={num(o.problem)} s={o.problem ? 'the latest are listed below, with why' : 'none in this window'} tone={o.problem ? 'bad' : ''} />
             <Tile k="Confirmed as working" v={num(o.confirmed)} s="a tool that worked, a conversation that moved on, or your report" />
@@ -242,7 +242,7 @@ requests.post("${o.endpoint}",
             ))}
             <button className="minig ocopy" onClick={() => navigator.clipboard?.writeText(code).catch(() => {})}>Copy</button>
           </div>
-          <pre className="ocode"><code>{code}</code></pre>
+          <pre className="ocode" tabIndex={0} role="region" aria-label="Code to copy"><code>{code}</code></pre>
         </div>
       )}
     </div>
@@ -261,9 +261,9 @@ function Tasks({ t }) {
       <div className="cbody">
         <div className="tiles otiles">
           <Tile k="Tasks" v={num(ov.tasks)} s="in the last 30 days" />
-          <Tile k="Steps, typically" v={ov.avgSteps === null ? '–' : ov.avgSteps.toFixed(1)} s="calls per task" />
-          <Tile k="A whole task costs" v={ov.avgCost === null ? '–' : usd(ov.avgCost)} s="on average, every step" />
-          <Tile k="Worked" v={ov.rate === null ? '–' : pct(ov.rate, 0)} s={ov.known ? `of ${num(ov.known)} tasks, judged by how each one ended` : 'judged by how each task ended'} />
+          <Tile k="Steps, typically" v={ov.avgSteps === null ? 'not yet' : ov.avgSteps.toFixed(1)} s="calls per task" />
+          <Tile k="A whole task costs" v={ov.avgCost === null ? 'not yet' : usd(ov.avgCost)} s="on average, every step" />
+          <Tile k="Worked" v={ov.rate === null ? 'not yet' : pct(ov.rate, 0)} s={ov.known ? `of ${num(ov.known)} tasks, judged by how each one ended` : 'judged by how each task ended'} />
         </div>
         <div className="tgrid">
           <div>

@@ -25,14 +25,16 @@ export function simulateCascade(calls, { thresholds = THRESHOLDS, checkCost = ()
     const latency = [];
     const ttft = [];
     const served = [];
+    const scores = [];
     calls.forEach((c, i) => {
       refCost += c.ref.cost;
       const passes = c.ok && c.check && c.check.structureOk && Number(c.check.p) >= t;
-      const spentCheck = c.ok && c.check?.structureOk ? checkCost(i) : 0;
-      const waitedCheck = c.ok && c.check?.structureOk ? checkMs(i) : 0;
+      const spentCheck = c.ok && c.check?.structureOk ? checkCost(c, i) : 0;
+      const waitedCheck = c.ok && c.check?.structureOk ? checkMs(c, i) : 0;
       const first = c.cost || 0;
       if (passes) {
         sum += c.score;
+        scores.push(c.score);
         cost += first + spentCheck;
         latency.push((c.latency || 0) + waitedCheck);
         ttft.push((c.latency || 0) + waitedCheck);
@@ -41,6 +43,7 @@ export function simulateCascade(calls, { thresholds = THRESHOLDS, checkCost = ()
         escalated += 1;
         // the customer's model's own answer: as far from its other answer as it ever is
         sum += c.ref.noise;
+        scores.push(c.ref.noise);
         cost += first + spentCheck + c.ref.cost;
         const before = (c.ok ? c.latency || 0 : c.latency || 0) + waitedCheck;
         latency.push(before + (c.ref.latency || 0));
@@ -59,6 +62,7 @@ export function simulateCascade(calls, { thresholds = THRESHOLDS, checkCost = ()
       latency,
       ttft,
       served,
+      scores,
     };
   });
 }
@@ -78,16 +82,19 @@ export function simulateRouter(calls, { thresholds = THRESHOLDS } = {}) {
     let toStrong = 0;
     const latency = [];
     const ttft = [];
+    const scores = [];
     for (const c of calls) {
       refCost += c.ref.cost;
       if (c.p >= t) {
         sum += c.ok ? c.score : 1;
+        scores.push(c.ok ? c.score : 1);
         cost += c.cost || 0;
         latency.push(c.latency || 0);
         ttft.push(c.ttft ?? c.latency ?? 0);
       } else {
         toStrong += 1;
         sum += c.ref.noise;
+        scores.push(c.ref.noise);
         cost += c.ref.cost;
         latency.push(c.ref.latency || 0);
         ttft.push(c.ref.ttft ?? c.ref.latency ?? 0);
@@ -95,7 +102,7 @@ export function simulateRouter(calls, { thresholds = THRESHOLDS } = {}) {
     }
     const n = calls.length;
     return { threshold: t, gap: n ? (sum / n) * 100 : 100, escalated: n ? toStrong / n : 1, cost, refCost,
-      ratio: refCost > 0 ? cost / refCost : null, latency, ttft };
+      ratio: refCost > 0 ? cost / refCost : null, latency, ttft, scores };
   });
 }
 
@@ -114,4 +121,46 @@ export function bestOf(readings, { floor, reviewBand = 1.25, fast = () => true }
   const near = priced.filter((r) => r.gap <= floor * reviewBand && fast(r)).sort((a, b) => a.gap - b.gap || a.ratio - b.ratio);
   if (near.length) return { ...near[0], inside: false, near: true };
   return { ...[...readings].sort((a, b) => a.gap - b.gap)[0], inside: false };
+}
+
+/**
+ * A threshold chosen on the very calls it is then scored on reads better than it is. Cross-fitting
+ * chooses it on every fold but one and scores that one, so the pooled score is the score of calls
+ * the choice never saw. `readingsOf(calls)` returns one reading per threshold for a set of calls;
+ * `pick(readings)` chooses one. Returns the pooled held-out reading at the thresholds chosen, and
+ * the threshold chosen on everything (the one to serve with).
+ */
+export function crossFit(calls, readingsOf, pick, { folds = 5 } = {}) {
+  const n = calls.length;
+  const k = Math.max(2, Math.min(folds, n));
+  let sum = 0;
+  let cost = 0;
+  let refCost = 0;
+  let escalated = 0;
+  const latency = [];
+  const ttft = [];
+  const scores = [];
+  const chosen = [];
+  for (let f = 0; f < k; f += 1) {
+    const test = calls.filter((_, i) => i % k === f);
+    const train = calls.filter((_, i) => i % k !== f);
+    if (!test.length || !train.length) continue;
+    const t = pick(readingsOf(train)).threshold;
+    chosen.push(t);
+    const r = readingsOf(test).find((x) => x.threshold === t) || readingsOf(test)[0];
+    sum += (r.gap / 100) * test.length;
+    cost += r.cost;
+    refCost += r.refCost;
+    escalated += r.escalated * test.length;
+    latency.push(...r.latency);
+    ttft.push(...r.ttft);
+    scores.push(...(r.scores || []));
+  }
+  const all = pick(readingsOf(calls));
+  return {
+    heldOut: { gap: n ? (sum / n) * 100 : 100, cost, refCost, ratio: refCost > 0 ? cost / refCost : null,
+      escalated: n ? escalated / n : 1, latency, ttft, scores, thresholds: chosen },
+    threshold: all.threshold,
+    inSample: all,
+  };
 }

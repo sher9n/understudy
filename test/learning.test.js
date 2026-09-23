@@ -75,6 +75,137 @@ test('experiments go mostly to the candidate most likely to be best', () => {
   close(shares.get('unknown'), 1 - 0.98 ** 3, 0.02, 'something barely known still gets tried');
 });
 
+test('the fair record reads every strategy over the same traffic: each task weighted once by its chance, decayed by age', async () => {
+  const { combineDays, fairRecord } = await import('../src/learn/fair.js');
+  // one day's sums, as the database adds them up, from tasks { p, steps, worked (steps that worked), ok, cost }
+  const day = (ageDays, tasks) => {
+    const d = { ageDays, tasks: tasks.length, n: 0, w: 0, ws: 0, q: 0, ok: 0, wok: 0, wcost: 0 };
+    for (const t of tasks) {
+      const w = 1 / t.p;
+      const ok = t.ok ?? t.steps;
+      d.n += t.steps;
+      d.w += w;
+      d.ws += (w * t.worked) / t.steps;
+      d.q += w * w;
+      d.ok += ok;
+      d.wok += w * ok;
+      d.wcost += w * (t.cost ?? 0);
+    }
+    return d;
+  };
+  const many = (k, t) => Array.from({ length: k }, (_, i) => (typeof t === 'function' ? t(i) : t));
+  const prior = { mean: 0.9, strength: 4 };
+  // equal chances: the plain share, every task a whole piece of evidence
+  const plain = fairRecord(combineDays([day(0, many(100, (i) => ({ p: 0.5, steps: 1, worked: i < 90 ? 1 : 0 })))]), { prior });
+  close(plain.liveRate, 0.9, 1e-12, 'ninety of a hundred');
+  assert.equal(plain.nEff, 100);
+  assert.equal(plain.tasks, 100);
+  close(plain.a, 3.6 + 90, 1e-9, 'the prior and the ninety');
+  /* A day on which the customer's own model answered ninety five calls in a hundred, and another on which
+     it answered one in a hundred: each day stands for its whole traffic, so the second counts as much as
+     the first however few calls it had. Pooled by count, the first day's calls outvoted the second's. */
+  const rollout = day(3, many(950, (i) => ({ p: 0.95, steps: 1, worked: i % 100 === 0 ? 0 : 1 })));
+  const after = day(3, many(10, (i) => ({ p: 0.01, steps: 1, worked: i < 6 ? 1 : 0 })));
+  const both = fairRecord(combineDays([rollout, after]), { prior });
+  close(both.liveRate, (940 / 950 + 0.6) / 2, 1e-9, 'the two days, each as the traffic it stands for');
+  assert.ok(both.nEff < 45, `and worth far fewer than its 960 calls, since ten of them stand for a whole day: ${both.nEff}`);
+  // the steps of one conversation are one piece of evidence, and one long task does not outweigh many short ones
+  const task = fairRecord(combineDays([day(0, [{ p: 0.02, steps: 40, worked: 40 }])]), { prior });
+  assert.deepEqual([task.nLive, task.tasks, task.nEff], [40, 1, 1], 'forty steps, one task, worth one');
+  const mixed = fairRecord(combineDays([day(0, [{ p: 0.25, steps: 40, worked: 0 }, ...many(40, { p: 0.25, steps: 1, worked: 1 })])]), { prior });
+  close(mixed.liveRate, 40 / 41, 1e-12, 'one failed task of forty steps beside forty that worked: one task in forty one');
+  assert.equal(mixed.nEff, 41);
+  close(fairRecord(combineDays([day(0, [{ p: 0.5, steps: 4, worked: 3 }])]), { prior }).liveRate, 0.75, 1e-12,
+    'a task is as good as the share of its steps that worked');
+  // a day a half-life old counts half
+  const aged = fairRecord(combineDays([day(0, many(50, { p: 0.5, steps: 1, worked: 1 })), day(14, many(50, { p: 0.5, steps: 1, worked: 0 }))],
+    { halfLifeDays: 14 }), { prior });
+  close(aged.liveRate, 1 / 1.5, 1e-12, 'today at full weight, a fortnight ago at half');
+  // what a call costs, over the calls that were answered: a failed try costs nothing and says nothing about the price
+  const priced = fairRecord(combineDays([day(0, [
+    ...many(90, { p: 0.98, steps: 1, worked: 1, cost: 0.0004 }),
+    ...many(10, { p: 0.98, steps: 1, worked: 0, ok: 0, cost: 0 }),
+  ])]), { prior });
+  close(priced.costPerCall, 0.0004, 1e-15, 'the price of an answered call');
+  assert.equal(priced.okCalls, 90);
+  // nothing at all: the prior alone, and no rate
+  const none = fairRecord(combineDays([]), { prior });
+  assert.deepEqual([none.liveRate, none.nEff, none.tasks, none.costPerCall], [null, 0, 0, null]);
+  close(none.mean, 3.6 / (3.6 + 0.5), 1e-12, 'held at the workload\'s own rate, never surer than half a failure allows');
+});
+
+test('looked at every hour for a year, a comparison spends its chance of being wrong over time, and still switches back what is worse', async () => {
+  const { alphaAt, DEFAULTS } = await import('../src/learn/decide.js');
+  const { liveRates } = await import('../src/learn/horizon.js');
+  // half of it in the first window, a sixth in the next, and never more than all of it however long it runs
+  close(alphaAt(0), DEFAULTS.alpha / 2, 1e-15, 'the first window');
+  close(alphaAt(DEFAULTS.spendDays - 1), DEFAULTS.alpha / 2, 1e-15, 'still the first');
+  close(alphaAt(DEFAULTS.spendDays), DEFAULTS.alpha / 6, 1e-15, 'the second');
+  let total = 0;
+  for (let k = 0; k < 100000; k += 1) total += alphaAt(k * DEFAULTS.spendDays);
+  assert.ok(total <= DEFAULTS.alpha && total > 0.9999 * DEFAULTS.alpha, `${total}`);
+  assert.equal(alphaAt(400, { spendDays: 0 }), DEFAULTS.alpha, 'with no spending, the whole of it at every look');
+  /* A year of hourly looks on the record the product keeps (src/learn/horizon.js): a thousand calls a day,
+     two in a hundred tried another way, a runner-up exactly at the tolerance, two points worse than what
+     serves. Seeded, so these are the numbers measured: without spending, a decayed record that has
+     stopped growing kept being looked at, and the runner-up was promoted in 5 of 150 years (more than the
+     half of alpha its kind of evidence may spend) and set aside, also wrongly, in 2 more. */
+  const year = { volume: 1000, share: 0.02, days: 365 };
+  const boundary = { ...year, rates: { base: 0.97, serving: 0.97, runner: 0.95 } };
+  const unspent = liveRates({ ...boundary, decideOpts: { spendDays: 0 } }, { trials: 150 });
+  assert.equal(Math.round(unspent.promote * 150), 5);
+  assert.ok(unspent.promote > DEFAULTS.alpha / 2, `${unspent.promote}`);
+  const spent = liveRates(boundary, { trials: 150 });
+  assert.equal(Math.round((spent.promote + spent.rest) * 150), 0, 'spent over time: never, in the same 150 years');
+  // and a strategy three points worse than the customer's own model is still switched back, nearly always within the year
+  const worse = liveRates({ ...year, rates: { base: 0.97, serving: 0.94, runner: null } }, { trials: 150, byDays: [180] });
+  assert.ok(worse.revert >= 0.98, `${worse.revert}`);
+  assert.ok(worse.by[180].revert >= 0.96, `${worse.by[180].revert}`);
+});
+
+test('the same evidence decides in a young comparison and waits in an old one, which has spent more of its chance', async () => {
+  const { decide, DEFAULTS } = await import('../src/learn/decide.js');
+  const rec = (n, s) => posterior({ live: [{ ageDays: 0, n, s }] }, { prior: { mean: 0.97, strength: 4 }, quantiles: false });
+  const base = { id: 'b', fair: rec(400, 392) };
+  // the fewest failures of what serves that switch it back in a young comparison
+  let failed = null;
+  for (let k = 8; k < 200 && failed === null; k += 1) {
+    const young = decide({ serving: { id: 's', fair: rec(600, 600 - k), ageDays: 1 }, base: { ...base, ageDays: 1 }, runners: [], detection: 1 });
+    if (young[0]?.kind === 'revert') failed = k;
+  }
+  assert.ok(failed, 'some number of failures is enough');
+  const serving = { id: 's', fair: rec(600, 600 - failed) };
+  assert.equal(decide({ serving: { ...serving, ageDays: 1 }, base: { ...base, ageDays: 1 }, runners: [], detection: 1 })[0]?.kind, 'revert');
+  assert.deepEqual(decide({ serving: { ...serving, ageDays: 4 * DEFAULTS.spendDays }, base: { ...base, ageDays: 400 }, runners: [], detection: 1 }), [],
+    'a year in, the same difference is not yet enough');
+  // a comparison is as old as the younger of its two records
+  assert.equal(decide({ serving: { ...serving, ageDays: 1 }, base: { ...base, ageDays: 400 }, runners: [], detection: 1 })[0]?.kind, 'revert');
+  // records that do not say how old they are fall back to how long the workload has been learning
+  assert.deepEqual(decide({ serving, base, runners: [], detection: 1, days: 400 }), []);
+  assert.equal(decide({ serving, base, runners: [], detection: 1, days: 1 })[0]?.kind, 'revert');
+});
+
+test('careful stays at the share it promises, normal grows on a quiet workload, and "never switch" tries nothing unless asked', async () => {
+  const { exploreOf } = await import('../src/learn/explore.js');
+  const { default: config } = await import('../src/config.js');
+  // careful: never more than its share, whatever the volume, which is what the page says it is
+  for (const perDay of [5, 100, 1000, 100000]) {
+    assert.equal(exploreOf({ explore_mode: 'careful' }, { perDay }).share, config.EXPLORE_SHARE_CAREFUL, `careful at ${perDay} calls a day`);
+  }
+  // normal: grows until the customer's own model answers EXPLORE_YARDSTICK_PER_DAY a day, never past EXPLORE_SHARE_MAX
+  assert.equal(exploreOf({ explore_mode: 'normal' }, { perDay: 100000 }).share, config.EXPLORE_SHARE_NORMAL, 'a busy workload keeps the base share');
+  assert.equal(exploreOf({ explore_mode: 'normal' }, { perDay: 10 }).share, config.EXPLORE_SHARE_MAX, 'a very quiet one stops at the most there is');
+  const mid = (2 * config.EXPLORE_YARDSTICK_PER_DAY) / 0.07;
+  close(exploreOf({ explore_mode: 'normal' }, { perDay: mid }).share, 0.07, 1e-12, 'grown to what the yardstick needs');
+  // what each way of switching implies where nobody chose
+  assert.equal(exploreOf({ optimize_mode: 'auto' }).mode, 'careful');
+  assert.equal(exploreOf({ optimize_mode: 'ask' }).mode, 'shadow');
+  const never = exploreOf({ optimize_mode: 'off' }, { perDay: 100 });
+  assert.deepEqual([never.mode, never.live, never.share], ['off', false, 0], 'a workload that never switches tries nothing by itself');
+  // a person can still choose experiments for one
+  assert.equal(exploreOf({ optimize_mode: 'off', explore_mode: 'careful' }).mode, 'careful');
+});
+
 test('the split of one call: the yardstick, the candidates, and what serves', () => {
   const serving = { id: 's', post: { a: 90, b: 10 } };
   const baseline = { id: 'b', post: { a: 95, b: 5 } };

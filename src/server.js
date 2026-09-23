@@ -4,20 +4,26 @@ import express from 'express';
 import config, { canRoute } from './config.js';
 import { db, now } from './db/index.js';
 import migrate from './db/migrate.js';
-import { handle, startJobs, stopJobs, requeueStale, enqueue } from './jobs.js';
+import { handle, startJobs, stopJobs, requeueStale, enqueue, releaseMine } from './jobs.js';
 import { fetchModels, saveCatalog, fetchZdrEndpoints, saveZdrEndpoints } from './openrouter.js';
 import { forgetFacts } from './models/facts.js';
 import { syncArena } from './models/arena.js';
 import { planFor, onMissingFits } from './eval/plan.js';
 import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './alerts.js';
+
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
-import { runTopUp } from './billing.js';
-import { revert, watchLive } from './eval/promote.js';
+import { trueUp } from './trueup.js';
+import { parse as parseRoute } from '../web/src/router.js';
+import { nudgeForCatalog } from './eval/schedule.js';
+import { runTopUp, giveUpTopUp, reconcileLimitTotals, sweepHolds, sweepTopUps } from './billing.js';
+import { pruneLimits } from './limits.js';
+import { revert, watchLive, watchCatalogue } from './eval/promote.js';
 import { onFollowUp, readFollowUp } from './learn/outcomes.js';
 import { onChoose, onServed } from './learn/choose.js';
 import { chooseExplore, afterServed, reviewAll } from './learn/explore.js';
+import { gradeAll } from './learn/grade.js';
 import { ask as askJev, jevUsable } from './jev.js';
 import api from './api.js';
 import v1 from './proxy.js';
@@ -35,6 +41,9 @@ await settleOutcomes();
 handle('eval_run', async ({ workloadId, trigger }, job) =>
   await runEvaluation(workloadId, { trigger, jobId: job?.id ?? null }));
 
+// a call charged from its tokens, corrected to what OpenRouter recorded for it (see trueup.js)
+handle('true_up', async (payload, job) => await trueUp(payload, job));
+
 handle('catalog_sync', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
   // the next reading is booked first, so one that fails still leaves the next one coming
@@ -51,8 +60,43 @@ handle('catalog_sync', async () => {
     });
     throw err;
   }
+  const before = await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all();
+  /* A list that comes back empty, or less than half as long as the one we have, is a fault on the way
+     rather than a catalogue that shrank: saved, it would stop routing every model it left out until the
+     next reading, six hours on. It is kept out, we are told, and the reading is tried again soon. */
+  /* A shorter list that comes back the same twice within a few hours is the catalogue, and is taken: once
+     is a fault on the way, twice is not. The first sighting is kept in the database, so a restart or
+     another process reading it next still counts it. */
+  const shrunk = list.length > 0 && before.length >= 20 && list.length < before.length / 2;
+  let seenBefore = false;
+  if (shrunk) {
+    const seen = await db.prepare(`SELECT synced_at, note FROM fact_sync WHERE source = 'catalog_shrink'`).get();
+    seenBefore = !!seen && now() - Number(seen.synced_at) < 3 * 3600000
+      && Math.abs(Number(seen.note) - list.length) <= Math.max(2, list.length * 0.05);
+  }
+  if (!list.length || (shrunk && !seenBefore)) {
+    if (shrunk) {
+      await db.prepare(`INSERT INTO fact_sync (source, synced_at, note) VALUES ('catalog_shrink', ?, ?)
+          ON CONFLICT (source) DO UPDATE SET synced_at = excluded.synced_at, note = excluded.note`).run(now(), String(list.length));
+    }
+    reportCallFailure({ kind: 'model catalogue', status: 0,
+      message: `the model list came back with ${list.length} models against ${before.length}; kept the list we have` });
+    await enqueue('catalog_sync', {}, { runAfter: now() + 15 * 60000, unique: true, sooner: true });
+    return { ok: false, note: `refused a list of ${list.length} models` };
+  }
   const n = await saveCatalog(list);
+  // any list taken clears a sighting: a shorter list seen once, then a full one, is not a shrink seen twice
+  await db.prepare(`DELETE FROM fact_sync WHERE source = 'catalog_shrink'`).run();
+  if (shrunk) {
+    console.log(JSON.stringify({ at: new Date().toISOString(), kind: 'catalog', note: `took a list of ${list.length} models against ${before.length}, seen twice` }));
+    // read again soon, so a shrink taken by mistake is put right within the half hour
+    await enqueue('catalog_sync', {}, { runAfter: now() + 30 * 60000, unique: true, sooner: true });
+  }
   forgetFacts();
+  /* A model worth trying that was not there before, or one serving somebody that got dearer, brings
+     the next measurement of the workloads it could matter to forward (see src/eval/schedule.js). */
+  const moved = before.length ? await nudgeForCatalog(before, list) : null;
+  if (moved?.nudged) console.log(JSON.stringify({ at: new Date().toISOString(), kind: 'catalog', ...moved }));
   // which providers keep nothing depends on the models, so it is read again straight after
   await enqueue('model_health', {}, { unique: true, sooner: true });
   return { ok: true, models: n };
@@ -67,10 +111,17 @@ handle('model_health', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
   await enqueue('model_health', {}, { runAfter: now() + config.HEALTH_TTL_MIN * 60000, unique: true });
   const rows = await fetchZdrEndpoints();
-  if (rows.length) {
-    await saveZdrEndpoints(rows);
-    forgetFacts();
+  // the same guard as the catalogue: an empty or much shorter list is a fault, not news
+  const had = Number((await db.prepare('SELECT COUNT(*) AS n FROM model_endpoints').get())?.n || 0);
+  if (!rows.length || (had >= 20 && rows.length < had / 2)) {
+    if (had) {
+      reportCallFailure({ kind: 'provider list', status: 0,
+        message: `the list of providers that keep nothing came back with ${rows.length} against ${had}; kept the list we have` });
+    }
+    return { ok: false, providers: rows.length };
   }
+  await saveZdrEndpoints(rows);
+  forgetFacts();
   return { ok: true, providers: rows.length };
 });
 
@@ -123,7 +174,18 @@ onMissingFits((workloadId) => {
   void enqueue('model_fit', { workloadId }, { unique: true }).catch(() => {});
 });
 
-handle('topup', async ({ workspaceId }) => await runTopUp(workspaceId));
+/* A top up that keeps failing for a reason that is not the card (Stripe down, our key refused) used to
+   end after five tries in silence, with top up still on and the low balance email held back because of
+   it, so calls simply stopped at zero. The last try tells the owner, and us. */
+handle('topup', async ({ workspaceId }, job) => {
+  try {
+    return await runTopUp(workspaceId, { attempt: Math.max(0, Number(job?.attempts || 1) - 1), jobId: job?.id ?? null });
+  } catch (err) {
+    // the last try: automatic top up is paused and its owner told, once for this low balance
+    if (Number(job?.attempts || 0) >= 5) await giveUpTopUp(workspaceId, err);
+    throw err;
+  }
+});
 
 /* Workloads that existed before calls were grouped by shape.
  *
@@ -183,6 +245,13 @@ handle('backfill_shapes', async () => {
 handle('name_workload', async ({ workloadId }) => {
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
   if (!w || w.named_at) return { ok: true, skipped: true };
+  /* The same prompt on another model is named after the workload it was first seen in, with its model
+     beside it, so the two read as the pair they are. It waits for that one's name. */
+  if (w.sibling_of) {
+    const root = await db.prepare('SELECT slug, named_at FROM workloads WHERE id = ?').get(w.sibling_of);
+    if (!root?.named_at) return { ok: true, skipped: 'waiting for its sibling' };
+    return { ok: true, now: await nameSibling(w, root.slug) };
+  }
   if (!canRoute()) return { ok: true, skipped: 'no provider' };
 
   /* The model we chose for this, if we stock it, and otherwise the cheapest real one. A
@@ -256,8 +325,21 @@ handle('name_workload', async ({ workloadId }) => {
   const finalSlug = taken ? `${named}-${w.id.slice(-4)}` : named;
   await db.prepare('UPDATE workloads SET slug = ?, named_at = ?, name_source = ?, updated_at = ? WHERE id = ?')
     .run(finalSlug, now(), 'model', now(), w.id);
+  // and the same prompt on other models follows the name
+  for (const sib of await db.prepare('SELECT * FROM workloads WHERE sibling_of = ?').all(w.id)) await nameSibling(sib, finalSlug);
   return { ok: true, was: w.slug, now: finalSlug, model };
 });
+
+/* A sibling's name: its first workload's, and its model's. */
+async function nameSibling(w, rootSlug) {
+  const base = slug(`${rootSlug}-${String(w.reference_model || '').split('/').pop()}`);
+  const taken = await db.prepare('SELECT 1 FROM workloads WHERE workspace_id = ? AND slug = ? AND id != ?')
+    .get(w.workspace_id, base, w.id);
+  const finalSlug = taken ? `${base}-${w.id.slice(-4)}` : base;
+  await db.prepare('UPDATE workloads SET slug = ?, named_at = ?, name_source = ?, updated_at = ? WHERE id = ?')
+    .run(finalSlug, now(), 'sibling', now(), w.id);
+  return finalSlug;
+}
 
 /* Learning from live calls: a small share of a switched workload's calls tries something else,
    within the workload's own limits, and a few answered calls are answered again in the background
@@ -269,7 +351,9 @@ onServed((info) => afterServed(info));
 handle('learn', async () => {
   // the next one is booked first, so one that fails still leaves the next one coming
   await enqueue('learn', {}, { runAfter: now() + 3600000, unique: true });
-  return { ok: true, ...(await reviewAll()) };
+  // a few live answers read first, so the review decides on the newest grades
+  const graded = await gradeAll();
+  return { ok: true, graded: graded.graded, ...(await reviewAll()) };
 });
 
 /** Content ages out; the numbers the charts need do not. */
@@ -281,10 +365,18 @@ handle('purge', async () => {
      those workspaces are skipped entirely: nothing of theirs is ever blanked. */
   /* Finished jobs are kept a week, to see what ran, and no longer: some carry a customer's text, such
      as a follow-up waiting to be read, which must not outlive the workspace's own retention. */
-  const jobsGone = (await db.prepare(`DELETE FROM jobs WHERE status IN ('done', 'failed') AND created_at < ?`)
+  const jobsGone = (await db.prepare(`DELETE FROM jobs WHERE status IN ('done', 'failed', 'cancelled') AND created_at < ?`)
     .run(now() - 7 * 86400000)).changes;
+  /* Caches of judgements and model readings are only ever read while young (JUDGE_CACHE_DAYS,
+     FIT_TTL_DAYS), and a judgement keeps figures taken from answers, so neither outlives its use. */
+  const judged = (await db.prepare('DELETE FROM judge_cache WHERE created_at < ?')
+    .run(now() - config.JUDGE_CACHE_DAYS * 86400000)).changes;
+  await db.prepare('DELETE FROM model_fits WHERE judged_at < ?').run(now() - config.FIT_TTL_DAYS * 86400000);
+  await pruneLimits();
+  await sweepHolds();
   let a = 0;
   let b = 0;
+  let c = 0;
   const spaces = await db.prepare('SELECT id, retention_days FROM workspaces').all();
   for (const ws of spaces) {
     if (!ws.retention_days) continue;
@@ -298,8 +390,21 @@ handle('purge', async () => {
         WHERE content_purged_at IS NULL AND run_id IN (
           SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`)
       .run(now(), ws.id, cutoff)).changes;
+    /* Every other copy of what a call said or what a model answered to it goes by the same clock:
+       the answers a measurement kept, the answers kept to be used again, and the instruction a
+       workload shows once no call of its own still holds it. */
+    c += (await db.prepare(
+      `UPDATE eval_replays SET answer = NULL WHERE answer IS NOT NULL AND run_id IN (
+          SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`).run(ws.id, cutoff)).changes;
+    c += (await db.prepare(
+      `DELETE FROM replay_cache WHERE created_at < ? AND call_id IN (
+          SELECT id FROM calls WHERE workspace_id = ? AND created_at < ?)`).run(cutoff, ws.id, cutoff)).changes;
+    c += (await db.prepare(
+      `UPDATE workloads w SET sample_prompt = NULL WHERE w.workspace_id = ? AND w.sample_prompt IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM calls k WHERE k.workload_id = w.id AND k.content_purged_at IS NULL
+                            AND k.request_json IS NOT NULL)`).run(ws.id)).changes;
   }
-  return { ok: true, calls: a, samples: b, jobs: jobsGone };
+  return { ok: true, calls: a, samples: b, other: c, judgements: judged, jobs: jobsGone };
 });
 
 /* Measuring again, on the workspace's own schedule.
@@ -315,6 +420,10 @@ handle('recheck', async () => {
   /* A measurement a deploy or a restart left saying "running" is closed here too, not only when
      somebody opens its page, so it cannot hold a workload in "Measuring" that nobody visits. */
   await closeAbandoned();
+  // the spending limits' running totals, read again from the ledger (see reconcileLimitTotals)
+  await reconcileLimitTotals().catch((err) => console.error(`reconciling limit totals failed: ${err?.message || err}`));
+  // automatic top ups a low balance is still waiting on, booked again (see nudgeTopUp in billing.js)
+  await sweepTopUps().catch((err) => console.error(`booking waiting top ups failed: ${err?.message || err}`));
   await settleOutcomes();
   /* A workload saying "Ready to optimize" or "Nothing cleared yet" is read again from what its
      measurements found. The code before this set the first from whether a bar had ever been
@@ -326,16 +435,22 @@ handle('recheck', async () => {
   /* A switch that has started failing calls, or slowing down, under the customer's own load is
      undone now rather than at the next measurement. */
   await watchLive();
+  // and one that can no longer be served at all goes back before its calls start failing
+  await watchCatalogue();
   const spaces = await db.prepare('SELECT id, measure_every_days FROM workspaces').all();
   let queued = 0;
   for (const ws of spaces) {
     const days = ws.measure_every_days == null ? config.MEASURE_EVERY_DAYS : ws.measure_every_days;
     if (!days || days <= 0) continue;
+    /* Due by the workload's own schedule where it has one (spaced out while re-checks keep confirming,
+       brought forward by a change that could matter), otherwise by the workspace's rhythm. */
     const due = await db.prepare(
       `SELECT w.id FROM workloads w
         WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
-          AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?`)
-      .all(ws.id, now() - days * 86400000);
+          AND ((w.recheck_after IS NOT NULL AND w.recheck_after <= ?)
+            OR (w.recheck_after IS NULL
+                AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?))`)
+      .all(ws.id, now(), now() - days * 86400000);
     for (const w of due) {
       await enqueue('eval_run', { workloadId: w.id, trigger: 'automatic' }, { unique: true });
       queued += 1;
@@ -353,13 +468,40 @@ app.disable('x-powered-by');
 
 // Stripe needs the raw body, so it is mounted before the global json parser
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const { handleWebhook } = await import('./stripe-webhook.js');
-  return await handleWebhook(req, res);
+  /* Any failure answers 500, so Stripe tries again. Unwrapped, a database error before the handler's
+     own error handling left the request hanging until Stripe gave up on it. */
+  try {
+    const { handleWebhook } = await import('./stripe-webhook.js');
+    return await handleWebhook(req, res);
+  } catch (err) {
+    console.error(`stripe webhook failed: ${err?.message || err}`);
+    if (!res.headersSent) return res.status(500).send('webhook failed');
+    return undefined;
+  }
 });
 
 app.get('/health', async (_req, res) => res.json({
   ok: true, routing: canRoute(), models: (await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get()).n,
 }));
+
+/* One line for every customer call, every change made from a screen, and anything that failed, so the
+   deploy log says what the service is doing. The screens' own reads, which poll every few seconds,
+   are left out unless they fail. Never the body: it is the customer's content. */
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/v1') && !req.path.startsWith('/api')) return next();
+  const t0 = process.hrtime.bigint();
+  res.on('finish', () => {
+    const quietRead = req.path.startsWith('/api') && req.method === 'GET' && res.statusCode < 400;
+    if (quietRead || !config.REQUEST_LOGS) return;
+    const ms = Number((process.hrtime.bigint() - t0) / 1000000n);
+    console.log(JSON.stringify({
+      at: new Date().toISOString(), kind: 'request', method: req.method, path: req.path.replace(/[a-z]{2,5}_[a-z0-9]{8,}/g, ':id'),
+      status: res.statusCode, ms, ws: req.key?.workspace_id?.slice(-6) ?? req.workspace?.id?.slice(-6) ?? null,
+      call: res.getHeader('x-understudy-call-id') ?? null,
+    }));
+  });
+  return next();
+});
 
 // the customer's own traffic, authenticated by their key
 app.use('/v1', v1);
@@ -370,7 +512,14 @@ app.use('/api', api);
 const dist = path.resolve(process.cwd(), 'web/dist');
 if (fs.existsSync(dist)) {
   app.use(express.static(dist));
-  app.get(/^(?!\/(api|v1)\b).*/, (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+  /* Every address outside /api and /v1 gets the app, which draws the page, or its own "not found"
+     page for an address it has no page for. The status says the same as the page: 404 for an address
+     the app's own route table does not know, so a link checker or a search engine is told the truth
+     instead of being handed a page that says one thing with a status that says another. */
+  app.get(/^(?!\/(api|v1)\b).*/, (req, res) => {
+    const known = parseRoute(req.path).screen !== 'notfound';
+    res.status(known ? 200 : 404).sendFile(path.join(dist, 'index.html'));
+  });
 } else {
   app.get('/', (_req, res) => res.type('text/plain').send(
     'Understudy is running. The web build is missing: run `npm run build`.'));
@@ -381,11 +530,27 @@ if (fs.existsSync(dist)) {
    counts as one. Without this a thrown error is an unhandled rejection, which ends the
    process, so a single bad request would take the service down for everybody. */
 app.use((err, req, res, _next) => {
+  const machine = req.path.startsWith('/api') || req.path.startsWith('/v1');
+  /* A body that is not JSON, or is too big, is the request's problem, not ours: it is answered
+     with what is wrong, as a 400 or a 413, and nobody is paged about it. The copies example on the
+     Connect page, pasted with its placeholder in it, used to come back as a 500 "on our side". */
+  if (err?.type === 'entity.parse.failed' || err?.type === 'entity.too.large') {
+    if (res.headersSent) { res.end(); return; }
+    const status = err.type === 'entity.too.large' ? 413 : 400;
+    const message = status === 413
+      ? 'The request body is larger than we take. Send less at once.'
+      : `The request body is not valid JSON${err.message ? ` (${String(err.message).slice(0, 120)})` : ''}.`;
+    const body = req.path.startsWith('/v1') ? { error: { message, type: 'invalid_request_error' } } : { error: message };
+    res.status(status).json(body);
+    return;
+  }
   reportCrash({ where: `${req.method} ${req.path}`, err });
   if (res.headersSent) { res.end(); return; }
-  const machine = req.path.startsWith('/api') || req.path.startsWith('/v1');
-  if (machine) res.status(500).json({ error: { message: 'Something went wrong on our side.' } });
-  else res.status(500).type('text/plain').send('Something went wrong on our side.');
+  if (machine) {
+    // /api answers carry a plain message and /v1 answers the OpenAI shape, as every other answer does
+    if (req.path.startsWith('/v1')) res.status(500).json({ error: { message: 'Something went wrong on our side.', type: 'server_error' } });
+    else res.status(500).json({ error: 'Something went wrong on our side.' });
+  } else res.status(500).type('text/plain').send('Something went wrong on our side.');
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -411,13 +576,28 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
   await enqueue('learn', {}, { runAfter: now() + 10 * 60000, unique: true });
   startJobs();
+  /* A few minutes after boot, once the process a deploy replaced has stopped charging, the limit totals
+     are read again from the ledger, so a charge it made without moving them is counted. */
+  setTimeout(() => { reconcileLimitTotals().catch(() => {}); }, 3 * 60000).unref();
   const server = app.listen(config.PORT, () => {
     console.log(`Understudy on http://localhost:${config.PORT}`);
     console.log(`  routing: ${canRoute() ? 'ready' : 'no OPENROUTER_API_KEY, /v1 will answer 503'}`);
     console.log(`  alerts:  ${canAlert() ? `a failed call emails ${config.ALERT_EMAIL}`
       : 'nowhere to send (set RESEND_API_KEY and ALERT_EMAIL)'}`);
   });
-  const bye = async () => { await stopJobs(); await flushAllAlerts(); server.close(() => process.exit(0)); };
+  /* Stopping: no new work is claimed, measurements in flight are handed to the next process, alerts
+     are sent, and the process ends once open requests finish, or after a few seconds whatever they do,
+     so a measurement handed over is not also finished here. */
+  let leaving = false;
+  const bye = async () => {
+    if (leaving) return;
+    leaving = true;
+    await stopJobs();
+    await releaseMine().catch((err) => console.error(`handing measurements over failed: ${err?.message || err}`));
+    await flushAllAlerts().catch(() => {});
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
   process.on('SIGINT', bye);
   process.on('SIGTERM', bye);
 }

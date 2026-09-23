@@ -206,7 +206,8 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
                   ? ' Written answers cannot be compared word for word, so a judge also compares each pair.'
                   : ''}{' '}
                 You are charged for the calls made, not for answers reused from earlier
-                measurements{m.estimateUsd != null ? `, about ${usd(m.estimateUsd)} for this one` : ''}.
+                measurements{m.recordedShare > 0 ? ` or read from your own calls` : ''}{m.estimateUsd != null ? `, about ${usd(m.estimateUsd)} for this one, a second look at the winner included` : ''}.
+                {' '}<WorthLine m={m} />
               </p>
             ) : (
               <p className="mwhy cannot">{m.reason}</p>
@@ -231,10 +232,10 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
                 <button key={r.id} className={`mrow${on ? ' mshown' : ''}`}
                   aria-current={on ? 'true' : undefined}
                   onClick={() => onOpenRun(openRunId === r.id ? null : r.id)}>
-                  <span className="mwhen m">{timeIST(r.at)}</span>
+                  <span className="mwhen m">{timeIST(r.at)} IST</span>
                   <span className="mwhat">{whatHappened(r)}</span>
-                  <span className="mtrig m">{r.trigger === 'automatic' ? 'on schedule' : 'asked for'}</span>
-                  <span className="mspend m">{r.spend ? usd(r.spend) : '—'}</span>
+                  <span className="mtrig m">{r.trigger === 'manual' ? 'asked for' : r.trigger === 'first' ? 'first, by itself' : 'on schedule'}</span>
+                  <span className="mspend m">{r.spend ? usd(r.spend) : 'nothing spent'}</span>
                   <span className="mopen m">{on ? 'showing' : 'open'}</span>
                 </button>
               );
@@ -255,6 +256,30 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
 }
 
 const shortName = (m) => (m ? String(m).split('/').pop() : 'your model');
+
+/* Whether measuring this workload pays for itself, said with its numbers, and what that means for
+   the measurements nobody asks for. */
+function WorthLine({ m }) {
+  const w = m.worth;
+  if (!w || m.estimateUsd == null) return null;
+  const pays = w.worthIt !== false && m.estimateUsd <= w.budgetUsd;
+  const parts = [];
+  if (w.expectedMonthlyUsd > 0) parts.push(`It is expected to find about ${usd(w.expectedMonthlyUsd)} a month`);
+  else parts.push('It is not expected to find a saving from what is known about these models');
+  if (w.protectedMonthlyUsd > 0) parts.push(`and checks the ${usd(w.protectedMonthlyUsd)} a month the switch saves now`);
+  const said = `${parts.join(' ')}.`;
+  // said from the workspace's own schedule: one that measures only when asked never runs by itself
+  const scheduled = m.everyDays === undefined || m.everyDays === null || m.everyDays > 0;
+  const when = !scheduled
+    ? ' Your workspace measures only when you ask, so it runs when you press Measure now.'
+    : pays
+      ? ` That pays for it within ${w.paybackMonths} months, so it also runs on its schedule.`
+      : ` It would not pay for itself within ${w.paybackMonths} months, so it runs only when you ask; the schedule leaves it until it would.`;
+  const budget = m.optimizeBudget
+    ? ` ${usd(m.optimizeBudget.leftUsd)} of your ${usd(m.optimizeBudget.budgetUsd)} optimizing budget is left for the last thirty days.` : '';
+  const next = scheduled && m.nextAt && m.nextAt > Date.now() ? ` Next looked at by itself around ${timeIST(m.nextAt)} IST.` : '';
+  return <span className="mworth">{said}{when}{budget}{next}</span>;
+}
 
 const STOPPED = 'Stopped. You were charged only for the calls it made, and nothing was switched.';
 

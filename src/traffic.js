@@ -13,8 +13,8 @@ export async function addActivity(workspaceId, { kind, title, detail = null, wor
 }
 
 /** Find the workload this call belongs to, creating it the first time we see the shape. */
-export async function workloadFor(workspaceId, body) {
-  const workload = await matchWorkload(workspaceId, body);
+export async function workloadFor(workspaceId, body, { name = null } = {}) {
+  const workload = await matchWorkload(workspaceId, body, { name });
   /* A workload is only worth telling somebody about once it has been seen enough times to
      be a real part of their traffic. Announcing every one-off call would fill the feed with
      things that never happen again. */
@@ -51,7 +51,8 @@ export async function recordCall({
   id: givenId = null, workspaceId, workloadId = null, source, requestedModel = null, servedModel = null,
   statusCode = null, promptTokens = 0, completionTokens = 0, costUsd = 0, chargedUsd = 0,
   latencyMs = null, ttftMs = null, request = null, response = null, ref = null,
-  armId = null, propensity = null, explored = null, escalated = null, check = null,
+  armId = null, propensity = null, explored = null, escalated = null, check = null, cachedTokens = null, hinted = false,
+  costEstimated = false, generationId = null,
 }) {
   /* A call the customer made, routed or copied, carries its fingerprints: the request itself (the
      same request sent again is a retry), and the conversation before and after it (a follow-up
@@ -62,6 +63,9 @@ export async function recordCall({
     id: givenId || id('call'), workspace_id: workspaceId, workload_id: workloadId, source,
     requested_model: requestedModel, served_model: servedModel, status_code: statusCode,
     prompt_tokens: promptTokens | 0, completion_tokens: completionTokens | 0,
+    // the prompt tokens the provider had cached, where it said; from the answer itself when not given
+    cached_tokens: cachedTokens ?? (Number.isFinite(Number(response?.usage?.prompt_tokens_details?.cached_tokens))
+      ? Number(response.usage.prompt_tokens_details.cached_tokens) : null),
     cost_usd: round8(costUsd), charged_usd: round8(chargedUsd), latency_ms: latencyMs, ttft_ms: ttftMs,
     request_json: request ? JSON.stringify(request) : null,
     response_json: response ? JSON.stringify(response) : null,
@@ -73,17 +77,22 @@ export async function recordCall({
     arm_id: armId, propensity, explored: explored === null ? null : (explored ? 1 : 0),
     escalated: escalated === null ? null : (escalated ? 1 : 0),
     check_json: check ? JSON.stringify(check) : null,
+    hinted: hinted ? 1 : null,
+    // worked out from tokens because the provider did not say, until its own record corrects it
+    // 1: to be corrected from the provider's record; 2: an estimate that stands (see trueup.js)
+    cost_estimated: costEstimated === 2 ? 2 : costEstimated ? 1 : 0,
+    generation_id: generationId ? String(generationId).slice(0, 120) : null,
   };
   row.task_id = customer ? row.id : null;
   row.step = customer ? 1 : null;
   await db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model,
       status_code, prompt_tokens, completion_tokens, cost_usd, charged_usd, latency_ms, ttft_ms,
       request_json, response_json, created_at, ref, request_hash, before_hash, after_hash, task_id, step,
-      arm_id, propensity, explored, escalated, check_json)
+      arm_id, propensity, explored, escalated, check_json, cached_tokens, hinted, cost_estimated, generation_id)
       VALUES (@id, @workspace_id, @workload_id, @source, @requested_model, @served_model,
       @status_code, @prompt_tokens, @completion_tokens, @cost_usd, @charged_usd, @latency_ms, @ttft_ms,
       @request_json, @response_json, @created_at, @ref, @request_hash, @before_hash, @after_hash, @task_id, @step,
-      @arm_id, @propensity, @explored, @escalated, @check_json)`).run(row);
+      @arm_id, @propensity, @explored, @escalated, @check_json, @cached_tokens, @hinted, @cost_estimated, @generation_id)`).run(row);
   if (workloadId) await db.prepare('UPDATE workloads SET updated_at = ? WHERE id = ?').run(now(), workloadId);
   if (customer && workloadId) {
     const p = noteCall(row, { request, response })
@@ -118,42 +127,13 @@ export async function workloadStats(workspaceId, days = 30) {
 
 /** Daily spend, and what the same traffic would have cost on the customer's own models. */
 export async function dailySpend(workspaceId, days = 30) {
-  const since = now() - days * DAY;
-  const rows = await db.prepare(
-    /* Only calls that came through us. A copy was paid to the customer's own provider and could
-       not have been sent anywhere cheaper, so it is neither spend here nor a saving: counted, it
-       read as paid nothing against what it would have cost, and every copy showed as saved in
-       full ($6.60 on one workspace that had saved nothing). */
-    `SELECT c.created_at, c.charged_usd, c.cost_usd, c.served_model, c.requested_model,
-            c.prompt_tokens, c.completion_tokens
-       FROM calls c WHERE c.workspace_id = ? AND c.created_at >= ? AND c.source = 'routed'`)
-    .all(workspaceId, since);
-  const price = new Map(await (await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all())
-    .map((m) => [m.model_id, m]));
-  /* One clock for the whole calculation. now() was being read again for every bucket and
-     once more for the anchor, so the anchor was always a fraction of a second later than the
-     buckets it was supposed to line up with. */
-  const t0 = now();
-  const out = [];
-  for (let i = days - 1; i >= 0; i -= 1) out.push({ at: t0 - i * DAY, paid: 0, would: 0 });
-  const first = t0 - (days - 1) * DAY;
-  for (const c of rows) {
-    /* Each bucket is labelled by the moment it ENDS, so a call belongs to the first bucket
-       that ends at or after it: ceil, not floor. With floor, a call made seconds ago fell
-       just short of the last bucket and was drawn on yesterday, which left today reading
-       zero on every dashboard and every number one day out of place. */
-    const bucket = Math.min(days - 1, Math.max(0, Math.ceil((c.created_at - first) / DAY)));
-    const slot = out[bucket];
-    if (!slot) continue;
-    slot.paid = round8(slot.paid + c.charged_usd);
-    // what the customer's own model would have charged for the same tokens
-    const own = price.get(c.requested_model);
-    const wouldCost = own
-      ? own.price_in * c.prompt_tokens + own.price_out * c.completion_tokens
-      : c.charged_usd;
-    slot.would = round8(slot.would + wouldCost * (1 + config.ROUTING_FEE_PCT / 100));
-  }
-  return out;
+  /* Only calls that came through us. A copy was paid to the customer's own provider and could not have
+     been sent anywhere cheaper, so it is neither spend here nor a saving: counted, it read as paid
+     nothing against what it would have cost, and every copy showed as saved in full ($6.60 on one
+     workspace that had saved nothing). What each would have cost is worked out in src/eval/actual.js:
+     without our fee on the customer's own model, and with a switch's measured cost where there is one. */
+  const { routedSavings } = await import('./eval/actual.js');
+  return (await routedSavings({ workspaceId, days, at: now() })).series;
 }
 
 /* The calls themselves, for the live feed.

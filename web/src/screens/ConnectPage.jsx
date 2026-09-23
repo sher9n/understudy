@@ -42,14 +42,17 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
      after it was made. While we have it, everything shows it in full and the snippet is
      something that will actually run; otherwise the prefix stands in for it and the page
      says how to get one that works rather than handing over a key with a gap in it. */
-  const usable = freshKey || data.key || null;
+  /* The key the page names is the one it shows and replaces: the server's own reading of it, or a key
+     made a moment ago in this session when this deployment cannot show keys again, but only when it is
+     that same key. A key made at sign-up showed here beside the name of a newer one. */
+  const usable = data.key || (freshKey && data.keyPrefix && String(freshKey).startsWith(data.keyPrefix) ? freshKey : null);
   const shown = usable || (data.keyPrefix ? `${data.keyPrefix}…` : null);
   const lines = snippet(way, lang, { baseUrl: data.baseUrl, key: shown });
 
   const regenerate = async () => {
     setRotating(true); setKeyError('');
     try {
-      const r = await api.regenerateKey();
+      const r = await api.replaceKey(data.keyId);
       onFreshKey(r.key);
       setConfirming(false);
       await reload();
@@ -111,7 +114,7 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
                   <div style={{ flexGrow: 1 }} />
                   <Copy text={asText(lines)} />
                 </div>
-                <pre className="m code">
+                <pre className="m code" tabIndex={0} role="region" aria-label="Code to copy">
                   {lines.map((l, i) => (
                     <span key={i} style={{ display: 'block' }}>
                       {l.text === '' ? ' ' : (
@@ -138,7 +141,7 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
               <Copy text={data.baseUrl} />
             </div>
             <div className="rowpair">
-              <span className="rowk">API key</span>
+              <span className="rowk">API key{data.keyName ? <span className="rowkname">, {data.keyName}</span> : null}</span>
               <code className="rowv keyfull">{shown || 'no key yet'}</code>
               <span className="keyacts2">
                 {usable && <Copy text={usable} />}
@@ -156,7 +159,7 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
             )}
             {confirming && (
               <div className="keynote warn">
-                <div><b>Anything already using your current key stops working.</b> Whatever
+                <div><b>Anything already using {data.keyName ? <>the key &ldquo;{data.keyName}&rdquo;</> : 'your current key'} stops working.</b> Whatever
                   you have deployed will need the new key pasted in before it can send
                   another call.</div>
                 <div className="keyacts">
@@ -170,6 +173,36 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
             )}
             {keyError && <div className="errbox">{keyError}</div>}
           </section>
+
+          <section className="opt" aria-labelledby="headers-h">
+            <div className="opthead"><h2 id="headers-h">Headers you can send, and read</h2>
+              <span className="s">None of these is needed. Each is taken off before the call goes on to a provider.</span></div>
+            <div className="cbody">
+              <div className="rowpair"><code className="rowk">x-understudy-workload</code>
+                <span className="rowv">Names the job a call belongs to. Calls with the same name are measured together, whatever their words, and the workload is called by it.</span></div>
+              <div className="rowpair"><code className="rowk">x-understudy-pin: 1</code>
+                <span className="rowv">This call is answered by the model it names, whatever the workload was switched to. For the calls you cannot risk on anything else.</span></div>
+              <div className="rowpair"><code className="rowk">x-understudy-ref</code>
+                <span className="rowv">Your own reference for a call, to report later how it turned out (POST /v1/outcomes).</span></div>
+              <div className="rowpair"><code className="rowk">x-understudy-served-model</code>
+                <span className="rowv">On every answer: the model that actually answered it. With <code>x-understudy-workload</code> (the workload it joined) and <code>x-understudy-call-id</code>.</span></div>
+            </div>
+          </section>
+
+          {data.turnedAway?.length > 0 && (
+            <section className="opt" aria-labelledby="refused-h">
+              <div className="opthead"><h2 id="refused-h">Calls we turned away</h2>
+                <span className="s">The latest, with the reason each was given. Fix the cause and they go through.</span></div>
+              <div className="cbody">
+                {data.turnedAway.map((t) => (
+                  <div className="rowpair" key={`${t.at}-${t.status}`}>
+                    <span className="rowk">{ago(t.at)} · {t.status}</span>
+                    <span className="rowv">{t.why || 'No reason was recorded.'}{t.model ? ` (model: ${t.model})` : ''}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
         </div>
 
         <aside className="opt sidecard" style={{ marginTop: 0 }}>
@@ -232,8 +265,13 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
 
             <div style={{ height: 14 }} />
             <p className="sticknote">
-              Routed calls only reach providers that keep nothing. What we store is cleared
-              after the window you chose in Settings.
+              {data.zdrOnly === false
+                ? 'Routed calls may reach providers that keep what they are sent for a while, never ones that train on it, as you chose in Settings.'
+                : 'Routed calls only reach providers that keep nothing.'}
+              {' '}
+              {data.retentionDays
+                ? `What we store is cleared after ${data.retentionDays} days, the window you chose in Settings.`
+                : 'What we store is kept until you delete it, as you chose in Settings.'}
             </p>
           </div>
         </aside>

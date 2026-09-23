@@ -1,3 +1,5 @@
+import config from '../config.js';
+
 /* What a finished measurement found, as SQL, for a row that may not say.
  *
  * Every run now records its outcome, and migration 011 filled it in for the runs before it. But
@@ -30,15 +32,39 @@ export function outcomeOf(r) {
 }
 
 /* Whether a measurement found a model to switch to, by the rule the run itself switches on:
-   cleared the bar, has a monthly price, and costs less a month than the customer's model. A
+   cleared the bar, priced, and costs less than the customer's model once our fee is added. A
    model that cleared but costs more is not a candidate; counting it as one put "Ready to
-   optimize" over a workload the run had said nothing cleared, and offered a saving of minus. */
-export function cheaperCleared(results) {
+   optimize" over a workload the run had said nothing cleared, and offered a saving of minus. A
+   customer's model with no known price used to wave the price check through, so a model ten
+   times dearer could be switched to; with nothing to compare against, nothing is a candidate.
+
+   Cheapest first, and one the second look did not confirm after one that it did: a person may
+   still approve it, but it is never what is offered first. */
+export function cheaperCleared(results, feePct = config.ROUTING_FEE_PCT) {
   const ref = results.find((r) => r.verdict === 'reference');
   const refCost = ref?.cost_month_usd ?? null;
-  return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null
-    && (refCost == null || r.cost_month_usd < refCost));
+  const ceiling = 1 / (1 + (Number(feePct) || 0) / 100);
+  return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null && refCost != null
+    && Number(r.cost_month_usd) < Number(refCost)
+    && (r.cost_ratio == null || Number(r.cost_ratio) < ceiling))
+    .sort((a, b) => (confirmed(b) - confirmed(a)) || (a.cost_month_usd - b.cost_month_usd));
 }
+
+/* Whether the second look stood behind a result: it cleared again on calls it had never seen
+   ('cleared'), or it is a strategy, whose second look is its live rollout, a small share of the
+   calls at a time ('live'). Nothing else is. A result the second look never reached ('not_reached':
+   past the models a run looks at twice, or after the run was cut short), one there were too few
+   unseen calls for ('insufficient'), one that did not hold up, and a row with nothing written at
+   all all wait for a person or the next measurement. Reading nothing as confirmed let a model that
+   was never looked at twice sort first, drop "needs a second look" from its workload, and be the
+   one an approval with no model named switched to. */
+export const confirmed = (r) => (r.confirm_verdict === 'cleared' || r.confirm_verdict === 'live' ? 1 : 0);
+
+/* The outcomes of a finished measurement that found something: it compared models, or it found
+   the bar could not be set. A run that was stopped, interrupted or ran out of balance found nothing,
+   and is never read as though it had. `r` is the table alias with its dot, or '' for none. */
+export const FOUND = (r = '') => `${r}status = 'done' AND ${OUTCOME_OF(r)} IN ('compared', 'unmeasurable', 'refused')`;
+
 
 /* Whether a switch changes anything yet. Only calls that come through Understudy can be sent to
    another model: a copy arrives after the customer's own provider has already answered it. A
@@ -46,8 +72,10 @@ export function cheaperCleared(results) {
    its first routed call; until then it is not "optimized", and nothing on it is saved. Read from
    the latest hundred calls, so a workload that starts coming through us counts within days. */
 export const RECENT_CALLS = 100;
-export function carriesOf({ mode, routed = 0, copies = 0 }) {
-  if (mode === 'observe') return false;
+/* The monthly plan used to put a workspace in an "observe" mode that refused every routed call, so a
+   plan customer could not route even the one workload that had cleared. The plan is now only a
+   measuring allowance, and whether a switch carries calls is read from the calls themselves. */
+export function carriesOf({ routed = 0 } = {}) {
   return Number(routed) > 0;
 }
 

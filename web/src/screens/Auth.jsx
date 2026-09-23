@@ -5,6 +5,8 @@ import Board from '../Board.jsx';
 import signinHtml from './signin.html?raw';
 import signupHtml from './signup.html?raw';
 import CodeSignIn from './CodeSignIn.jsx';
+import LinkSignIn from './LinkSignIn.jsx';
+import '../lead.css';
 
 /* The pitch panel is taken from the sign-in board rather than rewritten, so the code
    screen beside it cannot drift away from the password one. */
@@ -20,12 +22,17 @@ const PITCH = (() => {
 })();
 
 /* The markup is the design board's. All this adds is what a real form needs: it submits,
-   it says why it was refused, and it knows where to go next. */
+   it says why it was refused, and it knows where to go next.
+
+   Signing up no longer hands out a key on the spot: it emails a code, and the account is made
+   usable when the code comes back, so nobody can take an address that is not theirs. What was
+   typed is kept here, in the page only, so "send it again" sends a code with the same password on it. */
 export default function Auth({ mode, go, onDone, dark, setDark }) {
   const signUp = mode === 'signup';
   const codeMode = mode === 'code';
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState(null);
 
   const submit = async (fields) => {
     if (busy) return;
@@ -34,7 +41,7 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
     try {
       if (signUp) {
         const r = await api.signUp(fields);
-        onDone(true, r.key);
+        setPending({ email: r.email, minutes: r.minutes, digits: r.digits, fields });
       } else {
         await api.signIn(fields);
         onDone(false);
@@ -46,11 +53,26 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
     }
   };
 
+  if (pending) {
+    return (
+      <CodeSignIn
+        pitchHtml={PITCH}
+        purpose="verify"
+        initial={{ email: pending.email, sent: { minutes: pending.minutes, digits: pending.digits } }}
+        resend={() => api.signUp(pending.fields)}
+        onDone={(_fresh, key, kept) => onDone(true, key, kept)}
+        onBack={() => { setPending(null); setError(''); }}
+      />
+    );
+  }
+
+  if (mode === 'link') return <LinkSignIn pitchHtml={PITCH} onDone={(fresh, key, kept) => onDone(fresh, key, kept)} />;
+
   if (codeMode) {
     return (
       <CodeSignIn
         pitchHtml={PITCH}
-        onDone={() => onDone(false)}
+        onDone={(fresh, key, kept) => onDone(!!fresh, key, kept)}
         onBack={() => go('signin')}
       />
     );

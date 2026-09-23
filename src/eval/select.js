@@ -1,4 +1,5 @@
-import { routedCallPrice, callPrice, healthOf } from '../models/facts.js';
+import { calibrated } from './calibrate.js';
+import { routedCallPrice, callPrice, healthOf, healthy } from '../models/facts.js';
 
 /* Which models a measurement tries, and in what order. Pure: everything it needs is handed to
  * it, so the same inputs always give the same answer, and a backtest can run it over any
@@ -295,13 +296,19 @@ export function speedChanceOf(model, recipe, ctx) {
  * cannot win and the next in line takes their place.
  */
 export function selectCandidates(input) {
+  /* `serving` is the model a switch sends calls to (for a strategy, its lead model); `servingAs` is
+     what serves by its own name (see servingKey in src/eval/promote.js), which tells the customer's
+     own model thinking less, or from its cheapest provider, from the customer's own model; and
+     `servingRecipe` is how it is sent. */
   const {
     facts, profile, reference, enabled, want, tryMultiple = 3, reverted = new Set(), serving = null,
+    servingAs = null, servingRecipe = null,
     history = null, fits = null, arena = null, difficulty = null, speed = null,
     refThinks = null, speedHistory = null, busy = null,
     config, at = Date.now(),
   } = input;
-  const zdrOnly = config.ZDR_ONLY;
+  // the workspace's own choice, where it made one; the deployment's otherwise
+  const zdrOnly = input.zdrOnly ?? config.ZDR_ONLY;
   const ctx = {
     profile, reference, zdrKnown: facts.zdrKnown, zdrOnly, room: config.EVAL_THINKING_ROOM_TOKENS,
     expiryMs: config.EVAL_EXPIRY_DAYS * 86400000, at, minUptime: config.EVAL_MIN_UPTIME_PCT,
@@ -422,10 +429,13 @@ export function selectCandidates(input) {
      answers, and it is forgotten once the providers have had time to recover. */
   const ranked = quick.map((k) => {
     const c = chanceOf(k.m, { ...ctx, reference });
+    /* Read through how often chances like it came true (src/eval/calibrate.js), where there is a
+       record to read it through; the chance as worked out is kept beside it for that record. */
+    const answer = calibrated(ctx.calibration, c.chance);
     const reach = k.routes ? { ...k.m, endpoints: k.routes } : k.m;
     const sp = speedChanceOf(reach, k.recipe, { speed, speedHistory, refHealth, profile, config });
     const wasBusy = busy?.get(k.m.id) || null;
-    const overall = c.chance * (sp ? sp.p : 1) * (wasBusy ? 0.35 : 1);
+    const overall = answer * (sp ? sp.p : 1) * (wasBusy ? 0.35 : 1);
     const saving = refPrice === null ? null : refPrice - k.price;
     return {
       model: k.m.id,
@@ -434,7 +444,8 @@ export function selectCandidates(input) {
       refPrice,
       savingShare: refPrice ? saving / refPrice : null,
       chance: overall,
-      answerChance: c.chance,
+      answerChance: answer,
+      rawChance: c.chance,
       speedChance: sp ? sp.p : null,
       speedMeasured: sp ? sp.measured : null,
       busy: !!wasBusy,
@@ -454,8 +465,13 @@ export function selectCandidates(input) {
      answers, and a good share of the billed tokens gone, since thinking is billed like the answer.
      Its price is a guess until measured (six tenths of the model's own); the measurement finds the
      real one. It is raced under its own name, and served the way it was measured if it wins. */
-  // never again once it was switched back, like any model: it has said something about itself
-  if (refModel && refThinks === true && !profile.reasoningSet && refPrice && !reverted.has(`${reference}#lighter`)) {
+  /* Never again once it was switched back, like any model: it has said something about itself. And
+     always when it is what serves the workload now, measured the way it is served, like any model
+     serving: whatever the catalogue says about its thinking today, a strategy left serving unmeasured
+     is the one that can quietly cost the customer. */
+  const lighterKey = `${reference}#lighter`;
+  const servesLighter = servingAs === lighterKey;
+  if (refModel && refPrice && (servesLighter || (refThinks === true && !profile.reasoningSet && !reverted.has(lighterKey)))) {
     const r = refModel.reasoning || {};
     const efforts = Array.isArray(r.supported_efforts) ? r.supported_efforts : [];
     let reasoning = null;
@@ -468,6 +484,7 @@ export function selectCandidates(input) {
       const lightest = ladder.find((e, i) => efforts.includes(e) && (own < 0 || i < own));
       if (lightest) reasoning = { effort: lightest };
     }
+    if (servesLighter && servingRecipe?.reasoning) reasoning = servingRecipe.reasoning;
     if (reasoning) {
       const price = refPrice * 0.6;
       const chance = 0.6;
@@ -481,16 +498,59 @@ export function selectCandidates(input) {
       });
     }
   }
+  /* The customer's own model, from the provider that charges least for it. Where several providers
+     sell it at different prices, calls are spread over them, and the one that charges least can be a
+     good deal cheaper than that mix. The same model, so very likely the same answers; but a provider
+     can run it differently (a smaller number format, an older build), so it is measured like any
+     model before anything is switched, and served only from that provider if it clears. */
+  const cheapestKey = `${reference}#cheapest`;
+  const servesCheapest = servingAs === cheapestKey;
+  if (refModel && refPrice && (servesCheapest || !reverted.has(cheapestKey))) {
+    const byPrice = refRoutes.filter(healthy)
+      .map((e) => ({ e, price: callPrice({ priceIn: e.price_in, priceOut: e.price_out, overrides: e.overrides }, pin, pout, profile.hours) }))
+      .filter((x) => x.price > 0)
+      .sort((a, b) => a.price - b.price);
+    /* The provider serving it now, when it serves, whether or not it is still the cheapest: it is
+       re-checked where it is served. A provider that has gone is still tried there, and the provider's
+       refusal is what switches it back. */
+    const pinned = servesCheapest ? (Array.isArray(servingRecipe?.providers) ? servingRecipe.providers : []) : null;
+    const pick = pinned
+      ? (byPrice.find((x) => pinned.includes(x.e.tag)) || { e: { tag: pinned[0] ?? null, provider: null }, price: refPrice, gone: true })
+      : byPrice.length >= 2 && byPrice[0].price < refPrice * 0.9 ? byPrice[0] : null;
+    if (pick) {
+      const { e, price } = pick;
+      /* A fixed guess, not a reading of any evidence: it is not written down as a raw chance, so the
+         record of how often chances came true (src/eval/calibrate.js) never counts it. */
+      const chance = 0.8;
+      const where = e.provider || e.tag || 'its cheapest provider';
+      ranked.push({
+        model: reference, key: cheapestKey, label: `${short(reference)}, from ${where}`, name: refModel.name,
+        price, refPrice, savingShare: (refPrice - price) / refPrice, chance, answerChance: chance, rawChance: null,
+        speedChance: null, speedMeasured: null, busy: false,
+        expected: (refPrice - price) * chance,
+        parts: [{ source: 'same model', p: chance, w: 1, note: `your own model, from ${where}, the provider that charges least for it` }],
+        family: true, recipe: pinned && servingRecipe ? servingRecipe : { providers: [e.tag], pinned: true },
+        note: `your own model, from ${where}`, thinks: !!refThinks, mustThink: false,
+        health: pick.gone ? refHealth : healthOf({ endpoints: [e] }),
+      });
+    }
+  }
   ranked.sort((a, b) => b.expected - a.expected || a.price - b.price);
 
   /* At most two from one maker in the list, so one family's shared weakness cannot take every
      place; the rest of that family waits behind everybody else rather than being dropped. The
-     model serving the workload now always goes first, so it is always checked again. */
+     model serving the workload now always goes first, so it is always checked again: found by its
+     own name, so that the customer's own model thinking less and the same model from its cheapest
+     provider, both the customer's model by name, are not both put first as the one serving. A
+     strategy's lead model goes first for it. */
+  const servesNow = (r) => (servingAs
+    ? (r.key || r.model) === servingAs || (!r.key && r.model === serving)
+    : !!serving && r.model === serving);
   const perVendor = new Map();
   const first = [];
   const later = [];
   for (const r of ranked) {
-    if (serving && r.model === serving) { first.unshift(r); continue; }
+    if (servesNow(r)) { first.unshift(r); continue; }
     const v = vendorOf(r.model);
     const n = perVendor.get(v) || 0;
     if (n < 2) { perVendor.set(v, n + 1); first.push(r); } else later.push(r);

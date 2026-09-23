@@ -118,7 +118,7 @@ export function betaQuantile(p, a, b) {
  * with a handful of calls reads close to what is usual here rather than at an extreme.
  */
 export function posterior({ live = [], shadow = [] } = {}, {
-  halfLifeDays = 14, surrogateWeight = 0.3, prior = { mean: 0.9, strength: 4 },
+  halfLifeDays = 14, surrogateWeight = 0.3, prior = { mean: 0.9, strength: 4 }, quantiles = true,
 } = {}) {
   const m = Math.min(0.98, Math.max(0.02, Number(prior.mean ?? 0.9)));
   let a = Math.max(0.5, m * prior.strength);
@@ -146,7 +146,7 @@ export function posterior({ live = [], shadow = [] } = {}, {
   }
   return {
     a, b, mean: a / (a + b),
-    lo: betaQuantile(0.05, a, b), hi: betaQuantile(0.95, a, b),
+    lo: quantiles ? betaQuantile(0.05, a, b) : null, hi: quantiles ? betaQuantile(0.95, a, b) : null,
     nLive, nShadow, weight,
     liveRate: nLive ? sLive / nLive : null,
     shadowRate: nShadow ? sShadow / nShadow : null,
@@ -160,6 +160,56 @@ export function probAtLeast(A, B, delta = 0, { draws = 4000, rng = rngFrom(7) } 
     if (sampleBeta(A.a, A.b, rng) >= sampleBeta(B.a, B.b, rng) - delta) n += 1;
   }
   return n / draws;
+}
+
+/**
+ * What is expected to be lost by serving A instead of B: E[max(0, B - A)] over both records. Near
+ * zero when A is very likely at least as good; it keeps growing the more B is likely to be better,
+ * and by how much. Far less sensitive to being looked at every hour than "P(A >= B) >= 0.95".
+ */
+export function expectedLoss(A, B, { draws = 0, rng = rngFrom(13), shift = 0 } = {}) {
+  // `shift` moves the yardstick: the loss against B being `shift` worse than it is
+  if (draws > 0) {
+    let sum = 0;
+    for (let i = 0; i < draws; i += 1) sum += Math.max(0, sampleBeta(B.a, B.b, rng) - shift - sampleBeta(A.a, A.b, rng));
+    return sum / draws;
+  }
+  /* In closed form: the difference of two records is close to normal once each holds a few calls,
+     and E[max(0, D)] for a normal D is mu * Phi(mu / sigma) + sigma * phi(mu / sigma). Exact
+     enough here, and instant, which lets the harness review a workload every hour for a month
+     ten thousand times over. */
+  const mv = (X) => {
+    const n = X.a + X.b;
+    return { m: X.a / n, v: (X.a * X.b) / (n * n * (n + 1)) };
+  };
+  const a = mv(A);
+  const b = mv(B);
+  const mu = b.m - shift - a.m;
+  const sigma = Math.sqrt(a.v + b.v) || 1e-9;
+  const z = mu / sigma;
+  const phi = Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+  const Phi = 0.5 * (1 + erf(z / Math.SQRT2));
+  return Math.max(0, mu * Phi + sigma * phi);
+}
+
+/**
+ * How far apart two records are, in units of how sure we can be: (mean A - mean B) over the
+ * standard deviation of the difference. A z of 3 is passed by chance about one look in seven
+ * hundred, which is what a decision looked at every hour for a month has to survive.
+ */
+export function zDiff(A, B) {
+  const mv = (X) => { const n = X.a + X.b; return { m: X.a / n, v: (X.a * X.b) / (n * n * (n + 1)) }; };
+  const a = mv(A);
+  const b = mv(B);
+  return { mu: a.m - b.m, sigma: Math.sqrt(a.v + b.v) || 1e-9, z: (a.m - b.m) / (Math.sqrt(a.v + b.v) || 1e-9) };
+}
+
+// Abramowitz and Stegun 7.1.26, good to a few parts in ten million
+function erf(x) {
+  const s = x < 0 ? -1 : 1;
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return s * y;
 }
 
 /** How often each candidate would be the best in a draw from every record: Thompson sampling. */

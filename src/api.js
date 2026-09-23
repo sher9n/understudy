@@ -1,25 +1,33 @@
 import express from 'express';
 import { safeRouter } from './safe.js';
 import { db, now, round8, usd } from './db/index.js';
-import config, { canRoute, canBill, MEASURE_CHOICES } from './config.js';
-import { createAccount, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
-  requestLoginCode, verifyLoginCode, verifyLoginLink } from './auth.js';
-import send, { signInEmail } from './email.js';
-import { issueKey, listKeys, revokeKey, revealKey } from './keys.js';
+import config, { canRoute, canBill, canEmail, canRevealKeys, paymentsState, MEASURE_CHOICES } from './config.js';
+import { allow, clientIp } from './limits.js';
+import crypto from 'node:crypto';
+import { startSignUp, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
+  requestLoginCode, verifyLoginCode, verifyLoginLink, peekLoginLink, changePassword, endOtherSessions,
+  requestEmailChange, verifyEmailChange, Refusal, signupCookieFor, clearSignupCookie, signupNonceOf } from './auth.js';
+import send, { codeEmail, accountExistsEmail, noticeEmail } from './email.js';
+import { issueKey, listKeys, revokeKey, revealKey, revealKeyById } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity, track } from './traffic.js';
-import { account, ledger, gateRouting, stripe } from './billing.js';
-import { planFor, forgetPlan } from './eval/plan.js';
+import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available, optimizeSpent, spentOnCalls, maybeTopUp } from './billing.js';
+import { notifyPrefs, NOTIFY_KINDS } from './notify.js';
+import { routedSavings } from './eval/actual.js';
+import { adviceFor } from './eval/advice.js';
+import { planFor, forgetPlan, forgetPlanAll } from './eval/plan.js';
+import { cadenceOf } from './eval/schedule.js';
 import { recipeKind } from './eval/select.js';
 import { outcomeSummary, outcomeTotals, tasksFor } from './learn/views.js';
-import { nameOfResult } from './learn/arms.js';
+import { nameOfResult, armById } from './learn/arms.js';
 import { saveDef } from './learn/outcomes.js';
 import { learningView, exploreOf, forgetState, EXPLORE_MODES } from './learn/explore.js';
-import { certificate, promote, revert, trafficOf, servingKey } from './eval/promote.js';
+import { certificate, promote, revert, trafficOf, servingKey, heldBack } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
 import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
 import { switchStory } from './eval/switch-story.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
+import { forgetWorkspace } from './workspace.js';
 
 export const api = safeRouter();
 api.use(express.json({ limit: '2mb' }));
@@ -30,16 +38,50 @@ const fail = (res, code, message) => res.status(code).json({ error: message });
 
 /* Accounts -------------------------------------------------------------------- */
 
+const tooMany = (res, message) => fail(res, 429, message);
+
+/* An email sent without waiting for it. Whether an address has an account decides whether a code goes
+   out, so waiting for the send made the answer slower for addresses that have one, which told anybody
+   timing it who does. A send that fails is logged; the answer never depended on it. */
+const sendLater = (message) => { send(message).catch((err) => console.error(`email to ${message.to} failed: ${err?.message || err}`)); };
+// where an emailed link lands: a page with a button, because opening a link must never sign anybody in
+const linkFor = (token) => `${config.PUBLIC_URL}/signin/link#t=${encodeURIComponent(token)}`;
+
+/* Signing up sends a code to the address, and the account is made usable when the code comes back.
+   The answer is the same whether or not the address already has an account. */
 api.post('/auth/sign-up', async (req, res) => {
+  const ip = clientIp(req);
+  if (!await allow('signup_ip', ip, { max: config.LIMIT_SIGNUP_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many sign-ups from here. Try again in an hour.');
+  }
+  // this browser's own secret: only a code used from here keeps the password chosen here (see startSignUp)
+  const nonce = crypto.randomBytes(24).toString('base64url');
+  let out;
   try {
-    const { user, workspace, key } = await createAccount(req.body || {});
-    res.setHeader('Set-Cookie', cookieFor(await startSession(user.id)));
-    res.json({ ok: true, workspace: workspace.name, key: key.secret });
-  } catch (err) { fail(res, 400, err.message); }
+    out = await startSignUp(req.body || {}, { ip, nonce });
+  } catch (err) {
+    // our own words for a person; anything else is ours to fix and is answered as a failure of ours
+    if (err instanceof Refusal) return fail(res, 400, err.message);
+    throw err;
+  }
+  if (!out.ok) return tooMany(res, 'Too many codes asked for this address. Wait an hour, then try again.');
+  if (out.send?.kind === 'verify') {
+    sendLater({ to: out.email, ...codeEmail({ purpose: 'verify', code: out.send.code, link: linkFor(out.send.token), minutes: out.send.minutes }) });
+  } else if (out.send?.kind === 'exists') {
+    sendLater({ to: out.email, ...accountExistsEmail({ signInUrl: `${config.PUBLIC_URL}/signin` }) });
+  }
+  res.setHeader('Set-Cookie', signupCookieFor(nonce));
+  return res.json({ ok: true, verify: true, email: out.email, minutes: config.LOGIN_CODE_TTL_MIN, digits: config.LOGIN_CODE_DIGITS });
 });
 
 api.post('/auth/sign-in', async (req, res) => {
-  const u = await checkPassword(req.body?.email, req.body?.password);
+  const ip = clientIp(req);
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  if (!await allow('signin_ip', ip, { max: config.LIMIT_SIGNIN_PER_IP_15MIN, windowMs: 900000 })
+    || !await allow('signin_email', email || '-', { max: 10, windowMs: 900000 })) {
+    return tooMany(res, 'Too many tries. Wait a few minutes, or sign in with an emailed code.');
+  }
+  const u = await checkPassword(email, req.body?.password);
   if (!u) return fail(res, 401, 'That email and password do not match.');
   res.setHeader('Set-Cookie', cookieFor(await startSession(u.id)));
   return res.json({ ok: true });
@@ -47,51 +89,74 @@ api.post('/auth/sign-in', async (req, res) => {
 
 /* Signing in without a password.
 
-   Every answer here is the same whether or not the address has an account. An endpoint
-   that says "no such user" is a way to find out who has one, and this one is reachable by
-   anybody. What differs is only whether an email actually goes out. */
+   Every answer here is the same whether or not the address has an account, and the limits count
+   every address the same way, so neither the words nor the limits say who has one. What differs is
+   only whether an email actually goes out. */
 api.post('/auth/code/request', async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return fail(res, 400, 'That does not look like an email address.');
   }
-  const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
+  const ip = clientIp(req);
+  if (!await allow('code_request_ip', ip, { max: config.LIMIT_CODES_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many codes asked for from here. Wait an hour, or sign in with your password.');
+  }
   const asked = await requestLoginCode(email, { ip });
   if (!asked.ok && asked.reason === 'too_many') {
-    return fail(res, 429, 'Too many codes asked for. Wait an hour, or sign in with your password.');
+    return tooMany(res, 'Too many codes asked for. Wait an hour, or sign in with your password.');
   }
   if (asked.send) {
-    const link = `${config.PUBLIC_URL}/api/auth/link?token=${encodeURIComponent(asked.send.token)}`;
-    const mail = signInEmail({ code: asked.send.code, link, minutes: asked.send.minutes });
-    await send({ to: email, ...mail });
+    sendLater({ to: email, ...codeEmail({ purpose: 'sign_in', code: asked.send.code, link: linkFor(asked.send.token), minutes: asked.send.minutes }) });
   }
   return res.json({ ok: true, minutes: config.LOGIN_CODE_TTL_MIN, digits: config.LOGIN_CODE_DIGITS });
 });
 
+/* The code from a sign-in email or a sign-up email: either works here. */
 api.post('/auth/code/verify', async (req, res) => {
-  const out = await verifyLoginCode(req.body?.email, req.body?.code);
+  const ip = clientIp(req);
+  if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many tries from here. Wait an hour and ask for a new code.');
+  }
+  const out = await verifyLoginCode(req.body?.email, req.body?.code, { nonce: signupNonceOf(req) });
   if (!out.ok) {
     if (out.reason === 'wrong') {
       return fail(res, 401, out.triesLeft > 0
         ? `That code is not right. ${out.triesLeft} ${out.triesLeft === 1 ? 'try' : 'tries'} left.`
         : 'That code is not right, and it has now been used up. Ask for another.');
     }
-    if (out.reason === 'too_many_attempts') {
-      return fail(res, 429, 'That code has been used up. Ask for another.');
-    }
+    if (out.reason === 'too_many_attempts') return tooMany(res, 'That code has been used up. Ask for another.');
     return fail(res, 401, 'That code has expired. Ask for another.');
   }
-  res.setHeader('Set-Cookie', cookieFor(out.token));
-  return res.json({ ok: true });
+  res.setHeader('Set-Cookie', [cookieFor(out.token), clearSignupCookie()]);
+  /* A new account's first key is made when its email answers, and handed over here, the one moment it
+     can be: without it, a deployment that cannot show keys again left the new customer holding nothing
+     but the key's first few characters. */
+  return res.json({ ok: true, fresh: !!out.fresh, key: out.key || null, passwordKept: out.passwordKept ?? null });
 });
 
-/* The link from the same email. A browser follows it, so this answers with a redirect
-   rather than JSON, and lands the person inside the app already signed in. */
-api.get('/auth/link', async (req, res) => {
-  const out = await verifyLoginLink(req.query?.token);
-  if (!out.ok) return res.redirect(302, '/signin?link=expired');
-  res.setHeader('Set-Cookie', cookieFor(out.token));
-  return res.redirect(302, '/');
+/* The link from the same emails. Links in mail sent before this signed in when opened; they are
+   sent to the page that asks first. The token travels after a #, so it never reaches a server log. */
+api.get('/auth/link', (req, res) => res.redirect(302, `/signin/link#t=${encodeURIComponent(String(req.query?.token || ''))}`));
+
+/** Whom a link would sign in, so the page can say so before anything is spent. */
+api.post('/auth/link/peek', async (req, res) => {
+  const ip = clientIp(req);
+  if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many tries from here. Wait an hour.');
+  }
+  const out = await peekLoginLink(req.body?.token);
+  return res.json(out.ok ? { ok: true, email: out.email, purpose: out.purpose } : { ok: false });
+});
+
+api.post('/auth/link', async (req, res) => {
+  const ip = clientIp(req);
+  if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many tries from here. Wait an hour.');
+  }
+  const out = await verifyLoginLink(req.body?.token, { nonce: signupNonceOf(req) });
+  if (!out.ok) return fail(res, 401, 'That link has expired or has already been used. Ask for a new one.');
+  res.setHeader('Set-Cookie', [cookieFor(out.token), clearSignupCookie()]);
+  return res.json({ ok: true, fresh: !!out.fresh, key: out.key || null, passwordKept: out.passwordKept ?? null });
 });
 
 api.post('/auth/sign-out', async (req, res) => {
@@ -99,6 +164,56 @@ api.post('/auth/sign-out', async (req, res) => {
   await endSession(m ? m[1] : null);
   res.setHeader('Set-Cookie', clearCookie());
   res.json({ ok: true });
+});
+
+/* The contact form, open to anybody.
+
+   What people write goes to the operator's inbox and is never stored here. The address it goes to
+   is never shown on a page, and a reply goes straight back to whoever wrote. Limited per internet
+   address and per day, because an open form is otherwise a way to send mail through us. */
+const TOPICS = ['question', 'sales', 'support', 'privacy', 'security', 'other'];
+api.post('/contact', async (req, res) => {
+  const b = req.body || {};
+  // a field people never see; only scripts fill it in
+  if (b.website) return res.json({ ok: true });
+  const email = String(b.email || '').trim().toLowerCase();
+  const message = String(b.message || '').trim();
+  const name = String(b.name || '').trim().slice(0, 120);
+  const topic = TOPICS.includes(b.topic) ? b.topic : 'other';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail(res, 400, 'That does not look like an email address.');
+  if (message.length < 10) return fail(res, 400, 'Say a little more, so we can answer properly.');
+  if (message.length > 5000) return fail(res, 400, 'That is longer than we can take here. Keep it under 5,000 characters.');
+  const ip = clientIp(req);
+  if (!await allow('contact_ip', ip, { max: config.LIMIT_CONTACT_PER_IP_HOUR, windowMs: 3600000 })
+    || !await allow('contact_all', 'all', { max: config.LIMIT_CONTACT_PER_DAY, windowMs: 86400000 })) {
+    return fail(res, 429, 'We have had a lot of messages from here. Try again in an hour.');
+  }
+  const to = config.CONTACT_TO || config.ALERT_EMAIL;
+  if (!to) return fail(res, 503, 'The contact form is not set up on this deployment yet.');
+  const who = req.user ? `${req.user.email} (signed in, workspace ${req.workspace?.id ?? 'none'})` : 'not signed in';
+  const text = [`Topic: ${topic}`, `From: ${name || '(no name)'} <${email}>`, `Account: ${who}`, '', message].join('\n');
+  const sent = await send({ to, subject: `Understudy contact: ${topic}${name ? ` from ${name}` : ''}`, text, replyTo: email });
+  if (!sent.ok) return fail(res, 502, 'We could not send that just now. Try again in a minute.');
+  return res.json({ ok: true });
+});
+
+/* What is working right now, for the status page and for checking a deploy. Nothing here is
+   private: it says whether routing, email and payments are switched on, not how. */
+api.get('/status', async (_req, res) => {
+  const models = (await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get())?.n ?? 0;
+  const synced = await db.prepare(`SELECT source, synced_at FROM fact_sync ORDER BY synced_at DESC`).all();
+  const last = (source) => synced.find((r) => r.source === source)?.synced_at ?? null;
+  res.json({
+    ok: true,
+    version: (process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_SHA || 'local').slice(0, 7),
+    routing: canRoute(),
+    email: canEmail(),
+    payments: paymentsState(),
+    models,
+    catalogSyncedAt: last('catalog'),
+    providersSyncedAt: last('zdr'),
+    checkedAt: now(),
+  });
 });
 
 api.get('/me', async (req, res) => {
@@ -111,6 +226,9 @@ api.get('/me', async (req, res) => {
     mode: req.workspace.mode,
     canRoute: canRoute(),
     canBill: canBill(),
+    payments: paymentsState(),
+    // proved by a sign-in code, so the password typed at sign-up was cleared: they choose their own
+    needsPassword: !!req.user.pw_cleared,
     // somebody whose traffic has never arrived belongs on Connect, not an empty dashboard
     connected: await db.prepare(
       `SELECT 1 FROM calls WHERE workspace_id = ? AND source NOT IN ('replay', 'test')
@@ -255,6 +373,12 @@ const runRow = (r) => ({
   reused: r.reused ?? 0,
   saved: round8(r.saved_usd || 0),
   judge: r.judge ?? null,
+  // what it was quoted before it started, how many of the bar's answers were read from the customer's own calls,
+  // what the judge got right on the pairs it was tested with, and which yardstick it measured with
+  quote: r.quote_usd ?? null,
+  recordedRefs: r.recorded_refs ?? null,
+  judgeCheck: parseJson(r.judge_check_json),
+  yardstick: r.yardstick ?? 'agreement',
 });
 
 const parseJson = (s) => { if (!s) return null; try { return JSON.parse(s); } catch { return null; } };
@@ -276,6 +400,15 @@ const resultRow = (r, runs = r.runs) => ({
   name: nameOfResult(r),
   escalated: r.escalated_pct ?? null,
   costRatio: r.cost_ratio ?? null,
+  // where the true gap most likely is, and how many calls a clear would take at this bar
+  gapLo: r.gap_lo ?? null,
+  gapHi: r.gap_hi ?? null,
+  callsNeeded: r.calls_needed ?? null,
+  // the second look, on calls it had never seen, when it had one
+  confirm: r.confirm_verdict ? {
+    verdict: r.confirm_verdict, runs: r.confirm_runs ?? 0, gap: r.confirm_gap ?? null, hi: r.confirm_hi ?? null,
+    floor: r.confirm_floor ?? null,
+  } : null,
 });
 
 /* The customer's own model's speed on a measurement's calls, which every model is held to. */
@@ -286,7 +419,8 @@ const refSpeedOf = (run) => ({
 
 /* The columns a measurement row is read with, wherever the page lists or opens one. */
 const RUN_COLUMNS = `id, status, outcome, trigger, sample_size, models_planned, floor_pct, noise_pct,
-  spend_usd, error, steps_done, steps_total, started_at, finished_at, created_at, reused, saved_usd, judge`;
+  spend_usd, error, steps_done, steps_total, started_at, finished_at, created_at, reused, saved_usd, judge,
+  quote_usd, recorded_refs, judge_check_json, yardstick`;
 
 /* Why a measurement has no models to show, in words somebody can act on. The page puts this
    where the chart would be. It used to leave the section out instead, so opening one of these
@@ -328,7 +462,15 @@ const CALL_COLUMNS = `id, source, requested_model, served_model, status_code, pr
    is not called optimized. */
 const statusLabel = (w, carries = true) => {
   if (w.routed_model) return carries ? { label: 'Optimized', tone: 'ok' } : { label: 'Waiting for routing', tone: 'wait' };
-  if (w.status === 'certified') return { label: 'Ready to optimize', tone: 'go' };
+  /* "Certified" covers three things, and only one of them is ready: a candidate that cleared, one that
+     cleared once and waits for its second look, and one only close to the bar. The last two used to say
+     "Ready to optimize" over a page with nothing to approve. */
+  if (w.status === 'certified') {
+    const note = String(w.status_note || '');
+    if (/second look/i.test(note)) return { label: 'Needs a second look', tone: 'wait' };
+    if (/close/i.test(note)) return { label: 'Close to clearing', tone: 'wait' };
+    return { label: 'Ready to optimize', tone: 'go' };
+  }
   if (w.status === 'measuring') return { label: 'Measuring', tone: 'wait' };
   if (w.status === 'no_match') return { label: 'Nothing cleared yet', tone: 'q' };
   return { label: 'Not optimized yet', tone: 'q' };
@@ -365,8 +507,14 @@ async function overview(workspaceId, days = 30) {
   const spend = await db.prepare(
     `SELECT COALESCE(SUM(charged_usd), 0) AS s, COUNT(*) AS n FROM calls
       WHERE workspace_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(workspaceId, since);
-  const series = await dailySpend(workspaceId, days);
-  const saved = round8(series.reduce((a, d) => a + Math.max(0, d.would - d.paid), 0));
+  /* What the customer is actually ahead by: what their routed calls would have cost on their own
+     models, less what they paid us for them, less what measuring and background answers cost. Each
+     part is given, so a screen can say where the figure comes from; it used to count only the days
+     that saved something, and to price their own model with our fee on it. */
+  const actual = await routedSavings({ workspaceId, days, at: now() });
+  const series = actual.series;
+  const optimizing = await optimizeSpent(workspaceId, days);
+  const saved = round8(actual.saved - optimizing);
   const priced = (await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get()).n > 0;
   return {
     days,
@@ -374,12 +522,22 @@ async function overview(workspaceId, days = 30) {
     priced,
     spend: round8(spend.s),
     saved,
+    savings: {
+      // on the calls themselves: their own models' cost against what they paid us, fee included
+      onCalls: actual.saved, paid: actual.paid, would: actual.would,
+      // what optimizing cost over the same days: measurements and background answers, fee included
+      optimizing,
+      net: saved,
+      // how many routed calls a cheaper strategy answered
+      switchedCalls: actual.switched, routedCalls: actual.calls,
+    },
     calls: spend.n,
     workloads: rows.length,
     // switched, and some calls come through us to be switched; a switch on copies alone is waiting
     optimized: rows.filter((w) => w.routed_model && carriesOf({ mode: w.ws_mode, routed: w.recent_routed })).length,
     waiting: rows.filter((w) => w.routed_model && !carriesOf({ mode: w.ws_mode, routed: w.recent_routed })).length,
-    ready: rows.filter((w) => !w.routed_model && w.status === 'certified').length,
+    // ready is what the label calls ready: cleared, not merely close or waiting for a second look
+    ready: rows.filter((w) => !w.routed_model && statusLabel(w).tone === 'go').length,
     measuring: rows.filter((w) => w.status === 'measuring').length,
     series,
     // how calls turned out over the window, in the same four groups each workload page shows
@@ -519,6 +677,17 @@ api.get('/workloads/:id', async (req, res) => {
     models: Math.min(plan.models, plan.order.length),
     modelsWanted: plan.models,
     estimateUsd: plan.estimateUsd,
+    /* What a measurement is worth: what it is expected to find a month, what the switch already saves
+       and protects, and the most one may spend on this workload. A measurement nobody asks for runs
+       only when it would pay for itself within EVAL_PAYBACK_MONTHS. */
+    worth: plan.worth ? { ...plan.worth, paybackMonths: config.EVAL_PAYBACK_MONTHS } : null,
+    ceilingUsd: plan.ceilingUsd ?? null,
+    optimizeBudget: plan.optimizeBudget ?? null,
+    // how many of the bar's answers can be read from the customer's own calls rather than bought
+    recordedShare: plan.recordedShare ?? 0,
+    // how often the workspace measures by itself, zero for only when asked, and when this one is next looked at
+    everyDays: await cadenceOf(w.workspace_id),
+    nextAt: w.recheck_after ? Number(w.recheck_after) : null,
     picked: plan.order.slice(0, plan.models).map((r) => r.model),
     /* How the models were chosen, for the page to explain: what ruled each group out, in what
        order the rest will be tried and why, what Jev and the leaderboard said, how old each fact
@@ -618,6 +787,8 @@ api.get('/workloads/:id', async (req, res) => {
     model: w.routed_model || w.reference_model, reference: w.reference_model,
     servingKey: servingAs,
     optimizeMode: w.optimize_mode, floor: w.floor_pct,
+    // savings the customer can make in their own code, with what each would save (src/eval/advice.js)
+    advice: await adviceFor(w),
     speedPref: w.speed_pref || null,
     calls: t.calls, cost: round8(t.cost),
     promotedAt: w.promoted_at,
@@ -636,6 +807,10 @@ api.get('/workloads/:id', async (req, res) => {
       reused: cert.run.reused ?? 0,
       saved: round8(cert.run.saved_usd || 0),
       plan: parseJson(cert.run.plan_json),
+      // held to the same answer as the customer's own model, or to one at least as good
+      yardstick: cert.run.yardstick ?? 'agreement',
+      // how many of the bar's answers were the customer's own, read rather than bought
+      recordedRefs: cert.run.recorded_refs ?? null,
       // this measurement's calls, like the reference row beside them and the note above them
       results: compared.map((r) => resultRow(r)),
       nothing: compared.length ? null : nothingCompared(cert.run),
@@ -651,6 +826,18 @@ api.get('/workloads/:id', async (req, res) => {
       model: best.model_id, gap: best.gap_pct, costMonth: best.cost_month_usd,
       accuracy: round8(100 - best.gap_pct),
       name: nameOfResult(best), escalated: best.escalated_pct ?? null,
+      // the second look on calls it had never seen, when it had one: a candidate it did not confirm waits for a person
+      confirm: best.confirm_verdict ? { verdict: best.confirm_verdict, runs: best.confirm_runs ?? 0, gap: best.confirm_gap ?? null,
+        hi: best.confirm_hi ?? null, floor: best.confirm_floor ?? null } : null,
+      // switched back from before, so switching never picks it again by itself; a person still can
+      heldBack: (await heldBack(w.id)).has(best.model_id),
+    },
+    /* A switch still taking over: the share of calls it answers now, the steps it passes through, and
+       what it has to show at this one before it takes the next. */
+    rollout: w.rollout_share === null || w.rollout_share === undefined ? null : {
+      share: Number(w.rollout_share), stage: Number(w.rollout_stage ?? 0), stages: config.ROLLOUT_STAGES,
+      startedAt: Number(w.rollout_started_at ?? w.promoted_at ?? 0), stageHours: config.ROLLOUT_STAGE_HOURS,
+      minCalls: config.ROLLOUT_MIN_CALLS, from: w.rollout_from_arm_id ? (await armById(w.rollout_from_arm_id))?.label ?? null : null,
     },
     traffic: { routed: traffic.routed, copies: traffic.copies, carries: traffic.carries, observe: traffic.observe },
   });
@@ -681,16 +868,47 @@ api.get('/workloads/:id/calls', async (req, res) => {
         OR (response_json::jsonb #>> '{choices,0,message,content}') ILIKE ?)` : '');
   const args = q ? [w.id, like, like, like, like] : [w.id];
 
-  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE ${where}`).get(...args)).n;
-  const pages = Math.max(1, Math.ceil(total / CALLS_PER_PAGE));
-  const page = Math.min(pages, Math.max(1, Number.parseInt(req.query.page, 10) || 1));
-  const rows = await db.prepare(
-    `SELECT ${CALL_COLUMNS} FROM calls WHERE ${where}
-      ORDER BY created_at DESC LIMIT ? OFFSET ?`)
-    .all(...args, CALLS_PER_PAGE, (page - 1) * CALLS_PER_PAGE);
-
-  return res.json({ total, page, pages, per: CALLS_PER_PAGE, q, rows: rows.map(callRow) });
+  /* A search reads the text of every stored call, on the same database the live calls use. One
+     account running a dozen of them at once used to slow every other customer's calls to seconds.
+     So a search gets three seconds, a workspace runs two at a time, and the count stops at a
+     thousand: past that nobody pages through, they search for something narrower. */
+  if (q) {
+    const running = searching.get(req.workspace.id) || 0;
+    if (running >= 2) return fail(res, 429, 'Two searches are already running. Wait for them to finish.');
+    searching.set(req.workspace.id, running + 1);
+  }
+  try {
+    const out = await db.tx(async (tx) => {
+      if (q) await tx.exec(`SET LOCAL statement_timeout = ${SEARCH_TIMEOUT_MS}`);
+      const counted = Number((await tx.prepare(
+        `SELECT COUNT(*) AS n FROM (SELECT 1 FROM calls WHERE ${where} LIMIT ${COUNT_CAP + 1}) x`).get(...args)).n);
+      const total = Math.min(counted, COUNT_CAP);
+      const pages = Math.max(1, Math.ceil(total / CALLS_PER_PAGE));
+      const page = Math.min(pages, Math.max(1, Number.parseInt(req.query.page, 10) || 1));
+      const rows = await tx.prepare(
+        `SELECT ${CALL_COLUMNS} FROM calls WHERE ${where}
+          ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+        .all(...args, CALLS_PER_PAGE, (page - 1) * CALLS_PER_PAGE);
+      return { total, more: counted > COUNT_CAP, page, pages, per: CALLS_PER_PAGE, q, rows: rows.map(callRow) };
+    });
+    return res.json(out);
+  } catch (err) {
+    // 57014 is Postgres cancelling a statement that ran past its time
+    if (err?.code === '57014') {
+      return res.json({ total: 0, page: 1, pages: 1, per: CALLS_PER_PAGE, q, rows: [], timedOut: true,
+        message: 'That search took too long. Try fewer words, or more particular ones.' });
+    }
+    throw err;
+  } finally {
+    if (q) {
+      const n = (searching.get(req.workspace.id) || 1) - 1;
+      if (n > 0) searching.set(req.workspace.id, n); else searching.delete(req.workspace.id);
+    }
+  }
 });
+const searching = new Map();
+const SEARCH_TIMEOUT_MS = 3000;
+const COUNT_CAP = 1000;
 
 /* The whole of ONE field of one call, for reading a cell the table had to cut short.
  *
@@ -721,8 +939,12 @@ api.get('/workloads/:id/calls/:callId/text', async (req, res) => {
   });
 });
 
+/* How this workload is switched: on its own, only once somebody approves, or never (measured, and a
+   person can still approve by hand). Anything else is refused rather than read as "on its own": the
+   page offering two choices used to turn a "never" workload into an automatic one with one click. */
 api.post('/workloads/:id/mode', async (req, res) => {
-  const mode = req.body?.mode === 'ask' ? 'ask' : 'auto';
+  const mode = String(req.body?.mode || '');
+  if (!['auto', 'ask', 'off'].includes(mode)) return fail(res, 400, 'Choose auto, ask or off.');
   const changed = (await db.prepare('UPDATE workloads SET optimize_mode = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
     .run(mode, now(), req.params.id, req.workspace.id)).changes;
   if (!changed) return fail(res, 404, 'No such workload.');
@@ -734,10 +956,29 @@ api.post('/workloads/:id/promote', async (req, res) => {
     .get(req.params.id, req.workspace.id);
   if (!w) return fail(res, 404, 'No such workload.');
   const cert = await certificate(w.id);
-  const pick = req.body?.model
-    || cert?.results.find((r) => r.verdict === 'cleared')?.model_id;
+  /* The model named, or the one the measurement itself would switch to: cleared, priced, cheaper once
+     our fee is added, and confirmed by the second look before one that was not. The first model that
+     cleared, whatever it cost, used to be taken. */
+  const pick = req.body?.model || (cert ? cheaperCleared(cert.results)[0]?.model_id : null);
   if (!pick) return fail(res, 400, 'Nothing has cleared your bar on this workload yet.');
-  return res.json(await promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it' }));
+  // a person may take all of the calls at once; otherwise it starts on a share and grows
+  return res.json(await promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it',
+    rollout: req.body?.rollout !== false }));
+});
+
+/* A switch still taking over a share at a time, given every call now, because a person says so. */
+api.post('/workloads/:id/rollout/finish', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  if (w.rollout_share === null || w.rollout_share === undefined) return res.json({ ok: true, already: true });
+  await db.prepare(`UPDATE workloads SET rollout_share = NULL, rollout_stage = NULL, rollout_started_at = NULL,
+      rollout_from_arm_id = NULL, updated_at = ? WHERE id = ?`).run(now(), w.id);
+  forgetState(w.id);
+  await addActivity(req.workspace.id, {
+    kind: 'ok', title: `${w.slug} now answers all of its calls on the new strategy`,
+    detail: 'You gave it every call at once rather than a share at a time.', workloadId: w.id,
+  });
+  return res.json({ ok: true });
 });
 
 api.post('/workloads/:id/revert', async (req, res) => {
@@ -927,13 +1168,17 @@ api.get('/models', async (req, res) => {
     if (!s.m) continue;
     where.set(s.m, [...(where.get(s.m) || []), s.slug]);
   }
+  /* How many providers that keep nothing serve each model, once that list has been read at least once;
+     before then nothing is known, and the page says "not reported" rather than "none". */
+  const zdrKnown = !!(await db.prepare(`SELECT 1 FROM fact_sync WHERE source = 'zdr'`).get());
   res.json({
-    zdrOnly: config.ZDR_ONLY,
+    zdrOnly: req.workspace.zdr_required !== 0,
     models: rows.map((m) => ({
       id: m.model_id, name: m.name,
       priceIn: round8(m.price_in * 1e6), priceOut: round8(m.price_out * 1e6),
       openWeights: !!m.open_weights, enabled: !!m.enabled,
       where: where.get(m.model_id) || [],
+      zdr: zdrKnown ? Number(m.zdr || 0) : null,
     })),
   });
 });
@@ -963,19 +1208,38 @@ const RETENTION_CHOICES = [
 
 api.get('/settings', async (req, res) => {
   const acct = await account(req.workspace.id);
+  const free = await available(req.workspace.id);
+  const planActive = acct.plan_status === 'active';
   res.json({
     name: req.user.name, email: req.user.email,
+    // signed in with a code after the password was cleared: a new one is set without the old
+    needsPassword: !!req.user.pw_cleared,
     mode: req.workspace.mode,
     keys: (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at),
     balance: round8(acct.balance_usd),
+    // set aside for calls in flight right now, and what is free to spend
+    held: round8(free.held),
+    free: round8(free.free),
     autoTopUp: !!acct.auto_topup,
-    topUpAmount: config.TOPUP_AMOUNT_USD,
+    topUpAmount: topUpAmountOf(acct),
     topUpThreshold: config.TOPUP_THRESHOLD_USD,
+    topUpMaxPerDay: config.TOPUP_MAX_PER_DAY,
+    topUpMin: config.TOPUP_MIN_USD,
+    topUpMax: config.TOPUP_MAX_USD,
+    payments: paymentsState(),
+    plan: planActive ? {
+      allowanceTotal: config.EVAL_ALLOWANCE_USD,
+      allowanceLeft: await allowanceLeft(req.workspace.id),
+      periodStart: (await account(req.workspace.id)).allowance_period_start,
+    } : null,
     /* Both, not just the digits. The brand and last four are only there to be READ; the
        thing that can actually be charged is the payment method, and anything that clears
        that while leaving the digits behind leaves a card on screen that does not exist. */
     card: (acct.payment_method && acct.card_last4)
-      ? { brand: acct.card_brand, last4: acct.card_last4 } : null,
+      ? { brand: acct.card_brand, last4: acct.card_last4, forTopUps: Number(acct.card_for_topups || 0) === 1 } : null,
+    // whether this deployment keeps keys in a form it can show again (KEY_SECRET is set)
+    canRevealKeys: canRevealKeys(),
+    passwordMin: 8,
     cardNote: acct.topup_failed_note,
     retentionDays: req.workspace.retention_days,
     evalModels: req.workspace.eval_models ?? config.EVAL_MODELS_DEFAULT,
@@ -983,17 +1247,166 @@ api.get('/settings', async (req, res) => {
     measureEveryDays: req.workspace.measure_every_days ?? config.MEASURE_EVERY_DAYS,
     measureChoices: MEASURE_OPTIONS,
     retentionChoices: RETENTION_CHOICES,
-    zdrOnly: config.ZDR_ONLY,
+    zdrOnly: req.workspace.zdr_required !== 0,
+    zdrForced: config.ZDR_FORCED,
+    // how a new workload is switched: ask first, on its own, or not at all
+    defaultOptimizeMode: req.workspace.default_optimize_mode || config.DEFAULT_OPTIMIZE_MODE,
+    // whether this workspace's results (never content) may help other workspaces choose models
+    shareStats: Number(req.workspace.share_stats || 0) === 1,
+    // the most optimizing may spend over thirty days, and what it has
+    optimizeBudget: req.workspace.optimize_budget_usd ?? null,
+    optimizeSpent: await optimizeSpent(req.workspace.id),
+    // marking long instructions for caching where that pays
+    cacheHints: Number(req.workspace.cache_hints ?? 1) !== 0,
+    cacheHintsAvailable: config.CACHE_HINTS,
+    // the most calls may cost through us in a day and a month, and what they have
+    limits: await (async () => {
+      const spent = await spentOnCalls(req.workspace.id);
+      return { dailyUsd: req.workspace.daily_limit_usd ?? null, monthlyUsd: req.workspace.monthly_limit_usd ?? null,
+        spentToday: spent.day, spentMonth: spent.month };
+    })(),
+    // which emails the workspace gets
+    notify: notifyPrefs(req.workspace),
+    notifyKinds: NOTIFY_KINDS,
     canBill: canBill(),
     ledger: await ledger(req.workspace.id, 10),
     routing: await gateRouting(req.workspace.id),
   });
 });
 
+/* Whether this workspace's calls only go to providers that keep nothing. Turning it off is a real
+   choice with a real cost, so it is said in the activity feed in words, and it never reaches
+   providers that train on what they are sent. */
+api.post('/settings/zdr', async (req, res) => {
+  if (config.ZDR_FORCED) return fail(res, 400, 'Zero data retention is required for every workspace on this deployment.');
+  const required = req.body?.required !== false;
+  await db.prepare('UPDATE workspaces SET zdr_required = ? WHERE id = ?').run(required ? 1 : 0, req.workspace.id);
+  forgetWorkspace(req.workspace.id);
+  await addActivity(req.workspace.id, {
+    kind: 'connect',
+    title: required ? 'Only providers that keep nothing' : 'Providers that keep data briefly are allowed',
+    detail: required
+      ? 'Every call goes only to providers that keep nothing of what they are sent.'
+      : 'Calls may go to providers that keep what they are sent for a while (usually for abuse checks), '
+        + 'never to ones that train on it. More models can be used, and measured.',
+  });
+  return res.json({ ok: true, required });
+});
+
+/* How a new workload is switched. Workloads that exist keep what they have unless asked to follow. */
+api.post('/settings/default-mode', async (req, res) => {
+  const mode = String(req.body?.mode || '');
+  if (!['ask', 'auto', 'off'].includes(mode)) return fail(res, 400, 'Choose ask, auto or off.');
+  await db.prepare('UPDATE workspaces SET default_optimize_mode = ? WHERE id = ?').run(mode, req.workspace.id);
+  let moved = 0;
+  if (req.body?.applyToExisting === true) {
+    moved = (await db.prepare(`UPDATE workloads SET optimize_mode = ?, updated_at = ? WHERE workspace_id = ? AND merged_into IS NULL`)
+      .run(mode, now(), req.workspace.id)).changes;
+  }
+  const words = { ask: 'ask you before switching', auto: 'switch on their own once a model clears twice', off: 'never be switched' };
+  await addActivity(req.workspace.id, {
+    kind: 'connect', title: `New workloads will ${words[mode]}`,
+    detail: moved ? `And the ${moved} workloads you have now do the same.` : 'Workloads you have now keep their own setting.',
+  });
+  return res.json({ ok: true, mode, moved });
+});
+
+/* Whether this workspace's measurement results may help other workspaces choose which models to try.
+   Only which model cleared which kind of workload is ever shared, never a call, an answer or a name. */
+api.post('/settings/share-stats', async (req, res) => {
+  const on = req.body?.enabled === true;
+  await db.prepare('UPDATE workspaces SET share_stats = ? WHERE id = ?').run(on ? 1 : 0, req.workspace.id);
+  return res.json({ ok: true, enabled: on });
+});
+
+/* The most optimizing (measurements and background answers) may spend over thirty days. Null is no
+   ceiling beyond what each measurement is worth. */
+api.post('/settings/optimize-budget', async (req, res) => {
+  const raw = req.body?.amountUsd;
+  const amount = raw === null || raw === undefined || raw === '' ? null : Number(raw);
+  if (amount !== null && (!Number.isFinite(amount) || amount < 0 || amount > 100000)) {
+    return fail(res, 400, 'The budget is a number of dollars between 0 and 100,000, or nothing for no budget.');
+  }
+  await db.prepare('UPDATE workspaces SET optimize_budget_usd = ? WHERE id = ?').run(amount, req.workspace.id);
+  forgetPlanAll();
+  return res.json({ ok: true, amountUsd: amount });
+});
+
+/* Whether long instructions may be marked for caching, on models that only cache what is marked. */
+api.post('/settings/cache-hints', async (req, res) => {
+  const on = req.body?.enabled !== false;
+  await db.prepare('UPDATE workspaces SET cache_hints = ? WHERE id = ?').run(on ? 1 : 0, req.workspace.id);
+  forgetWorkspace(req.workspace.id);
+  return res.json({ ok: true, enabled: on });
+});
+
+/* The most calls may cost through us in a day and in a month, days and months told in IST. */
+api.post('/settings/limits', async (req, res) => {
+  const read = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+  const daily = read(req.body?.dailyUsd);
+  const monthly = read(req.body?.monthlyUsd);
+  for (const v of [daily, monthly]) {
+    if (v !== null && (!Number.isFinite(v) || v <= 0 || v > 1000000)) {
+      return fail(res, 400, 'A limit is a number of dollars above 0, or nothing for no limit.');
+    }
+  }
+  if (daily !== null && monthly !== null && daily > monthly) return fail(res, 400, 'The daily limit cannot be above the monthly one.');
+  await db.prepare('UPDATE workspaces SET daily_limit_usd = ?, monthly_limit_usd = ? WHERE id = ?').run(daily, monthly, req.workspace.id);
+  forgetWorkspace(req.workspace.id);
+  return res.json({ ok: true, dailyUsd: daily, monthlyUsd: monthly });
+});
+
+/* Which emails the workspace gets. */
+api.post('/settings/notify', async (req, res) => {
+  const given = req.body?.kinds && typeof req.body.kinds === 'object' ? req.body.kinds : {};
+  const prefs = notifyPrefs(req.workspace);
+  for (const k of Object.keys(NOTIFY_KINDS)) if (typeof given[k] === 'boolean') prefs[k] = given[k];
+  await db.prepare('UPDATE workspaces SET notify_json = ? WHERE id = ?').run(JSON.stringify(prefs), req.workspace.id);
+  return res.json({ ok: true, notify: prefs });
+});
+
+/* The ledger further back than Settings shows at first, twenty lines at a time. */
+api.get('/settings/ledger', async (req, res) => {
+  const before = Number(req.query?.before);
+  const beforeId = typeof req.query?.beforeId === 'string' ? req.query.beforeId.slice(0, 60) : null;
+  const rows = await ledger(req.workspace.id, 20, { before: Number.isFinite(before) && before > 0 ? before : null, beforeId });
+  return res.json({ rows, more: rows.length === 20 });
+});
+
+/* Keys have names, so somebody with several can tell which one a service uses before revoking it. */
+const keyName = (raw, fallback) => {
+  const n = String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  return n || fallback;
+};
+
 api.post('/settings/keys', async (req, res) => {
-  const k = await issueKey(req.workspace.id, String(req.body?.name || 'production').slice(0, 40));
-  await addActivity(req.workspace.id, { kind: 'connect', title: `New key ${k.prefix}`, detail: 'Shown once, right now.' });
-  res.json({ ok: true, key: k.secret, prefix: k.prefix });
+  const count = (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at).length;
+  const k = await issueKey(req.workspace.id, keyName(req.body?.name, `Key ${count + 1}`));
+  await addActivity(req.workspace.id, {
+    kind: 'connect', title: `New key "${k.name}" (${k.prefix}…)`,
+    detail: canRevealKeys() ? 'Its full value is on Connect and in Settings.' : 'Copy it now: this deployment cannot show it again.',
+  });
+  res.json({ ok: true, key: k.secret, prefix: k.prefix, id: k.id, name: k.name });
+});
+
+api.post('/settings/keys/:id/name', async (req, res) => {
+  const name = keyName(req.body?.name, null);
+  if (!name) return fail(res, 400, 'Give the key a name.');
+  const done = (await db.prepare('UPDATE api_keys SET name = ? WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL')
+    .run(name, req.params.id, req.workspace.id)).changes;
+  if (!done) return fail(res, 404, 'No such key.');
+  return res.json({ ok: true, name });
+});
+
+/* Revealing one key in full, when somebody asks to see it. Keys are shown masked until then. */
+api.get('/settings/keys/:id/reveal', async (req, res) => {
+  if (!canRevealKeys()) {
+    return fail(res, 410, 'This deployment does not keep keys in a form it can show again, so a key can only be copied when it is made. Make a new one to get a key you can copy.');
+  }
+  const k = await revealKeyById(req.workspace.id, req.params.id);
+  if (!k) return fail(res, 404, 'No such key.');
+  if (!k.secret) return fail(res, 410, 'This key was made before keys could be shown again. Replace it to get one you can copy.');
+  return res.json({ ok: true, key: k.secret });
 });
 
 api.delete('/settings/keys/:id', async (req, res) => {
@@ -1001,19 +1414,76 @@ api.delete('/settings/keys/:id', async (req, res) => {
   return res.json({ ok: true });
 });
 
+/* A name changes at once. An email address changes only once the new address answers a code, so
+   nobody can move an account to an address that is not theirs, and a typo cannot lock anybody out.
+
+   Moving the address that signs in also needs the current password. A session alone used to be
+   enough, so anybody holding a stolen session could move the account to their own address, and the
+   owner could then sign in neither by password nor by code. The old address is told once it moves,
+   and every other session ends. Asking is limited per account and per address a request came from,
+   because each ask sends an email from us to an address of the asker's choosing. */
 api.post('/settings/profile', async (req, res) => {
-  const name = String(req.body?.name ?? req.user.name).slice(0, 80);
+  const name = String(req.body?.name ?? req.user.name).replace(/\s+/g, ' ').trim().slice(0, 80);
+  await db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, req.user.id);
   const email = String(req.body?.email ?? req.user.email).trim().toLowerCase().slice(0, 160);
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return fail(res, 400, 'That does not look like an email address.');
+  if (email === req.user.email) return res.json({ ok: true, name, email });
+  if (req.user.pw_cleared) return fail(res, 400, 'Choose a password first, under Password below, then change your email.');
+  const ip = clientIp(req);
+  if (!await allow('email_change_user', req.user.id, { max: 5, windowMs: 3600000 })
+    || !await allow('code_request_ip', ip, { max: config.LIMIT_CODES_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many changes asked for. Wait an hour, then try again.');
   }
-  if (email !== req.user.email) {
-    const taken = await db.prepare('SELECT id FROM users WHERE email = ? AND id != ?')
-      .get(email, req.user.id);
-    if (taken) return fail(res, 409, 'That email address is already in use.');
+  // a wrong password is a 400, not a 401: the app reads 401 as a session that has ended
+  if (!await checkPassword(req.user.email, req.body?.password)) return fail(res, 400, 'Your current password is not right.');
+  const asked = await requestEmailChange(req.user, email, { ip });
+  if (!asked.ok) return fail(res, 400, asked.reason);
+  if (asked.send) sendLater({ to: asked.email, ...codeEmail({ purpose: 'change_email', code: asked.send.code, minutes: asked.send.minutes }) });
+  // the same answer whether or not the address is free, so this cannot be used to find out who has an account
+  return res.json({ ok: true, name, email: req.user.email, pendingEmail: asked.email, minutes: config.LOGIN_CODE_TTL_MIN });
+});
+
+api.post('/settings/email/verify', async (req, res) => {
+  const ip = clientIp(req);
+  if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
+    return fail(res, 429, 'Too many tries from here. Wait an hour.');
   }
-  await db.prepare('UPDATE users SET name = ?, email = ? WHERE id = ?').run(name, email, req.user.id);
-  return res.json({ ok: true, name, email });
+  const before = req.user.email;
+  const out = await verifyEmailChange(req.user, req.body?.email, req.body?.code);
+  if (!out.ok) {
+    // 400 either way: the app reads a 401 as a session that has ended
+    return fail(res, 400, out.reason === 'wrong'
+      ? `That code is not right. ${out.triesLeft} ${out.triesLeft === 1 ? 'try' : 'tries'} left.`
+      : 'That code has expired or the address is no longer free. Ask for another.');
+  }
+  const ended = await endOtherSessions(req.user.id, req.sessionValue);
+  await addActivity(req.workspace.id, { kind: 'connect', title: 'Your email address changed',
+    detail: `It is ${out.email} now.${ended ? ' Every other session was signed out.' : ''}` });
+  sendLater({ to: before, ...noticeEmail({
+    title: 'Your Understudy email address was changed',
+    lines: [
+      `The address that signs in to your Understudy account is now ${out.email}. This one no longer signs in.`,
+      'It was changed by somebody signed in to the account who knew its password, and every other session was signed out.',
+      'If that was not you, tell us straight away through the contact page.',
+    ],
+    link: `${config.PUBLIC_URL}/contact?topic=security`, linkText: 'Contact us',
+  }) });
+  return res.json({ ok: true, email: out.email });
+});
+
+/* A new password. Every other session ends, so anybody who knew the old one is signed out everywhere. */
+api.post('/settings/password', async (req, res) => {
+  // each try is a deliberately slow hash, and a session must not be a way to guess the password
+  if (!await allow('password_change_user', req.user.id, { max: 10, windowMs: 900000 })) {
+    return tooMany(res, 'Too many tries. Wait a quarter of an hour, then try again.');
+  }
+  const out = await changePassword(req.user, req.body?.current, req.body?.next, { keepSession: req.sessionValue });
+  if (!out.ok) return fail(res, 400, out.reason);
+  return res.json({ ok: true });
+});
+
+api.post('/settings/sign-out-others', async (req, res) => {
+  const n = await endOtherSessions(req.user.id, req.sessionValue);
+  return res.json({ ok: true, ended: n });
 });
 
 /* How many models a measurement tries. More is a better picture of where quality falls off,
@@ -1074,14 +1544,19 @@ api.post('/settings/retention', async (req, res) => {
  * off-session charge the customer never agreed to is a dispute waiting to happen. */
 api.post('/billing/checkout', async (req, res) => {
   const s = await stripe();
-  if (!s) {
-    return res.status(503).json({ error: 'Payments are not set up on this deployment yet.' });
+  if (!s || !canBill()) {
+    return res.status(503).json({ error: paymentsState() === 'test_refused'
+      ? 'Payments are not switched on yet on this deployment, so credit cannot be added. Sending us copies needs no credit.'
+      : 'Payments are not set up on this deployment yet.' });
   }
   const asked = Number(req.body?.amountUsd);
   const amount = Math.min(config.TOPUP_MAX_USD,
     Math.max(config.TOPUP_MIN_USD, Number.isFinite(asked) ? asked : config.TOPUP_AMOUNT_USD));
+  // automatic top up only when the customer asked for it here, with the words that ask for it
+  const autoTopUp = req.body?.autoTopUp === true;
 
   const acct = await account(req.workspace.id);
+  const topUpAmount = topUpAmountOf(acct);
   let customer = acct.stripe_customer;
   if (!customer) {
     const made = await s.customers.create({
@@ -1111,33 +1586,76 @@ api.post('/billing/checkout', async (req, res) => {
       },
     }],
     payment_intent_data: {
-      setup_future_usage: 'off_session',
+      ...(autoTopUp ? { setup_future_usage: 'off_session' } : {}),
       metadata: { workspace_id: req.workspace.id },
     },
-    custom_text: {
-      submit: {
-        message: `We will save this card and charge it $${config.TOPUP_AMOUNT_USD.toFixed(2)} `
-          + `automatically whenever your balance falls below $${config.TOPUP_THRESHOLD_USD.toFixed(2)}, `
-          + 'so your calls do not stop. You can turn that off in Settings at any time.',
+    ...(autoTopUp ? {
+      custom_text: {
+        submit: {
+          message: `We will save this card and charge it $${topUpAmount.toFixed(2)} `
+            + `automatically whenever your balance falls below $${config.TOPUP_THRESHOLD_USD.toFixed(2)}, `
+            + `at most ${config.TOPUP_MAX_PER_DAY} times a day, so your calls do not stop. You can turn that off in Settings at any time.`,
+        },
       },
-    },
-    success_url: `${config.PUBLIC_URL}/settings?credit=${dollars}`,
+    } : {}),
+    // the session travels back, so the page asks us what was paid rather than reading it from the address
+    success_url: `${config.PUBLIC_URL}/settings?credit=paid&session={CHECKOUT_SESSION_ID}`,
     cancel_url: `${config.PUBLIC_URL}/settings?credit=cancelled`,
-    metadata: { workspace_id: req.workspace.id },
+    metadata: { workspace_id: req.workspace.id, auto_topup: autoTopUp ? '1' : '0' },
   }, {
     /* A double click, or a retried request, should land on the same payment page rather than
        opening a second one. Scoped to the minute so choosing the same amount again later is
        still a new top up. */
-    idempotencyKey: `checkout:${req.workspace.id}:${dollars}:${Math.floor(Date.now() / 60000)}`,
+    idempotencyKey: `checkout:${req.workspace.id}:${dollars}:${autoTopUp ? 'auto' : 'once'}:${Math.floor(Date.now() / 60000)}`,
   });
   res.json({ url: session.url });
 });
 
+/* What a payment page that sent somebody back actually took, asked of Stripe: the amount, whether it
+   was paid, and whether it is on the balance yet. Only this workspace's own sessions are answered. */
+api.get('/billing/checkout/:id', async (req, res) => {
+  const s = await stripe();
+  if (!s) return fail(res, 503, 'Payments are not set up here.');
+  // each lookup asks Stripe, so a workspace asks a few times a minute at most
+  if (!await allow('checkout_lookup', req.workspace.id, { max: 20, windowMs: 600000 })) {
+    return tooMany(res, 'Asked too often. The balance on this page shows the payment once it lands.');
+  }
+  const sid = String(req.params.id || '');
+  if (!/^cs_[A-Za-z0-9_]+$/.test(sid)) return fail(res, 404, 'No such payment.');
+  let session;
+  try { session = await s.checkout.sessions.retrieve(sid); } catch { return fail(res, 404, 'No such payment.'); }
+  if (session?.metadata?.workspace_id !== req.workspace.id) return fail(res, 404, 'No such payment.');
+  const intent = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+  const credited = intent ? !!(await db.prepare('SELECT 1 FROM ledger WHERE workspace_id = ? AND ref = ?').get(req.workspace.id, intent)) : false;
+  return res.json({ amount: (session.amount_total ?? 0) / 100, paid: session.payment_status === 'paid', credited });
+});
+
+/* Automatic top up: on only with a card saved, off at any time, and for an amount the customer picks. */
 api.post('/settings/auto-topup', async (req, res) => {
-  await db.prepare(`UPDATE billing_accounts SET auto_topup = ?, topup_failed_note = NULL, updated_at = ?
-               WHERE workspace_id = ?`)
-    .run(req.body?.enabled ? 1 : 0, now(), req.workspace.id);
-  res.json({ ok: true });
+  const acct = await account(req.workspace.id);
+  const b = req.body || {};
+  // switching off needs nothing else, and is never refused over an amount
+  if (b.amountUsd !== undefined && b.enabled !== false) {
+    const a = Number(b.amountUsd);
+    if (!Number.isFinite(a) || a < config.TOPUP_MIN_USD || a > config.TOPUP_MAX_USD) {
+      return fail(res, 400, `Pick an amount between $${config.TOPUP_MIN_USD} and $${config.TOPUP_MAX_USD}.`);
+    }
+    await db.prepare('UPDATE billing_accounts SET topup_amount_usd = ?, updated_at = ? WHERE workspace_id = ?')
+      .run(Math.round(a * 100) / 100, now(), req.workspace.id);
+  }
+  if (b.enabled !== undefined) {
+    // only a card saved for top ups, at a checkout that said so, is ever charged without its owner there
+    if (b.enabled && (!acct.payment_method || Number(acct.card_for_topups || 0) !== 1)) {
+      return fail(res, 400, 'Add credit with a card first, and tick the box to top up automatically there, so the card is saved for top ups.');
+    }
+    await db.prepare(`UPDATE billing_accounts SET auto_topup = ?, topup_failed_note = NULL, updated_at = ?
+                 WHERE workspace_id = ?`).run(b.enabled ? 1 : 0, now(), req.workspace.id);
+    /* Switched on with the balance already low: a top up is booked now. Otherwise the next one waited
+       for a call to be charged, and with an empty balance every call is refused before it is charged. */
+    if (b.enabled) await maybeTopUp(req.workspace.id).catch(() => {});
+  }
+  const after = await account(req.workspace.id);
+  res.json({ ok: true, enabled: !!after.auto_topup, amountUsd: topUpAmountOf(after) });
 });
 
 /* Connect ------------------------------------------------------------------------ */
@@ -1180,9 +1698,29 @@ api.get('/connect', async (req, res) => {
     `SELECT COUNT(*) AS n FROM calls WHERE workspace_id = ? AND status_code = 402`)
     .get(req.workspace.id)).n;
   const acct = await account(req.workspace.id);
+  /* The last calls we turned away, with the reason each was given, so a mistake in the wiring (a model
+     name we do not know, a body that is not JSON, a limit reached) is seen and fixed here rather than
+     found in the customer's own logs. At most one a minute is kept (see recordRefusal). */
+  const turnedAway = (await db.prepare(
+    `SELECT created_at, status_code, requested_model, response_json FROM calls
+      WHERE workspace_id = ? AND source = 'routed' AND status_code >= 400 ORDER BY created_at DESC LIMIT 5`)
+    .all(req.workspace.id)).map((r) => {
+    let why = null;
+    try { const j = JSON.parse(r.response_json || 'null'); why = j?.error?.message ?? (typeof j?.error === 'string' ? j.error : null); } catch { why = null; }
+    return { at: r.created_at, status: r.status_code, model: r.requested_model, why: why ? String(why).slice(0, 300) : null };
+  });
   res.json({
     baseUrl: `${config.PUBLIC_URL}/v1`,
+    // how new workloads are switched, chosen once while connecting and changeable in Settings
+    defaultMode: req.workspace.default_optimize_mode || config.DEFAULT_OPTIMIZE_MODE,
+    turnedAway,
     key: live?.secret ?? null,
+    // which key that is, by name, so replacing it replaces that one and says so
+    keyId: live?.id ?? null,
+    keyName: live?.name ?? null,
+    // what the workspace chose about what is kept, for the promise the page makes
+    zdrOnly: req.workspace.zdr_required !== 0,
+    retentionDays: req.workspace.retention_days ?? null,
     balance: round8(acct.balance_usd),
     refused,
     /* Routed calls need credit; copies never do. Saying so only when it is actually in the
@@ -1225,18 +1763,23 @@ async function lastTestCall(workspaceId) {
  * it can only be replaced. That is the whole reason this exists. The new one is returned in
  * full, once, right here, and everything still using the old one stops working, which the
  * screen says before it is pressed rather than after. */
+/* Replacing ONE key: the one named, or the one Connect shows. It used to revoke every key in the
+   workspace, including ones made separately in Settings for other services, while the screen
+   warned only about "your current key". Other keys keep working. */
 api.post('/connect/regenerate-key', async (req, res) => {
   const live = (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at);
-  const fresh = await issueKey(req.workspace.id, 'production');
-  for (const old of live) await revokeKey(req.workspace.id, old.id);
+  const target = req.body?.keyId ? live.find((k) => k.id === req.body.keyId) : live[live.length - 1];
+  if (req.body?.keyId && !target) return fail(res, 404, 'No such key.');
+  const fresh = await issueKey(req.workspace.id, target?.name || 'Key 1');
+  if (target) await revokeKey(req.workspace.id, target.id);
   await addActivity(req.workspace.id, {
     kind: 'connect',
-    title: `New key ${fresh.prefix}`,
-    detail: live.length
-      ? `${live.length} older ${live.length === 1 ? 'key' : 'keys'} stopped working.`
+    title: `New key "${fresh.name}" (${fresh.prefix}…)`,
+    detail: target
+      ? `It replaces ${target.prefix}…, which stopped working. ${live.length - 1 > 0 ? `Your ${live.length - 1} other ${live.length - 1 === 1 ? 'key keeps' : 'keys keep'} working.` : ''}`.trim()
       : 'Nothing was using a key before this one.',
   });
-  return res.json({ ok: true, key: fresh.secret, prefix: fresh.prefix, replaced: live.length });
+  return res.json({ ok: true, key: fresh.secret, prefix: fresh.prefix, id: fresh.id, replaced: target ? 1 : 0, replacedId: target?.id ?? null });
 });
 
 /* Sends one real call down the routed path and says what came back. It is the same path a

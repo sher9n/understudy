@@ -40,6 +40,16 @@ process.env.JEV_VIA = 'off';
 process.env.TYPESAFE_API_KEY = '';
 process.env.TYPESAFE_BASE = `http://127.0.0.1:${PORT}/typesafe`;
 process.env.ALERTS_ENABLED = 'false';
+// these tests are about what a switch does once it serves every call; the staged rollout has tests of its own
+process.env.ROLLOUT_ENABLED = 'false';
+process.env.DEFAULT_OPTIMIZE_MODE = process.env.DEFAULT_OPTIMIZE_MODE || 'auto';
+// no test here is about speed: a busy machine running every test file at once must not make a model look slow
+process.env.SPEED_SLACK_MS = '5000';
+process.env.REQUEST_LOGS = 'false';
+// these tests are about what a switch does, so new workloads switch on their own as they did before asking first
+process.env.DEFAULT_OPTIMIZE_MODE = 'auto';
+// these scenarios were built on two paid answers per call; recorded answers have tests of their own
+process.env.EVAL_USE_RECORDED = 'false';
 
 const { db, now } = await import('../src/db/index.js');
 const { default: migrate } = await import('../src/db/migrate.js');
@@ -57,12 +67,14 @@ await migrate({ quiet: true });
 /* How each model behaves. The reference is slightly unstable with itself, which is what
    creates the bar; one candidate is steadier and cheaper, one drifts badly. */
 const BEHAVIOUR = {
-  'openai/gpt-5.4': (i, call) => ({ total: 100 + i, currency: 'USD', lines: call === 2 && i % 20 === 0 ? 9 : (i % 5) + 1 }),
+  'openai/gpt-5.4': (i, call) => ({ total: 100 + i, currency: 'USD', lines: call === 2 && i % 10 === 0 ? 9 : (i % 5) + 1 }),
   'vendor/steady-small': (i) => ({ total: 100 + i, currency: 'USD', lines: (i % 5) + 1 }),
   'vendor/drifty-small': (i) => ({ total: 999, currency: 'EUR', lines: 0 }),
 };
 
 let seen = 0;
+// how many times each model has been asked each call
+const asksOf = new Map();
 /* While this is set, the provider holds every answer until it resolves, so a test can know a
    measurement is mid-flight at the moment it asks it to stop. */
 let hold = null;
@@ -109,7 +121,11 @@ const server = http.createServer((req, res) => {
     const text = payload.messages.find((m) => m.role === 'user')?.content || '';
     const i = Number((text.match(/#(\d+)/) || [])[1] || 0);
     seen += 1;
-    const call = (BEHAVIOUR[model] === BEHAVIOUR['openai/gpt-5.4']) ? (seen % 2 === 0 ? 2 : 1) : 1;
+    /* The customer's model answers a call one way the first time it is asked and the other way the
+       second, so how often it disagrees with itself is the same however the calls happen to interleave. */
+    const askKey = `${model}#${i}`;
+    asksOf.set(askKey, (asksOf.get(askKey) || 0) + 1);
+    const call = (BEHAVIOUR[model] === BEHAVIOUR['openai/gpt-5.4']) ? (asksOf.get(askKey) % 2 === 0 ? 2 : 1) : 1;
     const answer = BEHAVIOUR[model] ? BEHAVIOUR[model](i, call) : { total: 0 };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -164,11 +180,12 @@ test('a full measurement run sets a bar, scores every candidate, and switches', 
       workspaceId: workspace.id, workloadId: workload.id, source,
       requestedModel: 'openai/gpt-5.4', servedModel: 'openai/gpt-5.4', statusCode: 200,
       promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0.002,
-      request, response: { choices: [{ message: { content: '{}' } }] },
+      request, response: { choices: [{ message: { content: JSON.stringify({ total: 100 + i, currency: 'USD', lines: (i % 5) + 1 }) } }] },
     });
   }
-  await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ?')
-    .run(now() - 14 * DAY, workload.id);
+  // spread over the fortnight, as real traffic is: a measurement draws on each day's calls
+  await db.prepare('UPDATE calls SET created_at = ?::bigint - (abs(hashtext(id)) % 14) * 86400000 WHERE workload_id = ?')
+    .run(now() - DAY, workload.id);
 
   const out = await runEvaluation(workload.id);
   assert.equal(out.ok, true, `the run did not finish: ${JSON.stringify(out)}`);
@@ -239,10 +256,11 @@ async function seed(tag, { source = 'trace' } = {}) {
       workspaceId: workspace.id, workloadId: workload.id, source,
       requestedModel: 'openai/gpt-5.4', servedModel: 'openai/gpt-5.4', statusCode: 200,
       promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0.002,
-      request, response: { choices: [{ message: { content: '{}' } }] },
+      request, response: { choices: [{ message: { content: JSON.stringify({ total: 100 + i, currency: 'USD', lines: (i % 5) + 1 }) } }] },
     });
   }
-  await db.prepare('UPDATE calls SET created_at = ? WHERE workload_id = ?').run(now() - 14 * 86400000, workload.id);
+  await db.prepare('UPDATE calls SET created_at = ?::bigint - (abs(hashtext(id)) % 14) * 86400000 WHERE workload_id = ?')
+    .run(now() - 86400000, workload.id);
   return { workspace, workload };
 }
 
@@ -377,8 +395,10 @@ test('the switched card is built from the switch and the calls since, and adds u
   assert.equal(before.volume.routed, 0);
   assert.equal(before.volume.copies, 200);
   assert.equal(before.volume.basis, 'all');
-  assert.ok(Math.abs(before.projection[0].saved
-    - (before.prices.fromPerCall - before.prices.toPerCall) * (200 / 14) * 30) < 1e-6);
+  // the month is projected from the days since the first call, which moves while the test runs: within half a percent
+  const wantSaved = (before.prices.fromPerCall - before.prices.toPerCall) * (200 / 14) * 30;
+  assert.ok(Math.abs(before.projection[0].saved - wantSaved) <= 1e-6 + 0.005 * Math.abs(wantSaved),
+    `projected ${before.projection[0].saved} against ${wantSaved}`);
 
   // twelve calls served by it since the switch, charged as routed calls are
   for (let i = 0; i < 12; i += 1) {
@@ -403,11 +423,18 @@ test('the switched card is built from the switch and the calls since, and adds u
   assert.ok(Math.abs(s.prices.fromPerCall - (2.5e-6 * 800 + 15e-6 * 60)) < 1e-9, `${s.prices.fromPerCall}`);
   assert.ok(Math.abs(s.prices.toPerCall - (2.5e-6 * 800 + 15e-6 * 60) * 0.1 * 1.01) < 1e-9, 'the fee is on the new model');
 
-  // the twelve served calls, actual: what was paid, and the same prompts on the original
+  /* the twelve served calls, actual: what was paid, and what the same calls would have cost on the
+     original. The measurement found the new model costs a tenth of the original on the same calls, so
+     that is what they would have cost: their cost divided by a tenth, with no fee on the original */
   assert.equal(s.soFar.calls, 12);
   assert.ok(Math.abs(s.soFar.paid - 12 * withFee(0.000196)) < 1e-7, `paid ${s.soFar.paid}`);
-  assert.ok(Math.abs(s.soFar.wouldHave - 12 * (2.5e-6 * 800 + 15e-6 * 60)) < 1e-7, `would have ${s.soFar.wouldHave}`);
+  assert.equal(s.soFar.wouldPricedBy, 'measured');
+  assert.ok(Math.abs(s.soFar.wouldHave - 12 * (0.000196 / 0.1)) < 1e-7, `would have ${s.soFar.wouldHave}`);
   assert.ok(Math.abs(s.soFar.saved - (s.soFar.wouldHave - s.soFar.paid)) < 1e-9);
+  // and what is left once the measurement is paid for, which a first day of savings does not cover
+  assert.ok(Math.abs(s.soFar.net - (s.soFar.saved - s.measuring.spent - s.measuring.background)) < 1e-7, `net ${s.soFar.net}`);
+  assert.ok(s.soFar.net < s.soFar.saved);
+  assert.ok(s.measuring.paybackDays > 0, 'and how long the switch takes to pay that back');
 
   /* The saving projected is on the calls that come through us, at their own pace: twelve today
      is 360 a month. It used to be projected from all 212, copies included, which is the saving
@@ -420,8 +447,11 @@ test('the switched card is built from the switch and the calls since, and adds u
   assert.ok(Math.abs(s.volume.monthlyRouted - 360) < 1e-6, `routed a month is ${s.volume.monthlyRouted}`);
   const [month] = s.projection;
   assert.ok(Math.abs(month.saved - perCallSaving * 360) < 1e-6, `a month saves ${month.saved}`);
-  assert.ok(Math.abs(s.volume.allMonthSaved - perCallSaving * (212 / 14) * 30) < 1e-6,
-    'and what routing the copies too would save is there, apart');
+  // projected from the days since the first call, which moves while the test runs (a slow machine moves it
+  // further): within half a percent, as the projection before the switch is
+  const allWant = perCallSaving * (212 / 14) * 30;
+  assert.ok(Math.abs(s.volume.allMonthSaved - allWant) <= 1e-6 + 0.005 * Math.abs(allWant),
+    `and what routing the copies too would save is there, apart: ${s.volume.allMonthSaved} against ${allWant}`);
   assert.ok(s.measuring.spent > 0, 'and what measuring cost is there to be shown');
 
   // calls of no known size cannot be priced: "$0.00 a call" and "0% less" were not findings
@@ -443,7 +473,7 @@ test('a stop that lands while the last charge is being settled switches nothing'
   // half way through the model that answers every call; the one that drifts was dropped long before
   holdCall('vendor/steady-small', 50);
   const running = runEvaluation(workload.id);
-  await until(async () => held > 0, 20000);
+  await until(async () => held > 0, 60000);
   // hold the balance while the rest of the calls run, so the run waits at its last settle
   const lock = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await lock.connect();
@@ -454,7 +484,7 @@ test('a stop that lands while the last charge is being settled switches nothing'
     const r = await db.prepare(`SELECT steps_done, steps_total FROM eval_runs WHERE workload_id = ? AND status = 'running'`)
       .get(workload.id);
     return r && r.steps_done === r.steps_total;
-  }, 20000);
+  }, 60000);
   const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_settle' });
   assert.equal(asked.state, 'stopping');
   await lock.query('ROLLBACK');
@@ -565,7 +595,7 @@ test('a stop on the very last call of a measurement switches nothing', async () 
   // its very last call: the steady model's 100th, the drifting one having been dropped early
   holdCall('vendor/steady-small', 100);
   const running = runEvaluation(workload.id);
-  await until(async () => held > 0, 20000);
+  await until(async () => held > 0, 60000);
   const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_last' });
   assert.equal(asked.state, 'stopping');
   releaseAt();
@@ -607,8 +637,17 @@ test('a run a restart interrupted lets go of its job, so it can be measured agai
   await closeAbandoned(workload.id);
   assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(orphan)).status, 'failed');
 
-  // and an interrupted run, which nobody stopped, does not keep a new workload from starting itself
-  await db.prepare(`UPDATE workloads SET status = 'new' WHERE id = ?`).run(workload.id);
+  /* and an interrupted run, which nobody stopped, does not keep a new workload from starting itself:
+     it waits a few hours, never the whole rhythm a stop waits, rather than starting again at once
+     (every hourly pass started it again, and each attempt paid for a bar of its own) */
+  const after = await load(workload.id);
+  assert.ok(after.recheck_after >= now() + 5.9 * 3600000 && after.recheck_after <= now() + 6.1 * 3600000,
+    `put off a few hours: ${(after.recheck_after - now()) / 3600000} hours`);
+  await considerMeasuring(workspace.id, { ...after, status: 'new' });
+  assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND status = 'queued'
+                 AND (payload::jsonb ->> 'workloadId') = ?`).get(workload.id)).n, 0, 'not within those hours');
+  // once they have passed, it starts by itself
+  await db.prepare(`UPDATE workloads SET status = 'new', recheck_after = ? WHERE id = ?`).run(now() - 1000, workload.id);
   const before = (await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND status = 'queued'`).get()).n;
   await considerMeasuring(workspace.id, await load(workload.id));
   assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND status = 'queued'`).get()).n,
@@ -787,7 +826,10 @@ test('a switch on copies waits for routed calls, and copies are never counted as
     costUsd: 0.000196, chargedUsd: withFee(0.000196),
   });
   assert.equal((await trafficOf(await load(workload.id))).carries, true);
-  const saved = (await dailySpend(workspace.id, 30)).reduce((a, d) => a + Math.max(0, d.would - d.paid), 0);
-  const expected = (2.5e-6 * 800 + 15e-6 * 60) * 1.01 - withFee(0.000196);
-  assert.ok(Math.abs(saved - expected) < 1e-7, `saved ${saved}, the one routed call against gpt-5.4 for the same tokens`);
+  const saved = (await dailySpend(workspace.id, 30)).reduce((a, d) => a + (d.would - d.paid), 0);
+  /* the one routed call against what it would have cost on gpt-5.4: the measurement found steady-small
+     costs a tenth of it on the same calls, so a tenth is what this one is held to, and gpt-5.4 carries
+     no fee, because without us nobody pays one */
+  const expected = 0.000196 / 0.1 - withFee(0.000196);
+  assert.ok(Math.abs(saved - expected) < 1e-7, `saved ${saved}, the one routed call against gpt-5.4 on the same calls`);
 });

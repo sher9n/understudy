@@ -14,6 +14,7 @@
 
    A placeholder inside a quoted string is left alone, because '?' is data. */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import config from '../config.js';
 
@@ -24,18 +25,33 @@ import config from '../config.js';
 pg.types.setTypeParser(pg.types.builtins.INT8, (v) => (v === null ? null : Number(v)));
 pg.types.setTypeParser(pg.types.builtins.NUMERIC, (v) => (v === null ? null : Number(v)));
 
-export const pool = new pg.Pool({
-  connectionString: config.DATABASE_URL,
-  max: config.PG_POOL_MAX,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
-  ...(config.PG_SSL ? { ssl: { rejectUnauthorized: false } } : {}),
-});
+const makePool = (max) => {
+  const p = new pg.Pool({
+    connectionString: config.DATABASE_URL,
+    max,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+    ...(config.PG_SSL ? { ssl: { rejectUnauthorized: false } } : {}),
+  });
+  p.on('error', (err) => {
+    // an idle client dropped by the server: the pool replaces it, we only note it
+    console.error('postgres idle client error:', err.message);
+  });
+  return p;
+};
 
-pool.on('error', (err) => {
-  // an idle client dropped by the server: the pool replaces it, we only note it
-  console.error('postgres idle client error:', err.message);
-});
+/* Two sets of connections. Live calls and the screens use the first; background work (measurements,
+   the hourly reviews, the purge) uses the second, so a burst of measurements can never leave a
+   customer's call waiting for a connection. Code knows it is background work by running inside
+   `background.run(...)`, which the job runner does for every job. */
+export const pool = makePool(config.PG_POOL_MAX);
+export const background = new AsyncLocalStorage();
+let bgPool = null;
+const poolFor = () => {
+  if (!background.getStore()) return pool;
+  if (!bgPool) bgPool = makePool(config.PG_BG_POOL_MAX);
+  return bgPool;
+};
 
 /** Split SQL on placeholders while ignoring anything inside single quotes. */
 function compile(sql) {
@@ -85,11 +101,11 @@ const runner = (exec) => (sql) => {
 };
 
 export const db = {
-  prepare: runner((text, params) => pool.query(text, params)),
-  async exec(sql) { await pool.query(sql); },
+  prepare: runner((text, params) => poolFor().query(text, params)),
+  async exec(sql) { await poolFor().query(sql); },
   /** Everything inside runs on one connection, and rolls back together if it throws. */
   async tx(fn) {
-    const client = await pool.connect();
+    const client = await poolFor().connect();
     try {
       await client.query('BEGIN');
       const scoped = {
@@ -106,7 +122,7 @@ export const db = {
       client.release();
     }
   },
-  async close() { await pool.end(); },
+  async close() { await pool.end(); if (bgPool) await bgPool.end(); },
 };
 
 export const now = () => Date.now();

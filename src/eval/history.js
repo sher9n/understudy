@@ -1,6 +1,6 @@
 import { db, now } from '../db/index.js';
 import { recipeKind } from './select.js';
-import { WATCH_COOL_OFF_DAYS } from './promote.js';
+import { heldBack } from './promote.js';
 
 /* What earlier measurements found, as evidence for ranking the next one.
  *
@@ -28,21 +28,21 @@ export async function historyFor(workload) {
      answers, and neither was a model whose provider failed it, so those are not counted. A
      model close enough to need a look counts as half. */
   const shape = new Map();
+  /* A workspace's own other workloads always count for it; another workspace's only when it has said
+     its results may help others choose (share_stats, off until it says so). */
   const agg = await db.prepare(
     `SELECT r.model_id, COUNT(*) AS n,
             SUM(CASE WHEN r.verdict = 'cleared' OR r.verdict = 'slower' THEN 1
                      WHEN r.verdict = 'review' THEN 0.5 ELSE 0 END) AS cleared
-       FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
+       FROM eval_results r JOIN eval_runs e ON e.id = r.run_id JOIN workspaces w ON w.id = e.workspace_id
       WHERE e.shape_kind = ? AND e.workload_id <> ? AND e.created_at >= ?
+        AND (e.workspace_id = ? OR w.share_stats = 1)
         AND (r.verdict IN ('cleared', 'review', 'missed') OR (r.verdict = 'slower' AND r.stopped IS NULL))
-      GROUP BY r.model_id`).all(workload.shape_kind, workload.id, now() - 60 * DAY);
+      GROUP BY r.model_id`).all(workload.shape_kind, workload.id, now() - 60 * DAY, workload.workspace_id);
   for (const a of agg) shape.set(a.model_id, { n: Number(a.n), cleared: Number(a.cleared) });
 
-  // switched back for good, or for something that can change, within its cool-off
-  const reverted = new Set((await db.prepare(
-    `SELECT DISTINCT from_model FROM promotions WHERE workload_id = ?
-        AND (action IN ('revert', 'auto_revert') OR (action = 'soft_revert' AND created_at >= ?))`)
-    .all(workload.id, now() - WATCH_COOL_OFF_DAYS * DAY)).map((r) => r.from_model));
+  // switched back for good, or for something that can change within its cool-off, which grows each time
+  const reverted = await heldBack(workload.id);
   return { own, shape, reverted, live: liveElsewhere(await liveRates(workload.shape_kind), workload.workspace_id) };
 }
 
@@ -60,8 +60,8 @@ async function liveRates(shapeKind) {
   const rows = (await db.prepare(
     `SELECT c.served_model AS model_id, c.workspace_id, COUNT(*) AS n,
             SUM(CASE WHEN c.status_code = 200 THEN COALESCE(c.reward, 1) ELSE 0 END) AS s
-       FROM calls c JOIN workloads w ON w.id = c.workload_id
-      WHERE w.shape_kind = ? AND c.source = 'routed' AND c.served_model IS NOT NULL
+       FROM calls c JOIN workloads w ON w.id = c.workload_id JOIN workspaces ws ON ws.id = c.workspace_id
+      WHERE w.shape_kind = ? AND c.source = 'routed' AND c.served_model IS NOT NULL AND ws.share_stats = 1
         AND c.created_at >= ? AND c.created_at < ?
         AND (c.status_code = 200 OR c.status_code IN (0, 404, 408, 429) OR c.status_code >= 500)
       GROUP BY 1, 2`).all(shapeKind, now() - 30 * DAY, now() - 10 * 60000))

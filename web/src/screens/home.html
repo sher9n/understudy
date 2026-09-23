@@ -1,27 +1,5 @@
 <div style="display: flex; flex-direction: column;">
-  <header class="top">
-    <span style="font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink);">Understudy</span>
-    <nav style="display: flex; gap: 22px; font-size: 13.5px;">
-      <a href="#how">How it works</a>
-    </nav>
-    <div style="flex-grow: 1;"></div>
-    <button class="ni" style="width: auto;" data-go="toggleTheme" aria-label="Switch the theme">
-      <span data-if="dark">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-          <circle cx="12" cy="12" r="4"></circle>
-          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"></path>
-        </svg>
-      </span>
-      <span data-if="light">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-          <path d="M21 13a8.5 8.5 0 01-10-10 8.5 8.5 0 1010 10z"></path>
-        </svg>
-      </span>
-    </button>
-    <a data-go="go_signin" class="plain" style="font-size: 13.5px;">Sign in</a>
-    <a data-go="go_signup" class="btn">Get an API key</a>
-  </header>
-  <div class="lp">
+  <main class="lp" id="main">
 
     <section style="text-align: center; padding-top: 104px;">
       <h1 class="hero-h1" style="line-height: 1.04; letter-spacing: -0.044em; font-weight: 700; margin: 0 auto; max-width: 880px; text-wrap: balance;"><span style="white-space: nowrap;">Continuously optimize</span> <span style="white-space: nowrap;">every LLM workload</span></h1>
@@ -29,20 +7,20 @@
 
       <div style="max-width: 720px; margin: 46px auto 0; border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden; box-shadow: 0 18px 44px rgba(13, 13, 18, 0.1); text-align: left;">
         <div style="display: flex; align-items: center; gap: 10px; padding: 13px 18px; border-bottom: 1px solid var(--line); background: var(--panel);">
-          <span class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--mut); font-weight: 600;">Your client, unchanged except for one line</span>
+          <span class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--mut); font-weight: 600;">Your client, with its address and key changed</span>
         </div>
-        <pre class="m" style="margin: 0; padding: 26px 24px; font-size: 13.5px; line-height: 1.9; color: var(--mut-read); background: var(--code); overflow-x: auto;"><span style="display: block; color: var(--ink);">client = OpenAI(</span><span style="display: block;"><span style="display: inline-block; background: var(--okq); color: var(--ok); border-radius: 4px; padding: 0 6px; font-weight: 600;">  base_url="https://api.understudy.dev/v1",</span></span><span style="display: block; color: var(--ink);">  api_key=os.environ["UNDERSTUDY_KEY"],</span><span style="display: block; color: var(--ink);">)</span></pre>
-        <div style="border-top: 1px solid var(--line); padding: 15px 20px; font-size: 13px; color: var(--mut-read);">Every call still goes to the model you asked for, until a cheaper way has proved itself on your own calls.</div>
+        <pre class="m hero-code" style="margin: 0; padding: 26px 24px; font-size: 13.5px; line-height: 1.9; color: var(--mut-read); background: var(--code); overflow-x: auto;"><span style="display: block; color: var(--ink);">client = OpenAI(</span><span style="display: block;"><span style="display: inline-block; background: var(--okq); color: var(--ok); border-radius: 4px; padding: 0 6px; font-weight: 600;">  base_url="https://api.understudy.dev/v1",</span></span><span style="display: block;"><span style="display: inline-block; background: var(--okq); color: var(--ok); border-radius: 4px; padding: 0 6px; font-weight: 600;">  api_key=os.environ["UNDERSTUDY_KEY"],</span></span><span style="display: block; color: var(--ink);">)</span></pre>
+        <div style="border-top: 1px solid var(--line); padding: 15px 20px; font-size: 13px; color: var(--mut-read);">Every call still goes to the model you asked for, until a cheaper way has proved itself on your own calls and you say yes, or let it switch by itself.</div>
       </div>
 
       <div class="lp-cta">
         <a data-go="go_signup" class="btn big">Get an API key</a>
-        <a data-go="go_signup" class="btn sec big">See how it works</a>
+        <a href="#how" class="btn sec big">See how it works</a>
       </div>
     </section>
 
     <section id="how">
-      <div class="lp-sec"><div><h2>How it works</h2><p>Four steps, and after the first they run on their own.</p></div></div>
+      <div class="lp-sec"><div><h2>How it works</h2><p>Four steps, and after the first they run on their own. The figures in the drawings are examples, not results.</p></div></div>
       <div class="lp-cards">
 
         <div class="lp-card">
@@ -81,7 +59,7 @@
           </div>
           <div class="body">
             <div class="t"><span class="n">4</span>Keep improving</div>
-            <div class="b">When a cheaper way is proven on your live calls, we switch to it. If one starts working less well than your own model, we switch back.</div>
+            <div class="b">When a cheaper way is proven on your own calls, we offer it to you, or switch to it if you let us, starting with a small share of calls. If one starts working less well than your own model, we switch back.</div>
           </div>
         </div>
 
@@ -93,10 +71,10 @@
         <div>
           <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--brand); font-weight: 600;">Checked cheaper models</div>
           <h2 style="font-weight: 600; letter-spacing: -0.03em; margin: 12px 0 0; text-wrap: balance;">Cheap where it can be. Yours where it has to be.</h2>
-          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">Most cheaper models are not wrong on every call, only on some. So a cheaper model answers first, a quick check reads its answer, and when the check is unsure, your own model answers instead. You keep most of the saving, and the calls it would get wrong still get your model&rsquo;s answer.</p>
+          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">Most cheaper models are not wrong on every call, only on some. So a cheaper model answers first, a quick check reads its answer, and when the check is unsure, your own model answers instead. It is measured on your own calls like any other model, and only used if it stays inside your bar.</p>
         </div>
         <div style="border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 26px 24px;">
-          <svg viewBox="0 0 360 168" width="100%" role="img" aria-label="Each call goes first to a cheap model, then to a quick check. When the check is sure, which is 84 calls in 100 here, the cheap answer goes back to you. When it is unsure, 16 in 100, your own model answers instead. The cost bar shows the whole thing at 26 percent of what you pay now.">
+          <svg viewBox="0 0 360 168" width="100%" role="img" aria-label="Each call goes first to a cheap model, then to a quick check. When the check is sure, which is 84 calls in 100 here, the cheap answer goes back to you. When it is unsure, 16 in 100, your own model answers instead. In this example the cost bar shows the whole thing at 26 percent of what you pay now.">
             <text x="6" y="14" class="m" font-size="8.5" fill="var(--mut)">EACH CALL</text>
             <rect x="6" y="60" width="58" height="34" rx="8" fill="var(--raise)" stroke="var(--line-strong)" stroke-width="1.4"></rect>
             <text x="35" y="80" text-anchor="middle" class="m" font-size="8.5" fill="var(--ink)">your call</text>
@@ -123,7 +101,7 @@
             <text x="6" y="130" class="m" font-size="7" fill="var(--mut)">COST</text>
             <rect x="6" y="136" width="200" height="9" rx="4.5" fill="var(--grid)"></rect>
             <rect x="6" y="136" width="52" height="9" rx="4.5" fill="var(--brand)"></rect>
-            <text x="6" y="160" class="m" font-size="8" fill="var(--ink)">26% of what you pay now</text>
+            <text x="6" y="160" class="m" font-size="8" fill="var(--ink)">for example, 26% of what you pay now</text>
           </svg>
         </div>
       </div>
@@ -163,8 +141,8 @@
         <div>
           <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ok); font-weight: 600;">Learns from outcomes</div>
           <h2 style="font-weight: 600; letter-spacing: -0.03em; margin: 12px 0 0; text-wrap: balance;">Learns from what actually worked</h2>
-          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">A measurement proves a cheaper way gives your answers. Your live calls show whether answers worked. A few calls, within a daily budget you set, try a cheaper runner-up or your own model to compare. When the evidence is strong enough, we move, and tell you why in numbers.</p>
-          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">Would you rather nothing changed on its own? Runners-up can answer in the background instead, and you approve.</p>
+          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">A measurement shows whether a cheaper way gives your answers. Your live calls show whether answers worked. A few calls, within a daily budget you set, try a cheaper runner-up or your own model to compare, and a few answers a day are read in the background to check them. When the evidence is strong enough, we tell you why in numbers, and move if you let us.</p>
+          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">Nothing changes on its own unless you allow it: new workspaces are asked before every switch. Runners-up can also answer in the background only, so you see how they do before anything moves.</p>
         </div>
       </div>
     </section>
@@ -224,65 +202,65 @@
     <section>
       <div class="panel split" style="border: 1px solid var(--line); border-radius: 14px; background: var(--raise); padding: 34px 36px;">
         <div>
-          <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ok); font-weight: 600;">Dedicated endpoints</div>
-          <h2 style="font-weight: 600; letter-spacing: -0.03em; margin: 12px 0 0; text-wrap: balance;">Built for stricter data requirements</h2>
-          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">For workloads that need it, dedicated endpoints support zero data retention, EU or US residency, and configurable retention windows for measurement data.</p>
+          <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ok); font-weight: 600;">Your data</div>
+          <h2 style="font-weight: 600; letter-spacing: -0.03em; margin: 12px 0 0; text-wrap: balance;">Nothing kept at the model provider. Your window for the rest.</h2>
+          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">Every call we route or replay denies data collection and asks OpenRouter for providers that keep nothing. Zero data retention is on for every workspace unless it is switched off in Settings.</p>
+          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">What we keep ourselves, the request and the answer, stays for the window your workspace chooses: 30, 60 or 90 days, or indefinitely. New workspaces start at 30 days. When the window passes the words are cleared, and only the numbers behind your charts stay.</p>
+          <p class="lp-links"><a data-go="go_traffic">What happens to your traffic</a><a data-go="go_pricing">What it costs</a></p>
         </div>
         <div style="border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 26px 24px;">
-          <svg viewBox="0 0 360 168" width="100%" role="img" aria-label="Your call entering a dedicated Understudy endpoint inside a dashed region marked as your own, which fans out to two model providers, over three chips: zero data retention available, EU or US residency, and configurable retention.">
-            <text x="18" y="14" class="m" font-size="8.5" fill="var(--ok)">YOUR DEDICATED ENDPOINT &middot; YOUR REGION</text>
-            <rect x="6" y="22" width="348" height="96" rx="10" fill="none" stroke="var(--ok)" stroke-width="1.6" stroke-dasharray="6 4"></rect>
+          <svg viewBox="0 0 360 168" width="100%" role="img" aria-label="Your call goes to Understudy, which keeps it for the window your workspace chooses, then to OpenRouter, which asks for zero retention, then to a model provider that keeps nothing. The answer comes back the same way. Below, three labels: zero data retention, data collection denied, and a retention window you choose.">
+            <text x="6" y="14" class="m" font-size="8.5" fill="var(--mut)">EVERY CALL WE ROUTE OR REPLAY</text>
 
-            <rect x="18" y="52" width="74" height="36" rx="8" fill="var(--raise)" stroke="var(--line-strong)" stroke-width="1.4"></rect>
-            <text x="55" y="74" text-anchor="middle" class="m" font-size="9" fill="var(--ink)">your call</text>
+            <rect x="6" y="28" width="70" height="46" rx="9" fill="var(--raise)" stroke="var(--line-strong)" stroke-width="1.3"></rect>
+            <text x="41" y="54" text-anchor="middle" class="m" font-size="8.5" fill="var(--ink)">your call</text>
 
-            <path d="M96 70 h18" stroke="var(--brand)" stroke-width="1.8" fill="none"></path>
-            <path d="M112 65 l6 5 -6 5" stroke="var(--brand)" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"></path>
-
-            <rect x="122" y="44" width="82" height="52" rx="10" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.5"></rect>
-            <text x="163" y="64" text-anchor="middle" class="m" font-size="9" fill="var(--ok)">Understudy</text>
-            <text x="163" y="78" text-anchor="middle" class="m" font-size="9" fill="var(--ok)">endpoint</text>
-
-            <g stroke="var(--line-strong)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M208 64 L228 50" stroke-dasharray="4 3"></path>
-              <path d="M222 50 L228 50 L226 55"></path>
-              <path d="M208 76 L228 90" stroke-dasharray="4 3"></path>
-              <path d="M222 90 L228 90 L226 85"></path>
+            <g stroke="var(--line-strong)" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M78 51 H91"></path><path d="M87 47 L92 51 L87 55"></path>
+              <path d="M176 51 H189"></path><path d="M185 47 L190 51 L185 55"></path>
+              <path d="M270 51 H283"></path><path d="M279 47 L284 51 L279 55"></path>
             </g>
 
-            <rect x="232" y="32" width="110" height="32" rx="8" fill="var(--raise)" stroke="var(--line)" stroke-width="1.2"></rect>
-            <g stroke="var(--ink)" stroke-width="1.1" fill="none"><path d="M244.0 45.0 L251.0 45.0 L247.5 51.5 Z"></path></g><g fill="var(--ink)"><circle cx="244.0" cy="45.0" r="1.9"></circle><circle cx="251.0" cy="45.0" r="1.9"></circle><circle cx="247.5" cy="51.5" r="1.9"></circle></g>
-            <text x="259" y="51" class="m" font-size="7.5" fill="var(--ink)">Model provider A</text>
-            <rect x="232" y="76" width="110" height="32" rx="8" fill="var(--raise)" stroke="var(--line)" stroke-width="1.2"></rect>
-            <g stroke="var(--ink)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M243.5 87.5 L247.5 91.5 L243.5 95.5"></path><path d="M248.5 87.5 L252.5 91.5 L248.5 95.5"></path></g>
-            <text x="259" y="95" class="m" font-size="7.5" fill="var(--ink)">Model provider B</text>
+            <rect x="96" y="28" width="78" height="46" rx="9" fill="var(--brandq)" stroke="var(--brand)" stroke-width="1.4"></rect>
+            <text x="135" y="48" text-anchor="middle" class="m" font-size="8.5" font-weight="600" fill="var(--brand)">Understudy</text>
+            <text x="135" y="61" text-anchor="middle" class="m" font-size="7" fill="var(--brand)">your window</text>
 
-            <rect x="6" y="128" width="89" height="32" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
-            <g stroke="var(--ok)" stroke-width="1.4" fill="none" stroke-linecap="round"><rect x="14.0" y="143.0" width="9" height="6.5" rx="1.8"></rect><path d="M15.8 143.0 v-2.2 a2.7 2.7 0 0 1 5.4 0 v2.2"></path></g>
-            <text x="28" y="147" class="m" font-size="7.5" font-weight="600" fill="var(--ok)">ZDR AVAILABLE</text>
-            <rect x="104" y="128" width="111" height="32" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
-            <g stroke="var(--ok)" stroke-width="1.3" fill="none"><circle cx="116.5" cy="144.0" r="5"></circle><ellipse cx="116.5" cy="144.0" rx="2.2" ry="5"></ellipse><path d="M111.5 144.0 h10"></path></g>
-            <text x="126" y="147" class="m" font-size="7.5" font-weight="600" fill="var(--ok)">EU OR US RESIDENCY</text>
-            <rect x="224" y="128" width="130" height="32" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
-            <g stroke="var(--ok)" stroke-width="1.3" fill="none" stroke-linecap="round"><circle cx="236.5" cy="144.0" r="5"></circle><path d="M236.5 141.0 V144.0 H239.3"></path></g>
-            <text x="246" y="147" class="m" font-size="7.5" font-weight="600" fill="var(--ok)">CONFIGURABLE RETENTION</text>
+            <rect x="194" y="28" width="74" height="46" rx="9" fill="var(--raise)" stroke="var(--line-strong)" stroke-width="1.3"></rect>
+            <text x="231" y="48" text-anchor="middle" class="m" font-size="8.5" fill="var(--ink)">OpenRouter</text>
+            <text x="231" y="61" text-anchor="middle" class="m" font-size="7" fill="var(--mut)">zero retention</text>
+
+            <rect x="288" y="28" width="66" height="46" rx="9" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.5"></rect>
+            <text x="321" y="48" text-anchor="middle" class="m" font-size="8.5" font-weight="600" fill="var(--ok)">provider</text>
+            <text x="321" y="61" text-anchor="middle" class="m" font-size="7" fill="var(--ok)">keeps nothing</text>
+
+            <path d="M321 77 V91 H41 V79" fill="none" stroke="var(--line-strong)" stroke-width="1.2" stroke-dasharray="4 3"></path>
+            <path d="M37 83 L41 78 L45 83" fill="none" stroke="var(--line-strong)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path>
+            <text x="181" y="104" text-anchor="middle" class="m" font-size="7.5" fill="var(--mut)">the answer comes back the same way</text>
+
+            <rect x="6" y="120" width="106" height="30" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+            <g stroke="var(--ok)" stroke-width="1.4" fill="none" stroke-linecap="round"><rect x="14" y="135" width="9" height="6.5" rx="1.8"></rect><path d="M15.8 135 v-2.2 a2.7 2.7 0 0 1 5.4 0 v2.2"></path></g>
+            <text x="28" y="139.5" class="m" font-size="7" font-weight="600" fill="var(--ok)">ZERO DATA RETENTION</text>
+
+            <rect x="120" y="120" width="102" height="30" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+            <g stroke="var(--ok)" stroke-width="1.3" fill="none" stroke-linecap="round"><circle cx="131" cy="135" r="5"></circle><path d="M127.5 131.5 L134.5 138.5"></path></g>
+            <text x="141" y="139.5" class="m" font-size="7" font-weight="600" fill="var(--ok)">COLLECTION DENIED</text>
+
+            <rect x="230" y="120" width="124" height="30" rx="8" fill="var(--okq)" stroke="var(--ok)" stroke-width="1.2"></rect>
+            <g stroke="var(--ok)" stroke-width="1.3" fill="none" stroke-linecap="round"><circle cx="241" cy="135" r="5"></circle><path d="M241 132 V135 H243.8"></path></g>
+            <text x="251" y="139.5" class="m" font-size="7" font-weight="600" fill="var(--ok)">YOUR RETENTION WINDOW</text>
           </svg>
         </div>
       </div>
     </section>
 
     <section class="lp-end">
-      <h2 style="line-height: 1.14;"><span style="display: block; text-wrap: balance;">Up to 24&#215; lower cost.</span><span style="display: block; text-wrap: balance;">Zero compromise on quality.</span></h2>
+      <h2 style="line-height: 1.14;"><span style="display: block; text-wrap: balance;">A cheaper model only after it has matched yours, on your own calls.</span><span style="display: block; text-wrap: balance; color: var(--mut-read);">If it stops matching, it switches back by itself.</span></h2>
+      <p>Every switch shows the bar it was held to, the calls it was measured on, and what it costs against your own model.</p>
       <div class="lp-cta" style="margin-top: 36px;">
         <a data-go="go_signup" class="btn big">Get an API key</a>
-        
+        <a data-go="go_pricing" class="btn sec big">See pricing</a>
       </div>
     </section>
 
-  </div>
-  <footer class="foot">
-    <span class="m" style="font-size: 12px; color: var(--mut);">Understudy</span>
-    <div style="flex-grow: 1;"></div>
-    <span class="m" style="font-size: 12px; color: var(--mut);">Zero data retention at the provider. Stored calls deleted after 30 days.</span>
-  </footer>
+  </main>
 </div>

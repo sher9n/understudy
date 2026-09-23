@@ -174,7 +174,7 @@ test('the ranking is by expected saving, at most two from one maker in front, th
   assert.ok(sel.order.length <= 6, 'at most three times the number wanted');
 });
 
-test('numbers are checked in code, and only when the two answers state the same count of them', () => {
+test('numbers are checked in code: a figure in one answer that the other does not carry is a difference', () => {
   assert.deepEqual(numbersOf('The total is $1,234.50.'), ['1234.5']);
   assert.deepEqual(numbersOf('Total: USD 1234.50'), ['1234.5']);
   assert.deepEqual(numbersOf('Summe: 1.234,50 EUR'), ['1234.5']);
@@ -184,6 +184,10 @@ test('numbers are checked in code, and only when the two answers state the same 
   assert.equal(numbersDiffer('Fixed in 2.4.1', 'Fixed in 2.4.7'), true);
   // written differently, not different: left to the reading
   assert.equal(numbersDiffer('4 March 2026', '2026-03-04'), false);
+  // written in words on one side, so the figures cannot be compared: left to the reading
+  assert.equal(numbersDiffer('30 days', 'thirty days'), false, 'no figures at all on one side is not a difference in figures');
+  assert.equal(numbersDiffer('Total 1,234.50', 'Total 1,243.50 (incl. 12% VAT)'), true, 'a different amount, whatever else is said');
+  assert.equal(numbersDiffer('Total 1,234.50', 'Total 1,234.50 (incl. 12% VAT)'), false, 'the same amount with a rate added: the reading decides');
   assert.equal(numbersDiffer('You have 30 days.', 'You have thirty days.'), false);
   assert.equal(numbersDiffer('2026-03-04', '2026-04-03'), false, 'a date with its parts swapped is the reading\'s to catch');
 });
@@ -419,7 +423,8 @@ test('a switch changes something only once some calls come through us', () => {
   assert.equal(carriesOf({ mode: 'route', routed: 40, copies: 0 }), true);
   assert.equal(carriesOf({ mode: 'route', routed: 0, copies: 100 }), false, 'copies only: waiting');
   assert.equal(carriesOf({ mode: 'route', routed: 10, copies: 90 }), true, 'some come through us, and those are switched');
-  assert.equal(carriesOf({ mode: 'observe', routed: 100, copies: 0 }), false, 'a workspace that only observes');
+  // the monthly plan is a measuring allowance, never a mode that stops calls being routed
+  assert.equal(carriesOf({ mode: 'observe', routed: 100, copies: 0 }), true, 'calls routed are switched, plan or not');
   assert.equal(carriesOf({ mode: 'route', routed: 0, copies: 0 }), false, 'nothing yet');
 });
 

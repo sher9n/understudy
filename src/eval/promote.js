@@ -1,8 +1,10 @@
+import { notify } from '../notify.js';
 import { db, id, now } from '../db/index.js';
 import { addActivity } from '../traffic.js';
 import { OUTCOME_OF, RECENT_CALLS, carriesOf } from './outcome.js';
 import { upsertArm, armById, leadModel, specOfResult, setStatus } from '../learn/arms.js';
 import { forgetState } from '../learn/memo.js';
+import config from '../config.js';
 
 const record = async (workload, row, x = db) =>
   await x.prepare(`INSERT INTO promotions (id, workload_id, action, from_model, to_model, reason, run_id,
@@ -16,12 +18,34 @@ const record = async (workload, row, x = db) =>
    by hand, has said something lasting about itself, and stays out. */
 export const WATCH_COOL_OFF_DAYS = 7;
 
+/* Switched back for something that can change, it waits a while, and each time it is switched back
+   again it waits twice as long: a strategy that keeps clearing a measurement and then failing live
+   would otherwise be switched to and back every week, and the customer's calls would pay for each
+   round. After the third it stays out until a person approves it. */
+export const LASTING_AFTER = 3;
+export async function heldBack(workloadId) {
+  const rows = await db.prepare(
+    `SELECT from_model, action, created_at FROM promotions WHERE workload_id = ? AND from_model IS NOT NULL
+        AND action IN ('revert', 'auto_revert', 'soft_revert') AND created_at >= ?`)
+    .all(workloadId, now() - 180 * 86400000);
+  const by = new Map();
+  for (const r of rows) {
+    const m = by.get(r.from_model) || { hard: false, soft: 0, last: 0 };
+    if (r.action === 'soft_revert') m.soft += 1; else m.hard = true;
+    m.last = Math.max(m.last, Number(r.created_at));
+    by.set(r.from_model, m);
+  }
+  const out = new Set();
+  for (const [model, m] of by) {
+    const days = WATCH_COOL_OFF_DAYS * 2 ** Math.max(0, m.soft - 1);
+    if (m.hard || m.soft >= LASTING_AFTER || now() - m.last < days * 86400000) out.add(model);
+  }
+  return out;
+}
+
 /** A model that was switched back is not promoted automatically again: never, or for a while. */
 export async function everReverted(workloadId, modelId) {
-  return !!await db.prepare(
-    `SELECT 1 FROM promotions WHERE workload_id = ? AND from_model = ?
-      AND (action IN ('revert', 'auto_revert') OR (action = 'soft_revert' AND created_at >= ?))`)
-    .get(workloadId, modelId, now() - WATCH_COOL_OFF_DAYS * 86400000);
+  return (await heldBack(workloadId)).has(modelId);
 }
 
 /** How a workload's latest calls reach us, and whether switching it would change anything. */
@@ -42,7 +66,8 @@ export async function trafficOf(workload) {
    measurement gives the strategy's result, and the name the record of switches keeps. */
 export function keyOfSpec(spec, reference) {
   // the customer's own model thinking less, as a part of a strategy or on its own
-  const part = (p) => (p.model === reference && p.recipe?.reasoning ? `${p.model}#lighter` : p.model);
+  const part = (p) => (p.model === reference && p.recipe?.reasoning ? `${p.model}#lighter`
+    : p.model === reference && p.recipe?.pinned ? `${p.model}#cheapest` : p.model);
   if (spec.kind === 'cascade') return `cascade:${part(spec.first)}`;
   if (spec.kind === 'router') return `router:${part(spec.cheap)}`;
   return part(spec);
@@ -55,10 +80,16 @@ export async function servingKey(workload) {
     const arm = await armById(workload.routed_arm_id);
     if (arm?.spec) return keyOfSpec(arm.spec, workload.reference_model);
   }
-  return workload.routed_model;
+  /* A switch made before strategies were kept names only a model and how it was asked. The
+     customer's own model asked to think less, or pinned to its cheapest provider, is still a
+     strategy of its own, and named as one: by the model alone it read as the customer's model,
+     which is served by nothing. */
+  let recipe = null;
+  try { recipe = workload.routed_recipe ? JSON.parse(workload.routed_recipe) : null; } catch { recipe = null; }
+  return keyOfSpec({ kind: 'model', model: workload.routed_model, recipe }, workload.reference_model);
 }
 
-export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined, spec: given = null, detail = null } = {}) {
+export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined, spec: given = null, detail = null, rollout = true } = {}) {
   if (auto && await everReverted(workload.id, modelId)) {
     return { ok: false, code: 'previously_reverted' };
   }
@@ -88,10 +119,24 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
   } : null;
   const arm = await upsertArm(workload, spec, { status: 'serving', originRunId: runId, offline });
   const lead = leadModel(spec);
+  /* A switch starts on a share of the calls (see reviewRollout in src/learn/explore.js), and the rest
+     stay with what served before it: the strategy it replaces, or the customer's own model.
+
+     "What served before it" is what served in full. A switch made while another is still taking
+     over a share at a time keeps that one's control: the strategy on a twentieth of the calls has
+     not passed a single stage, and made the control it would have been given nineteen calls in
+     twenty straight away, marked as resting, and served on every call by a roll back. A switch back
+     to the control itself has nothing to roll out, and serves every call at once. */
+  const midRollout = workload.rollout_share !== null && workload.rollout_share !== undefined;
+  const control = midRollout ? (workload.rollout_from_arm_id ?? null) : (workload.routed_arm_id ?? null);
+  const stages = config.ROLLOUT_ENABLED && rollout && control !== arm.id ? config.ROLLOUT_STAGES : [];
+  const staged = stages.length > 0;
   await db.tx(async (tx) => {
     await tx.prepare(`UPDATE workloads SET routed_model = ?, routed_recipe = ?, routed_arm_id = ?, promoted_at = ?, promoted_run_id = ?,
-                status = 'promoted', status_note = NULL, updated_at = ? WHERE id = ?`)
-      .run(lead.model, lead.recipe ? JSON.stringify(lead.recipe) : null, arm.id, now(), runId, now(), workload.id);
+                status = 'promoted', status_note = NULL, updated_at = ?,
+                rollout_share = ?, rollout_stage = ?, rollout_started_at = ?, rollout_from_arm_id = ? WHERE id = ?`)
+      .run(lead.model, lead.recipe ? JSON.stringify(lead.recipe) : null, arm.id, now(), runId, now(),
+        staged ? stages[0] : null, staged ? 0 : null, staged ? now() : null, staged ? control : null, workload.id);
     await record(workload, { action: 'promote', from_model: from, to_model: modelId, reason, run_id: runId, actor_user_id: actorUserId }, tx);
   });
   if (workload.routed_arm_id && workload.routed_arm_id !== arm.id) await setStatus(workload.routed_arm_id, 'resting');
@@ -109,6 +154,19 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
       + (traffic.carries ? '' : ' Its calls reach us as copies, so the switch starts with the first one that comes through Understudy.'),
     workloadId: workload.id,
   });
+  // a switch nobody pressed a button for is worth an email; one a person just approved is not
+  if (auto) {
+    await notify(workload.workspace_id, 'switched', `${workload.id}:${arm.id}:${runId || now()}`, {
+      title: `${workload.slug} was switched to ${arm.label}`,
+      lines: [
+        `${arm.label} gave the same answers as ${workload.reference_model} on your own calls, measured twice, and costs less.`,
+        traffic.carries ? 'It starts on a small share of the calls and takes more of them while its live calls hold up.'
+          : 'Its calls reach us as copies, so the switch starts with the first call that comes through Understudy.',
+        'You can switch it back at any time from the workload page.',
+      ],
+      path: `/workloads/${workload.id}`, linkText: 'See the switch',
+    });
+  }
   return { ok: true, from, to: modelId, armId: arm.id, label: arm.label, waiting: !traffic.carries };
 }
 
@@ -122,7 +180,8 @@ export async function revert(workload, { reason = 'you asked for it', actorUserI
   let moved = false;
   await db.tx(async (tx) => {
     const r = await tx.prepare(`UPDATE workloads SET routed_model = NULL, routed_recipe = NULL, routed_arm_id = NULL, promoted_at = NULL,
-                promoted_run_id = NULL, status = 'certified', updated_at = ?
+                promoted_run_id = NULL, status = 'certified', updated_at = ?,
+                rollout_share = NULL, rollout_stage = NULL, rollout_started_at = NULL, rollout_from_arm_id = NULL
               WHERE id = ? AND routed_model = ? AND routed_arm_id IS NOT DISTINCT FROM ?`)
       .run(now(), workload.id, workload.routed_model, workload.routed_arm_id ?? null);
     if (!r.changes) { moved = true; return; }
@@ -140,7 +199,45 @@ export async function revert(workload, { reason = 'you asked for it', actorUserI
     detail: reason,
     workloadId: workload.id,
   });
+  if (auto || soft) {
+    await notify(workload.workspace_id, 'reverted', `${workload.id}:${from}:${now()}`, {
+      title: `${workload.slug} is back on ${workload.reference_model}`,
+      lines: [reason, 'Nothing needs doing: its calls are answered by your own model again from the next one on.'],
+      path: `/workloads/${workload.id}`, linkText: 'See why',
+    });
+  }
   return { ok: true, from, to: workload.reference_model };
+}
+
+/* A switch in progress whose calls did worse than what served before it goes back to that: the
+   strategy it replaced, served in full straight away, or the customer's own model. It is recorded as
+   a switch back of the new strategy, so it waits before it can be tried again (see heldBack). */
+export async function rollBack(workload, reason) {
+  const fromArm = workload.rollout_from_arm_id ? await armById(workload.rollout_from_arm_id) : null;
+  if (!fromArm?.spec) return await revert(workload, { auto: true, soft: true, reason });
+  const newKey = await servingKey(workload);
+  const oldKey = keyOfSpec(fromArm.spec, workload.reference_model);
+  const lead = leadModel(fromArm.spec);
+  let moved = false;
+  await db.tx(async (tx) => {
+    const r = await tx.prepare(`UPDATE workloads SET routed_model = ?, routed_recipe = ?, routed_arm_id = ?, updated_at = ?,
+                rollout_share = NULL, rollout_stage = NULL, rollout_started_at = NULL, rollout_from_arm_id = NULL
+              WHERE id = ? AND routed_arm_id IS NOT DISTINCT FROM ?`)
+      .run(lead.model, lead.recipe ? JSON.stringify(lead.recipe) : null, fromArm.id, now(), workload.id, workload.routed_arm_id ?? null);
+    if (!r.changes) { moved = true; return; }
+    await record(workload, { action: 'soft_revert', from_model: newKey, to_model: oldKey, reason }, tx);
+  });
+  if (moved) return { ok: false, code: 'moved' };
+  if (workload.routed_arm_id) await setStatus(workload.routed_arm_id, 'resting');
+  await setStatus(fromArm.id, 'serving');
+  forgetState(workload.id);
+  await addActivity(workload.workspace_id, { kind: 'revert', title: `${workload.slug} is back on ${fromArm.label}`, detail: reason, workloadId: workload.id });
+  await notify(workload.workspace_id, 'reverted', `${workload.id}:${newKey}:${now()}`, {
+    title: `${workload.slug} is back on ${fromArm.label}`,
+    lines: [reason, 'Nothing needs doing: its calls are answered the way they were before the switch.'],
+    path: `/workloads/${workload.id}`, linkText: 'See why',
+  });
+  return { ok: true, from: newKey, to: oldKey };
 }
 
 /** The certificate a switch was made on: the run, its bar, and every model tried. */
@@ -218,6 +315,49 @@ export function failingClearly(k, n, before) {
   return k >= 5 && rate > 0.05 && rate > 2 * before && tailAtLeast(k, n, base) < 0.01;
 }
 
+/* Every model a serving strategy can send a call to, besides the customer's own. */
+function modelsServing(workload, spec) {
+  if (!spec) return [workload.routed_model].filter(Boolean);
+  if (spec.kind === 'cascade') return [spec.first?.model].filter(Boolean);
+  if (spec.kind === 'router') return [spec.cheap?.model].filter(Boolean);
+  return [spec.model].filter(Boolean);
+}
+
+/* What serves a workload has to still be something we can send calls to. A model that left the
+   catalogue, or lost the last provider that keeps nothing while the workspace requires one, fails
+   every call it is given, and a quiet workload never makes enough failures for the live watch to
+   notice. Checked every hour, and switched back softly: it can be measured again once it returns. */
+export async function watchCatalogue() {
+  const { zdrFor } = await import('../workspace.js');
+  const rows = await db.prepare('SELECT * FROM workloads WHERE routed_model IS NOT NULL').all();
+  let reverted = 0;
+  for (const w of rows) {
+    let spec = null;
+    if (w.routed_arm_id) {
+      const arm = await db.prepare('SELECT spec_json FROM arms WHERE id = ?').get(w.routed_arm_id);
+      try { spec = arm?.spec_json ? JSON.parse(arm.spec_json) : null; } catch { spec = null; }
+    }
+    const zdr = await zdrFor(w.workspace_id);
+    let why = null;
+    for (const m of modelsServing(w, spec)) {
+      if (m === w.reference_model) continue;
+      const row = await db.prepare('SELECT zdr FROM models_catalog WHERE model_id = ?').get(m);
+      if (!row) { why = `${m} is no longer offered by the provider`; break; }
+      if (zdr && Number(row.zdr) === 0) { why = `no provider that keeps nothing serves ${m} any more`; break; }
+    }
+    if (!why) continue;
+    const r = await revert(w, { auto: true, soft: true, reason: `${why}. Switched back to ${w.reference_model}, and it can be measured again once that changes.` });
+    if (r.ok) reverted += 1;
+  }
+  // a switch pinned to providers that have all gone is looked at as soon as the catalogue says so
+  const { watchPins } = await import('../learn/pins.js');
+  reverted += (await watchPins()).reverted ?? 0;
+  return reverted;
+}
+
+// a call the serving strategy failed and the customer's own model answered instead, for a reason of the strategy's
+const fellBack = (c) => /"by":"fell back"/.test(String(c.check_json || ''));
+
 export async function watchLive({ minCalls = 20, speedFactor = null } = {}) {
   const { default: config } = await import('../config.js');
   const { profileOf, speedRule } = await import('./profile.js');
@@ -225,28 +365,30 @@ export async function watchLive({ minCalls = 20, speedFactor = null } = {}) {
     'SELECT * FROM workloads WHERE routed_model IS NOT NULL AND promoted_at IS NOT NULL').all();
   let reverted = 0;
   for (const w of rows) {
-    const since = Math.max(w.promoted_at, now() - DAY);
+    /* The last day for a busy workload, up to a week for a quiet one: the 500 newest calls since the
+       switch, so a workload with a few calls a day still gathers enough to be judged. */
+    const since = Math.max(w.promoted_at, now() - 7 * DAY);
     // the calls the switched-to strategy served: all of a cascade's, the ones it sent on included
     const after = w.routed_arm_id
       ? await db.prepare(
-        `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND arm_id = ?
+        `SELECT status_code, latency_ms, ttft_ms, check_json FROM calls WHERE workload_id = ? AND source = 'routed' AND arm_id = ?
             AND created_at >= ? ORDER BY created_at DESC LIMIT 500`).all(w.id, w.routed_arm_id, since)
       : await db.prepare(
-        `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ?
+        `SELECT status_code, latency_ms, ttft_ms, check_json FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ?
             AND created_at >= ? ORDER BY created_at DESC LIMIT 500`).all(w.id, w.routed_model, since);
     if (after.length < minCalls) continue;
     const before = await db.prepare(
       `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ?
           AND created_at < ? AND created_at >= ? ORDER BY created_at DESC LIMIT 500`)
       .all(w.id, w.reference_model, w.promoted_at, w.promoted_at - 14 * DAY);
-    const failed = (xs) => xs.filter((c) => providerFailed(c.status_code ?? 200)).length;
+    const failed = (xs) => xs.filter((c) => providerFailed(c.status_code ?? 200) || fellBack(c)).length;
     const errAfter = after.length ? failed(after) / after.length : 0;
     const errBefore = before.length ? failed(before) / before.length : 0;
     if (failingClearly(failed(after), after.length, errBefore)) {
       const r = await revert(w, {
         auto: true,
         soft: true,
-        reason: `${Math.round(errAfter * 100)}% of its live calls over the last day failed (${failed(after)} of `
+        reason: `${Math.round(errAfter * 100)}% of its recent live calls failed (${failed(after)} of `
           + `${after.length}), against ${Math.round(errBefore * 100)}% on ${w.reference_model} before the switch. `
           + `Switched back, and it can be tried again in ${WATCH_COOL_OFF_DAYS} days.`,
       });

@@ -69,15 +69,32 @@ export const config = {
   OPENROUTER_API_KEY: str('OPENROUTER_API_KEY'),
   OPENROUTER_BASE: str('OPENROUTER_BASE', 'https://openrouter.ai/api/v1'),
   ROUTING_FEE_PCT: num('ROUTING_FEE_PCT', 1),
-  // a call only ever reaches a provider that keeps nothing
+  /* A call only reaches a provider that keeps nothing, unless the workspace chose otherwise on
+     Settings (it still never reaches one that trains on it). ZDR_FORCED takes the choice away from
+     every workspace on this deployment. */
   ZDR_ONLY: bool('ZDR_ONLY', true),
+  ZDR_FORCED: bool('ZDR_FORCED', false),
   MODEL_MIN_GAP_MS: num('MODEL_MIN_GAP_MS', 3200),
   UPSTREAM_TIMEOUT_MS: num('UPSTREAM_TIMEOUT_MS', 120000),
+  /* Which header names the address a request came from, for the per-address limits (see clientIp in
+     limits.js): 'x-real-ip' straight from Railway's edge, or 'xff-first' once its CDN sits in front. */
+  CLIENT_IP_FROM: str('CLIENT_IP_FROM', 'x-real-ip'),
+  /* A live streamed answer, once it has started, may go on as long as it keeps coming: no silence
+     longer than the first number, and no longer in all than the second. The whole answer used to be
+     held to UPSTREAM_TIMEOUT_MS, which cut every streamed answer that took over two minutes. A
+     measurement's replays keep the single limit, because a measurement's heartbeat assumes it. */
+  UPSTREAM_IDLE_MS: num('UPSTREAM_IDLE_MS', 120000),
+  UPSTREAM_STREAM_MAX_MS: num('UPSTREAM_STREAM_MAX_MS', 1800000),
   /* The longest we wait before retrying when a provider says it is busy, whatever it asks for.
      Uncapped, one call could wait out any Retry-After three times over and outlast the silence
      a measurement is allowed (EVAL_STALE_MIN), so a slow but live run would be closed as
      abandoned. Capped, the slowest call is four timeouts and three of these waits. */
   UPSTREAM_RETRY_WAIT_MAX_MS: num('UPSTREAM_RETRY_WAIT_MAX_MS', 30000),
+  /* A live call is somebody's app waiting. It gets this many retries on a busy provider, each
+     waiting at most this long, and then the next way of serving it: the customer's own model. Up to
+     three waits of thirty seconds each left a customer's call hanging for a minute and a half. */
+  LIVE_RETRIES: num('LIVE_RETRIES', 1),
+  LIVE_RETRY_WAIT_MAX_MS: num('LIVE_RETRY_WAIT_MAX_MS', 2000),
 
   // what we keep, and for how long
   RETENTION_DAYS: num('RETENTION_DAYS', 30),
@@ -113,7 +130,7 @@ export const config = {
      of what the workload has, so a measurement is always made on a sample and there is
      always untouched traffic left to check a promoted model against later. */
   EVAL_SAMPLE_MIN: num('EVAL_SAMPLE_MIN', 10),
-  EVAL_SAMPLE_MAX: num('EVAL_SAMPLE_MAX', 100),
+  EVAL_SAMPLE_MAX: num('EVAL_SAMPLE_MAX', 120),
   EVAL_SAMPLE_SHARE: num('EVAL_SAMPLE_SHARE', 0.5),
   /* So the smallest measurable workload is twice the smallest sample. */
   EVAL_MIN_CALLS: num('EVAL_MIN_CALLS', 20),
@@ -129,9 +146,71 @@ export const config = {
      mean anything, so nothing may be certified against it. */
   EVAL_NOISE_MAX_PCT: num('EVAL_NOISE_MAX_PCT', 40),
   EVAL_REVIEW_BAND: num('EVAL_REVIEW_BAND', 1.25),
+  /* What one measurement may spend. Anybody may ask for one up to EVAL_MAX_USD_PER_RUN; a workload
+     worth more may spend more, up to what its expected saving pays back in EVAL_PAYBACK_MONTHS and
+     never past EVAL_RUN_CAP_USD. A measurement nobody asked for (a re-check, a new model worth
+     trying) only runs when its expected saving pays for it within EVAL_PAYBACK_MONTHS; a workload
+     already switched counts EVAL_PROTECT_SHARE of the saving it protects towards that. */
   EVAL_MAX_USD_PER_RUN: num('EVAL_MAX_USD_PER_RUN', 2),
+  EVAL_RUN_CAP_USD: num('EVAL_RUN_CAP_USD', 20),
+  EVAL_PAYBACK_MONTHS: num('EVAL_PAYBACK_MONTHS', 2),
+  EVAL_PROTECT_SHARE: num('EVAL_PROTECT_SHARE', 0.5),
   EVAL_JUDGE_MODEL: str('EVAL_JUDGE_MODEL', 'openai/gpt-5.4-mini'),
-  EVAL_RECHECK_HOURS: num('EVAL_RECHECK_HOURS', 24),
+  /* The calls a measurement draws on: at most this many from each of the last thirty days, so a busy
+     workload is sampled across its month rather than from its last few hours. */
+  EVAL_POOL_PER_DAY: num('EVAL_POOL_PER_DAY', 60),
+  /* Whether the answer the customer's own model actually gave a call is used as one of the two the bar
+     needs, so only one is paid for. */
+  EVAL_USE_RECORDED: bool('EVAL_USE_RECORDED', true),
+  /* The second look before anything is switched: the cheapest models that cleared (at most this many)
+     are measured again on calls they have never seen, on at least EVAL_CONFIRM_MIN calls and on
+     EVAL_CONFIRM_MULTIPLE times the fewest a perfect run needs to clear the bar. */
+  EVAL_CONFIRM_TRIES: num('EVAL_CONFIRM_TRIES', 2),
+  EVAL_CONFIRM_MIN: num('EVAL_CONFIRM_MIN', 30),
+  EVAL_CONFIRM_MULTIPLE: num('EVAL_CONFIRM_MULTIPLE', 2),
+  /* Written work with no one right answer is held to "at least as good" when it cannot be held to
+     "the same answer". */
+  EVAL_QUALITY_YARDSTICK: bool('EVAL_QUALITY_YARDSTICK', true),
+  /* Re-checks that keep confirming what serves are spaced out, doubling at most this many times;
+     a change in the catalogue that could matter to a workload brings its next one forward to within
+     EVAL_NUDGE_HOURS. */
+  EVAL_BACKOFF_MAX_DOUBLINGS: num('EVAL_BACKOFF_MAX_DOUBLINGS', 3),
+  EVAL_NUDGE_HOURS: num('EVAL_NUDGE_HOURS', 6),
+  EVAL_NUDGE_MIN_DAYS: num('EVAL_NUDGE_MIN_DAYS', 7),
+  /* Marking a long, repeated instruction for the provider to cache, on models that only cache what is
+     marked (Anthropic's). A cached instruction costs a tenth of the price to read and a quarter more to
+     write, so it is only marked where calls come often enough to read it back: at least
+     CACHE_HINT_MIN_PER_HOUR an hour, with an instruction of at least CACHE_HINT_MIN_CHARS characters,
+     which is about the smallest a provider will cache. */
+  /* A switch starts on a share of the calls and grows while its live calls hold up: the shares it
+     passes through before all of them, the hours it spends at each at least, and the calls it has to
+     answer at each first. A quiet workload moves on after a day with ROLLOUT_QUIET_CALLS. A switch
+     whose calls fail more often than what served before it, by more than ROLLOUT_ERROR_MARGIN, or whose
+     answers are shown worse, is rolled back on its own. */
+  ROLLOUT_ENABLED: bool('ROLLOUT_ENABLED', true),
+  ROLLOUT_STAGES: str('ROLLOUT_STAGES', '0.05,0.25').split(',').map(Number).filter((x) => x > 0 && x < 1),
+  ROLLOUT_STAGE_HOURS: str('ROLLOUT_STAGE_HOURS', '2,12').split(',').map(Number).filter((x) => x >= 0),
+  ROLLOUT_MIN_CALLS: num('ROLLOUT_MIN_CALLS', 30),
+  ROLLOUT_QUIET_CALLS: num('ROLLOUT_QUIET_CALLS', 10),
+  ROLLOUT_ERROR_MARGIN: num('ROLLOUT_ERROR_MARGIN', 0.01),
+  /* Reading a few live answers in the background (src/learn/grade.js): how many of each strategy's
+     fair calls a day, and the most it may spend on one workload a day. */
+  GRADE_ENABLED: bool('GRADE_ENABLED', true),
+  GRADE_PER_ARM_PER_DAY: num('GRADE_PER_ARM_PER_DAY', 20),
+  GRADE_BUDGET_USD_PER_DAY: num('GRADE_BUDGET_USD_PER_DAY', 0.25),
+  /* Emails about a workspace's own events (src/notify.js): on, and at most this many a day. */
+  NOTIFY_ENABLED: bool('NOTIFY_ENABLED', true),
+  NOTIFY_MAX_PER_DAY: num('NOTIFY_MAX_PER_DAY', 10),
+  CACHE_HINTS: bool('CACHE_HINTS', true),
+  CACHE_HINT_MIN_CHARS: num('CACHE_HINT_MIN_CHARS', 4400),
+  CACHE_HINT_MIN_PER_HOUR: num('CACHE_HINT_MIN_PER_HOUR', 12),
+  /* How a new workload is switched in a workspace that has not chosen: 'ask' (a person approves each
+     switch), 'auto' or 'off'. Workspaces choose for themselves in Settings. */
+  DEFAULT_OPTIMIZE_MODE: ['ask', 'auto', 'off'].includes(str('DEFAULT_OPTIMIZE_MODE', 'ask')) ? str('DEFAULT_OPTIMIZE_MODE', 'ask') : 'ask',
+  /* A measurement nobody asked for waits until it has enough calls to show a cheaper model is as good
+     as the customer's own at the bar it expects: the lowest bar for structured answers, and this one
+     for written answers, whose own model varies more, until a measurement has set the real one. */
+  EVAL_FIRST_FLOOR_TEXT_PCT: num('EVAL_FIRST_FLOOR_TEXT_PCT', 10),
   /* How often a workspace re-measures by itself, in days. Zero means never: measuring is
      then something a person asks for. Set in Settings; this is what a workspace has until it
      chooses, and it is always one of MEASURE_CHOICES. */
@@ -189,6 +268,9 @@ export const config = {
   JEV_MODEL: str('JEV_MODEL', 'jev-latest'),
   JEV_PRICE_PER_MTOK: num('JEV_PRICE_PER_MTOK', 0.042),
   JEV_CONCURRENCY: num('JEV_CONCURRENCY', 12),
+  /* Of those, how many only a question a live call is waiting on may take: measuring, grading and
+     reading follow-ups can never fill every place, so a cascade's live check always has one. */
+  JEV_LIVE_RESERVED: num('JEV_LIVE_RESERVED', 4),
   JEV_TIMEOUT_MS: num('JEV_TIMEOUT_MS', 20000),
   /* A cascade's check on a live call: one try, this long at most, and never a wait behind other
      questions. A check that does not come back in time sends the call on to the customer's own
@@ -223,7 +305,20 @@ export const config = {
      tolerance (0.02 is two calls in a hundred). */
   LEARN_MIN_CALLS: num('LEARN_MIN_CALLS', 30),
   LEARN_CONFIDENCE: num('LEARN_CONFIDENCE', 0.95),
+  /* The chance any one live decision is wrong, over every hourly look it will ever get: each is made
+     on a range that holds at every look at once (src/learn/decide.js), not at one look chosen ahead. */
+  LEARN_ALPHA: num('LEARN_ALPHA', 0.05),
   LEARN_TOLERANCE: num('LEARN_TOLERANCE', 0.02),
+  /* Live results only decide anything where outcomes are seen often enough for "worked" to mean
+     something: at least this share of calls has ever shown a signal, or the customer reports results. */
+  LEARN_MIN_DETECTION: num('LEARN_MIN_DETECTION', 0.02),
+  /* In "normal" mode the experiment share grows on a quiet workload, up to this, so that evidence
+     arrives within a half-life rather than in a year: the yardstick needs about eight calls a day. */
+  EXPLORE_SHARE_MAX: num('EXPLORE_SHARE_MAX', 0.1),
+  EXPLORE_YARDSTICK_PER_DAY: num('EXPLORE_YARDSTICK_PER_DAY', 24),
+  /* A day's experiments may cost up to this share of what the switch saves in a day, where that is
+     more than EXPLORE_BUDGET_USD: keeping a switch honest is worth more on a workload that saves more. */
+  EXPLORE_BUDGET_SHARE: num('EXPLORE_BUDGET_SHARE', 0.1),
 
   /* How long what we learn stays true. Models improve, providers are added and dropped,
      prices and speeds move, so every fact is read again once it is this old. */
@@ -256,13 +351,27 @@ export const config = {
   ALERTS_ENABLED: bool('ALERTS_ENABLED', true),
   ALERT_WINDOW_MIN: num('ALERT_WINDOW_MIN', 10),
 
-  EMAIL_FROM: str('EMAIL_FROM', 'Understudy <noreply@docupath.tech>'),
+  /* docupath.tech is refused in src/email.js whatever this says: mail from it is quarantined where
+     it lands and reported delivered, so nobody would ever know. */
+  EMAIL_FROM: str('EMAIL_FROM', 'Understudy <noreply@docupath.ai>'),
+  /* Where the contact form on the site sends what people write. Never shown on a page. */
+  CONTACT_TO: str('CONTACT_TO', ''),
   LOGIN_CODE_TTL_MIN: num('LOGIN_CODE_TTL_MIN', 10),
-  LOGIN_CODE_DIGITS: num('LOGIN_CODE_DIGITS', 4),
-  /* Four digits is ten thousand combinations, so the cap is what makes it safe, not the
-     length. Five wrong guesses spends the code and it cannot be retried. */
+  /* Six digits is a million combinations. With five tries a code and five codes an hour, a
+     guesser has 25 tries an hour at one address: about one chance in 40,000. Four digits made it
+     one in 400, which is days of patient guessing, not years. */
+  LOGIN_CODE_DIGITS: num('LOGIN_CODE_DIGITS', 6),
   LOGIN_CODE_MAX_ATTEMPTS: num('LOGIN_CODE_MAX_ATTEMPTS', 5),
   LOGIN_CODE_MAX_PER_HOUR: num('LOGIN_CODE_MAX_PER_HOUR', 5),
+  /* Limits per internet address, so one machine cannot work through many accounts or send a
+     flood of mail. They count every request the same way whether or not the address has an
+     account, which is what keeps them from telling anybody who has one. */
+  LIMIT_SIGNIN_PER_IP_15MIN: num('LIMIT_SIGNIN_PER_IP_15MIN', 20),
+  LIMIT_CODES_PER_IP_HOUR: num('LIMIT_CODES_PER_IP_HOUR', 20),
+  LIMIT_VERIFY_PER_IP_HOUR: num('LIMIT_VERIFY_PER_IP_HOUR', 40),
+  LIMIT_SIGNUP_PER_IP_HOUR: num('LIMIT_SIGNUP_PER_IP_HOUR', 10),
+  LIMIT_CONTACT_PER_IP_HOUR: num('LIMIT_CONTACT_PER_IP_HOUR', 5),
+  LIMIT_CONTACT_PER_DAY: num('LIMIT_CONTACT_PER_DAY', 100),
 
   // money
   STRIPE_SECRET_KEY: str('STRIPE_SECRET_KEY'),
@@ -270,6 +379,10 @@ export const config = {
      installed package, so upgrading the package is not the same act as changing the API. */
   STRIPE_API_VERSION: str('STRIPE_API_VERSION', '2026-08-26.dahlia'),
   STRIPE_WEBHOOK_SECRET: str('STRIPE_WEBHOOK_SECRET'),
+  /* Whether a payment made with a Stripe TEST key may become balance. Yes on a machine of our own
+     (plain http), no on any https deployment unless this says so, because a test key takes the
+     public practice card and the models behind the balance are paid for with real money. */
+  ALLOW_TEST_PAYMENTS: bool('ALLOW_TEST_PAYMENTS', !publicUrl().startsWith('https://')),
   /* Nobody is given money they did not pay for. A new account starts at zero and adds
      credit before its first routed call; "send us copies" needs no balance at all. */
   STARTER_CREDIT_USD: num('STARTER_CREDIT_USD', 0),
@@ -278,19 +391,65 @@ export const config = {
   TOPUP_MAX_USD: num('TOPUP_MAX_USD', 500),
   TOPUP_AMOUNT_USD: num('TOPUP_AMOUNT_USD', 20),
   TOPUP_THRESHOLD_USD: num('TOPUP_THRESHOLD_USD', 5),
+  /* The most automatic top ups a workspace gets in a day before it is asked to decide. */
+  TOPUP_MAX_PER_DAY: num('TOPUP_MAX_PER_DAY', 10),
+  /* Money set aside for a call in flight: the most it could cost (see callBound), reserved before it
+     is sent and given back once it is answered. A hold lapses after this long, longer than the longest
+     streamed answer allowed (UPSTREAM_STREAM_MAX_MS) with room for the tries before it, so a process that
+     died mid-call cannot freeze a balance, and a live call never outlives its own hold. A request with no
+     cap on its answer, to a model that publishes neither a longest answer nor a context length (almost
+     none do), is held as if it wrote HOLD_MAX_OUTPUT_TOKENS; the request itself is never changed. */
+  HOLD_TTL_MIN: num('HOLD_TTL_MIN', 45),
+  /* What a call can cost beyond its text: a picture given by its address is held as this many prompt
+     tokens (a large picture at full detail reads as a few thousand), and a call that searches the web
+     as this much (the dearest search is a few cents). */
+  HOLD_IMAGE_TOKENS: num('HOLD_IMAGE_TOKENS', 6000),
+  // how long a PDF sent inline may take to count its pages before the call is refused (see pdf-pages.js)
+  PDF_COUNT_MS: num('PDF_COUNT_MS', 5000),
+  HOLD_WEB_SEARCH_USD: num('HOLD_WEB_SEARCH_USD', 0.05),
+  // a model that searches by itself (it has its own price per search) is held for up to this many searches a call
+  HOLD_SEARCHES_PER_CALL: num('HOLD_SEARCHES_PER_CALL', 20),
+  /* Where the providers a call can reach are not each known (zero retention off), a hold prices it at
+     the list price times this, and the request tells OpenRouter never to use a provider dearer than
+     that (provider.max_price), so the margin is a bound and not a hope. A model with no known price is
+     never routed. */
+  HOLD_PRICE_MULTIPLE: num('HOLD_PRICE_MULTIPLE', 2),
+  HOLD_MAX_OUTPUT_TOKENS: num('HOLD_MAX_OUTPUT_TOKENS', 32000),
   OBSERVE_PLAN_USD: num('OBSERVE_PLAN_USD', 49),
   EVAL_ALLOWANCE_USD: num('EVAL_ALLOWANCE_USD', 10),
 
   // background work
   JOBS_ENABLED: bool('JOBS_ENABLED', true),
   JOBS_TICK_MS: num('JOBS_TICK_MS', 5000),
+  /* How much background work runs at once, and how many measurements of it. Every tick used to start
+     another runner while the last was still busy, so measurements piled up side by side without
+     limit, all on the connections live calls use. Background work now has its own connections too. */
+  JOBS_CONCURRENCY: num('JOBS_CONCURRENCY', 3),
+  EVAL_CONCURRENCY: num('EVAL_CONCURRENCY', 2),
+  PG_BG_POOL_MAX: num('PG_BG_POOL_MAX', 6),
+  /* One line per customer call, per change made from a screen, and per failure, in the deploy log. */
+  REQUEST_LOGS: bool('REQUEST_LOGS', true),
   CATALOG_SYNC_HOURS: num('CATALOG_SYNC_HOURS', 6),
 };
 
 /** True when the platform can actually reach a model provider. */
 export const canRoute = () => config.OPENROUTER_API_KEY !== '';
-/** True when the platform can actually take a payment. */
-export const canBill = () => config.STRIPE_SECRET_KEY !== '';
+/* Which kind of payments the Stripe key takes. A test key takes Stripe's public practice card
+   numbers, so on a deployment that spends real money on models, a test payment must never turn
+   into balance: anybody could "pay" with the practice card and spend the operator's credit. */
+export const stripeMode = () => {
+  const k = config.STRIPE_SECRET_KEY;
+  if (!k) return 'off';
+  return /^(sk|rk)_live_/.test(k) ? 'live' : 'test';
+};
+/** live, test (allowed, on a machine of our own), test_refused (a test key on a public deployment), or off. */
+export const paymentsState = () => {
+  const m = stripeMode();
+  if (m !== 'test') return m;
+  return config.ALLOW_TEST_PAYMENTS ? 'test' : 'test_refused';
+};
+/** True when the platform can actually take a payment that becomes balance. */
+export const canBill = () => ['live', 'test'].includes(paymentsState());
 /** True when a message can actually leave the building. */
 export const canEmail = () => config.RESEND_API_KEY !== '';
 /** True when a key can be shown again after it was made. */

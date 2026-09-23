@@ -32,12 +32,33 @@ const WOBBLE = {
   'anthropic/claude-haiku-4.5': 0.026,
   'qwen/qwen3-235b-a22b-2507': 0.041,
   'google/gemini-2.5-flash-lite': 0.098,
+  // a walk can make a model steadier or shakier: FAKE_WOBBLE='{"openai/gpt-5.4":0.1}'
+  ...(() => { try { return JSON.parse(process.env.FAKE_WOBBLE || '{}'); } catch { return {}; } })(),
 };
 
 let seq = 0;
 const hash = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
 
+/* One stand-in provider per model, as OpenRouter lists providers: with its price, its window and the
+   longest answer it writes, so a walk goes through the path that knows its providers one by one. */
+const endpoint = (m) => ({ tag: 'stand-in', provider_name: 'Stand-in', pricing: m.pricing, context_length: m.context_length,
+  max_completion_tokens: 16000, status: 0, uptime_last_30m: 100, latency_last_30m: { p50: 400, p90: 900 },
+  throughput_last_30m: { p50: 80, p90: 120 } });
+
 const server = http.createServer((req, res) => {
+  // the providers that keep nothing, and every provider of one model
+  if (req.url.endsWith('/endpoints/zdr')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ data: MODELS.map((m) => ({ model_id: m.id, ...endpoint(m) })) }));
+    return;
+  }
+  const one = req.url.match(/\/models\/(.+)\/endpoints$/);
+  if (one) {
+    const m = MODELS.find((x) => x.id === decodeURIComponent(one[1]));
+    res.writeHead(m ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(m ? { data: { id: m.id, endpoints: [endpoint(m)] } } : { error: { message: 'no such model' } }));
+    return;
+  }
   if (req.url.endsWith('/models')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ data: MODELS }));

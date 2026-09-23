@@ -1,6 +1,7 @@
 import React from 'react';
 import PeriodChip from '../PeriodChip.jsx';
-import { usd, num } from '../api.js';
+import { num } from '../api.js';
+import { savedTile, spendTile } from '../savings.js';
 import WorkloadTable from '../WorkloadTable.jsx';
 
 const Tile = ({ k, v, s }) => (
@@ -8,7 +9,6 @@ const Tile = ({ k, v, s }) => (
 );
 
 export default function Workloads({ data, onOpen, onPeriod, busy }) {
-  const runRate = data.days ? (data.spend / data.days) * 30 : 0;
   return (
     <>
       <div className="phead"><h1>Workloads</h1>
@@ -18,11 +18,9 @@ export default function Workloads({ data, onOpen, onPeriod, busy }) {
         <Tile k="Optimized" v={num(data.optimized)}
           s={data.waiting ? `${data.waiting} more switched, waiting for routed calls`
             : data.ready ? `${data.ready} more ready to switch` : 'nothing else ready yet'} />
-        <Tile k={`Saved · last ${data.days} days`} v={data.priced && data.saved > 0 ? usd(data.saved) : '—'}
-          s={data.priced ? 'against your own models' : 'waiting on prices'} />
-        <Tile k={`Spend · last ${data.days} days`} v={data.priced ? usd(data.spend) : '—'}
-          s={!data.priced ? 'prices sync once a provider key is set'
-            : data.spend > 0 ? `on track for ${usd(runRate)} a month` : 'nothing charged yet'} />
+        {/* what you are actually ahead by, which can be below zero while measuring is paid for */}
+        <Tile k={`Saved · last ${data.days} days`} {...savedTile(data)} />
+        <Tile k={`Spend · last ${data.days} days`} {...spendTile(data)} />
       </div>
       <WorkloadTable rows={data.rows} onOpen={onOpen} priced={data.priced} />
     </>

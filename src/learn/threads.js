@@ -121,10 +121,36 @@ export function toolFailed(text) {
     || /^(\d{3})\b/.test(t) && Number(t.slice(0, 3)) >= 400;
 }
 
-/* A refusal, said the ways models say it. Only for written answers, and only at the start,
-   where a refusal is: an answer that quotes someone saying "I can't" further down is not one. */
-const REFUSAL = /^(i'?m sorry|i am sorry|sorry, (but )?i|i can(no|')t|i am unable|i'?m unable|i won'?t|as an ai\b|i do not feel comfortable)/i;
-export const refused = (text) => REFUSAL.test(String(text ?? '').trim());
+/* A refusal, said the ways models say it. Only for written answers, and only at the start, where a
+   refusal is: an answer that quotes someone saying "I can't" further down is not one.
+
+   It has to decline something ("I can't help with that", "I'm sorry, but I cannot provide", "As an AI I
+   am not able to"), and the answer has to be mostly that. The old rule took any answer opening with an
+   apology or "I can't" for a refusal, so "I'm sorry to hear that, here is how to reset it" and "I can't
+   wait to help with this" were counted as failed calls, against whichever model wrote them. And an
+   answer that declines one part and then helps at length ("I can't give medical advice, but here is
+   what the guidance says: ...") did the job it was asked, and is not a failure either. */
+const DECLINE = new RegExp([
+  // an apology or "unfortunately" may come first
+  String.raw`^(?:(?:i'?m|i am)\s+(?:so\s+|really\s+|very\s+)?sorry,?\s+(?:but\s+)?|sorry,?\s+(?:but\s+)?|unfortunately,?\s+)?`,
+  '(?:',
+  // "I can't", "I cannot", "I won't", "I am unable", "I'm not able", "I must decline", "I don't feel comfortable" ...
+  String.raw`i(?:\s+(?:can(?:no|')t|cannot|won'?t|will\s+not|am\s+(?:not\s+able|unable)|must\s+decline|do\s+not\s+feel\s+comfortable|don'?t\s+feel\s+comfortable)|'m\s+(?:not\s+able|unable))`,
+  // ... then what it declines to do
+  String.raw`\s+(?:to\s+)?(?:help|assist|provide|do|comply|fulfil|fulfill|complete|answer|create|generate|write|share|support|engage|continue|process|give|offer|produce|make)`,
+  // or the old "as an AI I cannot"
+  String.raw`|as\s+an\s+ai(?:\s+(?:language\s+)?model)?,?\s+i(?:\s+(?:can(?:no|')t|cannot|don'?t|do\s+not|am\s+not)|'m\s+not)`,
+  ')',
+].join(''), 'i');
+export function refused(text) {
+  // curly apostrophes, as most models write them, read as straight ones
+  const t = String(text ?? '').trim().replace(/[\u2018\u2019]/g, "'");
+  if (!DECLINE.test(t.slice(0, 240))) return false;
+  // what follows the first sentence: a long answer after a decline is help, not a refusal
+  const first = t.search(/[.!?](\s|$)/);
+  const rest = first >= 0 ? t.slice(first + 1).trim() : '';
+  return rest.length < 300;
+}
 
 /* Problems visible in an answer the moment it arrives, before anything else happens: it stopped
    at the length limit, it is not the JSON the request asked for, a tool call's arguments are not

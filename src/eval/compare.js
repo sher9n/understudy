@@ -44,24 +44,100 @@ const leaves = (v, path = '', out = new Map()) => {
   return out;
 };
 
-/** 0 means identical, 1 means nothing in common. Structured answers compare field by field. */
+/* Structured answers, field by field, by what kind of field each one is.
+
+   A field that DECIDES something (a label, an amount, a date, an id, a yes or no, which tool was
+   called) has to match: an answer that gets one of those wrong is a wrong answer, whatever else it
+   gets right. The old rule counted the share of fields that differed, so a reversed decision in an
+   eight field answer counted as an eighth of a mistake, and a model that flipped the decision on
+   nine calls in a hundred cleared a 3% bar and was switched to.
+
+   A field that is WRITTEN (a "reason", a "summary", a sentence) is never the same string twice, even
+   from the customer's own model, and counting its wording as a difference made the model look
+   inconsistent with itself: that noise then loosened the bar for the fields that decide. Written
+   fields are read for meaning by the judge instead, and only when every deciding field matches. */
+const PROSE_CHARS = 40;
+const PROSE_WORDS = 6;
+export const isProse = (v) => typeof v === 'string' && v.trim().length >= PROSE_CHARS
+  && v.trim().split(/\s+/).length >= PROSE_WORDS;
+
+/** A number written as text, read the way people write it: 1,234.56, 1.234,56, 1234,5. */
+export function asNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v !== 'string') return null;
+  let t = v.trim().replace(/^[$€£¥₹]\s*|\s*[$€£¥₹%]$/g, '');
+  if (!/^-?\d[\d.,\s]*$/.test(t)) return null;
+  t = t.replace(/\s/g, '');
+  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) t = t.replace(/,/g, '');
+  else if (/^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) t = t.replace(/\./g, '').replace(',', '.');
+  else if (/^-?\d+,\d+$/.test(t)) t = t.replace(',', '.');
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** The same value, written two ways: spacing, a number with separators, the case of a one-word label. */
+export function sameValue(x, y) {
+  if (x === y) return true;
+  if (x === undefined || y === undefined || x === null || y === null) return false;
+  const nx = asNumber(x);
+  const ny = asNumber(y);
+  if (nx !== null && ny !== null) return Math.abs(nx - ny) <= 1e-9 * Math.max(1, Math.abs(nx), Math.abs(ny));
+  if (typeof x === 'boolean' || typeof y === 'boolean') return String(x).toLowerCase() === String(y).toLowerCase();
+  if (typeof x === 'string' && typeof y === 'string') {
+    const a = x.trim().replace(/\s+/g, ' ');
+    const b = y.trim().replace(/\s+/g, ' ');
+    if (a === b) return true;
+    return /^[A-Za-z][A-Za-z _-]{0,40}$/.test(a) && a.toLowerCase() === b.toLowerCase();
+  }
+  return canonical(x) === canonical(y);
+}
+
+/** Two structured answers compared: whether any deciding field differs, and the written fields that do. */
+export function structuredCompare(av, bv, shapeKind) {
+  let x = av;
+  let y = bv;
+  if (shapeKind === 'tool_call') {
+    const names = (calls) => (Array.isArray(calls) ? calls.map((c) => c?.name ?? '').join('|') : '');
+    if (names(x) !== names(y)) return { decision: 1, fields: 1, differ: 1, prose: [] };
+    x = (x || []).map((c) => c?.args);
+    y = (y || []).map((c) => c?.args);
+  }
+  const la = leaves(x);
+  const lb = leaves(y);
+  const keys = new Set([...la.keys(), ...lb.keys()]);
+  const prose = [];
+  let differ = 0;
+  let decided = 0;
+  for (const k of keys) {
+    const p = la.has(k) ? la.get(k) : undefined;
+    const q = lb.has(k) ? lb.get(k) : undefined;
+    if (isProse(p) && isProse(q)) {
+      if (p.trim() !== q.trim()) prose.push({ path: k, a: p, b: q });
+      continue;
+    }
+    decided += 1;
+    if (!sameValue(p, q)) differ += 1;
+  }
+  return { decision: differ > 0 ? 1 : 0, fields: decided, differ, prose };
+}
+
+/** The written fields of a structured answer, as one text a judge can read. */
+export function proseText(pairs, side) {
+  return pairs.map((p) => `${p.path}: ${p[side]}`).join('\n');
+}
+
+/** 0 means identical, 1 means a different answer. Null means a judge has to decide: free text, or a
+ *  structured answer whose deciding fields all match and whose written fields differ in wording. */
 export function disagreement(a, b, shapeKind) {
   if (!a.ok || !b.ok) return 1;                       // a failure is total disagreement, never skipped
   if (shapeKind === 'free_text') {
-    return a.value.trim() === b.value.trim() ? 0 : null;  // null means a judge has to decide
+    return a.value.trim() === b.value.trim() ? 0 : null;
   }
-  if (shapeKind === 'enum') return canonical(a.value) === canonical(b.value) ? 0 : 1;
-  const la = leaves(a.value);
-  const lb = leaves(b.value);
-  const keys = new Set([...la.keys(), ...lb.keys()]);
-  if (!keys.size) return 0;
-  let differ = 0;
-  for (const k of keys) {
-    const x = la.has(k) ? la.get(k) : undefined;
-    const y = lb.has(k) ? lb.get(k) : undefined;
-    if (canonical(x) !== canonical(y)) differ += 1;
-  }
-  return differ / keys.size;
+  if (shapeKind === 'enum') return sameValue(a.value, b.value) || canonical(a.value) === canonical(b.value) ? 0
+    : structuredCompare(a.value, b.value, 'json').decision;
+  const c = structuredCompare(a.value, b.value, shapeKind);
+  if (c.decision) return 1;
+  return c.prose.length ? null : 0;
 }
 
 /** The four gates a candidate has to pass, computed on the server, never in a screen. */
@@ -96,6 +172,67 @@ export function floorFrom(noisePct, { multiple, minPct }) {
 /** A bar is only meaningful while the reference agrees with itself most of the time. */
 export const barIsMeaningful = (noisePct, maxPct) => noisePct <= maxPct;
 
+/* A verdict is a claim about a rate seen on a sample, so it carries how sure the sample can make
+ * anybody: nineteen times in twenty the true rate is under the upper bound (Wilson's, one-sided).
+ * The bound is worked out from the mean score, which for scores between 0 and 1 is conservative,
+ * because nothing varies more than a yes-or-no with the same mean.
+ *
+ * cleared: even the upper bound is inside the bar.
+ * missed: even the lower bound is past the review band.
+ * review: the sample straddles the bar, so a person should look.
+ * insufficient: a perfect run on this many calls could not clear the bar; nothing can be said.
+ */
+const Z95 = 1.6449;
+export function wilson(mean, n, z = Z95) {
+  if (!(n > 0)) return { lo: 0, hi: 1 };
+  const p = Math.max(0, Math.min(1, mean));
+  const centre = p + (z * z) / (2 * n);
+  const half = z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+  const d = 1 + (z * z) / n;
+  return { lo: Math.max(0, (centre - half) / d), hi: Math.min(1, (centre + half) / d) };
+}
+
+/** The fewest calls on which a perfect run clears a bar (in percent). */
+export function callsToClear(floorPct, z = Z95) {
+  return Math.ceil((z * z) / (floorPct / 100) - z * z);
+}
+
+/**
+ * The verdict for one candidate from its per-call scores (each 0 to 1, 1 meaning a different answer).
+ *
+ * A score is two things: whether the call differed at all, and by how much when it did. The first
+ * is a count, which Wilson bounds properly; the second is bounded between 0 and 1 and gets its own
+ * small margin. Bounding the mean as if every score were a yes or no read a candidate that only
+ * ever differs slightly (one JSON field wrong on a few calls) as far more uncertain than it is.
+ */
+export function verdictWith(scores, floorPct, { reviewBand = 1.25 } = {}) {
+  const n = scores.length;
+  const gap = n ? (scores.reduce((a, b) => a + b, 0) / n) * 100 : 100;
+  const differed = scores.filter((x) => x > 0);
+  const k = differed.length;
+  const share = wilson(n ? k / n : 0, n);
+  let sevLo = 1;
+  let sevHi = 1;
+  if (k) {
+    const mean = differed.reduce((a, b) => a + b, 0) / k;
+    const sd = Math.sqrt(differed.reduce((a, b) => a + (b - mean) ** 2, 0) / k);
+    const margin = (Z95 * Math.max(sd, 0.1)) / Math.sqrt(k);
+    sevLo = Math.max(0, mean - margin);
+    sevHi = Math.min(1, mean + margin);
+  }
+  const lo = share.lo * sevLo;
+  const hi = share.hi * sevHi;
+  const loPct = lo * 100;
+  const hiPct = hi * 100;
+  if (n === 0 || wilson(0, n).hi * 100 > floorPct) {
+    return { verdict: 'insufficient', gap, lo: loPct, hi: hiPct, need: callsToClear(floorPct) };
+  }
+  if (hiPct <= floorPct) return { verdict: 'cleared', gap, lo: loPct, hi: hiPct };
+  if (loPct > floorPct * reviewBand) return { verdict: 'missed', gap, lo: loPct, hi: hiPct };
+  return { verdict: 'review', gap, lo: loPct, hi: hiPct };
+}
+
+/** Kept for the pages that still read a verdict from a gap alone; every measurement uses verdictWith. */
 export function verdictFor(gapPct, floorPct, runs, { minRuns, reviewBand }) {
   if (runs < minRuns) return 'insufficient';
   if (gapPct <= floorPct) return 'cleared';
@@ -108,25 +245,43 @@ export function verdictFor(gapPct, floorPct, runs, { minRuns, reviewBand }) {
  * `preferred` is the calls whose answers are already paid for. Within each length band they are
  * taken first, so a measurement repeated on unchanged traffic reuses what the last one bought,
  * while the spread across short and long answers stays exactly as it was. */
-export function sampleCalls(calls, size, seed = 1, preferred = null) {
+export function sampleCalls(calls, size, seed = 1, preferred = null, { fresh = null } = {}) {
   const withLen = calls.map((c) => ({ ...c, len: (c.response_json || '').length }));
   withLen.sort((a, b) => a.len - b.len);
   const quartiles = [[], [], [], []];
   withLen.forEach((c, i) => quartiles[Math.min(3, Math.floor((i * 4) / Math.max(1, withLen.length)))].push(c));
   let s = seed >>> 0;
   const rand = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  /* How many from each band. The share left over after an even split goes to the longest answers
+     first, because length is what breaks a model; it used to be the longest band that was cut short
+     (a pool of twenty sampled three, three, three and one). A band too small for its share passes
+     the rest on to the others. */
+  const want = [0, 0, 0, 0];
+  let left = Math.min(size, withLen.length);
+  for (let round = 0; left > 0 && round < 8; round += 1) {
+    const open = [3, 2, 1, 0].filter((q) => quartiles[q].length > want[q]);
+    if (!open.length) break;
+    const each = Math.floor(left / open.length);
+    const extra = left - each * open.length;
+    open.forEach((q, k) => {
+      const give = Math.min(quartiles[q].length - want[q], each + (k < extra ? 1 : 0));
+      want[q] += give;
+      left -= give;
+    });
+  }
   const out = [];
-  const perQ = Math.ceil(size / 4);
   quartiles.forEach((q, qi) => {
     const pool = [...q];
     for (let i = pool.length - 1; i > 0; i -= 1) {
       const j = Math.floor(rand() * (i + 1));
       [pool[i], pool[j]] = [pool[j], pool[i]];
     }
-    const ordered = preferred && preferred.size
-      ? [...pool.filter((c) => preferred.has(c.id)), ...pool.filter((c) => !preferred.has(c.id))]
-      : pool;
-    out.push(...ordered.slice(0, perQ).map((c) => ({ ...c, quartile: qi })));
+    /* A re-check wants calls no earlier measurement used, so a lucky sample is not simply measured
+       again; a first measurement prefers calls whose answers are already paid for. */
+    const rank = (c) => (fresh && fresh.size ? (fresh.has(c.id) ? 0 : 2) : 0)
+      + (preferred && preferred.size && preferred.has(c.id) ? 0 : 1);
+    const ordered = [...pool].sort((a, b) => rank(a) - rank(b));
+    out.push(...ordered.slice(0, want[qi]).map((c) => ({ ...c, quartile: qi })));
   });
   return out.slice(0, size);
 }

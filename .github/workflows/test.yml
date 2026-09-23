@@ -1,0 +1,43 @@
+# Every push and pull request runs the whole suite against a real Postgres and builds the screens,
+# because pushing main deploys it within a minute and nothing else stood between a change and customers.
+name: test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: understudy
+          POSTGRES_PASSWORD: understudy
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U understudy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # each test file makes and drops its own database from this one
+      DATABASE_URL: postgresql://understudy:understudy@localhost:5432/postgres
+      USER: understudy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: the suite, one file at a time so timing checks are not fighting each other
+        run: node --test --test-concurrency=1 test/*.test.js
+      - name: the error-rate harness
+        run: node scripts/harness.mjs > /dev/null
+      - name: the screens build
+        run: npx vite build

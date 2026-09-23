@@ -153,6 +153,68 @@ aside.side.mini {
 .acctrow.acctsw .sw { flex: 0 0 auto; width: 32px; height: 19px; border-radius: 10px; }
 .acctrow.acctsw .sw i { width: 13px; height: 13px; top: 2px; left: 2px; }
 .acctrow.acctsw .sw.swon i { left: 16px; }
+/* What the app itself has to say at the top of a screen: a payment back from Stripe, a session
+   that has ended. A sentence, a link when there is something to do, and a way to put it away. */
+.appnote { display: flex; align-items: flex-start; gap: 12px; margin: 0 0 18px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel); font-size: 13.5px;
+  line-height: 1.55; color: var(--ink); }
+.appnote.ok { border-color: var(--ok); background: var(--okq); }
+.appnote.warn { border-color: var(--warn); background: var(--warnq); }
+.appnote.bad { border-color: var(--bad); background: var(--badq); }
+.appnote a { font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.appnote b { font-weight: 650; }
+.appnotebody { flex: 1 1 auto; min-width: 0; }
+.appnotex { flex: 0 0 auto; width: 26px; height: 26px; margin: -3px -4px -3px 0; border-radius: 7px;
+  color: var(--mut-read); font-size: 18px; line-height: 1; }
+.appnotex:hover { background: var(--grid); color: var(--ink); }
+/* Above the sign-in form, which fills the screen, the notice is a strip across the top. */
+.u > .appnote { margin: 0; border-radius: 0; border-width: 0 0 1px; padding: 11px 20px; }
+
+/* The dashboard, when it cannot read itself: the figures stay, and this says how old they are. */
+.reconn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 0; padding: 9px 12px;
+  border: 1px solid var(--warn); border-radius: 10px; background: var(--warnq); font-size: 13px;
+  line-height: 1.5; color: var(--ink); }
+.reconn > span:nth-child(2) { flex: 1 1 260px; }
+.reconndot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: 0 0 auto;
+  animation: reconnbeat 1.6s ease-in-out infinite; }
+@keyframes reconnbeat { 50% { opacity: 0.35; } }
+.reconnbtn { font: inherit; font-size: 12.5px; font-weight: 600; color: var(--ink); background: var(--raise);
+  border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+.reconnbtn:hover { background: var(--grid); }
+
+/* A screen that could not be read at all: why, and the ways on. */
+.loadfail { margin: 14px 0 0; padding: 16px 18px; border-radius: 12px; background: var(--badq);
+  border: 1px solid var(--bad); max-width: 720px; }
+.loadfail p { margin: 0; font-size: 14px; line-height: 1.55; color: var(--ink); }
+.loadfailacts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.loadfail a.btn, .loadfail button.minig { font-size: 13px; }
+
+/* A chart drawn narrow reads its values in a card across its top, rather than in one beside the
+   point being read, which on a phone would run off the edge of the screen. */
+.charttip.wide { left: 8px; right: 8px; top: 8px; transform: none; min-width: 0; }
+.charttip.wide .tipday { overflow-wrap: anywhere; }
+/* The waiting chart's sentence, under the drawing when the drawing is too narrow to hold it. */
+.waitnote { margin: 6px 4px 0; font-size: 13px; line-height: 1.5; color: var(--mut-read); text-align: center; }
+
+/* Skipping past the menu to the page: out of sight until Tab reaches it. */
+.skiplink { position: absolute; left: 12px; top: -64px; z-index: 100; padding: 9px 14px; border-radius: 9px;
+  background: var(--ink); color: var(--bg); font-size: 13.5px; font-weight: 600; }
+.skiplink:focus { top: 12px; text-decoration: none; }
+
+/* The links on the sign-in and sign-up forms are underlined, so they are told apart from the
+   words around them by more than their colour: the difference in colour alone was 1.5 to 1. */
+.authcard a, .toprow a, .fl a { text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+
+/* The models waiting their turn to be tried were faded to 72%, which took their text to 3.7 to 1
+   against the page. They keep their full contrast, and say they are waiting by their heading. */
+.hwprank .hwprr.dim { opacity: 1; }
+.hwprank .hwprr.dim .hwprm { color: var(--mut-read); }
+
+/* The public pages, from inside the account menu: small, in one row, above the way out. */
+.acctlinks { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 2px 10px 8px; }
+.acctlinks a { font-size: 12.5px; line-height: 1.8; color: var(--mut-read); text-decoration: underline;
+  text-underline-offset: 2px; text-decoration-thickness: 1px; }
+.acctlinks a:hover { color: var(--ink); }
 
 
 /* A workload row is now a real link, so it would otherwise inherit the stylesheet's link
