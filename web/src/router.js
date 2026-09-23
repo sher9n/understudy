@@ -6,6 +6,7 @@ export const ROUTES = [
   { screen: 'home', path: '/' },
   { screen: 'signin', path: '/signin' },
   { screen: 'signincode', path: '/signin/code' },
+  { screen: 'signinlink', path: '/signin/link' },
   { screen: 'signup', path: '/signup' },
   { screen: 'connect', path: '/connect' },
   { screen: 'dash', path: '/dashboard' },

@@ -6,7 +6,7 @@ import config, { canRoute } from './config.js';
 import { verifyKey, bearerOf } from './keys.js';
 import { workloadFor, recordCall, addActivity } from './traffic.js';
 import { chat, chatStream, priceCall, UpstreamError } from './openrouter.js';
-import { gateRouting, chargeCall, grantStarterCredit } from './billing.js';
+import { gateRouting, chargeCall, grantStarterCredit, hold, release, worstCaseTokens, withFee } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
 import { report } from './learn/outcomes.js';
@@ -85,6 +85,47 @@ async function prepare(wsId, body, { classify = true } = {}) {
   return { workload, requested, served, recipe, strategy };
 }
 
+/* Every model one call could end up paying for: the one it is served by, the customer's own model,
+   and whatever a strategy may send it on to. */
+function modelsOf(ready) {
+  const out = new Set([ready.served, ready.requested, ready.workload?.reference_model].filter(Boolean));
+  for (const s of [ready.strategy, ready.strategy?.fallback]) {
+    const spec = s?.spec;
+    if (!spec) continue;
+    if (spec.kind === 'cascade') { out.add(spec.first?.model); out.add(spec.fallback?.model); }
+    else if (spec.kind === 'router') { out.add(spec.cheap?.model); out.add(spec.strong?.model); }
+    else out.add(spec.model);
+  }
+  out.delete(undefined);
+  return [...out];
+}
+
+/* Set aside what this call could cost before it is sent. The dearest model it could touch, at its
+   list price times a margin (a provider that keeps nothing can charge more than the list), for the
+   whole prompt and the longest answer it allows; twice that when a strategy can pay for two models
+   on one call. A model with no known price is held at a fixed amount. */
+async function holdFor(wsId, body, ready) {
+  const { pin, pout } = worstCaseTokens(body);
+  let worst = 0;
+  for (const m of modelsOf(ready)) {
+    const p = await priceCall(m, pin, pout);
+    if (p !== null && p > worst) worst = p;
+  }
+  const est = worst > 0 ? worst * config.HOLD_PRICE_MULTIPLE : config.HOLD_UNPRICED_USD;
+  const twice = [ready.strategy?.spec?.kind, ready.strategy?.fallback ? 'fallback' : null].some((k) => k === 'cascade' || k === 'fallback');
+  return hold(wsId, withFee(est * (twice ? 2 : 1)), 'call');
+}
+
+const cannotCover = (h) => ({
+  status: 402,
+  json: { error: {
+    message: h.inFlight > 0
+      ? 'Your balance is set aside for calls still in flight and cannot cover this one. Add credit, or send fewer calls at once.'
+      : 'Your balance is empty. Add credit in Settings and calls resume immediately.',
+    type: 'no_balance',
+  } },
+});
+
 /* What a call says about how it was decided, kept on its row: the strategy, the chance it had of
    being chosen, whether it was an experiment, and for a cascade whether it was sent on and why. */
 const decisionOf = (strategy, out = null) => (strategy ? {
@@ -152,6 +193,12 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     if (source === 'routed') await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return { ok: false, status: ready.error.status, json: ready.error.json };
   }
+  const h = await holdFor(wsId, body, ready);
+  if (!h.ok) {
+    const f = cannotCover(h);
+    if (source === 'routed') await recordRefusal(wsId, body, f.status, f.json);
+    return { ok: false, status: f.status, json: f.json };
+  }
   const { workload, requested } = ready;
   // made up front, so the answer can carry it and the customer can report how this call went
   const callId = id('call');
@@ -186,15 +233,17 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
         // what a strategy had already spent on it before it failed, kept, though nobody is charged for it
         costUsd: Number(err?.spent) || 0, ...(decisionOf(strategy) || {}),
       }).catch(() => {});
+      await release(h.holdId).catch(() => {});
       return { ok: false, status: f.status, json: f.json, served, requested, callId };
     }
     // charged for everything the strategy spent on it: a cascade's check, and a call it sent on
     await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
       started, body, response: out.json, status: 200, latencyMs: out.latencyMs, source, callId, ref,
-      decision: decisionOf(strategy, strategy && strategy.spec.kind !== 'model' ? out : null) });
+      decision: decisionOf(strategy, strategy && strategy.spec.kind !== 'model' ? out : null), holdId: h.holdId });
     return { ok: true, status: 200, json: out.json, served: out.served, requested, callId,
       latencyMs: out.latencyMs, costUsd: out.cost };
   }
+  await release(h.holdId).catch(() => {});
   return { ok: false, status: 502, json: { error: { message: 'The provider could not be reached.' } }, callId };
 }
 
@@ -214,6 +263,12 @@ v1.post('/chat/completions', async (req, res) => {
     await recordRefusal(wsId, body, ready.error.status, ready.error.json);
     return res.status(ready.error.status).json(ready.error.json);
   }
+  const h = await holdFor(wsId, body, ready);
+  if (!h.ok) {
+    const f = cannotCover(h);
+    await recordRefusal(wsId, body, f.status, f.json);
+    return res.status(f.status).json(f.json);
+  }
   const { workload, requested } = ready;
   const callId = id('call');
   const started = Date.now();
@@ -221,7 +276,9 @@ v1.post('/chat/completions', async (req, res) => {
   if (!tries.length) tries.push(null);
   for (const [k, strategy] of tries.entries()) {
     const last = k === tries.length - 1;
-    const r = await streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready });
+    const r = await streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready, holdId: h.holdId });
+    // an answer that failed part way was never charged, so what it set aside goes back
+    if (r.sent) await release(h.holdId).catch(() => {});
     if (r.ok || r.sent) return undefined;
     // nothing has reached the customer yet: an experiment that failed is kept, and the call served as usual
     if (!last) {
@@ -236,15 +293,17 @@ v1.post('/chat/completions', async (req, res) => {
       servedModel: r.served, statusCode: f.status, latencyMs: Date.now() - started, request: body, ref,
       costUsd: Number(r.err?.spent) || 0, ...(decisionOf(strategy) || {}),
     }).catch(() => {});
+    await release(h.holdId).catch(() => {});
     return res.status(f.status).json(f.json);
   }
+  await release(h.holdId).catch(() => {});
   return undefined;
 });
 
 /* One streamed call on one strategy. Answers { ok } once the whole answer has gone out; { sent } when
    the provider failed part way, after the answer had started, which is ended as it stands; or the
    failure, with nothing sent yet, so the caller can try again or say so. */
-async function streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready }) {
+async function streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready, holdId = null }) {
   let { served, recipe } = leadOf(strategy, ready);
   let decision = decisionOf(strategy);
   if (strategy && strategy.spec.kind === 'cascade') {
@@ -265,7 +324,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     res.end();
     await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
       started, body, response: out.json, status: 200, latencyMs: out.latencyMs, ttftMs: out.latencyMs, callId, ref,
-      decision: decisionOf(strategy, out) });
+      decision: decisionOf(strategy, out), holdId });
     return { ok: true };
   }
   if (strategy && strategy.spec.kind === 'router') {
@@ -358,15 +417,16 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     choices: [{ index: 0, message: { role: 'assistant', content: answer, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason }],
   };
   await settle({ wsId, workload, requested, served, usage, started, body, response, status: 200,
-    ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision });
+    ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision, holdId });
   return { ok: true };
 }
 
 async function finish({ wsId, workload, requested, served, usage, started, body, response, status,
-  latencyMs, ttftMs = null, source = 'routed', callId = null, ref = null, decision = null }) {
+  latencyMs, ttftMs = null, source = 'routed', callId = null, ref = null, decision = null, holdId = null }) {
   const cost = Number(usage?.cost ?? 0);
   const note = workload ? `${workload.slug} on ${served}` : `Test call on ${served}`;
-  const charged = cost > 0 ? await chargeCall(wsId, cost, note) : 0;
+  // charged, and what the call set aside given back, in one step
+  const charged = await chargeCall(wsId, cost, note, { holdId });
   await recordCall({
     id: callId, workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
     servedModel: served, statusCode: status,

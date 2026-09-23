@@ -1,14 +1,15 @@
 import express from 'express';
 import { safeRouter } from './safe.js';
 import { db, now, round8, usd } from './db/index.js';
-import config, { canRoute, canBill, canEmail, paymentsState, MEASURE_CHOICES } from './config.js';
+import config, { canRoute, canBill, canEmail, canRevealKeys, paymentsState, MEASURE_CHOICES } from './config.js';
 import { allow, clientIp } from './limits.js';
-import { createAccount, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
-  requestLoginCode, verifyLoginCode, verifyLoginLink } from './auth.js';
-import send, { signInEmail } from './email.js';
-import { issueKey, listKeys, revokeKey, revealKey } from './keys.js';
+import { startSignUp, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
+  requestLoginCode, verifyLoginCode, verifyLoginLink, peekLoginLink, changePassword, endOtherSessions,
+  requestEmailChange, verifyEmailChange } from './auth.js';
+import send, { codeEmail, accountExistsEmail } from './email.js';
+import { issueKey, listKeys, revokeKey, revealKey, revealKeyById } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity, track } from './traffic.js';
-import { account, ledger, gateRouting, stripe } from './billing.js';
+import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available } from './billing.js';
 import { planFor, forgetPlan } from './eval/plan.js';
 import { recipeKind } from './eval/select.js';
 import { outcomeSummary, outcomeTotals, tasksFor } from './learn/views.js';
@@ -31,16 +32,36 @@ const fail = (res, code, message) => res.status(code).json({ error: message });
 
 /* Accounts -------------------------------------------------------------------- */
 
+const tooMany = (res, message) => fail(res, 429, message);
+// where an emailed link lands: a page with a button, because opening a link must never sign anybody in
+const linkFor = (token) => `${config.PUBLIC_URL}/signin/link#t=${encodeURIComponent(token)}`;
+
+/* Signing up sends a code to the address, and the account is made usable when the code comes back.
+   The answer is the same whether or not the address already has an account. */
 api.post('/auth/sign-up', async (req, res) => {
-  try {
-    const { user, workspace, key } = await createAccount(req.body || {});
-    res.setHeader('Set-Cookie', cookieFor(await startSession(user.id)));
-    res.json({ ok: true, workspace: workspace.name, key: key.secret });
-  } catch (err) { fail(res, 400, err.message); }
+  const ip = clientIp(req);
+  if (!await allow('signup_ip', ip, { max: config.LIMIT_SIGNUP_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many sign-ups from here. Try again in an hour.');
+  }
+  let out;
+  try { out = await startSignUp(req.body || {}, { ip }); } catch (err) { return fail(res, 400, err.message); }
+  if (!out.ok) return tooMany(res, 'Too many codes asked for this address. Wait an hour, then try again.');
+  if (out.send?.kind === 'verify') {
+    await send({ to: out.email, ...codeEmail({ purpose: 'verify', code: out.send.code, link: linkFor(out.send.token), minutes: out.send.minutes }) });
+  } else if (out.send?.kind === 'exists') {
+    await send({ to: out.email, ...accountExistsEmail({ signInUrl: `${config.PUBLIC_URL}/signin` }) });
+  }
+  return res.json({ ok: true, verify: true, email: out.email, minutes: config.LOGIN_CODE_TTL_MIN, digits: config.LOGIN_CODE_DIGITS });
 });
 
 api.post('/auth/sign-in', async (req, res) => {
-  const u = await checkPassword(req.body?.email, req.body?.password);
+  const ip = clientIp(req);
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  if (!await allow('signin_ip', ip, { max: config.LIMIT_SIGNIN_PER_IP_15MIN, windowMs: 900000 })
+    || !await allow('signin_email', email || '-', { max: 10, windowMs: 900000 })) {
+    return tooMany(res, 'Too many tries. Wait a few minutes, or sign in with an emailed code.');
+  }
+  const u = await checkPassword(email, req.body?.password);
   if (!u) return fail(res, 401, 'That email and password do not match.');
   res.setHeader('Set-Cookie', cookieFor(await startSession(u.id)));
   return res.json({ ok: true });
@@ -48,28 +69,34 @@ api.post('/auth/sign-in', async (req, res) => {
 
 /* Signing in without a password.
 
-   Every answer here is the same whether or not the address has an account. An endpoint
-   that says "no such user" is a way to find out who has one, and this one is reachable by
-   anybody. What differs is only whether an email actually goes out. */
+   Every answer here is the same whether or not the address has an account, and the limits count
+   every address the same way, so neither the words nor the limits say who has one. What differs is
+   only whether an email actually goes out. */
 api.post('/auth/code/request', async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return fail(res, 400, 'That does not look like an email address.');
   }
-  const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
+  const ip = clientIp(req);
+  if (!await allow('code_request_ip', ip, { max: config.LIMIT_CODES_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many codes asked for from here. Wait an hour, or sign in with your password.');
+  }
   const asked = await requestLoginCode(email, { ip });
   if (!asked.ok && asked.reason === 'too_many') {
-    return fail(res, 429, 'Too many codes asked for. Wait an hour, or sign in with your password.');
+    return tooMany(res, 'Too many codes asked for. Wait an hour, or sign in with your password.');
   }
   if (asked.send) {
-    const link = `${config.PUBLIC_URL}/api/auth/link?token=${encodeURIComponent(asked.send.token)}`;
-    const mail = signInEmail({ code: asked.send.code, link, minutes: asked.send.minutes });
-    await send({ to: email, ...mail });
+    await send({ to: email, ...codeEmail({ purpose: 'sign_in', code: asked.send.code, link: linkFor(asked.send.token), minutes: asked.send.minutes }) });
   }
   return res.json({ ok: true, minutes: config.LOGIN_CODE_TTL_MIN, digits: config.LOGIN_CODE_DIGITS });
 });
 
+/* The code from a sign-in email or a sign-up email: either works here. */
 api.post('/auth/code/verify', async (req, res) => {
+  const ip = clientIp(req);
+  if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many tries from here. Wait an hour and ask for a new code.');
+  }
   const out = await verifyLoginCode(req.body?.email, req.body?.code);
   if (!out.ok) {
     if (out.reason === 'wrong') {
@@ -77,22 +104,36 @@ api.post('/auth/code/verify', async (req, res) => {
         ? `That code is not right. ${out.triesLeft} ${out.triesLeft === 1 ? 'try' : 'tries'} left.`
         : 'That code is not right, and it has now been used up. Ask for another.');
     }
-    if (out.reason === 'too_many_attempts') {
-      return fail(res, 429, 'That code has been used up. Ask for another.');
-    }
+    if (out.reason === 'too_many_attempts') return tooMany(res, 'That code has been used up. Ask for another.');
     return fail(res, 401, 'That code has expired. Ask for another.');
   }
   res.setHeader('Set-Cookie', cookieFor(out.token));
-  return res.json({ ok: true });
+  return res.json({ ok: true, fresh: !!out.fresh });
 });
 
-/* The link from the same email. A browser follows it, so this answers with a redirect
-   rather than JSON, and lands the person inside the app already signed in. */
-api.get('/auth/link', async (req, res) => {
-  const out = await verifyLoginLink(req.query?.token);
-  if (!out.ok) return res.redirect(302, '/signin?link=expired');
+/* The link from the same emails. Links in mail sent before this signed in when opened; they are
+   sent to the page that asks first. The token travels after a #, so it never reaches a server log. */
+api.get('/auth/link', (req, res) => res.redirect(302, `/signin/link#t=${encodeURIComponent(String(req.query?.token || ''))}`));
+
+/** Whom a link would sign in, so the page can say so before anything is spent. */
+api.post('/auth/link/peek', async (req, res) => {
+  const ip = clientIp(req);
+  if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many tries from here. Wait an hour.');
+  }
+  const out = await peekLoginLink(req.body?.token);
+  return res.json(out.ok ? { ok: true, email: out.email, purpose: out.purpose } : { ok: false });
+});
+
+api.post('/auth/link', async (req, res) => {
+  const ip = clientIp(req);
+  if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many tries from here. Wait an hour.');
+  }
+  const out = await verifyLoginLink(req.body?.token);
+  if (!out.ok) return fail(res, 401, 'That link has expired or has already been used. Ask for a new one.');
   res.setHeader('Set-Cookie', cookieFor(out.token));
-  return res.redirect(302, '/');
+  return res.json({ ok: true, fresh: !!out.fresh });
 });
 
 api.post('/auth/sign-out', async (req, res) => {
@@ -162,6 +203,9 @@ api.get('/me', async (req, res) => {
     mode: req.workspace.mode,
     canRoute: canRoute(),
     canBill: canBill(),
+    payments: paymentsState(),
+    // proved by a sign-in code, so the password typed at sign-up was cleared: they choose their own
+    needsPassword: !!req.user.pw_cleared,
     // somebody whose traffic has never arrived belongs on Connect, not an empty dashboard
     connected: await db.prepare(
       `SELECT 1 FROM calls WHERE workspace_id = ? AND source NOT IN ('replay', 'test')
@@ -732,16 +776,47 @@ api.get('/workloads/:id/calls', async (req, res) => {
         OR (response_json::jsonb #>> '{choices,0,message,content}') ILIKE ?)` : '');
   const args = q ? [w.id, like, like, like, like] : [w.id];
 
-  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM calls WHERE ${where}`).get(...args)).n;
-  const pages = Math.max(1, Math.ceil(total / CALLS_PER_PAGE));
-  const page = Math.min(pages, Math.max(1, Number.parseInt(req.query.page, 10) || 1));
-  const rows = await db.prepare(
-    `SELECT ${CALL_COLUMNS} FROM calls WHERE ${where}
-      ORDER BY created_at DESC LIMIT ? OFFSET ?`)
-    .all(...args, CALLS_PER_PAGE, (page - 1) * CALLS_PER_PAGE);
-
-  return res.json({ total, page, pages, per: CALLS_PER_PAGE, q, rows: rows.map(callRow) });
+  /* A search reads the text of every stored call, on the same database the live calls use. One
+     account running a dozen of them at once used to slow every other customer's calls to seconds.
+     So a search gets three seconds, a workspace runs two at a time, and the count stops at a
+     thousand: past that nobody pages through, they search for something narrower. */
+  if (q) {
+    const running = searching.get(req.workspace.id) || 0;
+    if (running >= 2) return fail(res, 429, 'Two searches are already running. Wait for them to finish.');
+    searching.set(req.workspace.id, running + 1);
+  }
+  try {
+    const out = await db.tx(async (tx) => {
+      if (q) await tx.exec(`SET LOCAL statement_timeout = ${SEARCH_TIMEOUT_MS}`);
+      const counted = Number((await tx.prepare(
+        `SELECT COUNT(*) AS n FROM (SELECT 1 FROM calls WHERE ${where} LIMIT ${COUNT_CAP + 1}) x`).get(...args)).n);
+      const total = Math.min(counted, COUNT_CAP);
+      const pages = Math.max(1, Math.ceil(total / CALLS_PER_PAGE));
+      const page = Math.min(pages, Math.max(1, Number.parseInt(req.query.page, 10) || 1));
+      const rows = await tx.prepare(
+        `SELECT ${CALL_COLUMNS} FROM calls WHERE ${where}
+          ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+        .all(...args, CALLS_PER_PAGE, (page - 1) * CALLS_PER_PAGE);
+      return { total, more: counted > COUNT_CAP, page, pages, per: CALLS_PER_PAGE, q, rows: rows.map(callRow) };
+    });
+    return res.json(out);
+  } catch (err) {
+    // 57014 is Postgres cancelling a statement that ran past its time
+    if (err?.code === '57014') {
+      return res.json({ total: 0, page: 1, pages: 1, per: CALLS_PER_PAGE, q, rows: [], timedOut: true,
+        message: 'That search took too long. Try fewer words, or more particular ones.' });
+    }
+    throw err;
+  } finally {
+    if (q) {
+      const n = (searching.get(req.workspace.id) || 1) - 1;
+      if (n > 0) searching.set(req.workspace.id, n); else searching.delete(req.workspace.id);
+    }
+  }
 });
+const searching = new Map();
+const SEARCH_TIMEOUT_MS = 3000;
+const COUNT_CAP = 1000;
 
 /* The whole of ONE field of one call, for reading a cell the table had to cut short.
  *
@@ -1014,14 +1089,28 @@ const RETENTION_CHOICES = [
 
 api.get('/settings', async (req, res) => {
   const acct = await account(req.workspace.id);
+  const free = await available(req.workspace.id);
+  const planActive = acct.plan_status === 'active';
   res.json({
     name: req.user.name, email: req.user.email,
     mode: req.workspace.mode,
     keys: (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at),
     balance: round8(acct.balance_usd),
+    // set aside for calls in flight right now, and what is free to spend
+    held: round8(free.held),
+    free: round8(free.free),
     autoTopUp: !!acct.auto_topup,
-    topUpAmount: config.TOPUP_AMOUNT_USD,
+    topUpAmount: topUpAmountOf(acct),
     topUpThreshold: config.TOPUP_THRESHOLD_USD,
+    topUpMaxPerDay: config.TOPUP_MAX_PER_DAY,
+    topUpMin: config.TOPUP_MIN_USD,
+    topUpMax: config.TOPUP_MAX_USD,
+    payments: paymentsState(),
+    plan: planActive ? {
+      allowanceTotal: config.EVAL_ALLOWANCE_USD,
+      allowanceLeft: await allowanceLeft(req.workspace.id),
+      periodStart: (await account(req.workspace.id)).allowance_period_start,
+    } : null,
     /* Both, not just the digits. The brand and last four are only there to be READ; the
        thing that can actually be charged is the payment method, and anything that clears
        that while leaving the digits behind leaves a card on screen that does not exist. */
@@ -1041,10 +1130,44 @@ api.get('/settings', async (req, res) => {
   });
 });
 
+/* The ledger further back than Settings shows at first, twenty lines at a time. */
+api.get('/settings/ledger', async (req, res) => {
+  const before = Number(req.query?.before);
+  const rows = await ledger(req.workspace.id, 20, { before: Number.isFinite(before) && before > 0 ? before : null });
+  return res.json({ rows, more: rows.length === 20 });
+});
+
+/* Keys have names, so somebody with several can tell which one a service uses before revoking it. */
+const keyName = (raw, fallback) => {
+  const n = String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  return n || fallback;
+};
+
 api.post('/settings/keys', async (req, res) => {
-  const k = await issueKey(req.workspace.id, String(req.body?.name || 'production').slice(0, 40));
-  await addActivity(req.workspace.id, { kind: 'connect', title: `New key ${k.prefix}`, detail: 'Shown once, right now.' });
-  res.json({ ok: true, key: k.secret, prefix: k.prefix });
+  const count = (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at).length;
+  const k = await issueKey(req.workspace.id, keyName(req.body?.name, `Key ${count + 1}`));
+  await addActivity(req.workspace.id, {
+    kind: 'connect', title: `New key "${k.name}" (${k.prefix}…)`,
+    detail: canRevealKeys() ? 'Its full value is on Connect and in Settings.' : 'Copy it now: this deployment cannot show it again.',
+  });
+  res.json({ ok: true, key: k.secret, prefix: k.prefix, id: k.id, name: k.name });
+});
+
+api.post('/settings/keys/:id/name', async (req, res) => {
+  const name = keyName(req.body?.name, null);
+  if (!name) return fail(res, 400, 'Give the key a name.');
+  const done = (await db.prepare('UPDATE api_keys SET name = ? WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL')
+    .run(name, req.params.id, req.workspace.id)).changes;
+  if (!done) return fail(res, 404, 'No such key.');
+  return res.json({ ok: true, name });
+});
+
+/* Revealing one key in full, when somebody asks to see it. Keys are shown masked until then. */
+api.get('/settings/keys/:id/reveal', async (req, res) => {
+  const k = await revealKeyById(req.workspace.id, req.params.id);
+  if (!k) return fail(res, 404, 'No such key.');
+  if (!k.secret) return fail(res, 410, 'This key was made before keys could be shown again. Replace it to get one you can copy.');
+  return res.json({ ok: true, key: k.secret });
 });
 
 api.delete('/settings/keys/:id', async (req, res) => {
@@ -1052,19 +1175,45 @@ api.delete('/settings/keys/:id', async (req, res) => {
   return res.json({ ok: true });
 });
 
+/* A name changes at once. An email address changes only once the new address answers a code, so
+   nobody can move an account to an address that is not theirs, and a typo cannot lock anybody out. */
 api.post('/settings/profile', async (req, res) => {
-  const name = String(req.body?.name ?? req.user.name).slice(0, 80);
+  const name = String(req.body?.name ?? req.user.name).replace(/\s+/g, ' ').trim().slice(0, 80);
+  await db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, req.user.id);
   const email = String(req.body?.email ?? req.user.email).trim().toLowerCase().slice(0, 160);
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return fail(res, 400, 'That does not look like an email address.');
+  if (email === req.user.email) return res.json({ ok: true, name, email });
+  const asked = await requestEmailChange(req.user, email, { ip: clientIp(req) });
+  if (!asked.ok) return fail(res, 400, asked.reason);
+  if (asked.send) await send({ to: asked.email, ...codeEmail({ purpose: 'change_email', code: asked.send.code, minutes: asked.send.minutes }) });
+  // the same answer whether or not the address is free, so this cannot be used to find out who has an account
+  return res.json({ ok: true, name, email: req.user.email, pendingEmail: asked.email, minutes: config.LOGIN_CODE_TTL_MIN });
+});
+
+api.post('/settings/email/verify', async (req, res) => {
+  const ip = clientIp(req);
+  if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
+    return fail(res, 429, 'Too many tries from here. Wait an hour.');
   }
-  if (email !== req.user.email) {
-    const taken = await db.prepare('SELECT id FROM users WHERE email = ? AND id != ?')
-      .get(email, req.user.id);
-    if (taken) return fail(res, 409, 'That email address is already in use.');
+  const out = await verifyEmailChange(req.user, req.body?.email, req.body?.code);
+  if (!out.ok) {
+    return fail(res, out.reason === 'wrong' ? 401 : 400, out.reason === 'wrong'
+      ? `That code is not right. ${out.triesLeft} ${out.triesLeft === 1 ? 'try' : 'tries'} left.`
+      : 'That code has expired or the address is no longer free. Ask for another.');
   }
-  await db.prepare('UPDATE users SET name = ?, email = ? WHERE id = ?').run(name, email, req.user.id);
-  return res.json({ ok: true, name, email });
+  await addActivity(req.workspace.id, { kind: 'connect', title: 'Your email address changed', detail: `It is ${out.email} now.` });
+  return res.json({ ok: true, email: out.email });
+});
+
+/* A new password. Every other session ends, so anybody who knew the old one is signed out everywhere. */
+api.post('/settings/password', async (req, res) => {
+  const out = await changePassword(req.user, req.body?.current, req.body?.next, { keepSession: req.sessionValue });
+  if (!out.ok) return fail(res, 400, out.reason);
+  return res.json({ ok: true });
+});
+
+api.post('/settings/sign-out-others', async (req, res) => {
+  const n = await endOtherSessions(req.user.id, req.sessionValue);
+  return res.json({ ok: true, ended: n });
 });
 
 /* How many models a measurement tries. More is a better picture of where quality falls off,
@@ -1125,14 +1274,19 @@ api.post('/settings/retention', async (req, res) => {
  * off-session charge the customer never agreed to is a dispute waiting to happen. */
 api.post('/billing/checkout', async (req, res) => {
   const s = await stripe();
-  if (!s) {
-    return res.status(503).json({ error: 'Payments are not set up on this deployment yet.' });
+  if (!s || !canBill()) {
+    return res.status(503).json({ error: paymentsState() === 'test_refused'
+      ? 'Payments are not switched on yet on this deployment, so credit cannot be added. Sending us copies needs no credit.'
+      : 'Payments are not set up on this deployment yet.' });
   }
   const asked = Number(req.body?.amountUsd);
   const amount = Math.min(config.TOPUP_MAX_USD,
     Math.max(config.TOPUP_MIN_USD, Number.isFinite(asked) ? asked : config.TOPUP_AMOUNT_USD));
+  // automatic top up only when the customer asked for it here, with the words that ask for it
+  const autoTopUp = req.body?.autoTopUp === true;
 
   const acct = await account(req.workspace.id);
+  const topUpAmount = topUpAmountOf(acct);
   let customer = acct.stripe_customer;
   if (!customer) {
     const made = await s.customers.create({
@@ -1162,33 +1316,51 @@ api.post('/billing/checkout', async (req, res) => {
       },
     }],
     payment_intent_data: {
-      setup_future_usage: 'off_session',
+      ...(autoTopUp ? { setup_future_usage: 'off_session' } : {}),
       metadata: { workspace_id: req.workspace.id },
     },
-    custom_text: {
-      submit: {
-        message: `We will save this card and charge it $${config.TOPUP_AMOUNT_USD.toFixed(2)} `
-          + `automatically whenever your balance falls below $${config.TOPUP_THRESHOLD_USD.toFixed(2)}, `
-          + 'so your calls do not stop. You can turn that off in Settings at any time.',
+    ...(autoTopUp ? {
+      custom_text: {
+        submit: {
+          message: `We will save this card and charge it $${topUpAmount.toFixed(2)} `
+            + `automatically whenever your balance falls below $${config.TOPUP_THRESHOLD_USD.toFixed(2)}, `
+            + `at most ${config.TOPUP_MAX_PER_DAY} times a day, so your calls do not stop. You can turn that off in Settings at any time.`,
+        },
       },
-    },
+    } : {}),
     success_url: `${config.PUBLIC_URL}/settings?credit=${dollars}`,
     cancel_url: `${config.PUBLIC_URL}/settings?credit=cancelled`,
-    metadata: { workspace_id: req.workspace.id },
+    metadata: { workspace_id: req.workspace.id, auto_topup: autoTopUp ? '1' : '0' },
   }, {
     /* A double click, or a retried request, should land on the same payment page rather than
        opening a second one. Scoped to the minute so choosing the same amount again later is
        still a new top up. */
-    idempotencyKey: `checkout:${req.workspace.id}:${dollars}:${Math.floor(Date.now() / 60000)}`,
+    idempotencyKey: `checkout:${req.workspace.id}:${dollars}:${autoTopUp ? 'auto' : 'once'}:${Math.floor(Date.now() / 60000)}`,
   });
   res.json({ url: session.url });
 });
 
+/* Automatic top up: on only with a card saved, off at any time, and for an amount the customer picks. */
 api.post('/settings/auto-topup', async (req, res) => {
-  await db.prepare(`UPDATE billing_accounts SET auto_topup = ?, topup_failed_note = NULL, updated_at = ?
-               WHERE workspace_id = ?`)
-    .run(req.body?.enabled ? 1 : 0, now(), req.workspace.id);
-  res.json({ ok: true });
+  const acct = await account(req.workspace.id);
+  const b = req.body || {};
+  if (b.amountUsd !== undefined) {
+    const a = Number(b.amountUsd);
+    if (!Number.isFinite(a) || a < config.TOPUP_MIN_USD || a > config.TOPUP_MAX_USD) {
+      return fail(res, 400, `Pick an amount between $${config.TOPUP_MIN_USD} and $${config.TOPUP_MAX_USD}.`);
+    }
+    await db.prepare('UPDATE billing_accounts SET topup_amount_usd = ?, updated_at = ? WHERE workspace_id = ?')
+      .run(Math.round(a * 100) / 100, now(), req.workspace.id);
+  }
+  if (b.enabled !== undefined) {
+    if (b.enabled && !acct.payment_method) {
+      return fail(res, 400, 'Add credit with a card first, and tick "Top up automatically" there, so there is a card to charge.');
+    }
+    await db.prepare(`UPDATE billing_accounts SET auto_topup = ?, topup_failed_note = NULL, updated_at = ?
+                 WHERE workspace_id = ?`).run(b.enabled ? 1 : 0, now(), req.workspace.id);
+  }
+  const after = await account(req.workspace.id);
+  res.json({ ok: true, enabled: !!after.auto_topup, amountUsd: topUpAmountOf(after) });
 });
 
 /* Connect ------------------------------------------------------------------------ */
@@ -1276,18 +1448,23 @@ async function lastTestCall(workspaceId) {
  * it can only be replaced. That is the whole reason this exists. The new one is returned in
  * full, once, right here, and everything still using the old one stops working, which the
  * screen says before it is pressed rather than after. */
+/* Replacing ONE key: the one named, or the one Connect shows. It used to revoke every key in the
+   workspace, including ones made separately in Settings for other services, while the screen
+   warned only about "your current key". Other keys keep working. */
 api.post('/connect/regenerate-key', async (req, res) => {
   const live = (await listKeys(req.workspace.id)).filter((k) => !k.revoked_at);
-  const fresh = await issueKey(req.workspace.id, 'production');
-  for (const old of live) await revokeKey(req.workspace.id, old.id);
+  const target = req.body?.keyId ? live.find((k) => k.id === req.body.keyId) : live[live.length - 1];
+  if (req.body?.keyId && !target) return fail(res, 404, 'No such key.');
+  const fresh = await issueKey(req.workspace.id, target?.name || 'Key 1');
+  if (target) await revokeKey(req.workspace.id, target.id);
   await addActivity(req.workspace.id, {
     kind: 'connect',
-    title: `New key ${fresh.prefix}`,
-    detail: live.length
-      ? `${live.length} older ${live.length === 1 ? 'key' : 'keys'} stopped working.`
+    title: `New key "${fresh.name}" (${fresh.prefix}…)`,
+    detail: target
+      ? `It replaces ${target.prefix}…, which stopped working. ${live.length - 1 > 0 ? `Your ${live.length - 1} other ${live.length - 1 === 1 ? 'key keeps' : 'keys keep'} working.` : ''}`.trim()
       : 'Nothing was using a key before this one.',
   });
-  return res.json({ ok: true, key: fresh.secret, prefix: fresh.prefix, replaced: live.length });
+  return res.json({ ok: true, key: fresh.secret, prefix: fresh.prefix, id: fresh.id, replaced: target ? 1 : 0, replacedId: target?.id ?? null });
 });
 
 /* Sends one real call down the routed path and says what came back. It is the same path a

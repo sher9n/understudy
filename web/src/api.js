@@ -53,6 +53,20 @@ export const api = {
   outcomes: (id) => send('GET', `/workloads/${id}/outcomes`),
   saveOutcomeDef: (id, def) => send('POST', `/workloads/${id}/outcomes/def`, def),
   tasks: (id) => send('GET', `/workloads/${id}/tasks`),
+  // accounts that prove whose they are: the emailed link, a new password, a new address, sessions
+  peekLink: (token) => send('POST', '/auth/link/peek', { token }),
+  redeemLink: (token) => send('POST', '/auth/link', { token }),
+  changePassword: (current, next) => send('POST', '/settings/password', { current, next }),
+  verifyEmailChange: (email, code) => send('POST', '/settings/email/verify', { email, code }),
+  signOutOthers: () => send('POST', '/settings/sign-out-others'),
+  // keys with names, shown in full only when asked for, replaced one at a time
+  renameKey: (id, name) => send('POST', `/settings/keys/${id}/name`, { name }),
+  revealKeyById: (id) => send('GET', `/settings/keys/${id}/reveal`),
+  replaceKey: (keyId) => send('POST', '/connect/regenerate-key', keyId ? { keyId } : {}),
+  // money: an amount for automatic top ups, and credit that asks for them only when chosen
+  setTopUp: (b) => send('POST', '/settings/auto-topup', b),
+  checkout: (amountUsd, autoTopUp) => send('POST', '/billing/checkout', { amountUsd, autoTopUp }),
+  ledgerMore: (before) => send('GET', `/settings/ledger?before=${before}`),
 };
 
 /* Money, at a precision where the number can actually be seen.

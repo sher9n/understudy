@@ -423,7 +423,8 @@ test('a switch changes something only once some calls come through us', () => {
   assert.equal(carriesOf({ mode: 'route', routed: 40, copies: 0 }), true);
   assert.equal(carriesOf({ mode: 'route', routed: 0, copies: 100 }), false, 'copies only: waiting');
   assert.equal(carriesOf({ mode: 'route', routed: 10, copies: 90 }), true, 'some come through us, and those are switched');
-  assert.equal(carriesOf({ mode: 'observe', routed: 100, copies: 0 }), false, 'a workspace that only observes');
+  // the monthly plan is a measuring allowance, never a mode that stops calls being routed
+  assert.equal(carriesOf({ mode: 'observe', routed: 100, copies: 0 }), true, 'calls routed are switched, plan or not');
   assert.equal(carriesOf({ mode: 'route', routed: 0, copies: 0 }), false, 'nothing yet');
 });
 

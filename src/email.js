@@ -64,39 +64,99 @@ export async function send({ to, subject, text, html, replyTo = null }) {
   }
 }
 
-/* The sign-in message carries both ways to get in, because they suit different moments: the
-   link is one tap on the phone the mail arrived on, and the code is for when the mail is on
-   the phone but the browser is on the laptop. They are the same token underneath, so using
-   either spends both. */
-export function signInEmail({ code, link, minutes }) {
-  const subject = `${code} is your Understudy sign-in code`;
-  const text = [
-    `Your sign-in code is ${code}`,
-    '',
-    `Or open this link to sign in directly:`,
-    link,
-    '',
-    `Either one works, and only once. Both stop working in ${minutes} minutes.`,
-    '',
-    'If you did not ask to sign in, you can ignore this. Nobody can get in without this email.',
-  ].join('\n');
+/* The emails that carry a code. Each carries two ways in, because they suit different moments: the
+   link is one tap on the phone the mail arrived on, and the code is for when the mail is on the
+   phone but the browser is on the laptop. The link opens a page with a button, and only pressing
+   it signs anybody in: mail scanners open links before people do. */
+const WORDS = {
+  sign_in: {
+    subject: (code) => `${code} is your Understudy sign-in code`,
+    lead: 'Your sign-in code is',
+    button: 'Or sign in with one tap',
+    ignore: 'If you did not ask to sign in, you can ignore this. Nobody can get in without this email.',
+  },
+  verify: {
+    subject: (code) => `${code} confirms your Understudy account`,
+    lead: 'To finish making your account, enter this code',
+    button: 'Or confirm with one tap',
+    ignore: 'If you did not sign up for Understudy, you can ignore this. Nothing happens without this code.',
+  },
+  change_email: {
+    subject: (code) => `${code} confirms your new email address`,
+    lead: 'To make this your Understudy email address, enter this code',
+    button: null,
+    ignore: 'If you did not ask for this, you can ignore it. Your account stays as it is.',
+  },
+};
 
-  const html = `<!doctype html>
+const box = (inner) => `<!doctype html>
 <html><body style="margin:0;background:#f7f7f8;padding:28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
   <div style="max-width:440px;margin:0 auto;background:#ffffff;border:1px solid #e7e7e9;border-radius:14px;padding:28px;">
     <div style="font-weight:700;font-size:16px;letter-spacing:-0.03em;color:#0d0d12;">Understudy</div>
-    <p style="font-size:14.5px;line-height:1.6;color:#55555f;margin:18px 0 6px;">Your sign-in code is</p>
-    <div style="font-family:ui-monospace,SFMono-Regular,monospace;font-size:34px;font-weight:700;
-                letter-spacing:0.18em;color:#0d0d12;margin:0 0 20px;">${code}</div>
-    <a href="${link}" style="display:inline-block;background:#0f62fe;color:#ffffff;text-decoration:none;
-       font-size:14px;font-weight:600;padding:11px 18px;border-radius:9px;">Or sign in with one tap</a>
-    <p style="font-size:12.5px;line-height:1.55;color:#6b6b7b;margin:20px 0 0;">
-      Either one works, and only once. Both stop working in ${minutes} minutes.</p>
-    <p style="font-size:12.5px;line-height:1.55;color:#6b6b7b;margin:10px 0 0;">
-      If you did not ask to sign in, you can ignore this. Nobody can get in without this email.</p>
+    ${inner}
   </div>
 </body></html>`;
 
+export function codeEmail({ purpose = 'sign_in', code, link = null, minutes }) {
+  const w = WORDS[purpose] || WORDS.sign_in;
+  const subject = w.subject(code);
+  const text = [
+    `${w.lead}: ${code}`,
+    ...(link && w.button ? ['', 'Or open this link and press the button on it:', link] : []),
+    '',
+    `${link && w.button ? 'Either one works, and only once. Both stop' : 'It works once, and stops'} working in ${minutes} minutes.`,
+    '',
+    w.ignore,
+  ].join('\n');
+  const html = box(`
+    <p style="font-size:14.5px;line-height:1.6;color:#55555f;margin:18px 0 6px;">${w.lead}</p>
+    <div style="font-family:ui-monospace,SFMono-Regular,monospace;font-size:34px;font-weight:700;
+                letter-spacing:0.18em;color:#0d0d12;margin:0 0 20px;">${code}</div>
+    ${link && w.button ? `<a href="${link}" style="display:inline-block;background:#0f62fe;color:#ffffff;text-decoration:none;
+       font-size:14px;font-weight:600;padding:11px 18px;border-radius:9px;">${w.button}</a>` : ''}
+    <p style="font-size:12.5px;line-height:1.55;color:#6b6b7b;margin:20px 0 0;">
+      ${link && w.button ? 'Either one works, and only once. Both stop' : 'It works once, and stops'} working in ${minutes} minutes.</p>
+    <p style="font-size:12.5px;line-height:1.55;color:#6b6b7b;margin:10px 0 0;">${w.ignore}</p>`);
+  return { subject, text, html };
+}
+
+/** Kept for anything that still asks for the sign-in email by its old name. */
+export const signInEmail = ({ code, link, minutes }) => codeEmail({ purpose: 'sign_in', code, link, minutes });
+
+/* Somebody tried to sign up with an address that already has an account. Its owner is told, and
+   nobody learns from the form whether the address is taken. */
+export function accountExistsEmail({ signInUrl }) {
+  const subject = 'Somebody tried to make an Understudy account with your email';
+  const text = [
+    'Somebody tried to sign up for Understudy with this email address, which already has an account.',
+    '',
+    'If it was you, sign in instead:',
+    signInUrl,
+    '',
+    'If it was not you, you can ignore this. Nothing about your account changed.',
+  ].join('\n');
+  const html = box(`
+    <p style="font-size:14.5px;line-height:1.6;color:#55555f;margin:18px 0 14px;">
+      Somebody tried to sign up for Understudy with this email address, which already has an account.</p>
+    <a href="${signInUrl}" style="display:inline-block;background:#0f62fe;color:#ffffff;text-decoration:none;
+       font-size:14px;font-weight:600;padding:11px 18px;border-radius:9px;">If it was you, sign in</a>
+    <p style="font-size:12.5px;line-height:1.55;color:#6b6b7b;margin:20px 0 0;">
+      If it was not you, you can ignore this. Nothing about your account changed.</p>`);
+  return { subject, text, html };
+}
+
+/* A message about the customer's own workspace: a switch, a switch back, something waiting for
+   their approval, money running low. Plain words, the numbers that matter, and a link to the page. */
+export function noticeEmail({ title, lines = [], link = null, linkText = 'Open it in Understudy', footer = null }) {
+  const subject = title;
+  const text = [...lines, ...(link ? ['', `${linkText}: ${link}`] : []), ...(footer ? ['', footer] : [])].join('\n');
+  const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const html = box(`
+    <p style="font-size:15px;line-height:1.5;color:#0d0d12;font-weight:600;margin:18px 0 8px;">${esc(title)}</p>
+    ${lines.map((l) => `<p style="font-size:14px;line-height:1.6;color:#55555f;margin:0 0 8px;">${esc(l)}</p>`).join('')}
+    ${link ? `<a href="${link}" style="display:inline-block;margin-top:10px;background:#0f62fe;color:#ffffff;text-decoration:none;
+       font-size:14px;font-weight:600;padding:11px 18px;border-radius:9px;">${esc(linkText)}</a>` : ''}
+    ${footer ? `<p style="font-size:12px;line-height:1.55;color:#6b6b7b;margin:20px 0 0;">${esc(footer)}</p>` : ''}`);
   return { subject, text, html };
 }
 

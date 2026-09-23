@@ -1,7 +1,9 @@
 import { db, id, now, round8, usd } from './db/index.js';
-import config, { canBill } from './config.js';
+import config, { canBill, stripeMode } from './config.js';
 import { addActivity } from './traffic.js';
 import { enqueue } from './jobs.js';
+
+const DAY = 86400000;
 
 /* `x` is whatever should run the query: the pool by default, or an open transaction when
    the caller already has one. Without it a helper called inside a transaction would quietly
@@ -9,8 +11,8 @@ import { enqueue } from './jobs.js';
 export async function account(workspaceId, x = db) {
   let row = await x.prepare('SELECT * FROM billing_accounts WHERE workspace_id = ?').get(workspaceId);
   if (!row) {
-    await x.prepare('INSERT INTO billing_accounts (workspace_id, balance_usd, updated_at) VALUES (?, 0, ?)')
-      .run(workspaceId, now());
+    await x.prepare(`INSERT INTO billing_accounts (workspace_id, balance_usd, auto_topup, updated_at)
+                     VALUES (?, 0, 0, ?) ON CONFLICT (workspace_id) DO NOTHING`).run(workspaceId, now());
     row = await x.prepare('SELECT * FROM billing_accounts WHERE workspace_id = ?').get(workspaceId);
   }
   return row;
@@ -54,8 +56,9 @@ export async function move(workspaceId, { kind, amountUsd, note = null, ref = nu
 
 /** The first routed call has to work before any card exists, so a small credit is granted once. */
 export async function grantStarterCredit(workspaceId) {
+  if (config.STARTER_CREDIT_USD <= 0) return false;
   const already = await db.prepare(`SELECT 1 FROM ledger WHERE workspace_id = ? AND kind = 'starter'`).get(workspaceId);
-  if (already || config.STARTER_CREDIT_USD <= 0) return false;
+  if (already) return false;
   await move(workspaceId, {
     kind: 'starter', amountUsd: config.STARTER_CREDIT_USD,
     note: `${usd(config.STARTER_CREDIT_USD).toFixed(2)} of credit so your first calls work straight away`,
@@ -64,77 +67,187 @@ export async function grantStarterCredit(workspaceId) {
   return true;
 }
 
-/** Can this workspace make a routed call right now? */
+/* Money set aside for work in flight ------------------------------------------------
+
+   A call is paid for after it is answered, because only then is its cost known. Checked and paid
+   as two separate steps, every call arriving at the same moment saw the same balance and all of
+   them went through: a wallet holding five cents answered sixty calls at once and ended twenty
+   cents below zero, and with expensive models there was no limit at all.
+
+   So a call first sets aside what it could cost, in one step that also checks there is room, and
+   gives back what it did not use once it is answered. Calls arriving together each take their own
+   share of what is free, and the ones that do not fit are refused before anything is sent.
+
+   When nothing else is in flight and less is free than a call could cost, the call may take what
+   is left: somebody spending their balance down one call at a time is never stopped a call early,
+   and at most one call's overrun can land below zero, never sixty. A hold its process never came
+   back for lapses on its own, so a crash cannot freeze anybody's balance. */
+
+const HOLD_TTL_MS = () => Math.max(5, config.HOLD_TTL_MIN) * 60000;
+
+/** What can be spent right now: the balance, less what calls in flight have set aside. */
+export async function available(workspaceId, x = db) {
+  const acct = await account(workspaceId, x);
+  const held = await x.prepare(
+    `SELECT COALESCE(SUM(amount_usd), 0) AS s, COUNT(*) AS n FROM balance_holds
+      WHERE workspace_id = ? AND expires_at > ?`).get(workspaceId, now());
+  return { balance: acct.balance_usd, held: Number(held.s), inFlight: Number(held.n),
+    free: round8(acct.balance_usd - Number(held.s)) };
+}
+
+/** Set aside up to `amountUsd` for one piece of work. Answers { ok, holdId, amount } or { ok: false, free }. */
+export async function hold(workspaceId, amountUsd, purpose) {
+  const want = round8(Math.max(0, Number(amountUsd) || 0));
+  return await db.tx(async (tx) => {
+    await account(workspaceId, tx);
+    // the row lock is what makes two holds arriving together take turns
+    await tx.prepare('SELECT 1 FROM billing_accounts WHERE workspace_id = ? FOR UPDATE').get(workspaceId);
+    const a = await available(workspaceId, tx);
+    let take = null;
+    if (a.free >= want && a.free > 0) take = want;
+    else if (a.inFlight === 0 && a.free > 0) take = a.free;
+    if (take === null) return { ok: false, free: a.free, inFlight: a.inFlight };
+    const holdId = id('hold');
+    await tx.prepare(`INSERT INTO balance_holds (id, workspace_id, amount_usd, purpose, created_at, expires_at)
+                      VALUES (?, ?, ?, ?, ?, ?)`).run(holdId, workspaceId, round8(take), purpose, now(), now() + HOLD_TTL_MS());
+    return { ok: true, holdId, amount: round8(take) };
+  });
+}
+
+/** Give a hold back without charging anything, when the work did not happen. */
+export async function release(holdId) {
+  if (!holdId) return;
+  await db.prepare('DELETE FROM balance_holds WHERE id = ?').run(holdId);
+}
+
+/** Holds long past their time, from processes that never came back for them. */
+export async function sweepHolds() {
+  return (await db.prepare('DELETE FROM balance_holds WHERE expires_at < ?').run(now() - DAY)).changes;
+}
+
+/* What a call could cost before it is sent: its prompt as sent, and the longest answer it allows. A
+   prompt is counted at three characters a token, which overcounts ordinary text a little, and an
+   answer with no cap is counted at a generous default. Only ever used to set money aside. */
+export function worstCaseTokens(body) {
+  const text = JSON.stringify(body?.messages ?? []) + JSON.stringify(body?.tools ?? []);
+  const pin = Math.ceil(text.length / 3);
+  const cap = Number(body?.max_completion_tokens ?? body?.max_tokens);
+  const pout = Number.isFinite(cap) && cap > 0 ? Math.min(cap, config.HOLD_MAX_OUTPUT_TOKENS)
+    : config.HOLD_DEFAULT_OUTPUT_TOKENS;
+  return { pin, pout };
+}
+
+/** Can this workspace make a routed call right now? A quick check before the hold is taken. */
 export async function gateRouting(workspaceId) {
-  const ws = await db.prepare('SELECT mode FROM workspaces WHERE id = ?').get(workspaceId);
-  if (ws?.mode === 'observe') {
-    return { ok: false, code: 'observe_only', message: 'This workspace sends copies rather than routing.' };
-  }
-  const acct = await account(workspaceId);
-  if (acct.balance_usd > 0) return { ok: true, balance: acct.balance_usd };
+  const a = await available(workspaceId);
+  if (a.free > 0) return { ok: true, balance: a.balance };
   return {
     ok: false, code: 'no_balance',
-    message: 'Your balance is empty. Add credit in Settings and calls resume immediately.',
+    message: a.balance > 0
+      ? 'Your balance is set aside for calls still in flight. Add credit, or try again in a moment.'
+      : 'Your balance is empty. Add credit in Settings and calls resume immediately.',
   };
 }
 
-/** Can we spend the customer's money on measuring right now? */
+/* The monthly plan's measuring allowance ---------------------------------------------
+
+   The plan includes a sum of measurement each month. It used to be counted but never reset, so
+   after the first $10 over an account's whole life measuring stopped for good; and it could not be
+   used at all, because every measurement also needed a balance. Now it runs in 30 day periods from
+   the day the plan started, is spent before the balance, and only what it does not cover comes out
+   of the balance. */
+
+const PERIOD = 30 * DAY;
+
+/** How much of this period's allowance is left, rolling the period forward when one has passed. */
+export async function allowanceLeft(workspaceId, x = db) {
+  const acct = await account(workspaceId, x);
+  if (acct.plan_status !== 'active') return 0;
+  let start = acct.allowance_period_start;
+  if (!start) {
+    start = now();
+    await x.prepare('UPDATE billing_accounts SET allowance_period_start = ?, eval_used_usd = 0 WHERE workspace_id = ?')
+      .run(start, workspaceId);
+    return round8(config.EVAL_ALLOWANCE_USD);
+  }
+  if (now() - start >= PERIOD) {
+    const periods = Math.floor((now() - start) / PERIOD);
+    await x.prepare(`UPDATE billing_accounts SET allowance_period_start = ?, eval_used_usd = 0
+                      WHERE workspace_id = ? AND allowance_period_start = ?`)
+      .run(start + periods * PERIOD, workspaceId, start);
+    return round8(config.EVAL_ALLOWANCE_USD);
+  }
+  return round8(Math.max(0, config.EVAL_ALLOWANCE_USD - Number(acct.eval_used_usd || 0)));
+}
+
+/** Can we spend the customer's money on measuring right now? Allowance first, then the balance. */
 export async function gateEval(workspaceId, { estimatedUsd = 0 } = {}) {
-  const ws = await db.prepare('SELECT mode FROM workspaces WHERE id = ?').get(workspaceId);
-  const acct = await account(workspaceId);
-  if (ws?.mode === 'observe') {
-    const left = round8(config.EVAL_ALLOWANCE_USD - acct.eval_used_usd);
-    if (left < estimatedUsd) {
-      return {
-        ok: false, code: 'allowance_spent',
-        message: `This month's ${usd(config.EVAL_ALLOWANCE_USD).toFixed(2)} of measurement is used up. It resets next month.`,
-      };
-    }
-    return { ok: true };
-  }
-  if (acct.balance_usd < estimatedUsd) {
-    return {
-      ok: false, code: 'no_balance',
-      message: 'Measuring needs a little balance. Add credit in Settings and it starts again on its own.',
-    };
-  }
-  return { ok: true };
+  const left = await allowanceLeft(workspaceId);
+  const a = await available(workspaceId);
+  if (left + Math.max(0, a.free) >= estimatedUsd) return { ok: true, allowance: left, free: a.free };
+  return {
+    ok: false, code: 'no_balance',
+    message: left > 0
+      ? `This would cost about $${usd(estimatedUsd).toFixed(2)}: $${left.toFixed(2)} of this month's allowance is left, `
+        + 'and your balance covers the rest only with a little more credit. Add credit in Settings and it starts again on its own.'
+      : 'Measuring needs a little balance. Add credit in Settings and it starts again on its own.',
+  };
 }
 
 /** What a routed call costs the customer: what the provider charged, plus the fee. */
 export const withFee = (costUsd) => round8(costUsd * (1 + config.ROUTING_FEE_PCT / 100));
 
-export async function chargeCall(workspaceId, costUsd, note) {
+/** Charge a routed call, giving back what its hold set aside in the same step. */
+export async function chargeCall(workspaceId, costUsd, note, { holdId = null } = {}) {
   const amount = withFee(costUsd);
-  await move(workspaceId, { kind: 'call', amountUsd: -amount, note });
+  await db.tx(async (tx) => {
+    if (holdId) await tx.prepare('DELETE FROM balance_holds WHERE id = ?').run(holdId);
+    if (amount > 0) await move(workspaceId, { kind: 'call', amountUsd: -amount, note }, tx);
+  });
   await maybeTopUp(workspaceId);
   return amount;
 }
 
-/** Measurement is charged the same way the customer's own traffic is. */
+/** Measurement is charged the same way the customer's own traffic is: from the allowance first. */
 export async function chargeEval(workspaceId, costUsd, note) {
   const amount = withFee(costUsd);
+  if (!(amount > 0)) return 0;
   await db.tx(async (tx) => {
-    await move(workspaceId, { kind: 'eval', amountUsd: -amount, note }, tx);
-    await tx.prepare('UPDATE billing_accounts SET eval_used_usd = eval_used_usd + ? WHERE workspace_id = ?')
-      .run(amount, workspaceId);
+    await tx.prepare('SELECT 1 FROM billing_accounts WHERE workspace_id = ? FOR UPDATE').get(workspaceId);
+    const left = await allowanceLeft(workspaceId, tx);
+    const fromAllowance = round8(Math.min(amount, left));
+    const fromBalance = round8(amount - fromAllowance);
+    if (fromAllowance > 0) {
+      await tx.prepare('UPDATE billing_accounts SET eval_used_usd = eval_used_usd + ? WHERE workspace_id = ?')
+        .run(fromAllowance, workspaceId);
+    }
+    if (fromBalance > 0) {
+      await move(workspaceId, {
+        kind: 'eval', amountUsd: -fromBalance,
+        note: fromAllowance > 0 ? `${note} ($${fromAllowance.toFixed(4)} from this month's allowance)` : note,
+      }, tx);
+    }
   });
   return amount;
 }
 
-export async function ledger(workspaceId, limit = 20) {
+export async function ledger(workspaceId, limit = 20, { before = null } = {}) {
   return await db.prepare(
-    `SELECT kind, amount_usd, balance_after, note, created_at FROM ledger
-      WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?`).all(workspaceId, limit);
+    `SELECT id, kind, amount_usd, balance_after, note, created_at FROM ledger
+      WHERE workspace_id = ? ${before ? 'AND created_at < ?' : ''}
+      ORDER BY created_at DESC LIMIT ?`).all(...(before ? [workspaceId, before, limit] : [workspaceId, limit]));
 }
 
 /* Auto top up ------------------------------------------------------------------
-   A saved card is charged off session when the balance runs low. A failure turns
-   the whole thing off and says so, rather than retrying into a wall. */
+   A saved card is charged off session when the balance runs low, only once the customer has
+   switched it on. A failure turns the whole thing off and says so, rather than retrying into a wall. */
 
 let stripeClient = null;
+/* A client whenever there is a key at all, test or live: the webhook needs it to check a signature
+   even when the payments it describes are not allowed to become balance. Whether a payment may be
+   TAKEN is canBill's question, asked where money moves. */
 export async function stripe() {
-  if (!canBill()) return null;
+  if (stripeMode() === 'off') return null;
   if (!stripeClient) {
     const { default: Stripe } = await import('stripe');
     /* Pinned on purpose. Without this the SDK uses whatever was current when the PACKAGE was
@@ -144,6 +257,12 @@ export async function stripe() {
   }
   return stripeClient;
 }
+
+/** How much one automatic top up adds for this workspace. */
+export const topUpAmountOf = (acct) => {
+  const own = Number(acct?.topup_amount_usd);
+  return Number.isFinite(own) && own > 0 ? own : config.TOPUP_AMOUNT_USD;
+};
 
 export async function maybeTopUp(workspaceId) {
   const acct = await account(workspaceId);
@@ -157,10 +276,36 @@ export async function maybeTopUp(workspaceId) {
 export async function runTopUp(workspaceId) {
   const s = await stripe();
   const acct = await account(workspaceId);
-  if (!s || !acct.payment_method || !acct.stripe_customer) return { ok: false, code: 'no_card' };
+  if (!s || !canBill() || !acct.payment_method || !acct.stripe_customer || !acct.auto_topup) return { ok: false, code: 'no_card' };
+  if (acct.balance_usd >= config.TOPUP_THRESHOLD_USD) return { ok: true, skipped: 'balance is fine' };
+  /* A ceiling on automatic top ups a day, so a workload whose calls outrun any amount cannot keep
+     charging a card in a loop. It says so, once, and the customer decides. */
+  const today = Number((await db.prepare(
+    `SELECT COUNT(*) AS n FROM ledger WHERE workspace_id = ? AND kind = 'credit' AND note = 'Automatic top up'
+        AND created_at > ?`).get(workspaceId, now() - DAY))?.n ?? 0);
+  if (today >= config.TOPUP_MAX_PER_DAY) {
+    const said = await db.prepare(`SELECT 1 FROM activity WHERE workspace_id = ? AND title = 'Automatic top ups paused for today'
+                                     AND created_at > ?`).get(workspaceId, now() - DAY);
+    if (!said) {
+      await addActivity(workspaceId, {
+        kind: 'bill', title: 'Automatic top ups paused for today',
+        detail: `${config.TOPUP_MAX_PER_DAY} automatic top ups ran in the last day, which is the most we make without you. `
+          + 'Add credit in Settings, or raise the top up amount there.',
+      });
+    }
+    return { ok: false, code: 'daily_cap' };
+  }
+  const amount = topUpAmountOf(acct);
+  /* The key is the last credit that landed. A retry of this job, or a second low balance before
+     the first top up has been credited, replays the same charge instead of making a new one; once it
+     has been credited the next one is new. The old key was the clock hour, which made a second top
+     up within the hour replay the first one and add nothing, so a busy workload simply ran dry. */
+  const lastCredit = (await db.prepare(
+    `SELECT id FROM ledger WHERE workspace_id = ? AND kind = 'credit' ORDER BY created_at DESC LIMIT 1`)
+    .get(workspaceId))?.id ?? 'none';
   try {
     const pi = await s.paymentIntents.create({
-      amount: Math.round(config.TOPUP_AMOUNT_USD * 100),
+      amount: Math.round(amount * 100),
       currency: 'usd',
       customer: acct.stripe_customer,
       payment_method: acct.payment_method,
@@ -169,13 +314,7 @@ export async function runTopUp(workspaceId) {
       /* The webhook credits on this. Without it an automatic top up is charged to the card
          and never appears as balance, which is the worst possible half of the two. */
       metadata: { topup: '1', workspace_id: workspaceId },
-    }, {
-      /* The top up runs from the job queue, which retries. Without a key a retry is a SECOND
-         charge on somebody's card. The key is the workspace and the hour it ran in, so a
-         retry inside that hour replays the first charge instead of making a new one, while a
-         genuine second top up later still goes through. */
-      idempotencyKey: `topup:${workspaceId}:${Math.floor(Date.now() / 3600000)}`,
-    });
+    }, { idempotencyKey: `topup:${workspaceId}:${lastCredit}:${Math.round(amount * 100)}` });
     // the credit itself is written by the webhook, keyed on the intent, so it lands once
     return { ok: true, intent: pi.id };
   } catch (err) {

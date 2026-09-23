@@ -65,6 +65,15 @@ export async function revealKey(workspaceId) {
   return { prefix: row.prefix, secret: open(row.secret_enc) };
 }
 
+/** One key of this workspace's, in full when it can be opened; null when there is no such live key. */
+export async function revealKeyById(workspaceId, keyId) {
+  const row = await db.prepare(
+    `SELECT id, name, prefix, secret_enc FROM api_keys WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL`)
+    .get(keyId, workspaceId);
+  if (!row) return null;
+  return { id: row.id, name: row.name, prefix: row.prefix, secret: open(row.secret_enc) };
+}
+
 /** Resolve a bearer token to its workspace, or null. Stamps last_used_at. */
 export async function verifyKey(secret) {
   if (typeof secret !== 'string' || !secret.startsWith('us_live_')) return null;

@@ -182,9 +182,14 @@ export function profileFromRows(workload, rows) {
     task,
     /* What Jev's readings of this task are kept under. The workload's own identity, not its
        newest requests: those change with every call, and a key that changes with every call is
-       a cache that is never read. */
+       a cache that is never read. It carries the workspace and the instruction too: keyed on the
+       structure alone, a triage prompt and a limerick prompt with the same plain shape shared one
+       reading, and one customer's reading of their own requests was served to another customer. */
     taskKey: crypto.createHash('sha256')
-      .update(JSON.stringify({ shape: workload.shape_kind, workload: workload.struct_key || workload.fingerprint || workload.id }))
+      .update(JSON.stringify({
+        v: 2, shape: workload.shape_kind, workspace: workload.workspace_id,
+        workload: workload.fingerprint || workload.struct_key || workload.id,
+      }))
       .digest('hex').slice(0, 32),
   };
   return profile;

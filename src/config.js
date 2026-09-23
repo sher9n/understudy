@@ -303,6 +303,19 @@ export const config = {
   TOPUP_MAX_USD: num('TOPUP_MAX_USD', 500),
   TOPUP_AMOUNT_USD: num('TOPUP_AMOUNT_USD', 20),
   TOPUP_THRESHOLD_USD: num('TOPUP_THRESHOLD_USD', 5),
+  /* The most automatic top ups a workspace gets in a day before it is asked to decide. */
+  TOPUP_MAX_PER_DAY: num('TOPUP_MAX_PER_DAY', 10),
+  /* Money set aside for a call in flight: what it could cost, reserved before it is sent and given
+     back once it is answered. A hold lapses after this long, longer than the slowest call can take,
+     so a process that died mid-call cannot freeze a balance. An answer with no length cap is
+     reserved as this many tokens, and no answer as more than the second number. */
+  HOLD_TTL_MIN: num('HOLD_TTL_MIN', 15),
+  /* A provider that keeps nothing can charge more than the list price, so a hold is the list price
+     times this; a model with no known price is held at a fixed amount. */
+  HOLD_PRICE_MULTIPLE: num('HOLD_PRICE_MULTIPLE', 2),
+  HOLD_UNPRICED_USD: num('HOLD_UNPRICED_USD', 0.25),
+  HOLD_DEFAULT_OUTPUT_TOKENS: num('HOLD_DEFAULT_OUTPUT_TOKENS', 2000),
+  HOLD_MAX_OUTPUT_TOKENS: num('HOLD_MAX_OUTPUT_TOKENS', 32000),
   OBSERVE_PLAN_USD: num('OBSERVE_PLAN_USD', 49),
   EVAL_ALLOWANCE_USD: num('EVAL_ALLOWANCE_USD', 10),
 

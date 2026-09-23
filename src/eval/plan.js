@@ -1,7 +1,7 @@
 import { db, now } from '../db/index.js';
 import config from '../config.js';
 import { jevUsable, jevResting } from '../jev.js';
-import { account } from '../billing.js';
+import { gateEval } from '../billing.js';
 import { loadFacts, routedCallPrice, callPrice } from '../models/facts.js';
 import { ratingsFor } from '../models/arena.js';
 import { profileOf, speedRule } from './profile.js';
@@ -132,10 +132,12 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const survivors = first.ranked.map((r) => r.model);
 
   // what Jev and the leaderboard say about the survivors; the run asks for what is missing
-  const { fits, difficulty } = await fitsFor(profile, survivors, facts, { compute: forRun });
+  /* Jev reads the models only for a measurement, which pays for the reading like any other call. It
+     used to read them whenever a workload page was opened, which spent money nobody was charged for. */
+  const { fits, difficulty, cost: fitCost } = await fitsFor(profile, survivors, facts, { compute: forRun });
+  plan.fitCost = Number(fitCost) || 0;
   const arena = await ratingsFor([workload.reference_model, ...survivors], facts, { link: forRun });
   plan.pendingJev = jevUsable() ? survivors.filter((id) => !fits.has(id)).length : 0;
-  if (!forRun && plan.pendingJev && queueFit) queueFit(workload.id);
   plan.difficulty = difficulty;
 
   const sel = selectCandidates({ ...base, fits, arena, difficulty });
@@ -166,10 +168,14 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
       + 'Testing fewer models in Settings brings it down.';
     return plan;
   }
-  const acct = await account(workload.workspace_id);
-  if (acct.balance_usd < plan.estimateUsd) {
-    plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)} and your balance is $`
-      + `${Number(acct.balance_usd).toFixed(2)}. Add credit and it can run.`;
+  /* The plan's monthly allowance is spent before the balance, so a plan customer with no balance can
+     still measure within it. */
+  const gate = await gateEval(workload.workspace_id, { estimatedUsd: plan.estimateUsd });
+  if (!gate.ok) {
+    const free = Math.max(0, Number(gate.free ?? 0));
+    plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)}, and `
+      + (gate.allowance > 0 ? `$${gate.allowance.toFixed(2)} of this month's allowance and ` : '')
+      + `$${free.toFixed(2)} of balance are free. Add credit and it can run.`;
     return plan;
   }
   plan.canRun = true;

@@ -13,7 +13,8 @@ import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './aler
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
-import { runTopUp } from './billing.js';
+import { runTopUp, sweepHolds } from './billing.js';
+import { pruneLimits } from './limits.js';
 import { revert, watchLive } from './eval/promote.js';
 import { onFollowUp, readFollowUp } from './learn/outcomes.js';
 import { onChoose, onServed } from './learn/choose.js';
@@ -281,10 +282,18 @@ handle('purge', async () => {
      those workspaces are skipped entirely: nothing of theirs is ever blanked. */
   /* Finished jobs are kept a week, to see what ran, and no longer: some carry a customer's text, such
      as a follow-up waiting to be read, which must not outlive the workspace's own retention. */
-  const jobsGone = (await db.prepare(`DELETE FROM jobs WHERE status IN ('done', 'failed') AND created_at < ?`)
+  const jobsGone = (await db.prepare(`DELETE FROM jobs WHERE status IN ('done', 'failed', 'cancelled') AND created_at < ?`)
     .run(now() - 7 * 86400000)).changes;
+  /* Caches of judgements and model readings are only ever read while young (JUDGE_CACHE_DAYS,
+     FIT_TTL_DAYS), and a judgement keeps figures taken from answers, so neither outlives its use. */
+  const judged = (await db.prepare('DELETE FROM judge_cache WHERE created_at < ?')
+    .run(now() - config.JUDGE_CACHE_DAYS * 86400000)).changes;
+  await db.prepare('DELETE FROM model_fits WHERE judged_at < ?').run(now() - config.FIT_TTL_DAYS * 86400000);
+  await pruneLimits();
+  await sweepHolds();
   let a = 0;
   let b = 0;
+  let c = 0;
   const spaces = await db.prepare('SELECT id, retention_days FROM workspaces').all();
   for (const ws of spaces) {
     if (!ws.retention_days) continue;
@@ -298,8 +307,21 @@ handle('purge', async () => {
         WHERE content_purged_at IS NULL AND run_id IN (
           SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`)
       .run(now(), ws.id, cutoff)).changes;
+    /* Every other copy of what a call said or what a model answered to it goes by the same clock:
+       the answers a measurement kept, the answers kept to be used again, and the instruction a
+       workload shows once no call of its own still holds it. */
+    c += (await db.prepare(
+      `UPDATE eval_replays SET answer = NULL WHERE answer IS NOT NULL AND run_id IN (
+          SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`).run(ws.id, cutoff)).changes;
+    c += (await db.prepare(
+      `DELETE FROM replay_cache WHERE created_at < ? AND call_id IN (
+          SELECT id FROM calls WHERE workspace_id = ? AND created_at < ?)`).run(cutoff, ws.id, cutoff)).changes;
+    c += (await db.prepare(
+      `UPDATE workloads w SET sample_prompt = NULL WHERE w.workspace_id = ? AND w.sample_prompt IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM calls k WHERE k.workload_id = w.id AND k.content_purged_at IS NULL
+                            AND k.request_json IS NOT NULL)`).run(ws.id)).changes;
   }
-  return { ok: true, calls: a, samples: b, jobs: jobsGone };
+  return { ok: true, calls: a, samples: b, other: c, judgements: judged, jobs: jobsGone };
 });
 
 /* Measuring again, on the workspace's own schedule.

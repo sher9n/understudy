@@ -281,6 +281,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   let spentTotal = 0;
   let reusedCount = 0;
   let savedUsd = 0;
+  // Jev's reading of the models to try, taken for this measurement, is paid for with it
+  if (plan.fitCost > 0) { spend += plan.fitCost; spentTotal += plan.fitCost; }
 
   /* Charge what has run so far, and say whether there is anything left. */
   const settle = async (note) => {

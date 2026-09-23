@@ -13,6 +13,8 @@ import ConnectWizard from './screens/ConnectWizard.jsx';
 import ConnectPage from './screens/ConnectPage.jsx';
 
 const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
+// the doors in: a password, an emailed code, the page an emailed link opens, and signing up
+const AUTH = new Set(['signin', 'signup', 'signincode', 'signinlink']);
 
 /* Every one of these screens is built out of the customer's own traffic, so before the guide
    is finished they are either empty or half a story. Settings is deliberately not on the
@@ -46,7 +48,7 @@ export default function App() {
 
   // someone already signed in has no business on the sign in screen
   useEffect(() => {
-    if (me?.signedIn && (screen === 'signin' || screen === 'signup' || screen === 'signincode')) {
+    if (me?.signedIn && AUTH.has(screen)) {
       const home = me.onboarded ? 'dash' : 'connect';
       navigate(home, null, { replace: true });
       setWhere({ screen: home, openId: null });
@@ -104,11 +106,11 @@ export default function App() {
     );
   }
 
-  if (!me.signedIn || screen === 'signin' || screen === 'signup' || screen === 'signincode') {
+  if (!me.signedIn || AUTH.has(screen)) {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
         <Auth
-          mode={screen === 'signup' ? 'signup' : (screen === 'signincode' ? 'code' : 'signin')}
+          mode={screen === 'signup' ? 'signup' : screen === 'signincode' ? 'code' : screen === 'signinlink' ? 'link' : 'signin'}
           go={(where) => go(where)}
           dark={dark}
           setDark={setDark}

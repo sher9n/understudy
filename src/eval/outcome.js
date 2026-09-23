@@ -46,8 +46,10 @@ export function cheaperCleared(results) {
    its first routed call; until then it is not "optimized", and nothing on it is saved. Read from
    the latest hundred calls, so a workload that starts coming through us counts within days. */
 export const RECENT_CALLS = 100;
-export function carriesOf({ mode, routed = 0, copies = 0 }) {
-  if (mode === 'observe') return false;
+/* The monthly plan used to put a workspace in an "observe" mode that refused every routed call, so a
+   plan customer could not route even the one workload that had cleared. The plan is now only a
+   measuring allowance, and whether a switch carries calls is read from the calls themselves. */
+export function carriesOf({ routed = 0 } = {}) {
   return Number(routed) > 0;
 }
 
