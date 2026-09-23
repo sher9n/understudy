@@ -12,7 +12,7 @@ process.env.ALERTS_ENABLED = 'false';
 const { simulateCascade, simulateRouter, bestOf } = await import('../src/learn/simulate.js');
 const { structureOf } = await import('../src/learn/check.js');
 const { featuresOf, train, predict, leaveOneOut } = await import('../src/learn/router.js');
-const { armKey, labelOf, leadModel } = await import('../src/learn/arms.js');
+const { armKey, labelOf, leadModel, nameOfResult } = await import('../src/learn/arms.js');
 const { keyOfSpec } = await import('../src/eval/promote.js');
 const { selectCandidates } = await import('../src/eval/select.js');
 const { default: config } = await import('../src/config.js');
@@ -125,6 +125,25 @@ test('strategies have one name each, in words and as a key', () => {
   assert.equal(keyOfSpec({ kind: 'model', model: 'm/x', recipe: null }, 'openai/gpt-5.4'), 'm/x');
   const router = { kind: 'router', cheap: { model: 'm/cheap' }, strong: { model: 'openai/gpt-4.1' } };
   assert.equal(labelOf(router), 'cheap or gpt-4.1, picked call by call');
+});
+
+test('the customer\'s own model from its cheapest provider is named as that, never as thinking less', () => {
+  const REF = 'openai/gpt-5.4';
+  const row = (spec) => ({ model_id: keyOfSpec(spec, REF), arm_json: JSON.stringify(spec) });
+  const cheapest = { kind: 'model', model: REF, recipe: { providers: ['azure'], pinned: true } };
+  assert.equal(keyOfSpec(cheapest, REF), `${REF}#cheapest`);
+  assert.deepEqual(nameOfResult(row(cheapest)), { kind: 'cheapest', label: 'gpt-5.4, from its cheapest provider',
+    short: 'gpt-5.4, cheapest provider', first: REF });
+  assert.equal(labelOf(cheapest, REF), 'gpt-5.4, from its cheapest provider');
+  // the lightest thinking a model offers can be "medium", and that is still thinking less
+  const medium = { kind: 'model', model: REF, recipe: { reasoning: { effort: 'medium' } } };
+  assert.equal(nameOfResult(row(medium)).kind, 'lighter');
+  assert.equal(nameOfResult(row(medium)).label, 'gpt-5.4, thinking less');
+  assert.equal(labelOf(medium, REF), 'gpt-5.4, thinking less', 'not "(yours)", which reads as the customer\'s own model unchanged');
+  assert.equal(nameOfResult(row({ kind: 'model', model: REF, recipe: { reasoning: { enabled: false } } })).kind, 'lighter');
+  // a plain model, and a result with no strategy of its own
+  assert.equal(nameOfResult({ model_id: 'm/x', arm_json: JSON.stringify({ kind: 'model', model: 'm/x', recipe: null }) }).kind, 'model');
+  assert.deepEqual(nameOfResult({ model_id: 'vendor/steady-small', arm_json: null }), { kind: 'model', label: 'vendor/steady-small', short: 'steady-small' });
 });
 
 test('the customer model thinking less is offered when it thinks, and only then', () => {

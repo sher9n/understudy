@@ -1,6 +1,6 @@
 import React from 'react';
 import { usd, num, timeIST, dateIST } from '../api.js';
-import { ServingFlow, inHundred } from '../LearnCharts.jsx';
+import { inHundred } from '../LearnCharts.jsx';
 
 /* A workload we moved to a cheaper model: which model it was on, which one it is on now, what
  * that saves, and how much it comes to over time.
@@ -21,11 +21,17 @@ const pct1 = (v) => `${Number(v).toFixed(1)}%`;
 const pct2 = (v) => `${Number(v).toFixed(2)}%`;
 const months = (m) => (m === 1 ? 'Next month' : m === 12 ? 'Next 12 months' : `Next ${m} months`);
 
-/* How a switch is served: one model, the customer's own thinking less, a checked cheaper model or
-   a pick made call by call. A switch made before strategies were kept is one model. */
+/* How a switch is served: one model, the customer's own thinking less, the customer's own from the
+   provider that sells it most cheaply, a checked cheaper model or a pick made call by call. Read from
+   the switch's key first, which names the last two apart ("#lighter", "#cheapest"): the customer's
+   own model from its cheapest provider used to be called thinking less. A switch made before
+   strategies were kept is one model. */
 const kindOf = (s) => {
   if (s.kind === 'cascade' || s.kind === 'router') return s.kind;
-  if (s.spec?.kind === 'model' && s.spec.model === s.from) return 'lighter';
+  const key = String(s.key || '');
+  if (key.endsWith('#cheapest')) return 'cheapest';
+  if (key.endsWith('#lighter')) return 'lighter';
+  if (s.spec?.kind === 'model' && s.spec.model === s.from) return s.spec.recipe?.pinned && !s.spec.recipe?.reasoning ? 'cheapest' : 'lighter';
   return 'model';
 };
 const nameOf = (s) => {
@@ -33,6 +39,7 @@ const nameOf = (s) => {
   if (k === 'cascade') return `${short(s.spec.first.model)}, checked`;
   if (k === 'router') return `${short(s.spec.cheap.model)} or ${short(s.spec.strong.model)}`;
   if (k === 'lighter') return `${short(s.from)}, thinking less`;
+  if (k === 'cheapest') return `${short(s.from)}, from its cheapest provider`;
   return short(s.to);
 };
 
@@ -42,7 +49,7 @@ function whyLine(s) {
   const to = nameOf(s);
   const ev = s.evidence;
   if (!ev) return s.how === 'you' ? `You switched it to ${to}.` : `It was switched to ${to}.`;
-  const on = ev.escalated === null || ev.escalated === undefined || kindOf(s) === 'model' || kindOf(s) === 'lighter' ? ''
+  const on = ev.escalated === null || ev.escalated === undefined || !['cascade', 'router'].includes(kindOf(s)) ? ''
     : kindOf(s) === 'cascade' ? `, sending ${inHundred(ev.escalated / 100)} calls on to ${from} when the check was unsure`
       : `, sending ${inHundred(ev.escalated / 100)} calls to ${from}`;
   const measured = `its answers differed from ${from}'s on ${pct1(ev.gap)} of ${num(ev.sample)} calls${on}`;
@@ -114,20 +121,10 @@ const unpriced = (listed) => (listed
   ? 'No call of a known size yet, so a call cannot be priced.'
   : 'Not in the price list, so it cannot be priced.');
 
-export default function SwitchedCard({ s, learn = null }) {
+export default function SwitchedCard({ s }) {
   const from = short(s.from);
   const to = nameOf(s);
   const kind = kindOf(s);
-  /* The share of calls a strategy sent the long way: from its own calls once there are enough of
-     them to say, and from the measurement it was switched on until then. */
-  const liveShare = s.soFar.calls >= 20 ? s.soFar.sentOn / s.soFar.calls : null;
-  const sentOn = liveShare !== null ? liveShare
-    : s.evidence?.escalated !== null && s.evidence?.escalated !== undefined ? s.evidence.escalated / 100 : null;
-  const e = learn?.explore;
-  // said only while it is happening: nothing is tried while the budget is spent or anything else holds it back
-  const experiments = !e || e.mode === 'off' || e.reason ? null
-    : e.live ? ` Also, up to ${inHundred(e.share)} calls are experiments: half go to ${from} to compare, half to a cheaper runner-up when there is one.`
-      : e.mode === 'shadow' ? ` Runners-up answer about ${inHundred(e.share)} calls again in the background; your app never sees those answers.` : null;
   const p = s.prices;
   const priced = p.fromPerCall != null && p.toPerCall != null && p.cheaperPct != null;
   const month = s.projection.find((r) => r.months === 1);
@@ -138,15 +135,11 @@ export default function SwitchedCard({ s, learn = null }) {
       <span className="eyebrow eyeok">
         {s.how === 'you' ? 'Switched because you approved it' : 'Switched automatically'} · {timeIST(s.at)} IST
       </span>
-      <h2>{kind === 'lighter' ? `${from} now thinks less before it answers` : `Moved from ${from} to ${to}`}</h2>
+      <h2>{kind === 'lighter' ? `${from} now thinks less before it answers`
+        : kind === 'cheapest' ? `${from} now comes from the provider that sells it most cheaply`
+          : `Moved from ${from} to ${to}`}</h2>
       <p>{whyLine(s)} {checkLine(s)}</p>
-
-      <div className="swflow">
-        <div className="kk">How your calls are served now</div>
-        <ServingFlow kind={kind} first={kind === 'cascade' ? s.spec.first.model : kind === 'router' ? s.spec.cheap.model : s.to}
-          fallback={kind === 'cascade' ? s.spec.fallback.model : kind === 'router' ? s.spec.strong.model : null}
-          reference={s.from} sentOn={sentOn} sentOnFrom={liveShare !== null ? 'switch' : 'measured'} experiments={experiments} />
-      </div>
+      {/* How its requests flow now is drawn once, at the top of the page (ValuePipeline.jsx). */}
 
       <div className="swtiles">
         <div className="kpi">

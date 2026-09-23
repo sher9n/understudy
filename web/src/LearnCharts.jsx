@@ -93,10 +93,13 @@ export function ServingFlow({ kind, first, fallback, reference, sentOn = null, s
   } else {
     words = kind === 'lighter'
       ? `Every call goes to ${short(first)}, your own model, asked to think less before it answers. Thinking is billed, so the same model costs less.`
-      : `Every call goes to ${short(first)} instead of ${short(reference)}.`;
+      : kind === 'cheapest'
+        ? `Every call goes to ${short(first)}, your own model, bought from the provider that sells it most cheaply. It is the same model, run by a different company.`
+        : `Every call goes to ${short(first)} instead of ${short(reference)}.`;
     body = (
       <>
-        <Node eyebrow="Answers" title={short(first)} sub={kind === 'lighter' ? 'your model, thinking less' : 'the cheaper model'} tone="fn-brand" />
+        <Node eyebrow="Answers" title={short(first)}
+          sub={kind === 'lighter' ? 'your model, thinking less' : kind === 'cheapest' ? 'your model, cheapest provider' : 'the cheaper model'} tone="fn-brand" />
         <Arrow />
         {answer}
       </>
@@ -104,7 +107,7 @@ export function ServingFlow({ kind, first, fallback, reference, sentOn = null, s
   }
   return (
     <figure className="flowfig">
-      <div className="flow" role="img" aria-label={`${words}${long !== null && kind !== 'model' && kind !== 'lighter' ? ` ${inHundred(long)} calls go the long way ${from}.` : ''}`}>
+      <div className="flow" role="img" aria-label={`${words}${long !== null && (kind === 'cascade' || kind === 'router') ? ` ${inHundred(long)} calls go the long way ${from}.` : ''}`}>
         <Node eyebrow="Your app" title="Sends a call" />
         <Arrow />
         {body}
