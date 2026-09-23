@@ -10,7 +10,7 @@
           <span class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--mut); font-weight: 600;">Your client, with its address and key changed</span>
         </div>
         <pre class="m hero-code" style="margin: 0; padding: 26px 24px; font-size: 13.5px; line-height: 1.9; color: var(--mut-read); background: var(--code); overflow-x: auto;"><span style="display: block; color: var(--ink);">client = OpenAI(</span><span style="display: block;"><span style="display: inline-block; background: var(--okq); color: var(--ok); border-radius: 4px; padding: 0 6px; font-weight: 600;">  base_url="https://api.understudy.dev/v1",</span></span><span style="display: block;"><span style="display: inline-block; background: var(--okq); color: var(--ok); border-radius: 4px; padding: 0 6px; font-weight: 600;">  api_key=os.environ["UNDERSTUDY_KEY"],</span></span><span style="display: block; color: var(--ink);">)</span></pre>
-        <div style="border-top: 1px solid var(--line); padding: 15px 20px; font-size: 13px; color: var(--mut-read);">Every call still goes to the model you asked for, until a cheaper way has proved itself on your own calls.</div>
+        <div style="border-top: 1px solid var(--line); padding: 15px 20px; font-size: 13px; color: var(--mut-read);">Every call still goes to the model you asked for, until a cheaper way has proved itself on your own calls and you say yes, or let it switch by itself.</div>
       </div>
 
       <div class="lp-cta">
@@ -59,7 +59,7 @@
           </div>
           <div class="body">
             <div class="t"><span class="n">4</span>Keep improving</div>
-            <div class="b">When a cheaper way is proven on your live calls, we switch to it. If one starts working less well than your own model, we switch back.</div>
+            <div class="b">When a cheaper way is proven on your own calls, we offer it to you, or switch to it if you let us, starting with a small share of calls. If one starts working less well than your own model, we switch back.</div>
           </div>
         </div>
 
@@ -141,8 +141,8 @@
         <div>
           <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ok); font-weight: 600;">Learns from outcomes</div>
           <h2 style="font-weight: 600; letter-spacing: -0.03em; margin: 12px 0 0; text-wrap: balance;">Learns from what actually worked</h2>
-          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">A measurement shows whether a cheaper way gives your answers. Your live calls show whether answers worked. A few calls, within a daily budget you set, try a cheaper runner-up or your own model to compare. When the evidence is strong enough, we move, and tell you why in numbers.</p>
-          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">Would you rather nothing changed on its own? Runners-up can answer in the background instead, and you approve.</p>
+          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">A measurement shows whether a cheaper way gives your answers. Your live calls show whether answers worked. A few calls, within a daily budget you set, try a cheaper runner-up or your own model to compare, and a few answers a day are read in the background to check them. When the evidence is strong enough, we tell you why in numbers, and move if you let us.</p>
+          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">Nothing changes on its own unless you allow it: new workspaces are asked before every switch. Runners-up can also answer in the background only, so you see how they do before anything moves.</p>
         </div>
       </div>
     </section>
@@ -204,7 +204,7 @@
         <div>
           <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ok); font-weight: 600;">Your data</div>
           <h2 style="font-weight: 600; letter-spacing: -0.03em; margin: 12px 0 0; text-wrap: balance;">Nothing kept at the model provider. Your window for the rest.</h2>
-          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">Every call we route or replay asks OpenRouter for providers that keep nothing: zero data retention, and data collection denied.</p>
+          <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">Every call we route or replay denies data collection and asks OpenRouter for providers that keep nothing. Zero data retention is on for every workspace unless it is switched off in Settings.</p>
           <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">What we keep ourselves, the request and the answer, stays for the window your workspace chooses: 30, 60 or 90 days, or indefinitely. New workspaces start at 30 days. When the window passes the words are cleared, and only the numbers behind your charts stay.</p>
           <p class="lp-links"><a data-go="go_traffic">What happens to your traffic</a><a data-go="go_pricing">What it costs</a></p>
         </div>

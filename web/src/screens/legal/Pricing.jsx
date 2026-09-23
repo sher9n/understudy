@@ -44,7 +44,8 @@ export default function Pricing({ go }) {
             <div className="pricefig">Cost + 1%</div>
             <p>
               Replaying a sample of your calls on other models to measure them, runners-up answering some calls in
-              the background, and live experiments are all charged at what they cost, plus 1%, from your balance.
+              the background, reading a few live answers a day to check them, and live experiments are all charged
+              at what they cost, plus 1%, from your balance.
             </p>
           </div>
           <div className="pricecard">
@@ -55,8 +56,14 @@ export default function Pricing({ go }) {
         </div>
         <p>
           A workload&rsquo;s page shows an estimate of what measuring it will cost before anything runs, and
-          Settings can hold measuring back until you ask for it. Experiments have a daily limit, set on each
-          workload.
+          Settings can hold measuring back until you ask for it. A measurement nobody asked for only runs when
+          what it can be expected to find would pay for itself within two months, and a single measurement
+          never spends more than its cap. Experiments have a daily limit, set on each workload.
+        </p>
+        <p>
+          <b>An optimizing budget</b> in Settings caps everything spent on finding and checking a cheaper model
+          over thirty days, measurements, background answers, reads and experiments together. Once it is spent,
+          that work waits, and your calls carry on as they are.
         </p>
       </Sec>
 
@@ -68,7 +75,21 @@ export default function Pricing({ go }) {
             <b>Automatic top-up is optional.</b> It is off until you have saved a card and switched it on, and you
             can switch it off again in Settings at any time.
           </li>
+          <li>
+            <b>Spending limits are optional.</b> Set a daily or monthly limit on calls in Settings. Once one is
+            reached, calls through Understudy are refused with a message saying when they resume, and you are
+            emailed once. Days and months are counted in India Standard Time.
+          </li>
+          <li>
+            <b>A low balance is emailed.</b> When your balance runs low, the workspace owner gets one email, and
+            can switch it off in Settings under Emails.
+          </li>
         </ul>
+        <p>
+          <b>Savings are shown after what they cost.</b> The saving on your dashboard is what your routed calls cost
+          against what your own model would have cost for the same calls, after the 1% fee and less everything spent
+          on optimizing, so a figure below zero is shown as it is.
+        </p>
       </Sec>
 
       <Sec id="more" title="More">
