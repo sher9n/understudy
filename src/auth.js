@@ -16,6 +16,9 @@ const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const cleanEmail = (e) => String(e || '').trim().toLowerCase();
 const validEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e);
 
+/** A refusal meant for the person: its words are shown as they are. Anything else is our failure. */
+export class Refusal extends Error {}
+
 /* Signing up ---------------------------------------------------------------------
 
    An account is only usable once its email address has answered. Before this, signing up with
@@ -27,29 +30,50 @@ const validEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e);
    takes effect only when that code comes back: whoever holds the email is whoever chooses the
    password. Signing up again for an address that is still waiting simply sends a new code with the
    new password on it. The answer is the same whether or not the address already has an account, so
-   the form cannot be used to find out who does; the owner of an existing account is emailed instead. */
-export async function startSignUp({ email, password, name = '' }, { ip = null } = {}) {
+   the form cannot be used to find out who does; the owner of an existing account is emailed instead.
+
+   The code alone was not enough. Whoever signed up LAST put their password on the code, so somebody
+   who signed up with another person's address, or signed up again inside that person's ten minutes,
+   chose the password the real owner then confirmed without knowing. So the browser that signs up is
+   given a secret of its own (the nonce, kept in a cookie), and the password chosen there is kept only
+   when the code comes back from that same browser. A code that comes back from anywhere else still
+   signs its holder in, since holding the email is what proves the account, and asks them to choose a
+   password. */
+export async function startSignUp({ email, password, name = '' }, { ip = null, nonce = null } = {}) {
   const addr = cleanEmail(email);
-  if (!validEmail(addr)) throw new Error('That email address does not look right.');
-  if (String(password || '').length < 8) throw new Error('Use at least 8 characters.');
-  if (String(password).length > 200) throw new Error('Use at most 200 characters.');
+  if (!validEmail(addr)) throw new Refusal('That email address does not look right.');
+  if (String(password || '').length < 8) throw new Refusal('Use at least 8 characters.');
+  if (String(password).length > 200) throw new Refusal('Use at most 200 characters.');
+  // hashed whichever way this goes, so how long it takes says nothing about who has an account
+  const salt = crypto.randomBytes(16).toString('hex');
+  const pw = await hash(password, salt);
   const recent = await codesInLastHour(addr);
   if (recent >= config.LOGIN_CODE_MAX_PER_HOUR) return { ok: false, reason: 'too_many' };
 
   let user = await db.prepare('SELECT * FROM users WHERE email = ?').get(addr);
   if (user && user.email_verified_at) {
     // somebody already has this address: its owner hears about it, nobody else learns anything
-    await logCodeRequest(addr, ip);
+    await logCodeRequest(addr);
     return { ok: true, send: { kind: 'exists' }, email: addr };
   }
   if (!user) {
-    user = await createPendingAccount(addr, String(name || '').trim().slice(0, 80));
+    try {
+      user = await createPendingAccount(addr, String(name || '').trim().slice(0, 80));
+    } catch (err) {
+      // two sign-ups for one address at the same moment: the second finds the first one's account
+      if (err?.code !== '23505') throw err;
+      user = await db.prepare('SELECT * FROM users WHERE email = ?').get(addr);
+      if (!user) throw err;
+      if (user.email_verified_at) {
+        await logCodeRequest(addr);
+        return { ok: true, send: { kind: 'exists' }, email: addr };
+      }
+    }
   } else if (name && String(name).trim()) {
     await db.prepare('UPDATE users SET name = ? WHERE id = ? AND email_verified_at IS NULL').run(String(name).trim().slice(0, 80), user.id);
   }
-  const salt = crypto.randomBytes(16).toString('hex');
-  const pw = await hash(password, salt);
-  const code = await issueCode(addr, { purpose: 'verify', ip, pwHash: pw, pwSalt: salt, userId: user.id });
+  const code = await issueCode(addr, { purpose: 'verify', ip, pwHash: pw, pwSalt: salt, userId: user.id,
+    nonceHash: nonce ? sha(nonce) : null });
   return { ok: true, send: { kind: 'verify', ...code }, email: addr };
 }
 
@@ -164,6 +188,16 @@ export const cookieFor = (value) =>
   `us_session=${value}; Path=/; HttpOnly; SameSite=Lax${SECURE}; Max-Age=${SESSION_DAYS * 86400}`;
 export const clearCookie = () => `us_session=; Path=/; HttpOnly; SameSite=Lax${SECURE}; Max-Age=0`;
 
+/* The sign-up browser's own secret (see startSignUp). Only the routes that use a code or link read it,
+   so it is scoped to them, and it lasts a little longer than a code does. */
+export const signupCookieFor = (nonce) =>
+  `us_signup=${nonce}; Path=/api/auth; HttpOnly; SameSite=Lax${SECURE}; Max-Age=${(config.LOGIN_CODE_TTL_MIN + 10) * 60}`;
+export const clearSignupCookie = () => `us_signup=; Path=/api/auth; HttpOnly; SameSite=Lax${SECURE}; Max-Age=0`;
+export const signupNonceOf = (req) => {
+  const m = String(req.headers?.cookie || '').match(/(?:^|;\s*)us_signup=([^;]+)/);
+  return m ? m[1] : null;
+};
+
 /* Codes and links ------------------------------------------------------------------
 
    Each emailed code is six digits, lives ten minutes, and allows five tries. The tries are counted
@@ -184,19 +218,22 @@ const sameString = (a, b) => {
   return crypto.timingSafeEqual(x, y);
 };
 
-async function codesInLastHour(addr) {
+/* Codes asked for an address in the last hour. Sign-in and sign-up codes count in one bucket; codes to
+   confirm a NEW address count in their own, so another account asking to move to somebody's address
+   cannot use up that person's sign-in codes and lock them out. */
+async function codesInLastHour(addr, bucket = 'code_email') {
   return Number((await db.prepare(
-    `SELECT COUNT(*) AS n FROM rate_events WHERE bucket = 'code_email' AND key = ? AND created_at > ?`)
-    .get(addr, now() - 3600000))?.n ?? 0);
+    `SELECT COUNT(*) AS n FROM rate_events WHERE bucket = ? AND key = ? AND created_at > ?`)
+    .get(bucket, addr, now() - 3600000))?.n ?? 0);
 }
 
-async function logCodeRequest(addr, ip) {
-  await db.prepare(`INSERT INTO rate_events (bucket, key, created_at) VALUES ('code_email', ?, ?)`).run(addr, now());
-  if (ip) await db.prepare(`INSERT INTO rate_events (bucket, key, created_at) VALUES ('code_ip', ?, ?)`).run(ip, now());
+async function logCodeRequest(addr, bucket = 'code_email') {
+  await db.prepare(`INSERT INTO rate_events (bucket, key, created_at) VALUES (?, ?, ?)`).run(bucket, addr, now());
 }
 
-async function issueCode(addr, { purpose, ip = null, pwHash = null, pwSalt = null, userId = null, newEmail = null }) {
-  await logCodeRequest(addr, ip);
+async function issueCode(addr, { purpose, ip = null, pwHash = null, pwSalt = null, userId = null, newEmail = null,
+  nonceHash = null, decoy = false, bucket = 'code_email' }) {
+  await logCodeRequest(addr, bucket);
   const rowId = id('lgn');
   const digits = config.LOGIN_CODE_DIGITS;
   const code = String(crypto.randomInt(0, 10 ** digits)).padStart(digits, '0');
@@ -206,9 +243,11 @@ async function issueCode(addr, { purpose, ip = null, pwHash = null, pwSalt = nul
   await db.prepare(`UPDATE login_codes SET consumed_at = ? WHERE email = ? AND purpose = ? AND consumed_at IS NULL`)
     .run(now(), addr, purpose);
   await db.prepare(`INSERT INTO login_codes (id, email, code_hash, link_hash, purpose, attempts,
-                      consumed_at, requested_ip, expires_at, created_at, pw_hash, pw_salt, user_id, new_email)
-                    VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(rowId, addr, codeHash(rowId, code), sha(token), purpose, ip, now() + ttl, now(), pwHash, pwSalt, userId, newEmail);
+                      consumed_at, requested_ip, expires_at, created_at, pw_hash, pw_salt, user_id, new_email,
+                      signup_nonce_hash, decoy)
+                    VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(rowId, addr, codeHash(rowId, code), sha(token), purpose, ip, now() + ttl, now(), pwHash, pwSalt, userId, newEmail,
+      nonceHash, decoy ? 1 : 0);
   return { code, token, minutes: config.LOGIN_CODE_TTL_MIN, purpose };
 }
 
@@ -217,7 +256,13 @@ export async function requestLoginCode(email, { ip = null } = {}) {
   const addr = cleanEmail(email);
   if (await codesInLastHour(addr) >= config.LOGIN_CODE_MAX_PER_HOUR) return { ok: false, reason: 'too_many' };
   const user = await db.prepare('SELECT id FROM users WHERE email = ?').get(addr);
-  if (!user) { await logCodeRequest(addr, ip); return { ok: true, send: null }; }   // answered the same as success, on purpose
+  /* No account: a code is still made, and never sent, so that trying a code for this address answers
+     "not right, so many tries left" exactly as it would for an address with an account. Without it the
+     answer was "expired", which told anybody who asked which addresses have accounts. */
+  if (!user) {
+    await issueCode(addr, { purpose: 'sign_in', ip, decoy: true });
+    return { ok: true, send: null };
+  }
   return { ok: true, send: await issueCode(addr, { purpose: 'sign_in', ip, userId: user.id }) };
 }
 
@@ -226,13 +271,14 @@ export async function requestEmailChange(user, newEmail, { ip = null } = {}) {
   const addr = cleanEmail(newEmail);
   if (!validEmail(addr)) return { ok: false, reason: 'That does not look like an email address.' };
   if (addr === user.email) return { ok: false, reason: 'That is already your email address.' };
-  if (await codesInLastHour(addr) >= config.LOGIN_CODE_MAX_PER_HOUR) return { ok: false, reason: 'Too many codes asked for. Wait an hour.' };
+  if (await codesInLastHour(addr, 'code_change') >= config.LOGIN_CODE_MAX_PER_HOUR) return { ok: false, reason: 'Too many codes asked for. Wait an hour.' };
   if (await db.prepare('SELECT 1 FROM users WHERE email = ?').get(addr)) {
-    // the same answer as success; the address already in use simply never gets a code
-    await logCodeRequest(addr, ip);
+    /* The same answer as success; the address already in use simply never gets a code. A decoy is kept
+       for it, so trying a code answers as it would for a free address. */
+    await issueCode(addr, { purpose: 'change_email', ip, userId: user.id, newEmail: addr, decoy: true, bucket: 'code_change' });
     return { ok: true, send: null, email: addr };
   }
-  return { ok: true, email: addr, send: await issueCode(addr, { purpose: 'change_email', ip, userId: user.id, newEmail: addr }) };
+  return { ok: true, email: addr, send: await issueCode(addr, { purpose: 'change_email', ip, userId: user.id, newEmail: addr, bucket: 'code_change' }) };
 }
 
 /** The newest live row for an address and purpose, if there is one. */
@@ -244,8 +290,14 @@ const liveCode = (addr, purposes) => db.prepare(
    holder's from now on. A sign-up code sets the password chosen with it. A sign-in code for an
    account that never answered its email clears the password somebody else may have chosen and
    ends every other session, because answering the email is what proves whose the account is. */
-async function redeem(row) {
-  await db.prepare('UPDATE login_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(now(), row.id);
+async function redeem(row, { nonce = null } = {}) {
+  /* Spent in the same statement that checks it was still unspent. Marked spent without looking, one
+     link pressed twice at once signed in twice and made two live API keys. */
+  const spent = await db.prepare(
+    'UPDATE login_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL RETURNING id').run(now(), row.id);
+  if (!spent.rows.length) return { ok: false, reason: 'expired' };
+  // a code nobody was ever sent opens nothing, even guessed
+  if (Number(row.decoy)) return { ok: false, reason: 'expired' };
   if (row.purpose === 'change_email') {
     const taken = await db.prepare('SELECT 1 FROM users WHERE email = ? AND id <> ?').get(row.new_email, row.user_id);
     if (taken) return { ok: false, reason: 'expired' };
@@ -255,9 +307,14 @@ async function redeem(row) {
   const user = await db.prepare('SELECT * FROM users WHERE email = ?').get(row.email);
   if (!user) return { ok: false, reason: 'expired' };
   let fresh = false;
+  let passwordKept = null;
   if (!user.email_verified_at) {
     fresh = true;
-    if (row.purpose === 'verify' && row.pw_hash) {
+    // the password chosen at sign-up, only for a code that came back to the browser that chose it
+    const fromSigner = row.purpose === 'verify' && row.pw_hash && row.signup_nonce_hash && nonce
+      && sameString(row.signup_nonce_hash, sha(String(nonce)));
+    passwordKept = !!fromSigner;
+    if (fromSigner) {
       await db.prepare('UPDATE users SET pw_hash = ?, pw_salt = ?, email_verified_at = ?, pw_changed_at = ? WHERE id = ?')
         .run(row.pw_hash, row.pw_salt, now(), now(), user.id);
     } else {
@@ -273,14 +330,16 @@ async function redeem(row) {
   if (ws && !await db.prepare('SELECT 1 FROM api_keys WHERE workspace_id = ? AND revoked_at IS NULL').get(ws.id)) {
     key = (await issueKey(ws.id)).secret;
   }
-  return { ok: true, user, token: await startSession(user.id), fresh, key };
+  return { ok: true, user, token: await startSession(user.id), fresh, key, passwordKept };
 }
 
 /** Type the code in. Five tries a code, counted in the same step that checks them. */
-export async function verifyLoginCode(email, code, { purposes = ['sign_in', 'verify'] } = {}) {
+export async function verifyLoginCode(email, code, { purposes = ['sign_in', 'verify'], nonce = null, userId = null } = {}) {
   const addr = cleanEmail(email);
   const row = await liveCode(addr, purposes);
   if (!row) return { ok: false, reason: 'expired' };
+  // a code to confirm a new address is only ever the account's that asked for it
+  if (userId && row.user_id !== userId) return { ok: false, reason: 'expired' };
   const tried = await db.prepare(
     `UPDATE login_codes SET attempts = attempts + 1
       WHERE id = ? AND consumed_at IS NULL AND attempts < ? RETURNING attempts`).run(row.id, config.LOGIN_CODE_MAX_ATTEMPTS);
@@ -293,12 +352,12 @@ export async function verifyLoginCode(email, code, { purposes = ['sign_in', 'ver
     if (left <= 0) await db.prepare('UPDATE login_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').run(now(), row.id);
     return { ok: false, reason: 'wrong', triesLeft: Math.max(0, left) };
   }
-  return redeem(row);
+  return redeem(row, { nonce });
 }
 
 /** Confirm a new email address with the code sent to it. */
 export async function verifyEmailChange(user, email, code) {
-  const out = await verifyLoginCode(email, code, { purposes: ['change_email'] });
+  const out = await verifyLoginCode(email, code, { purposes: ['change_email'], userId: user.id });
   if (!out.ok) return out;
   return out.changedEmail ? { ok: true, email: out.changedEmail } : { ok: false, reason: 'expired' };
 }
@@ -312,10 +371,10 @@ export async function peekLoginLink(token) {
 }
 
 /** Spend the link, when the person presses the button on the page it opened. */
-export async function verifyLoginLink(token) {
+export async function verifyLoginLink(token, { nonce = null } = {}) {
   const row = await db.prepare(
     `SELECT * FROM login_codes WHERE link_hash = ? AND consumed_at IS NULL AND expires_at > ?`)
     .get(sha(String(token || '')), now());
   if (!row || row.purpose === 'change_email') return { ok: false, reason: 'expired' };
-  return redeem(row);
+  return redeem(row, { nonce });
 }

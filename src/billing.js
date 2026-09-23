@@ -108,7 +108,16 @@ export async function hold(workspaceId, amountUsd, purpose) {
     let take = null;
     if (a.free >= want && a.free > 0) take = want;
     else if (a.inFlight === 0 && a.free > 0) take = a.free;
-    if (take === null) return { ok: false, free: a.free, inFlight: a.inFlight };
+    if (take === null) return { ok: false, free: a.free, inFlight: a.inFlight, want };
+    /* A workspace's own ceilings on what its calls may cost count what calls in flight have set
+       aside, read under the same lock. Checked only against what had already been charged, a burst
+       of calls all fitted under a limit none of them had been charged against yet: forty calls at
+       once spent eight times a daily limit of five cents. As with the balance, the last call of a
+       period may run alone past what is left, so a limit is overrun by at most one call. */
+    if (purpose === 'call') {
+      const over = await overLimit(workspaceId, tx, want, a);
+      if (over) return { ok: false, ...over, free: a.free, inFlight: a.inFlight, want };
+    }
     const holdId = id('hold');
     await tx.prepare(`INSERT INTO balance_holds (id, workspace_id, amount_usd, purpose, created_at, expires_at)
                       VALUES (?, ?, ?, ?, ?, ?)`).run(holdId, workspaceId, round8(take), purpose, now(), now() + HOLD_TTL_MS());
@@ -127,16 +136,53 @@ export async function sweepHolds() {
   return (await db.prepare('DELETE FROM balance_holds WHERE expires_at < ?').run(now() - DAY)).changes;
 }
 
-/* What a call could cost before it is sent: its prompt as sent, and the longest answer it allows. A
-   prompt is counted at three characters a token, which overcounts ordinary text a little, and an
-   answer with no cap is counted at a generous default. Only ever used to set money aside. */
-export function worstCaseTokens(body) {
+/* What a call could cost before it is sent, as a bound and not a guess.
+
+   A hold is only a promise about money if the call cannot spend more than it. It used to count an
+   answer with no cap as two thousand tokens and any cap as at most thirty-two thousand, while the
+   request went to the provider unchanged: twenty calls at once on fifty cents of credit each wrote
+   far longer answers and left the balance three dollars below zero, paid for by us.
+
+   So the answer a call is held for is the longest it can actually be: the cap it asks for, or the
+   longest answer the model writes, times the answers it asks for (n). Where neither is known, the
+   call is sent with a cap of HOLD_MAX_OUTPUT_TOKENS, so the bound is true by construction. The price
+   is the dearest provider that keeps nothing, where those are known one by one; otherwise the list
+   price with a margin, since a provider can charge more than the list. A prompt is counted at three
+   characters a token, which overcounts ordinary text, and priced as if written to a cache, a quarter
+   dearer than read plainly. Only ever used to set money aside. */
+export function callShape(body) {
   const text = JSON.stringify(body?.messages ?? []) + JSON.stringify(body?.tools ?? []);
   const pin = Math.ceil(text.length / 3);
-  const cap = Number(body?.max_completion_tokens ?? body?.max_tokens);
-  const pout = Number.isFinite(cap) && cap > 0 ? Math.min(cap, config.HOLD_MAX_OUTPUT_TOKENS)
-    : config.HOLD_DEFAULT_OUTPUT_TOKENS;
-  return { pin, pout };
+  const raw = Number(body?.max_completion_tokens ?? body?.max_tokens);
+  const cap = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null;
+  const n = Math.max(1, Math.min(128, Math.floor(Number(body?.n) || 1)));
+  return { pin, cap, n };
+}
+
+/** The most one call can cost on one model, or null when the model has no known price. */
+export async function callBound(modelId, { pin, cap, n = 1 }, { zdr = true } = {}) {
+  const m = await db.prepare('SELECT price_in, price_out, max_output FROM models_catalog WHERE model_id = ?').get(modelId);
+  if (!m) return null;
+  let pi = Number(m.price_in) || 0;
+  let po = Number(m.price_out) || 0;
+  let margin = config.HOLD_PRICE_MULTIPLE;
+  let maxOut = Number(m.max_output) > 0 ? Number(m.max_output) : null;
+  if (zdr) {
+    const e = await db.prepare(
+      'SELECT MAX(price_in) AS pi, MAX(price_out) AS po, MAX(max_output) AS mo FROM model_endpoints WHERE model_id = ?').get(modelId);
+    if (e && (Number(e.pi) > 0 || Number(e.po) > 0)) {
+      // every provider it can be sent to is known, so the dearest of them is the bound
+      pi = Math.max(pi, Number(e.pi) || 0);
+      po = Math.max(po, Number(e.po) || 0);
+      margin = 1;
+      if (Number(e.mo) > 0) maxOut = Math.max(maxOut || 0, Number(e.mo));
+    }
+  }
+  if (!(pi > 0) && !(po > 0)) return { usd: 0, each: cap ?? maxOut ?? config.HOLD_MAX_OUTPUT_TOKENS, known: cap !== null || maxOut !== null };
+  const known = cap !== null || maxOut !== null;
+  const each = cap !== null ? (maxOut ? Math.min(cap, maxOut) : cap) : (maxOut ?? config.HOLD_MAX_OUTPUT_TOKENS);
+  const usd = (pin * pi * 1.25 + each * n * po) * margin;
+  return { usd, each, known };
 }
 
 /** Can this workspace make a routed call right now? A quick check before the hold is taken. */
@@ -191,6 +237,48 @@ export async function spentOnCalls(workspaceId) {
   if (spendMemo.size > 5000) spendMemo.clear();
   return v;
 }
+/* Whether one more call would take the workspace past its own daily or monthly limit, counting what
+   has been charged and what calls in flight have set aside. Read inside the hold's lock, from the
+   ledger itself rather than the fifteen second reading gateRouting uses. */
+async function overLimit(workspaceId, x, want, a) {
+  const lim = await limitsFor(workspaceId);
+  if (lim.dailyLimit === null && lim.monthlyLimit === null) return null;
+  const t = now();
+  const day = istDayStart(t);
+  const month = istMonthStart(t);
+  const r = await x.prepare(
+    `SELECT COALESCE(-SUM(amount_usd) FILTER (WHERE created_at >= ?), 0) AS day,
+            COALESCE(-SUM(amount_usd), 0) AS month
+       FROM ledger WHERE workspace_id = ? AND kind = 'call' AND created_at >= ?`).get(day, workspaceId, Math.min(day, month));
+  const h = await x.prepare(
+    `SELECT COALESCE(SUM(amount_usd), 0) AS s FROM balance_holds
+      WHERE workspace_id = ? AND purpose = 'call' AND expires_at > ?`).get(workspaceId, t);
+  const held = Number(h?.s || 0);
+  const periods = [
+    ['day', lim.dailyLimit, Number(r?.day || 0), day],
+    ['month', lim.monthlyLimit, Number(r?.month || 0), month],
+  ];
+  for (const [period, limit, spent, start] of periods) {
+    if (limit === null) continue;
+    const committed = spent + held;
+    if (committed + want <= limit) continue;
+    // nothing else in flight and something left: the last call of the period runs alone
+    if (a.inFlight === 0 && committed < limit) continue;
+    const reached = spent >= limit;
+    if (reached) tellLimit(workspaceId, period, start, limit);
+    const when = period === 'day' ? 'at midnight IST' : 'on the 1st (IST)';
+    const which = period === 'day' ? 'daily' : 'monthly';
+    return {
+      code: period === 'day' ? 'daily_limit' : 'monthly_limit', limit, spent,
+      message: reached
+        ? `Your ${which} limit of $${limit.toFixed(2)} is reached. Calls resume ${when}, or raise the limit in Settings.`
+        : `Calls in flight have set aside what is left of your ${which} limit of $${limit.toFixed(2)}. `
+          + 'Try again in a moment, send fewer calls at once, or raise the limit in Settings.',
+    };
+  }
+  return null;
+}
+
 /* A limit reached is told once a period, by email as well as on every refused call, and never waits
    on the email: the refusal answers at once. */
 const told = new Set();
@@ -333,11 +421,19 @@ export async function chargeEval(workspaceId, costUsd, note) {
   return amount;
 }
 
-export async function ledger(workspaceId, limit = 20, { before = null } = {}) {
+/* A page of the ledger, newest first. Paged by time and then id, so two movements made in the same
+   millisecond, which a charge and the hold it gives back can be, are never split across a page and lost. */
+export async function ledger(workspaceId, limit = 20, { before = null, beforeId = null } = {}) {
+  if (before && beforeId) {
+    return await db.prepare(
+      `SELECT id, kind, amount_usd, balance_after, note, created_at FROM ledger
+        WHERE workspace_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+        ORDER BY created_at DESC, id DESC LIMIT ?`).all(workspaceId, before, before, beforeId, limit);
+  }
   return await db.prepare(
     `SELECT id, kind, amount_usd, balance_after, note, created_at FROM ledger
       WHERE workspace_id = ? ${before ? 'AND created_at < ?' : ''}
-      ORDER BY created_at DESC LIMIT ?`).all(...(before ? [workspaceId, before, limit] : [workspaceId, limit]));
+      ORDER BY created_at DESC, id DESC LIMIT ?`).all(...(before ? [workspaceId, before, limit] : [workspaceId, limit]));
 }
 
 /* Auto top up ------------------------------------------------------------------
@@ -420,7 +516,16 @@ export async function runTopUp(workspaceId) {
     // the credit itself is written by the webhook, keyed on the intent, so it lands once
     return { ok: true, intent: pi.id };
   } catch (err) {
-    const code = err?.code || err?.raw?.decline_code || 'card_declined';
+    /* Only a problem with the card itself switches automatic top up off. Every error used to, so a
+       network blip, a Stripe outage, a rate limit or two top ups racing on one key told the customer
+       their card was declined and stopped their calls when the balance ran out. Those are thrown
+       instead, and the job tries again later. */
+    const type = err?.type || err?.rawType || '';
+    const transient = ['StripeAPIError', 'StripeConnectionError', 'StripeRateLimitError', 'StripeIdempotencyError'].includes(type)
+      || err?.code === 'idempotency_key_in_use' || err?.code === 'lock_timeout' || err?.code === 'rate_limit'
+      || Number(err?.statusCode) === 429 || Number(err?.statusCode) >= 500;
+    if (transient) throw err;
+    const code = err?.raw?.decline_code || err?.code || 'card_declined';
     /* Stripe distinguishes "the bank wants the customer present" from "this card is no
        good". The recovery is the same screen either way, but the sentence is not, and
        telling somebody their card failed when their bank simply wanted them to confirm is
@@ -435,6 +540,13 @@ export async function runTopUp(workspaceId) {
       title: code === 'authentication_required' ? 'A top up needs your confirmation' : 'A top up was declined',
       detail: why,
     });
+    /* Told by email too. The low balance email is skipped while automatic top up is on, so without
+       this nobody heard anything until calls stopped. */
+    await notify(workspaceId, 'money', `topup-failed:${workspaceId}:${lastCredit}`, {
+      title: code === 'authentication_required' ? 'An automatic top up needs your confirmation' : 'An automatic top up did not go through',
+      lines: [why, 'Calls through Understudy stop when the balance runs out.'],
+      path: '/settings', linkText: 'Open Settings',
+    }).catch(() => {});
     return { ok: false, code };
   }
 }

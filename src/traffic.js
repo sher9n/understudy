@@ -52,6 +52,7 @@ export async function recordCall({
   statusCode = null, promptTokens = 0, completionTokens = 0, costUsd = 0, chargedUsd = 0,
   latencyMs = null, ttftMs = null, request = null, response = null, ref = null,
   armId = null, propensity = null, explored = null, escalated = null, check = null, cachedTokens = null, hinted = false,
+  costEstimated = false, generationId = null,
 }) {
   /* A call the customer made, routed or copied, carries its fingerprints: the request itself (the
      same request sent again is a retry), and the conversation before and after it (a follow-up
@@ -77,17 +78,20 @@ export async function recordCall({
     escalated: escalated === null ? null : (escalated ? 1 : 0),
     check_json: check ? JSON.stringify(check) : null,
     hinted: hinted ? 1 : null,
+    // worked out from tokens because the provider did not say, until its own record corrects it
+    cost_estimated: costEstimated ? 1 : 0,
+    generation_id: generationId ? String(generationId).slice(0, 120) : null,
   };
   row.task_id = customer ? row.id : null;
   row.step = customer ? 1 : null;
   await db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model,
       status_code, prompt_tokens, completion_tokens, cost_usd, charged_usd, latency_ms, ttft_ms,
       request_json, response_json, created_at, ref, request_hash, before_hash, after_hash, task_id, step,
-      arm_id, propensity, explored, escalated, check_json, cached_tokens, hinted)
+      arm_id, propensity, explored, escalated, check_json, cached_tokens, hinted, cost_estimated, generation_id)
       VALUES (@id, @workspace_id, @workload_id, @source, @requested_model, @served_model,
       @status_code, @prompt_tokens, @completion_tokens, @cost_usd, @charged_usd, @latency_ms, @ttft_ms,
       @request_json, @response_json, @created_at, @ref, @request_hash, @before_hash, @after_hash, @task_id, @step,
-      @arm_id, @propensity, @explored, @escalated, @check_json, @cached_tokens, @hinted)`).run(row);
+      @arm_id, @propensity, @explored, @escalated, @check_json, @cached_tokens, @hinted, @cost_estimated, @generation_id)`).run(row);
   if (workloadId) await db.prepare('UPDATE workloads SET updated_at = ? WHERE id = ?').run(now(), workloadId);
   if (customer && workloadId) {
     const p = noteCall(row, { request, response })

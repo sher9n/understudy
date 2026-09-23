@@ -6,7 +6,7 @@ import config, { canRoute } from './config.js';
 import { verifyKey, bearerOf } from './keys.js';
 import { workloadFor, recordCall, addActivity } from './traffic.js';
 import { chat, chatStream, priceCall, UpstreamError, reasonOf, hintApplies } from './openrouter.js';
-import { gateRouting, chargeCall, grantStarterCredit, hold, release, worstCaseTokens, withFee } from './billing.js';
+import { gateRouting, chargeCall, grantStarterCredit, hold, release, callShape, callBound, withFee } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
 import { workloadNameOf, pinnedOf } from './classify.js';
@@ -16,6 +16,16 @@ import { serveWith, writeAsStream } from './learn/serve.js';
 import { leadModel } from './learn/arms.js';
 import { zdrFor, cacheHintFor } from './workspace.js';
 import { featuresOf, predict } from './learn/router.js';
+import { estimateCost } from './trueup.js';
+
+/* Roughly how many tokens an answer ran to, from what it wrote: three characters a token, which
+   overcounts ordinary text, for charging a call whose provider did not say. */
+const writtenTokens = (response) => {
+  const m = response?.choices?.[0]?.message || {};
+  const args = Array.isArray(m.tool_calls) ? m.tool_calls.reduce((n, c) => n + String(c?.function?.arguments || '').length, 0) : 0;
+  return Math.ceil((String(m.content || '').length + args) / 3);
+};
+const hasCost = (usage) => usage?.cost !== null && usage?.cost !== undefined && Number.isFinite(Number(usage.cost));
 
 export const v1 = safeRouter();
 
@@ -139,31 +149,49 @@ function modelsOf(ready) {
   return [...out];
 }
 
-/* Set aside what this call could cost before it is sent. The dearest model it could touch, at its
-   list price times a margin (a provider that keeps nothing can charge more than the list), for the
-   whole prompt and the longest answer it allows; twice that when a strategy can pay for two models
-   on one call. A model with no known price is held at a fixed amount. */
+/* Set aside what this call could cost before it is sent: the most it can cost on the dearest model it
+   could touch (see callBound), twice that when a strategy can pay for two models on one call. A model
+   with no known price is held at a fixed amount. When the request names no cap and some model it may
+   reach publishes no longest answer, the call is sent capped at HOLD_MAX_OUTPUT_TOKENS, so what was set
+   aside is still a bound; the request is changed only then, and only by adding that cap. */
 async function holdFor(wsId, body, ready) {
-  const { pin, pout } = worstCaseTokens(body);
+  const shape = callShape(body);
   let worst = 0;
+  let priced = false;
+  let unbounded = false;
   for (const m of modelsOf(ready)) {
-    const p = await priceCall(m, pin, pout);
-    if (p !== null && p > worst) worst = p;
+    const b = await callBound(m, shape, { zdr: ready.zdr });
+    if (!b) continue;
+    priced = true;
+    if (!b.known) unbounded = true;
+    if (b.usd > worst) worst = b.usd;
   }
-  const est = worst > 0 ? worst * config.HOLD_PRICE_MULTIPLE : config.HOLD_UNPRICED_USD;
+  if (unbounded && shape.cap === null) body.max_tokens = config.HOLD_MAX_OUTPUT_TOKENS;
+  const est = priced ? worst : config.HOLD_UNPRICED_USD;
   const twice = [ready.strategy?.spec?.kind, ready.strategy?.fallback ? 'fallback' : null].some((k) => k === 'cascade' || k === 'fallback');
-  return hold(wsId, withFee(est * (twice ? 2 : 1)), 'call');
+  const h = await hold(wsId, withFee(est * (twice ? 2 : 1)), 'call');
+  return { ...h, capped: shape.cap !== null };
 }
 
-const cannotCover = (h) => ({
-  status: 402,
-  json: { error: {
-    message: h.inFlight > 0
-      ? 'Your balance is set aside for calls still in flight and cannot cover this one. Add credit, or send fewer calls at once.'
-      : 'Your balance is empty. Add credit in Settings and calls resume immediately.',
-    type: 'no_balance',
-  } },
-});
+/* Why a call that did not fit was refused, in words that say what to do. A workspace's own limit is
+   said as that limit; otherwise the balance is empty, or what is free is set aside for calls in
+   flight, and a call with no cap on its answer sets aside the most its longest answer could cost. */
+const cannotCover = (h) => {
+  if (h.code === 'daily_limit' || h.code === 'monthly_limit') {
+    return { status: 402, json: { error: { message: h.message, type: h.code } } };
+  }
+  const asks = h.want > 0 ? ` This call sets aside up to $${Number(h.want).toFixed(2)}` : '';
+  const why = h.capped ? '.' : ', because a call without max_tokens sets aside what its longest possible answer could cost; setting max_tokens sets aside less.';
+  return {
+    status: 402,
+    json: { error: {
+      message: h.inFlight > 0
+        ? `Your balance is set aside for calls still in flight and cannot cover this one.${asks ? `${asks}${why}` : ''} Add credit, or send fewer calls at once.`
+        : 'Your balance is empty. Add credit in Settings and calls resume immediately.',
+      type: 'no_balance',
+    } },
+  };
+};
 
 /* What a call says about how it was decided, kept on its row: the strategy, the chance it had of
    being chosen, whether it was an experiment, and for a cascade whether it was sent on and why. */
@@ -250,9 +278,10 @@ const liveOpts = (strategy) => (strategy?.explored
    turns an answer the customer has already been sent, and paid for, into an error. */
 async function settle(args) {
   try {
-    await finish(args);
+    return await finish(args);
   } catch (err) {
     console.error(`bookkeeping for ${args.callId} failed: ${err?.message || err}`);
+    return null;
   }
 }
 
@@ -284,7 +313,8 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
         out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr });
       } else {
         const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: ready.cacheHint, ...liveOpts(strategy) });
-        out = { json: r.json, served, cost: Number(r.json?.usage?.cost ?? 0), latencyMs: r.latencyMs ?? Date.now() - started };
+        // a cost the answer did not state stays unstated here, so the charge estimates it (see finish)
+        out = { json: r.json, served, cost: hasCost(r.json?.usage) ? Number(r.json.usage.cost) : null, latencyMs: r.latencyMs ?? Date.now() - started };
       }
     } catch (err) {
       if (next && (!next.isFallback || worthFallback(err))) {
@@ -307,12 +337,12 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
       return { ok: false, status: f.status, json: f.json, served, requested, callId };
     }
     // charged for everything the strategy spent on it: a cascade's check, and a call it sent on
-    await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
+    const done = await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
       started, body, response: out.json, status: 200, latencyMs: out.latencyMs, source, callId, ref,
       decision: decisionOf(strategy, strategy && strategy.spec.kind !== 'model' ? out : null), holdId: h.holdId,
       cacheHint: ready.cacheHint && (!strategy || strategy.spec.kind === 'model') });
     return { ok: true, status: 200, json: out.json, served: out.served, requested, callId,
-      latencyMs: out.latencyMs, costUsd: out.cost, workload: workload?.slug ?? null };
+      latencyMs: out.latencyMs, costUsd: done?.cost ?? out.cost ?? 0, workload: workload?.slug ?? null };
   }
   await release(h.holdId).catch(() => {});
   return { ok: false, status: 502, json: { error: { message: 'The provider could not be reached.' } }, callId };
@@ -355,7 +385,7 @@ v1.post('/chat/completions', async (req, res) => {
   for (const [k, strategy] of tries.entries()) {
     const next = tries[k + 1];
     const r = await streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready, holdId: h.holdId });
-    // an answer that failed part way was never charged, so what it set aside goes back
+    // an answer that failed part way was charged for what it wrote, which took its hold; this is only a safety
     if (r.sent) await release(h.holdId).catch(() => {});
     if (r.ok || r.sent) return undefined;
     // nothing has reached the customer yet: a failure is kept, and the call served the next way
@@ -436,6 +466,8 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
   const toolCalls = [];
   let finish_reason = null;
   let model = null;
+  // the provider's id for this answer, under which OpenRouter keeps what it cost
+  let genId = null;
   // when the first word reached the customer: what somebody watching a streamed answer waits for
   let firstAt = null;
   const read = (line) => {
@@ -448,6 +480,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
       // the last chunk carries usage, which is what the customer is charged on
       if (j.usage) usage = j.usage;
       if (j.model) model = j.model;
+      if (typeof j.id === 'string' && !genId) genId = j.id;
       const ch = j.choices?.[0];
       if (typeof ch?.delta?.content === 'string') answer += ch.delta.content;
       if (Array.isArray(ch?.delta?.tool_calls)) {
@@ -486,16 +519,31 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
   } catch (err) {
     // the answer had started, so it cannot be tried again: it is ended where it stands
     reportCallFailure({ kind: 'streamed call', model: served, status: 502, workspaceId: wsId, message: err?.message });
+    /* What the provider wrote before it broke off was paid for, and used to be charged nothing: a
+       customer could stream long answers and cut them off for free. It is charged from what was
+       written, at list price, and corrected from OpenRouter's record of the call. */
+    const partial = { id: genId, choices: [{ message: { content: answer, ...(toolCalls.length ? { tool_calls: toolCalls.filter(Boolean) } : {}) } }] };
+    let cost = 0;
+    let charged = 0;
+    try {
+      cost = hasCost(usage) ? Number(usage.cost)
+        : await estimateCost(served, usage?.prompt_tokens ?? callShape(body).pin, usage?.completion_tokens ?? writtenTokens(partial));
+      charged = await chargeCall(wsId, cost, `${workload?.slug ?? 'a call'} on ${served}, broken off`, { holdId });
+    } catch (e) {
+      console.error(`charging a broken stream ${callId} failed: ${e?.message || e}`);
+    }
     await recordCall({
       id: callId, workspaceId: wsId, workloadId: workload.id, source: 'routed', requestedModel: requested,
       servedModel: served, statusCode: 502, latencyMs: Date.now() - started, request: body, ref, ...(decision || {}),
+      costUsd: cost, chargedUsd: charged, costEstimated: !hasCost(usage), generationId: genId,
     }).catch(() => {});
+    if (!hasCost(usage) && genId) await enqueue('true_up', { callId }, { runAfter: now() + 60000 }).catch(() => {});
     res.end();
     return { ok: false, sent: true };
   }
   const calls = toolCalls.filter(Boolean);
   const response = {
-    model, streamed: true, usage,
+    id: genId, model, streamed: true, usage,
     choices: [{ index: 0, message: { role: 'assistant', content: answer, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason }],
   };
   await settle({ wsId, workload, requested, served, usage, started, body, response, status: 200,
@@ -505,7 +553,12 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
 
 async function finish({ wsId, workload, requested, served, usage, started, body, response, status,
   latencyMs, ttftMs = null, source = 'routed', callId = null, ref = null, decision = null, holdId = null, cacheHint = false }) {
-  const cost = Number(usage?.cost ?? 0);
+  /* What the provider said it cost. An answer that did not say used to be charged nothing; it is
+     charged from its tokens now and corrected once OpenRouter's own record of it can be read. */
+  const estimated = !hasCost(usage);
+  const cost = estimated
+    ? await estimateCost(served, usage?.prompt_tokens ?? callShape(body).pin, usage?.completion_tokens ?? writtenTokens(response))
+    : Number(usage.cost);
   const note = workload ? `${workload.slug} on ${served}` : `Test call on ${served}`;
   // charged, and what the call set aside given back, in one step
   const charged = await chargeCall(wsId, cost, note, { holdId });
@@ -518,10 +571,13 @@ async function finish({ wsId, workload, requested, served, usage, started, body,
     hinted: !!(cacheHint && hintApplies(body, served)),
     costUsd: cost, chargedUsd: charged, latencyMs: latencyMs ?? Date.now() - started, ttftMs,
     request: body, response, ref, ...(decision || {}),
+    costEstimated: estimated, generationId: response?.id ?? null,
   });
+  if (estimated && response?.id) await enqueue('true_up', { callId }, { runAfter: now() + 60000 }).catch(() => {});
   if (workload) await considerMeasuring(wsId, workload);
   // a customer's answered call, which the learning layer may answer again in the background
   if (workload && source === 'routed' && status === 200) noteServed({ workload, body, response, callId, decision, costUsd: cost });
+  return { cost, charged, estimated };
 }
 
 /** Once a workload has enough calls to be trusted, it measures itself without being asked. */

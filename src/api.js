@@ -3,10 +3,11 @@ import { safeRouter } from './safe.js';
 import { db, now, round8, usd } from './db/index.js';
 import config, { canRoute, canBill, canEmail, canRevealKeys, paymentsState, MEASURE_CHOICES } from './config.js';
 import { allow, clientIp } from './limits.js';
+import crypto from 'node:crypto';
 import { startSignUp, checkPassword, startSession, endSession, session, requireUser, cookieFor, clearCookie,
   requestLoginCode, verifyLoginCode, verifyLoginLink, peekLoginLink, changePassword, endOtherSessions,
-  requestEmailChange, verifyEmailChange } from './auth.js';
-import send, { codeEmail, accountExistsEmail } from './email.js';
+  requestEmailChange, verifyEmailChange, Refusal, signupCookieFor, clearSignupCookie, signupNonceOf } from './auth.js';
+import send, { codeEmail, accountExistsEmail, noticeEmail } from './email.js';
 import { issueKey, listKeys, revokeKey, revealKey, revealKeyById } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity, track } from './traffic.js';
 import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available, optimizeSpent, spentOnCalls } from './billing.js';
@@ -37,6 +38,11 @@ const fail = (res, code, message) => res.status(code).json({ error: message });
 /* Accounts -------------------------------------------------------------------- */
 
 const tooMany = (res, message) => fail(res, 429, message);
+
+/* An email sent without waiting for it. Whether an address has an account decides whether a code goes
+   out, so waiting for the send made the answer slower for addresses that have one, which told anybody
+   timing it who does. A send that fails is logged; the answer never depended on it. */
+const sendLater = (message) => { send(message).catch((err) => console.error(`email to ${message.to} failed: ${err?.message || err}`)); };
 // where an emailed link lands: a page with a button, because opening a link must never sign anybody in
 const linkFor = (token) => `${config.PUBLIC_URL}/signin/link#t=${encodeURIComponent(token)}`;
 
@@ -47,14 +53,23 @@ api.post('/auth/sign-up', async (req, res) => {
   if (!await allow('signup_ip', ip, { max: config.LIMIT_SIGNUP_PER_IP_HOUR, windowMs: 3600000 })) {
     return tooMany(res, 'Too many sign-ups from here. Try again in an hour.');
   }
+  // this browser's own secret: only a code used from here keeps the password chosen here (see startSignUp)
+  const nonce = crypto.randomBytes(24).toString('base64url');
   let out;
-  try { out = await startSignUp(req.body || {}, { ip }); } catch (err) { return fail(res, 400, err.message); }
+  try {
+    out = await startSignUp(req.body || {}, { ip, nonce });
+  } catch (err) {
+    // our own words for a person; anything else is ours to fix and is answered as a failure of ours
+    if (err instanceof Refusal) return fail(res, 400, err.message);
+    throw err;
+  }
   if (!out.ok) return tooMany(res, 'Too many codes asked for this address. Wait an hour, then try again.');
   if (out.send?.kind === 'verify') {
-    await send({ to: out.email, ...codeEmail({ purpose: 'verify', code: out.send.code, link: linkFor(out.send.token), minutes: out.send.minutes }) });
+    sendLater({ to: out.email, ...codeEmail({ purpose: 'verify', code: out.send.code, link: linkFor(out.send.token), minutes: out.send.minutes }) });
   } else if (out.send?.kind === 'exists') {
-    await send({ to: out.email, ...accountExistsEmail({ signInUrl: `${config.PUBLIC_URL}/signin` }) });
+    sendLater({ to: out.email, ...accountExistsEmail({ signInUrl: `${config.PUBLIC_URL}/signin` }) });
   }
+  res.setHeader('Set-Cookie', signupCookieFor(nonce));
   return res.json({ ok: true, verify: true, email: out.email, minutes: config.LOGIN_CODE_TTL_MIN, digits: config.LOGIN_CODE_DIGITS });
 });
 
@@ -90,7 +105,7 @@ api.post('/auth/code/request', async (req, res) => {
     return tooMany(res, 'Too many codes asked for. Wait an hour, or sign in with your password.');
   }
   if (asked.send) {
-    await send({ to: email, ...codeEmail({ purpose: 'sign_in', code: asked.send.code, link: linkFor(asked.send.token), minutes: asked.send.minutes }) });
+    sendLater({ to: email, ...codeEmail({ purpose: 'sign_in', code: asked.send.code, link: linkFor(asked.send.token), minutes: asked.send.minutes }) });
   }
   return res.json({ ok: true, minutes: config.LOGIN_CODE_TTL_MIN, digits: config.LOGIN_CODE_DIGITS });
 });
@@ -101,7 +116,7 @@ api.post('/auth/code/verify', async (req, res) => {
   if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
     return tooMany(res, 'Too many tries from here. Wait an hour and ask for a new code.');
   }
-  const out = await verifyLoginCode(req.body?.email, req.body?.code);
+  const out = await verifyLoginCode(req.body?.email, req.body?.code, { nonce: signupNonceOf(req) });
   if (!out.ok) {
     if (out.reason === 'wrong') {
       return fail(res, 401, out.triesLeft > 0
@@ -111,8 +126,11 @@ api.post('/auth/code/verify', async (req, res) => {
     if (out.reason === 'too_many_attempts') return tooMany(res, 'That code has been used up. Ask for another.');
     return fail(res, 401, 'That code has expired. Ask for another.');
   }
-  res.setHeader('Set-Cookie', cookieFor(out.token));
-  return res.json({ ok: true, fresh: !!out.fresh });
+  res.setHeader('Set-Cookie', [cookieFor(out.token), clearSignupCookie()]);
+  /* A new account's first key is made when its email answers, and handed over here, the one moment it
+     can be: without it, a deployment that cannot show keys again left the new customer holding nothing
+     but the key's first few characters. */
+  return res.json({ ok: true, fresh: !!out.fresh, key: out.key || null, passwordKept: out.passwordKept ?? null });
 });
 
 /* The link from the same emails. Links in mail sent before this signed in when opened; they are
@@ -134,10 +152,10 @@ api.post('/auth/link', async (req, res) => {
   if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
     return tooMany(res, 'Too many tries from here. Wait an hour.');
   }
-  const out = await verifyLoginLink(req.body?.token);
+  const out = await verifyLoginLink(req.body?.token, { nonce: signupNonceOf(req) });
   if (!out.ok) return fail(res, 401, 'That link has expired or has already been used. Ask for a new one.');
-  res.setHeader('Set-Cookie', cookieFor(out.token));
-  return res.json({ ok: true, fresh: !!out.fresh });
+  res.setHeader('Set-Cookie', [cookieFor(out.token), clearSignupCookie()]);
+  return res.json({ ok: true, fresh: !!out.fresh, key: out.key || null, passwordKept: out.passwordKept ?? null });
 });
 
 api.post('/auth/sign-out', async (req, res) => {
@@ -908,8 +926,12 @@ api.get('/workloads/:id/calls/:callId/text', async (req, res) => {
   });
 });
 
+/* How this workload is switched: on its own, only once somebody approves, or never (measured, and a
+   person can still approve by hand). Anything else is refused rather than read as "on its own": the
+   page offering two choices used to turn a "never" workload into an automatic one with one click. */
 api.post('/workloads/:id/mode', async (req, res) => {
-  const mode = req.body?.mode === 'ask' ? 'ask' : 'auto';
+  const mode = String(req.body?.mode || '');
+  if (!['auto', 'ask', 'off'].includes(mode)) return fail(res, 400, 'Choose auto, ask or off.');
   const changed = (await db.prepare('UPDATE workloads SET optimize_mode = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
     .run(mode, now(), req.params.id, req.workspace.id)).changes;
   if (!changed) return fail(res, 404, 'No such workload.');
@@ -1197,7 +1219,10 @@ api.get('/settings', async (req, res) => {
        thing that can actually be charged is the payment method, and anything that clears
        that while leaving the digits behind leaves a card on screen that does not exist. */
     card: (acct.payment_method && acct.card_last4)
-      ? { brand: acct.card_brand, last4: acct.card_last4 } : null,
+      ? { brand: acct.card_brand, last4: acct.card_last4, forTopUps: Number(acct.card_for_topups || 0) === 1 } : null,
+    // whether this deployment keeps keys in a form it can show again (KEY_SECRET is set)
+    canRevealKeys: canRevealKeys(),
+    passwordMin: 8,
     cardNote: acct.topup_failed_note,
     retentionDays: req.workspace.retention_days,
     evalModels: req.workspace.eval_models ?? config.EVAL_MODELS_DEFAULT,
@@ -1326,7 +1351,8 @@ api.post('/settings/notify', async (req, res) => {
 /* The ledger further back than Settings shows at first, twenty lines at a time. */
 api.get('/settings/ledger', async (req, res) => {
   const before = Number(req.query?.before);
-  const rows = await ledger(req.workspace.id, 20, { before: Number.isFinite(before) && before > 0 ? before : null });
+  const beforeId = typeof req.query?.beforeId === 'string' ? req.query.beforeId.slice(0, 60) : null;
+  const rows = await ledger(req.workspace.id, 20, { before: Number.isFinite(before) && before > 0 ? before : null, beforeId });
   return res.json({ rows, more: rows.length === 20 });
 });
 
@@ -1357,6 +1383,9 @@ api.post('/settings/keys/:id/name', async (req, res) => {
 
 /* Revealing one key in full, when somebody asks to see it. Keys are shown masked until then. */
 api.get('/settings/keys/:id/reveal', async (req, res) => {
+  if (!canRevealKeys()) {
+    return fail(res, 410, 'This deployment does not keep keys in a form it can show again, so a key can only be copied when it is made. Make a new one to get a key you can copy.');
+  }
   const k = await revealKeyById(req.workspace.id, req.params.id);
   if (!k) return fail(res, 404, 'No such key.');
   if (!k.secret) return fail(res, 410, 'This key was made before keys could be shown again. Replace it to get one you can copy.');
@@ -1369,15 +1398,29 @@ api.delete('/settings/keys/:id', async (req, res) => {
 });
 
 /* A name changes at once. An email address changes only once the new address answers a code, so
-   nobody can move an account to an address that is not theirs, and a typo cannot lock anybody out. */
+   nobody can move an account to an address that is not theirs, and a typo cannot lock anybody out.
+
+   Moving the address that signs in also needs the current password. A session alone used to be
+   enough, so anybody holding a stolen session could move the account to their own address, and the
+   owner could then sign in neither by password nor by code. The old address is told once it moves,
+   and every other session ends. Asking is limited per account and per address a request came from,
+   because each ask sends an email from us to an address of the asker's choosing. */
 api.post('/settings/profile', async (req, res) => {
   const name = String(req.body?.name ?? req.user.name).replace(/\s+/g, ' ').trim().slice(0, 80);
   await db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, req.user.id);
   const email = String(req.body?.email ?? req.user.email).trim().toLowerCase().slice(0, 160);
   if (email === req.user.email) return res.json({ ok: true, name, email });
-  const asked = await requestEmailChange(req.user, email, { ip: clientIp(req) });
+  if (req.user.pw_cleared) return fail(res, 400, 'Choose a password first, under Password below, then change your email.');
+  const ip = clientIp(req);
+  if (!await allow('email_change_user', req.user.id, { max: 5, windowMs: 3600000 })
+    || !await allow('code_request_ip', ip, { max: config.LIMIT_CODES_PER_IP_HOUR, windowMs: 3600000 })) {
+    return tooMany(res, 'Too many changes asked for. Wait an hour, then try again.');
+  }
+  // a wrong password is a 400, not a 401: the app reads 401 as a session that has ended
+  if (!await checkPassword(req.user.email, req.body?.password)) return fail(res, 400, 'Your current password is not right.');
+  const asked = await requestEmailChange(req.user, email, { ip });
   if (!asked.ok) return fail(res, 400, asked.reason);
-  if (asked.send) await send({ to: asked.email, ...codeEmail({ purpose: 'change_email', code: asked.send.code, minutes: asked.send.minutes }) });
+  if (asked.send) sendLater({ to: asked.email, ...codeEmail({ purpose: 'change_email', code: asked.send.code, minutes: asked.send.minutes }) });
   // the same answer whether or not the address is free, so this cannot be used to find out who has an account
   return res.json({ ok: true, name, email: req.user.email, pendingEmail: asked.email, minutes: config.LOGIN_CODE_TTL_MIN });
 });
@@ -1387,18 +1430,35 @@ api.post('/settings/email/verify', async (req, res) => {
   if (!await allow('code_verify_ip', ip, { max: config.LIMIT_VERIFY_PER_IP_HOUR, windowMs: 3600000 })) {
     return fail(res, 429, 'Too many tries from here. Wait an hour.');
   }
+  const before = req.user.email;
   const out = await verifyEmailChange(req.user, req.body?.email, req.body?.code);
   if (!out.ok) {
-    return fail(res, out.reason === 'wrong' ? 401 : 400, out.reason === 'wrong'
+    // 400 either way: the app reads a 401 as a session that has ended
+    return fail(res, 400, out.reason === 'wrong'
       ? `That code is not right. ${out.triesLeft} ${out.triesLeft === 1 ? 'try' : 'tries'} left.`
       : 'That code has expired or the address is no longer free. Ask for another.');
   }
-  await addActivity(req.workspace.id, { kind: 'connect', title: 'Your email address changed', detail: `It is ${out.email} now.` });
+  const ended = await endOtherSessions(req.user.id, req.sessionValue);
+  await addActivity(req.workspace.id, { kind: 'connect', title: 'Your email address changed',
+    detail: `It is ${out.email} now.${ended ? ' Every other session was signed out.' : ''}` });
+  sendLater({ to: before, ...noticeEmail({
+    title: 'Your Understudy email address was changed',
+    lines: [
+      `The address that signs in to your Understudy account is now ${out.email}. This one no longer signs in.`,
+      'It was changed by somebody signed in to the account who knew its password, and every other session was signed out.',
+      'If that was not you, tell us straight away through the contact page.',
+    ],
+    link: `${config.PUBLIC_URL}/contact?topic=security`, linkText: 'Contact us',
+  }) });
   return res.json({ ok: true, email: out.email });
 });
 
 /* A new password. Every other session ends, so anybody who knew the old one is signed out everywhere. */
 api.post('/settings/password', async (req, res) => {
+  // each try is a deliberately slow hash, and a session must not be a way to guess the password
+  if (!await allow('password_change_user', req.user.id, { max: 10, windowMs: 900000 })) {
+    return tooMany(res, 'Too many tries. Wait a quarter of an hour, then try again.');
+  }
   const out = await changePassword(req.user, req.body?.current, req.body?.next, { keepSession: req.sessionValue });
   if (!out.ok) return fail(res, 400, out.reason);
   return res.json({ ok: true });
@@ -1546,8 +1606,9 @@ api.post('/settings/auto-topup', async (req, res) => {
       .run(Math.round(a * 100) / 100, now(), req.workspace.id);
   }
   if (b.enabled !== undefined) {
-    if (b.enabled && !acct.payment_method) {
-      return fail(res, 400, 'Add credit with a card first, and tick "Top up automatically" there, so there is a card to charge.');
+    // only a card saved for top ups, at a checkout that said so, is ever charged without its owner there
+    if (b.enabled && (!acct.payment_method || Number(acct.card_for_topups || 0) !== 1)) {
+      return fail(res, 400, 'Add credit with a card first, and tick the box to top up automatically there, so the card is saved for top ups.');
     }
     await db.prepare(`UPDATE billing_accounts SET auto_topup = ?, topup_failed_note = NULL, updated_at = ?
                  WHERE workspace_id = ?`).run(b.enabled ? 1 : 0, now(), req.workspace.id);

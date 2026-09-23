@@ -76,6 +76,15 @@ export const config = {
   ZDR_FORCED: bool('ZDR_FORCED', false),
   MODEL_MIN_GAP_MS: num('MODEL_MIN_GAP_MS', 3200),
   UPSTREAM_TIMEOUT_MS: num('UPSTREAM_TIMEOUT_MS', 120000),
+  /* Which header names the address a request came from, for the per-address limits (see clientIp in
+     limits.js): 'x-real-ip' straight from Railway's edge, or 'xff-first' once its CDN sits in front. */
+  CLIENT_IP_FROM: str('CLIENT_IP_FROM', 'x-real-ip'),
+  /* A live streamed answer, once it has started, may go on as long as it keeps coming: no silence
+     longer than the first number, and no longer in all than the second. The whole answer used to be
+     held to UPSTREAM_TIMEOUT_MS, which cut every streamed answer that took over two minutes. A
+     measurement's replays keep the single limit, because a measurement's heartbeat assumes it. */
+  UPSTREAM_IDLE_MS: num('UPSTREAM_IDLE_MS', 120000),
+  UPSTREAM_STREAM_MAX_MS: num('UPSTREAM_STREAM_MAX_MS', 1800000),
   /* The longest we wait before retrying when a provider says it is busy, whatever it asks for.
      Uncapped, one call could wait out any Retry-After three times over and outlast the silence
      a measurement is allowed (EVAL_STALE_MIN), so a slow but live run would be closed as
@@ -386,11 +395,13 @@ export const config = {
   TOPUP_THRESHOLD_USD: num('TOPUP_THRESHOLD_USD', 5),
   /* The most automatic top ups a workspace gets in a day before it is asked to decide. */
   TOPUP_MAX_PER_DAY: num('TOPUP_MAX_PER_DAY', 10),
-  /* Money set aside for a call in flight: what it could cost, reserved before it is sent and given
-     back once it is answered. A hold lapses after this long, longer than the slowest call can take,
-     so a process that died mid-call cannot freeze a balance. An answer with no length cap is
-     reserved as this many tokens, and no answer as more than the second number. */
-  HOLD_TTL_MIN: num('HOLD_TTL_MIN', 15),
+  /* Money set aside for a call in flight: the most it could cost (see callBound), reserved before it
+     is sent and given back once it is answered. A hold lapses after this long, longer than the longest
+     streamed answer allowed (UPSTREAM_STREAM_MAX_MS), so a process that died mid-call cannot freeze a
+     balance, and a live call never outlives its own hold. A request with no cap on its answer, to a
+     model that publishes no longest answer, is sent capped at HOLD_MAX_OUTPUT_TOKENS, so what was set
+     aside stays a bound. */
+  HOLD_TTL_MIN: num('HOLD_TTL_MIN', 35),
   /* A provider that keeps nothing can charge more than the list price, so a hold is the list price
      times this; a model with no known price is held at a fixed amount. */
   HOLD_PRICE_MULTIPLE: num('HOLD_PRICE_MULTIPLE', 2),

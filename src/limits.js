@@ -1,4 +1,5 @@
 import { db, now } from './db/index.js';
+import config from './config.js';
 
 /* Counting requests, so one machine or one address cannot hammer the doors that are open to
    anybody: signing in, asking for codes, signing up, the contact form.
@@ -27,16 +28,20 @@ export async function countOf(bucket, key, windowMs) {
     .get(bucket, String(key).slice(0, 200), now() - windowMs))?.n ?? 0);
 }
 
-/* The address a request came from.
+/* The address a request came from, which every per-address limit is keyed on.
 
-   Behind the platform's proxy every request arrives from the proxy, and the client's address is
-   in X-Forwarded-For. Anybody can send that header themselves, and proxies ADD to it rather than
-   replace it, so the entries on the left are whatever the client claimed and the one on the right
-   is what the proxy saw. The right-most entry is the one that cannot be forged from outside. */
+   Railway's edge sets X-Real-IP to the address that connected to it, and has refused a client's own
+   X-Real-IP since August 2024, so it cannot be forged from outside. Production answers straight from
+   the edge (server: railway-hikari, no CDN headers, checked 2026-09-23), where that address is the
+   client's. With Railway's CDN in front it is the CDN's instead, which would put every visitor behind
+   one address into one limit; Railway's advice for that case (March 2026) is the first entry of
+   X-Forwarded-For, which its edge controls. CLIENT_IP_FROM chooses: 'x-real-ip' (the default) or
+   'xff-first'. Without either header, the right-most X-Forwarded-For entry, then the socket. */
 export function clientIp(req) {
+  const xff = String(req.headers?.['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (config.CLIENT_IP_FROM === 'xff-first' && xff.length) return xff[0];
   const real = req.headers?.['x-real-ip'];
   if (typeof real === 'string' && real.trim()) return real.trim();
-  const xff = String(req.headers?.['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
   if (xff.length) return xff[xff.length - 1];
   return req.socket?.remoteAddress || 'unknown';
 }

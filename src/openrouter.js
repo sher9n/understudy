@@ -139,7 +139,15 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
   }
 }
 
-/** Streaming passes straight through; the final chunk carries usage, which is what we bill on. */
+const timedOut = (message) => Object.assign(new Error(message), { name: 'TimeoutError' });
+
+/** Streaming passes straight through; the final chunk carries usage, which is what we bill on.
+ *
+ *  A stream is timed in two parts. The provider has UPSTREAM_TIMEOUT_MS to start answering, and then
+ *  may keep going for as long as it keeps sending, up to UPSTREAM_STREAM_MAX_MS, with no silence longer
+ *  than UPSTREAM_IDLE_MS. One limit on the whole answer used to cut every streamed answer that took
+ *  longer than two minutes to write, which a long answer or a model that thinks at length routinely
+ *  does, and the customer was left holding half an answer. */
 export async function chatStream(body, model, { signal, recipe = null, retries = 0, pace = false, zdr = null, cacheHint = false } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
   const payload = buildUpstream(body, model, recipe, { zdr, cacheHint });
@@ -148,11 +156,30 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
   for (let attempt = 0; ; attempt += 1) {
     await waitForSlot(model, pace);
     const sentAt = Date.now();
-    const res = await fetch(`${config.OPENROUTER_BASE}/chat/completions`, {
-      method: 'POST', headers: headers(), body: JSON.stringify(payload),
-      signal: signal ?? AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS),
-    });
+    const ctl = new AbortController();
+    const stop = (why) => { if (!ctl.signal.aborted) ctl.abort(why); };
+    const onOuter = () => stop(signal.reason);
+    if (signal) {
+      if (signal.aborted) stop(signal.reason);
+      else signal.addEventListener('abort', onOuter, { once: true });
+    }
+    const letGo = () => { if (signal) signal.removeEventListener('abort', onOuter); };
+    const toStart = setTimeout(() => stop(timedOut('The provider did not start answering in time.')), config.UPSTREAM_TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetch(`${config.OPENROUTER_BASE}/chat/completions`, {
+        method: 'POST', headers: headers(), body: JSON.stringify(payload), signal: ctl.signal,
+      });
+    } catch (err) {
+      letGo();
+      const late = err?.name === 'TimeoutError' || ctl.signal.reason?.name === 'TimeoutError';
+      throw new UpstreamError(late ? 408 : 0,
+        { error: { message: late ? 'The provider did not answer in time.' : 'The provider could not be reached.' } });
+    } finally {
+      clearTimeout(toStart);
+    }
     if (res.status === 429 && attempt < retries) {
+      letGo();
       await res.text().catch(() => '');
       const after = Number(res.headers.get('retry-after')) * 1000;
       const wait = Number.isFinite(after) && after > 0 ? after : 2000 * 2 ** attempt;
@@ -160,13 +187,31 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
       continue;
     }
     if (!res.ok) {
+      letGo();
       const text = await res.text();
       let json = null;
       try { json = JSON.parse(text); } catch { /* not json */ }
       throw new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
     }
-    res.sentAt = sentAt;
-    return res;
+    // started: from here the answer may take as long as it needs, so long as it keeps coming
+    const whole = setTimeout(() => stop(timedOut('The answer took longer than allowed.')), config.UPSTREAM_STREAM_MAX_MS);
+    let quiet = setTimeout(() => stop(timedOut('The provider stopped sending.')), config.UPSTREAM_IDLE_MS);
+    whole.unref?.();
+    quiet.unref?.();
+    const done = () => { clearTimeout(whole); clearTimeout(quiet); letGo(); };
+    const watched = res.body ? res.body.pipeThrough(new TransformStream({
+      transform(chunk, c) {
+        clearTimeout(quiet);
+        quiet = setTimeout(() => stop(timedOut('The provider stopped sending.')), config.UPSTREAM_IDLE_MS);
+        quiet.unref?.();
+        c.enqueue(chunk);
+      },
+      flush() { done(); },
+    })) : null;
+    if (!watched) done();
+    const out = new Response(watched, { status: res.status, statusText: res.statusText, headers: res.headers });
+    out.sentAt = sentAt;
+    return out;
   }
 }
 
@@ -177,7 +222,9 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
  * both count as the first thing written; a model's hidden thinking does not, because nobody sees
  * it. Tool calls arrive in pieces and are joined by their index, the way every client joins them. */
 export async function streamCollect(body, model, { recipe = null, retries = 3, signal, pace = true, zdr = null } = {}) {
-  const res = await chatStream(body, model, { recipe, retries, signal, pace, zdr });
+  /* One limit on the whole replay, as before: a measurement's heartbeat is written between calls, and
+     a replay allowed the live stream's half hour would read as a measurement nothing is running. */
+  const res = await chatStream(body, model, { recipe, retries, signal: signal ?? AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS), pace, zdr });
   /* Timed from when the request actually left, after any spacing, so waiting our turn is
      never counted against a model's speed. */
   const started = res.sentAt ?? Date.now();

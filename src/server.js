@@ -13,6 +13,7 @@ import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './aler
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
+import { trueUp } from './trueup.js';
 import { nudgeForCatalog } from './eval/schedule.js';
 import { runTopUp, sweepHolds } from './billing.js';
 import { pruneLimits } from './limits.js';
@@ -37,6 +38,9 @@ await settleOutcomes();
 
 handle('eval_run', async ({ workloadId, trigger }, job) =>
   await runEvaluation(workloadId, { trigger, jobId: job?.id ?? null }));
+
+// a call charged from its tokens, corrected to what OpenRouter recorded for it (see trueup.js)
+handle('true_up', async (payload, job) => await trueUp(payload, job));
 
 handle('catalog_sync', async () => {
   if (!canRoute()) return { snoozeMs: 60 * 60000, note: 'no OPENROUTER_API_KEY' };
@@ -410,8 +414,16 @@ app.disable('x-powered-by');
 
 // Stripe needs the raw body, so it is mounted before the global json parser
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const { handleWebhook } = await import('./stripe-webhook.js');
-  return await handleWebhook(req, res);
+  /* Any failure answers 500, so Stripe tries again. Unwrapped, a database error before the handler's
+     own error handling left the request hanging until Stripe gave up on it. */
+  try {
+    const { handleWebhook } = await import('./stripe-webhook.js');
+    return await handleWebhook(req, res);
+  } catch (err) {
+    console.error(`stripe webhook failed: ${err?.message || err}`);
+    if (!res.headersSent) return res.status(500).send('webhook failed');
+    return undefined;
+  }
 });
 
 app.get('/health', async (_req, res) => res.json({

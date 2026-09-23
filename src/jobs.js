@@ -21,21 +21,31 @@ const CLAIM_STALE_MS = 30 * 60000;
 export function handle(kind, fn) { handlers.set(kind, fn); }
 
 export async function enqueue(kind, payload = {}, { runAfter = now(), unique = null, sooner = false } = {}) {
-  if (unique) {
-    const open = await db.prepare(
+  const row = { id: id('job'), kind, payload: JSON.stringify(payload), run_after: runAfter, created_at: now() };
+  const insert = (x) => x.prepare(`INSERT INTO jobs (id, kind, payload, status, attempts, run_after, created_at)
+              VALUES (@id, @kind, @payload, 'queued', 0, @run_after, @created_at)`).run(row);
+  if (!unique) {
+    await insert(db);
+    return row.id;
+  }
+  /* Looking for a copy and booking one used to be two separate steps, so two callers arriving together
+     both found none and both booked: two charges finishing at once queued two automatic top ups, which
+     then ran side by side on the same payment key. The two steps now run in one transaction behind a
+     lock on this job's kind and payload, so the second caller waits and finds the first one's copy. */
+  return db.tx(async (tx) => {
+    await tx.prepare('SELECT pg_advisory_xact_lock(hashtext(?))').get(`job:${kind}:${row.payload}`);
+    const open = await tx.prepare(
       `SELECT id, status, run_after FROM jobs WHERE kind = ? AND payload = ? AND id <> ?
           AND (status = 'queued' OR (status = 'claimed' AND (kind = 'eval_run' OR claimed_at >= ?)))`)
-      .get(kind, JSON.stringify(payload), running.getStore() ?? '', now() - CLAIM_STALE_MS);
+      .get(kind, row.payload, running.getStore() ?? '', now() - CLAIM_STALE_MS);
     // asked for sooner than the copy already booked: that copy is brought forward instead
     if (open && sooner && open.status === 'queued' && open.run_after > runAfter) {
-      await db.prepare(`UPDATE jobs SET run_after = ? WHERE id = ? AND status = 'queued'`).run(runAfter, open.id);
+      await tx.prepare(`UPDATE jobs SET run_after = ? WHERE id = ? AND status = 'queued'`).run(runAfter, open.id);
     }
     if (open) return open.id;
-  }
-  const row = { id: id('job'), kind, payload: JSON.stringify(payload), run_after: runAfter, created_at: now() };
-  await db.prepare(`INSERT INTO jobs (id, kind, payload, status, attempts, run_after, created_at)
-              VALUES (@id, @kind, @payload, 'queued', 0, @run_after, @created_at)`).run(row);
-  return row.id;
+    await insert(tx);
+    return row.id;
+  });
 }
 
 /** One row at a time, claimed atomically so a restart cannot run it twice. Kinds that are already

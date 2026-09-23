@@ -58,9 +58,14 @@ export async function handleWebhook(req, res) {
           // "completed" with the money still on its way is credited when it arrives, by the event after
           if (o.payment_status !== 'paid') break;
           const pi = await s.paymentIntents.retrieve(o.payment_intent);
-          if (pi.payment_method) await saveCard(wsId, s, pi.payment_method, o.customer);
+          /* A card is kept for automatic top ups only from a checkout that set it up for them, where
+             the customer ticked the box and was shown what it means. Every checkout used to replace
+             the saved card, so a one-off payment with another card left automatic top up pointing
+             at a card Stripe had never been told could be charged later, and the next top up failed. */
+          const forTopUps = o.metadata?.auto_topup === '1' && !!pi.payment_method;
+          if (forTopUps) await saveCard(wsId, s, pi.payment_method, o.customer);
           await credit(wsId, (o.amount_total ?? 0) / 100, pi.id, 'Card top up');
-          if (o.metadata?.auto_topup === '1' && pi.payment_method) {
+          if (forTopUps) {
             await db.prepare('UPDATE billing_accounts SET auto_topup = 1, topup_failed_note = NULL WHERE workspace_id = ?').run(wsId);
           }
         } else if (o.mode === 'subscription') {
@@ -115,6 +120,14 @@ export async function handleWebhook(req, res) {
           await db.prepare('UPDATE billing_accounts SET auto_topup = 0, updated_at = ? WHERE workspace_id = ?').run(now(), wsId);
         }
         break;
+      /* A dispute the bank decides for us returns the payment to us, so what was taken off the balance
+         when the dispute opened is given back, once. */
+      case 'charge.dispute.closed':
+      case 'charge.dispute.funds_reinstated':
+        if (wsId && (event.type === 'charge.dispute.funds_reinstated' || o.status === 'won')) {
+          await giveBackDispute(wsId, o.id);
+        }
+        break;
       case 'customer.subscription.deleted':
         if (wsId) {
           await db.prepare(`UPDATE billing_accounts SET plan_status = 'cancelled', updated_at = ? WHERE workspace_id = ?`)
@@ -166,14 +179,23 @@ async function credit(workspaceId, amountUsd, ref, note) {
 async function takeBack(workspaceId, sourceId, totalUsd, kind, note) {
   if (!(totalUsd > 0)) return;
   const prefix = `${kind}:${sourceId}`;
-  const taken = Number((await db.prepare(
-    `SELECT COALESCE(SUM(-amount_usd), 0) AS s FROM ledger WHERE workspace_id = ? AND ref LIKE ?`)
-    .get(workspaceId, `${prefix}:%`))?.s ?? 0);
-  const more = Math.round((totalUsd - taken) * 100) / 100;
-  if (!(more > 0)) return;
-  const r = await move(workspaceId, {
-    kind, amountUsd: -more, note, ref: `${prefix}:${Math.round(totalUsd * 100)}`,
+  /* What was already taken is read and the rest taken in one transaction, behind the account's row
+     lock. Read outside it, two partial refunds arriving together each saw nothing taken yet, and
+     refunds totalling $10 took $15. */
+  const out = await db.tx(async (tx) => {
+    await account(workspaceId, tx);
+    await tx.prepare('SELECT 1 FROM billing_accounts WHERE workspace_id = ? FOR UPDATE').get(workspaceId);
+    const taken = Number((await tx.prepare(
+      `SELECT COALESCE(SUM(-amount_usd), 0) AS s FROM ledger WHERE workspace_id = ? AND ref LIKE ?`)
+      .get(workspaceId, `${prefix}:%`))?.s ?? 0);
+    const more = Math.round((totalUsd - taken) * 100) / 100;
+    if (!(more > 0)) return null;
+    return { more, r: await move(workspaceId, {
+      kind, amountUsd: -more, note, ref: `${prefix}:${Math.round(totalUsd * 100)}`,
+    }, tx) };
   });
+  if (!out) return;
+  const { more, r } = out;
   if (!r.duplicate) {
     await addActivity(workspaceId, {
       kind: 'bill', title: `$${more.toFixed(2)} came off your balance`,
@@ -187,7 +209,29 @@ async function takeBack(workspaceId, sourceId, totalUsd, kind, note) {
 async function saveCard(workspaceId, s, paymentMethodId, customerId) {
   const pm = await s.paymentMethods.retrieve(paymentMethodId);
   await db.prepare(`UPDATE billing_accounts SET payment_method = ?, stripe_customer = COALESCE(stripe_customer, ?),
-              card_brand = ?, card_last4 = ?, updated_at = ? WHERE workspace_id = ?`)
+              card_brand = ?, card_last4 = ?, card_for_topups = 1, updated_at = ? WHERE workspace_id = ?`)
     .run(paymentMethodId, customerId ?? null, pm.card?.brand ?? null, pm.card?.last4 ?? null, now(), workspaceId);
   await account(workspaceId);
+}
+
+/* What a dispute took, given back when it is decided for us. Keyed on the dispute, so however many
+   times Stripe says so, it is given back once. */
+async function giveBackDispute(workspaceId, disputeId) {
+  const r = await db.tx(async (tx) => {
+    await account(workspaceId, tx);
+    await tx.prepare('SELECT 1 FROM billing_accounts WHERE workspace_id = ? FOR UPDATE').get(workspaceId);
+    const taken = Number((await tx.prepare(
+      `SELECT COALESCE(SUM(-amount_usd), 0) AS s FROM ledger WHERE workspace_id = ? AND ref LIKE ?`)
+      .get(workspaceId, `dispute:${disputeId}:%`))?.s ?? 0);
+    if (!(taken > 0)) return null;
+    return { taken, m: await move(workspaceId, {
+      kind: 'credit', amountUsd: taken, note: 'A disputed payment was upheld by the bank', ref: `dispute-won:${disputeId}`,
+    }, tx) };
+  });
+  if (r && !r.m.duplicate) {
+    await addActivity(workspaceId, {
+      kind: 'bill', title: `$${r.taken.toFixed(2)} is back on your balance`,
+      detail: 'The bank upheld a payment that had been disputed, so its credit is back on your balance. Automatic top up stays off until you switch it on.',
+    });
+  }
 }

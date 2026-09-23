@@ -50,16 +50,60 @@ const Stripe = (await import('stripe')).default;
 const MODEL = 'openai/gpt-5.4';
 // what the catalogue price below charges for the call the provider reports: 120 tokens in, 2 out
 const COST = 120 * 2.5e-6 + 2 * 15e-6;
+/* Models for the review's cases. LONG writes the longest answer it can unless asked for less, at a
+   cent per thousand tokens, so an answer with no cap costs 45 cents. NOCOST answers without saying
+   what it cost. NOLIMIT publishes no longest answer. STREAMY streams, and can be told to break off or
+   to go quiet part way. The provider keeps a record of what each answer cost, like OpenRouter's. */
+const LONG = 'test/long-writer';
+const NOCOST = 'test/no-cost';
+const NOLIMIT = 'test/no-limit';
+const STREAMY = 'test/streamy';
+const seen = [];
+const records = new Map();
+let gen = 0;
 const provider = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url.includes('/generation')) {
+    const id = new URL(req.url, 'http://x').searchParams.get('id');
+    if (!records.has(id)) { res.writeHead(404); res.end('{}'); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ data: { id, total_cost: records.get(id) } }));
+    return;
+  }
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
     const p = JSON.parse(body || '{}');
+    seen.push(p);
+    const id = `gen-${++gen}`;
+    if (p.model === STREAMY && p.stream) {
+      const how = String(p.messages?.at(-1)?.content || '');
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const piece = (t) => res.write(`data: ${JSON.stringify({ id, model: p.model, choices: [{ index: 0, delta: { content: t } }] })}\n\n`);
+      let n = 0;
+      const every = how.includes('slow') ? 120 : 20;
+      const tick = setInterval(() => {
+        n += 1;
+        if (how.includes('break') && n === 4) { clearInterval(tick); records.set(id, 0.0009); res.destroy(); return; }
+        if (how.includes('quiet') && n === 3) { clearInterval(tick); records.set(id, 0.0007); return; }
+        if (n <= 8) { piece('word '); return; }
+        clearInterval(tick);
+        res.write(`data: ${JSON.stringify({ id, model: p.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 30, completion_tokens: 16, cost: 0.0003 } })}\n\n`);
+        res.end('data: [DONE]\n\n');
+      }, every);
+      return;
+    }
     setTimeout(() => {
+      let usage = { prompt_tokens: 120, completion_tokens: 2, cost: COST };
+      if (p.model === LONG) {
+        const out = Math.min(Number(p.max_tokens) || 45000, 45000);
+        usage = { prompt_tokens: 50, completion_tokens: out, cost: out * 1e-5 + 50 * 1e-6 };
+      } else if (p.model === NOCOST) {
+        usage = { prompt_tokens: 100, completion_tokens: 10 };
+        records.set(id, 0.0005);
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ id: 'gen', model: p.model,
-        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'billing' } }],
-        usage: { prompt_tokens: 120, completion_tokens: 2, cost: COST } }));
+      res.end(JSON.stringify({ id, model: p.model,
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'billing' } }], usage }));
     }, 40);
   });
 });
@@ -89,11 +133,21 @@ const post = (path, body, { ip = '203.0.113.1', cookie = null, headers = {} } = 
   body: typeof body === 'string' ? body : JSON.stringify(body),
 });
 const cookieOf = (r) => (r.headers.get('set-cookie') || '').split(';')[0] || null;
+const cookiesOf = (r) => (r.headers.getSetCookie ? r.headers.getSetCookie() : [r.headers.get('set-cookie') || '']);
+const named = (r, name) => { const c = cookiesOf(r).find((x) => x.startsWith(`${name}=`) && !x.startsWith(`${name}=;`)); return c ? c.split(';')[0] : null; };
+const sessionOf = (r) => named(r, 'us_session');
+const signupOf = (r) => named(r, 'us_signup');
 
 test.before(async () => {
   await new Promise((r) => provider.listen(PORT, '127.0.0.1', r));
   await new Promise((r) => { server = app.listen(APP_PORT, '127.0.0.1', r); });
-  await saveCatalog([{ model_id: MODEL, name: 'gpt-5.4', context_len: 200000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1 }]);
+  await saveCatalog([
+    { model_id: MODEL, name: 'gpt-5.4', context_len: 200000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1 },
+    { model_id: LONG, name: 'long writer', context_len: 200000, price_in: 1e-6, price_out: 1e-5, open_weights: 0, zdr: 1, max_output: 45000 },
+    { model_id: NOCOST, name: 'no cost', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
+    { model_id: NOLIMIT, name: 'no limit', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
+    { model_id: STREAMY, name: 'streamy', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
+  ]);
 });
 
 test.after(async () => {
@@ -118,7 +172,9 @@ test('signing up sends a code and gives nothing until the code comes back', asyn
   assert.equal(r.status, 200);
   assert.equal(j.verify, true);
   assert.equal(j.key, undefined, 'no key before the email answers');
-  assert.equal(cookieOf(r), null, 'no session before the email answers');
+  assert.equal(sessionOf(r), null, 'no session before the email answers');
+  const mine = signupOf(r);
+  assert.ok(mine, 'the browser that signed up holds its own secret');
   const ws = await workspaceOf(email);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE workspace_id = ?').get(ws.id)).n, 0);
   // password sign-in does not work yet
@@ -126,9 +182,12 @@ test('signing up sends a code and gives nothing until the code comes back', asyn
 
   const code = lastCodeFor(email);
   assert.match(code, /^\d{6}$/, 'a six digit code was emailed');
-  const v = await post('/api/auth/code/verify', { email, code }, { ip: '198.51.100.10' });
+  const v = await post('/api/auth/code/verify', { email, code }, { ip: '198.51.100.10', cookie: mine });
   assert.equal(v.status, 200);
-  const cookie = cookieOf(v);
+  const vj = await v.clone().json();
+  assert.ok(typeof vj.key === 'string' && vj.key.length > 20, 'the first key is handed over when the email answers');
+  assert.equal(vj.passwordKept, true, 'the code came back to the browser that chose the password');
+  const cookie = sessionOf(v);
   assert.ok(cookie, 'signed in once the code came back');
   const me = await (await fetch(`${base}/api/me`, { headers: { cookie } })).json();
   assert.equal(me.signedIn, true);
@@ -401,4 +460,265 @@ test('the contact form sends, refuses what a script fills in, and limits a flood
     flood.push((await post('/api/contact', { email: 'a@example.test', message: 'hello there, a question' }, { ip: '198.51.100.72' })).status);
   }
   assert.equal(flood.at(-1), 429);
+});
+
+/* What the money and account review found --------------------------------------------------------- */
+
+const call = (key, body) => fetch(`${base}/v1/chat/completions`, {
+  method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` }, body: JSON.stringify(body),
+});
+const { trueUp } = await import('../src/trueup.js');
+
+test('many calls with no cap on their answer cannot spend a small balance many times over', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'uncapped@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 0.5, note: 'test credit' });
+  // each call, with no max_tokens, writes 45,000 tokens: 45 cents, nearly the whole balance
+  const outs = await Promise.all(Array.from({ length: 20 }, (_, i) => call(key.secret, {
+    model: LONG, messages: [{ role: 'user', content: `write at length ${i}` }] }).then((r) => r.status)));
+  const acct = await billing.account(workspace.id);
+  const one = (45000 * 1e-5 + 50 * 1e-6) * (1 + config.ROUTING_FEE_PCT / 100);
+  assert.ok(outs.filter((x) => x === 200).length <= 2, `at most the call that ran alone and one after it: ${outs.join(',')}`);
+  assert.ok(acct.balance_usd >= -one - 1e-9, `never more than one call's cost below zero: ${acct.balance_usd}`);
+  assert.equal((await billing.available(workspace.id)).inFlight, 0, 'every hold was given back');
+  const refused = await call(key.secret, { model: LONG, messages: [{ role: 'user', content: 'and one more' }] });
+  if (refused.status === 402) assert.match((await refused.json()).error.message, /Add credit/);
+});
+
+test('a call to a model that publishes no longest answer is capped, so what it set aside is a bound', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'nolimit@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  seen.length = 0;
+  assert.equal((await call(key.secret, { model: NOLIMIT, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
+  assert.equal(seen.at(-1).max_tokens, config.HOLD_MAX_OUTPUT_TOKENS, 'sent with the cap it was held for');
+  // a model that says how long it writes, and a request that names its own cap, are sent as they came
+  assert.equal((await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
+  assert.equal(seen.at(-1).max_tokens, undefined);
+  assert.equal((await call(key.secret, { model: NOLIMIT, max_tokens: 77, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
+  assert.equal(seen.at(-1).max_tokens, 77);
+});
+
+test('a daily limit counts calls in flight, so a burst cannot run far past it', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'limited@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 10, note: 'test credit' });
+  await db.prepare('UPDATE workspaces SET daily_limit_usd = 0.05 WHERE id = ?').run(workspace.id);
+  // each call costs about a cent, and forty arrive at once
+  const outs = await Promise.all(Array.from({ length: 40 }, (_, i) => call(key.secret, {
+    model: LONG, max_tokens: 1000, messages: [{ role: 'user', content: `burst ${i}` }] }).then((r) => r.status)));
+  const spent = await billing.spentOnCalls(workspace.id);
+  const oneCall = (1000 * 1e-5 + 50 * 1e-6) * (1 + config.ROUTING_FEE_PCT / 100);
+  assert.ok(outs.includes(402), 'the rest were refused');
+  const day = Number((await db.prepare(`SELECT -SUM(amount_usd) AS s FROM ledger WHERE workspace_id = ? AND kind = 'call'`).get(workspace.id)).s);
+  assert.ok(day <= 0.05 + oneCall + 1e-9, `at most one call past the limit: spent ${day}, reading ${spent.day}`);
+});
+
+test('an answer that states no cost is charged from its tokens, then corrected to the provider\'s record', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'nocost@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  const r = await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: 'price me' }] });
+  assert.equal(r.status, 200);
+  const callId = r.headers.get('x-understudy-call-id');
+  let row = await db.prepare('SELECT * FROM calls WHERE id = ?').get(callId);
+  assert.equal(row.cost_estimated, 1);
+  assert.ok(Math.abs(row.cost_usd - (100 * 1e-6 + 10 * 2e-6)) < 1e-12, `charged from its tokens: ${row.cost_usd}`);
+  assert.ok(row.charged_usd > 0, 'never free');
+  const job = await db.prepare(`SELECT * FROM jobs WHERE kind = 'true_up' AND payload LIKE ?`).get(`%${callId}%`);
+  assert.ok(job, 'a correction is booked');
+  const before = (await billing.account(workspace.id)).balance_usd;
+  await trueUp({ callId });
+  row = await db.prepare('SELECT * FROM calls WHERE id = ?').get(callId);
+  assert.equal(row.cost_estimated, 0);
+  assert.ok(Math.abs(row.cost_usd - 0.0005) < 1e-12, 'corrected to what the provider recorded');
+  const after = (await billing.account(workspace.id)).balance_usd;
+  assert.ok(Math.abs((before - after) - (0.0005 - 0.00012) * (1 + config.ROUTING_FEE_PCT / 100)) < 1e-9, 'the difference, with the fee, and only that');
+  await trueUp({ callId });
+  assert.equal((await billing.account(workspace.id)).balance_usd, after, 'correcting twice changes nothing');
+});
+
+test('a stream that breaks off part way is charged for what it wrote, and corrected', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'broken@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  const r = await call(key.secret, { model: STREAMY, stream: true, messages: [{ role: 'user', content: 'break please' }] });
+  assert.equal(r.status, 200);
+  await r.text().catch(() => '');
+  const callId = r.headers.get('x-understudy-call-id');
+  let row = null;
+  for (let i = 0; i < 50 && !row; i += 1) {
+    row = await db.prepare('SELECT * FROM calls WHERE id = ?').get(callId);
+    if (!row) await new Promise((x) => setTimeout(x, 20));
+  }
+  assert.ok(row, 'the call is recorded');
+  assert.equal(row.status_code, 502);
+  assert.ok(row.charged_usd > 0, 'what it wrote is charged');
+  assert.equal(row.cost_estimated, 1);
+  assert.equal((await billing.available(workspace.id)).inFlight, 0, 'and its hold is gone');
+  await trueUp({ callId });
+  row = await db.prepare('SELECT * FROM calls WHERE id = ?').get(callId);
+  assert.ok(Math.abs(row.cost_usd - 0.0009) < 1e-12, 'corrected to the provider\'s record');
+});
+
+test('a streamed answer may take longer than the time allowed to start, as long as it keeps coming', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'slowstream@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  const was = { start: config.UPSTREAM_TIMEOUT_MS, idle: config.UPSTREAM_IDLE_MS };
+  config.UPSTREAM_TIMEOUT_MS = 400;
+  config.UPSTREAM_IDLE_MS = 400;
+  try {
+    // about a second in all, never quiet for long
+    const ok = await call(key.secret, { model: STREAMY, stream: true, messages: [{ role: 'user', content: 'slow please' }] });
+    const text = await ok.text();
+    assert.match(text, /\[DONE\]/, 'the whole answer arrived');
+    // a stream that goes quiet is ended, and charged for what it wrote
+    const quiet = await call(key.secret, { model: STREAMY, stream: true, messages: [{ role: 'user', content: 'quiet please' }] });
+    await quiet.text().catch(() => '');
+    const id = quiet.headers.get('x-understudy-call-id');
+    let row = null;
+    for (let i = 0; i < 100 && !row; i += 1) {
+      row = await db.prepare('SELECT * FROM calls WHERE id = ?').get(id);
+      if (!row) await new Promise((x) => setTimeout(x, 20));
+    }
+    assert.equal(row?.status_code, 502);
+    assert.ok(row.charged_usd > 0);
+  } finally {
+    config.UPSTREAM_TIMEOUT_MS = was.start;
+    config.UPSTREAM_IDLE_MS = was.idle;
+  }
+});
+
+test('a sign-up code used from another browser signs in, and asks for a password instead of keeping the one typed', async () => {
+  const email = 'elsewhere@example.test';
+  const r = await post('/api/auth/sign-up', { email, password: 'typed-at-sign-up', name: 'E' }, { ip: '198.51.100.60' });
+  assert.equal(r.status, 200);
+  const v = await post('/api/auth/code/verify', { email, code: lastCodeFor(email) }, { ip: '198.51.100.61' });
+  assert.equal(v.status, 200);
+  const j = await v.json();
+  assert.equal(j.fresh, true);
+  assert.equal(j.passwordKept, false);
+  assert.ok(j.key, 'the first key is still handed over');
+  const u = await db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  assert.equal(u.pw_cleared, 1);
+  assert.equal(await auth.checkPassword(email, 'typed-at-sign-up'), null);
+});
+
+test('signing up again inside the owner\'s ten minutes cannot choose the owner\'s password', async () => {
+  const email = 'owner-two@example.test';
+  const own = await post('/api/auth/sign-up', { email, password: 'owner-typed-this' }, { ip: '198.51.100.62' });
+  const ownSecret = signupOf(own);
+  await post('/api/auth/sign-up', { email, password: 'attacker-typed-this' }, { ip: '198.51.100.63' });
+  // the newest code, made by the attacker's sign-up, is the one in the owner's inbox
+  const v = await post('/api/auth/code/verify', { email, code: lastCodeFor(email) }, { ip: '198.51.100.62', cookie: ownSecret });
+  assert.equal(v.status, 200);
+  assert.equal((await v.json()).passwordKept, false, 'this code\'s password was not chosen by this browser');
+  assert.equal(await auth.checkPassword(email, 'attacker-typed-this'), null, 'the attacker\'s password never works');
+});
+
+test('a link pressed twice at once signs in once and makes one key', async () => {
+  const email = 'twice@example.test';
+  const out = await auth.startSignUp({ email, password: 'password-123' });
+  const both = await Promise.all([auth.verifyLoginLink(out.send.token), auth.verifyLoginLink(out.send.token)]);
+  assert.equal(both.filter((o) => o.ok).length, 1);
+  const ws = await workspaceOf(email);
+  assert.equal(Number((await db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE workspace_id = ?').get(ws.id)).n), 1);
+});
+
+test('trying a code answers the same way whether or not the address has an account', async () => {
+  await auth.createAccount({ email: 'has-account@example.test', password: 'password-123' });
+  await post('/api/auth/code/request', { email: 'has-account@example.test' }, { ip: '198.51.100.70' });
+  await post('/api/auth/code/request', { email: 'no-account-here@example.test' }, { ip: '198.51.100.71' });
+  const a = await post('/api/auth/code/verify', { email: 'has-account@example.test', code: 'nonono' }, { ip: '198.51.100.72' });
+  const b = await post('/api/auth/code/verify', { email: 'no-account-here@example.test', code: 'nonono' }, { ip: '198.51.100.73' });
+  assert.equal(a.status, b.status);
+  assert.deepEqual(await a.json(), await b.json());
+});
+
+test('changing the email needs the password, a code only its own account can use, and tells the old address', async () => {
+  const { user } = await auth.createAccount({ email: 'mover@example.test', password: 'mover-password' });
+  const mine = `us_session=${await auth.startSession(user.id)}`;
+  const other = `us_session=${await auth.startSession(user.id)}`;
+  const to = 'mover-new@example.test';
+  assert.equal((await post('/api/settings/profile', { email: to }, { cookie: mine, ip: '198.51.100.80' })).status, 400, 'no password, no change');
+  assert.equal((await post('/api/settings/profile', { email: to, password: 'not-it' }, { cookie: mine, ip: '198.51.100.80' })).status, 400);
+  const asked = await post('/api/settings/profile', { email: to, password: 'mover-password' }, { cookie: mine, ip: '198.51.100.80' });
+  assert.equal(asked.status, 200);
+  const code = lastCodeFor(to);
+  const { user: nosy } = await auth.createAccount({ email: 'nosy@example.test', password: 'password-123' });
+  assert.equal((await auth.verifyEmailChange(nosy, to, code)).ok, false, 'another account cannot spend it');
+  const before = mail.length;
+  const v = await post('/api/settings/email/verify', { email: to, code }, { cookie: mine, ip: '198.51.100.80' });
+  assert.equal(v.status, 200);
+  assert.ok(mail.slice(before).some((m) => m.includes('to: mover@example.test') && /was changed/.test(m)), 'the old address is told');
+  assert.equal((await (await fetch(`${base}/api/me`, { headers: { cookie: other } })).json()).signedIn, false, 'other sessions end');
+  assert.equal((await (await fetch(`${base}/api/me`, { headers: { cookie: mine } })).json()).signedIn, true, 'this one stays');
+  // a wrong code while signed in is a 400, never read as a session that ended
+  assert.equal((await post('/api/settings/email/verify', { email: 'x@example.test', code: '000000' }, { cookie: mine, ip: '198.51.100.81' })).status, 400);
+});
+
+test('only a card saved for top ups is ever charged automatically', async () => {
+  const { workspace, user } = await auth.createAccount({ email: 'carder@example.test', password: 'password-123' });
+  const s = await billing.stripe();
+  s.paymentMethods.retrieve = async (id) => ({ id, card: { brand: 'visa', last4: '4242' } });
+  const paid = (id, pm, auto) => {
+    s.paymentIntents.retrieve = async (x) => ({ id: x, payment_method: pm });
+    return webhook(event('checkout.session.completed', { id, object: 'checkout.session', mode: 'payment', payment_status: 'paid',
+      amount_total: 1000, payment_intent: `pi_${id}`, customer: 'cus_card', metadata: { workspace_id: workspace.id, auto_topup: auto } }));
+  };
+  await paid('cs_once', 'pm_once', '0');
+  let acct = await billing.account(workspace.id);
+  assert.equal(acct.balance_usd, 10);
+  assert.equal(acct.payment_method, null, 'a one-off payment keeps no card');
+  const sess = `us_session=${await auth.startSession(user.id)}`;
+  assert.equal((await post('/api/settings/auto-topup', { enabled: true }, { cookie: sess })).status, 400);
+  await paid('cs_auto', 'pm_auto', '1');
+  acct = await billing.account(workspace.id);
+  assert.equal(acct.payment_method, 'pm_auto');
+  assert.equal(acct.card_for_topups, 1);
+  assert.equal(acct.auto_topup, 1);
+  await paid('cs_once_again', 'pm_other', '0');
+  assert.equal((await billing.account(workspace.id)).payment_method, 'pm_auto', 'a later one-off payment leaves the top up card alone');
+});
+
+test('two partial refunds arriving together take exactly what was refunded', async () => {
+  const { workspace } = await auth.createAccount({ email: 'refunds@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 20, note: 'test credit', ref: 'pi_refunds' });
+  const refund = (amount) => event('charge.refunded', { id: 'ch_together', object: 'charge', amount_refunded: amount, metadata: { workspace_id: workspace.id } });
+  await Promise.all([webhook(refund(500)), webhook(refund(1000))]);
+  assert.equal((await billing.account(workspace.id)).balance_usd, 10);
+});
+
+test('a dispute the bank decides for us gives its credit back, once', async () => {
+  const { workspace } = await auth.createAccount({ email: 'disputed@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 30, note: 'test credit', ref: 'pi_disputed' });
+  await webhook(event('charge.dispute.created', { id: 'dp_won', object: 'dispute', amount: 1000, metadata: { workspace_id: workspace.id } }));
+  assert.equal((await billing.account(workspace.id)).balance_usd, 20);
+  await webhook(event('charge.dispute.closed', { id: 'dp_won', object: 'dispute', amount: 1000, status: 'won', metadata: { workspace_id: workspace.id } }));
+  await webhook(event('charge.dispute.funds_reinstated', { id: 'dp_won', object: 'dispute', amount: 1000, metadata: { workspace_id: workspace.id } }));
+  assert.equal((await billing.account(workspace.id)).balance_usd, 30);
+  // one lost keeps what it took
+  await webhook(event('charge.dispute.created', { id: 'dp_lost', object: 'dispute', amount: 500, metadata: { workspace_id: workspace.id } }));
+  await webhook(event('charge.dispute.closed', { id: 'dp_lost', object: 'dispute', amount: 500, status: 'lost', metadata: { workspace_id: workspace.id } }));
+  assert.equal((await billing.account(workspace.id)).balance_usd, 25);
+});
+
+test('a top up that fails for a reason other than the card stays on and is tried again', async () => {
+  const { workspace } = await auth.createAccount({ email: 'blip@example.test', password: 'password-123' });
+  const s = await billing.stripe();
+  await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_b', payment_method = 'pm_b', card_for_topups = 1,
+                     balance_usd = 1, auto_topup = 1 WHERE workspace_id = ?`).run(workspace.id);
+  s.paymentIntents.create = async () => { const e = new Error('connection reset'); e.type = 'StripeConnectionError'; throw e; };
+  await assert.rejects(billing.runTopUp(workspace.id), /connection reset/);
+  assert.equal((await billing.account(workspace.id)).auto_topup, 1, 'still on, and the job tries again');
+  s.paymentIntents.create = async () => { const e = new Error('Your card was declined.'); e.type = 'StripeCardError'; e.code = 'card_declined'; e.raw = { decline_code: 'insufficient_funds' }; throw e; };
+  const before = mail.length;
+  const out = await billing.runTopUp(workspace.id);
+  assert.equal(out.ok, false);
+  const acct = await billing.account(workspace.id);
+  assert.equal(acct.auto_topup, 0, 'a declined card switches it off');
+  assert.equal(acct.topup_failed_note, 'insufficient_funds');
+  assert.ok(mail.slice(before).some((m) => m.includes('to: blip@example.test')), 'and the owner is emailed');
+});
+
+test('two top ups booked at the same moment are one job', async () => {
+  const { workspace } = await auth.createAccount({ email: 'onejob@example.test', password: 'password-123' });
+  const ids = await Promise.all(Array.from({ length: 8 }, () => enqueue('topup', { workspaceId: workspace.id }, { unique: true })));
+  assert.equal(new Set(ids).size, 1);
+  assert.equal(Number((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'topup' AND payload LIKE ?`).get(`%${workspace.id}%`)).n), 1);
 });
