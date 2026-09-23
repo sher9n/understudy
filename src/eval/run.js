@@ -674,6 +674,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      against another call's request must read different. A judge that gets those wrong cannot be
      trusted with a bar in single percent, so nothing it settled is switched to on its own. */
   let noise = mean(noiseScores);
+  /* The scores the bar is read from: the customer's model against itself, by the yardstick every
+     model is then held to. The second look reads its bar from these pooled with its own, so the two
+     have to be the same kind of score. */
+  let barScores = noiseScores;
   /* Written work with no one right answer: the customer's own model gives a different, equally good
      answer nearly every time, so "the same answer" is no bar at all. Rather than give up, the bar
      becomes "at least as good": how often the customer's model gives a clearly worse answer than its
@@ -684,20 +688,34 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     && !barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
     if (await step(0, `Asking whether ${reference}'s answers are at least as good as each other`)) return await endStopped();
     const worse = [];
-    await inParallel(kept.filter((p) => p.a.ok && p.b.ok), 6, async (p) => {
-      if (stopped) return;
-      if (await halted()) { stopped = true; return; }
-      const j = await judgeQuality(askOf(p.body), p.b.value, p.a.value, { scope: workload.workspace_id });
-      addJudge(j.cost);
-      if (j.transient || j.score === null) { judgeMisses += 1; return; }
-      judgedWith.add(j.judgedBy);
-      worse.push(j.score);
-    });
+    try {
+      await inParallel(kept.filter((p) => p.a.ok && p.b.ok), 6, async (p) => {
+        if (stopped) return;
+        if (await halted()) { stopped = true; return; }
+        const j = await judgeQuality(askOf(p.body), p.b.value, p.a.value, { scope: workload.workspace_id });
+        addJudge(j.cost);
+        if (j.transient || j.score === null) { judgeMisses += 1; return; }
+        judgedWith.add(j.judgedBy);
+        p.worse = j.score;
+        worse.push(j.score);
+      });
+    } catch (err) {
+      await interrupt(`Something went wrong here while comparing the answers: ${String(err?.message || err).slice(0, 160)}.`, { retryMs: 0 });
+      throw err;
+    }
     if (stopped) return await endStopped();
     if (worse.length >= Math.min(10, kept.length)) qualityNoise = mean(worse);
     if (qualityNoise !== null && barIsMeaningful(qualityNoise * 100, config.EVAL_NOISE_MAX_PCT)) {
       yardstick = 'quality';
       noise = mean(worse);
+      /* From here on the bar is "at least as good", and so is every reading of it: the second look's
+         pooled bar, and the customer's model's own score on a call a strategy sends on to it. Pooled
+         with the agreement scores, which only give way to this yardstick when they are over 40%, a
+         second look's bar came out far above the first look's (agreement 55% and quality 6% gave
+         about 38% against 7.5%), and a model clearly worse on 15% of calls was confirmed and
+         switched to. */
+      barScores = worse;
+      for (const p of kept) p.noise = p.worse;
       planRecord.yardstick = { kind: 'quality', agreementNoisePct: round8(agreementNoise * 100), qualityNoisePct: round8(noise * 100) };
       await db.prepare('UPDATE eval_runs SET plan_json = ?, yardstick = ? WHERE id = ?').run(JSON.stringify(planRecord), 'quality', run.id);
     }
@@ -1039,13 +1057,36 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      one, and a replay), averaged. Scored against one answer instead, the second look was stricter than
      the first, and turned down models as good as the ones the first look let through.
      Enough calls that a model better than the bar can clear: EVAL_CONFIRM_MULTIPLE times what a perfect
-     run needs, and never fewer than what a perfect run needs. */
+     run needs, and never fewer than what a perfect run needs.
+
+     Only calls no measurement of this workload has looked at, finished or not, and with too few of
+     those there is no second look. Short of them it used to fall back on calls earlier measurements
+     had used, whose answers were kept, so a model was "confirmed" on calls it had been chosen on. The
+     calls a second look uses are kept with the run like its sample, so no later look takes them for
+     unseen either.
+
+     Every second look this run takes is on the same calls, and the customer's model answers them, and
+     is compared with itself on them, once. A look at the next model on calls chosen afresh paid the
+     customer's model again for most of them, and counted what it did find kept as answers reused from
+     an earlier measurement. It is no weaker for it: the next model was not chosen on these calls
+     either. */
+  const looked = new Set();
+  const keepLook = async (c, ra, rb) => {
+    if (looked.has(c.id)) return;
+    looked.add(c.id);
+    await db.prepare(`INSERT INTO eval_samples (id, run_id, call_id, quartile, ref_a_json, ref_b_json, charged)
+                VALUES (?, ?, ?, ?, ?, ?, 0)`)
+      .run(id('smp'), run.id, c.id, c.quartile ?? 0,
+           ra.json ? JSON.stringify(ra.json) : null, rb.json ? JSON.stringify(rb.json) : null);
+  };
+  let lookCalls = null;
+  // each looked-at call's two answers from the customer's model, and how far they were from each other
+  const lookRefs = new Map();
   const confirmOn = async (r, freshCalls) => {
     const { cand } = stats.get(r.model_id) || {};
     if (!cand) return { verdict: 'unconfirmed', runs: 0, note: 'there was nothing to look again with' };
     const least = callsToClear(floor);
-    const usable = freshCalls.filter((c) => !usedBefore.has(c.id));
-    const from = usable.length >= least ? usable : freshCalls;
+    const from = freshCalls.filter((c) => !seenBefore.has(c.id));
     if (from.length < least) {
       await db.prepare('UPDATE eval_results SET confirm_runs = 0, confirm_verdict = ? WHERE id = ?').run('insufficient', r.id);
       return { verdict: 'insufficient', runs: 0,
@@ -1053,9 +1094,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     }
     // never thinner than the first look: a second look on fewer calls is a noisier one, not a stricter one
     const n = Math.min(from.length, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * least), samples.length));
-    const picks = sampleCalls(from, n, (now() % 99991) + 13);
-    // the calls it will send: one or two of the customer's model, and the candidate's one
-    const sends = (c) => (recorded(c) ? 2 : 3);
+    lookCalls = lookCalls || sampleCalls(from, n, (now() % 99991) + 13);
+    const picks = lookCalls;
+    // the calls it will send: the candidate's one, and one or two of the customer's model where they are not in hand
+    const sends = (c) => (lookRefs.has(c.id) ? 1 : recorded(c) ? 2 : 3);
     confirmLeft = picks.reduce((a, c) => a + sends(c), 0);
     remaining = () => confirmLeft;
     const scores = [];
@@ -1064,40 +1106,51 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     for (const c of picks) {
       if (halt || spentTotal >= hardLimit) break;
       if (await halted()) { halt = 'stopped'; break; }
-      const had = recorded(c);
       confirmLeft = Math.max(0, confirmLeft - sends(c));
       const body = JSON.parse(c.request_json);
-      const [ra, rb] = had ? [had, await replayOnce({ body, callId: c.id, model: reference, slot: 1, workload })]
-        : await Promise.all([
-          replayOnce({ body, callId: c.id, model: reference, slot: 0, workload }),
-          replayOnce({ body, callId: c.id, model: reference, slot: 1, workload }),
-        ]);
-      if (had) recordedRefs += 1;
-      note(ra);
-      note(rb);
-      const refHit = [ra, rb].find((x) => x.account);
-      if (refHit) { halt = 'account'; accountHit = { ...refHit, model: reference }; break; }
-      const refs = [extract(ra.json, shape), extract(rb.json, shape)].filter((x, k) => [ra, rb][k].ok && x.ok);
       let judged = 0;
-      if (refs.length === 2) {
-        if (shape === 'free_text') {
-          const j = yardstick === 'quality'
-            ? await judgeQuality(askOf(body), refs[1].value, refs[0].value, { scope: workload.workspace_id })
-            : await judgeBarPair(askOf(body), refs[0].value, refs[1].value, { scope: workload.workspace_id });
-          addJudge(j.cost);
-          if (j.cost > 0) judged += 1;
-          if (!j.transient && j.score !== null && j.score !== undefined) freshNoise.push(j.score);
-        } else {
-          const d = disagreement(refs[0], refs[1], shape);
-          if (d !== null) freshNoise.push(d);
-          else {
-            const pr = await proseScore(body, refs[0], refs[1], shape, workload.workspace_id);
-            addJudge(pr.cost);
-            if (pr.cost > 0) judged += 1;
-            if (!pr.transient) freshNoise.push(pr.score);
+      let refSent = 0;
+      let seen = lookRefs.get(c.id);
+      if (!seen) {
+        const had = recorded(c);
+        const [ra, rb] = had ? [had, await replayOnce({ body, callId: c.id, model: reference, slot: 1, workload })]
+          : await Promise.all([
+            replayOnce({ body, callId: c.id, model: reference, slot: 0, workload }),
+            replayOnce({ body, callId: c.id, model: reference, slot: 1, workload }),
+          ]);
+        if (had) recordedRefs += 1;
+        note(ra);
+        note(rb);
+        const refHit = [ra, rb].find((x) => x.account);
+        if (refHit) { halt = 'account'; accountHit = { ...refHit, model: reference }; break; }
+        await keepLook(c, ra, rb);
+        refSent = had ? 1 : 2;
+        const refs = [extract(ra.json, shape), extract(rb.json, shape)].filter((x, k) => [ra, rb][k].ok && x.ok);
+        let noise = null;
+        if (refs.length === 2) {
+          if (shape === 'free_text') {
+            const j = yardstick === 'quality'
+              ? await judgeQuality(askOf(body), refs[1].value, refs[0].value, { scope: workload.workspace_id })
+              : await judgeBarPair(askOf(body), refs[0].value, refs[1].value, { scope: workload.workspace_id });
+            addJudge(j.cost);
+            if (j.cost > 0) judged += 1;
+            if (!j.transient && j.score !== null && j.score !== undefined) noise = j.score;
+          } else {
+            const d = disagreement(refs[0], refs[1], shape);
+            if (d !== null) noise = d;
+            else {
+              const pr = await proseScore(body, refs[0], refs[1], shape, workload.workspace_id);
+              addJudge(pr.cost);
+              if (pr.cost > 0) judged += 1;
+              if (!pr.transient) noise = pr.score;
+            }
           }
         }
+        seen = { refs, noise };
+        lookRefs.set(c.id, seen);
       }
+      const { refs } = seen;
+      if (seen.noise !== null) freshNoise.push(seen.noise);
       const got = refs.length ? await replayOnce({ body, callId: c.id, model: cand.model, recipe: cand.recipe, slot: 0, workload }) : null;
       if (got) note(got);
       if (got?.account) { halt = 'account'; accountHit = { ...got, model: cand.model }; break; }
@@ -1128,7 +1181,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         }
       }
       if (score !== null) scores.push(score);
-      const sent = (had ? 1 : 2) + (got ? 1 : 0) + judged;
+      const sent = refSent + (got ? 1 : 0) + judged;
       if (await step(sent, `Looking again at ${cand.label || cand.model} on calls it has not seen, ${scores.length} of ${picks.length}`)) {
         halt = 'stopped';
         break;
@@ -1138,8 +1191,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     /* The bar, read from both samples: how often the customer's model disagreed with itself on the first
        look's calls and on these. A bar read from one sample of a hundred moves a good deal by chance,
        and a second look held to the first sample's bar alone turned good models down whenever the two
-       samples happened to differ. The candidate's own reading is from these calls only, as it must be. */
-    const pooled = [...noiseScores, ...freshNoise];
+       samples happened to differ. The candidate's own reading is from these calls only, as it must be.
+       Both samples are read by the same yardstick: under "at least as good", the first look's bar
+       scores are the quality ones (see barScores), as these are. */
+    const pooled = [...barScores, ...freshNoise];
     const bar = pooled.length ? floorFrom(mean(pooled) * 100, {
       multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT,
     }) : floor;
@@ -1253,7 +1308,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
    * router does the same without the check, by picking the model before the call is sent, from a
    * small model of which calls it got right. Both are worked out here from answers already paid
    * for, plus one check per answer, and only what clears the bar can be switched to. */
-  const noiseMean = mean(noiseScores);
+  const noiseMean = mean(barScores);
   const refOfPair = (p) => {
     const r = p.ra?.ok ? p.ra : p.rb;
     return { cost: p.refCost, latency: r?.latencyMs ?? null, ttft: r?.ttftMs ?? r?.latencyMs ?? null,
@@ -1439,15 +1494,36 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      EVAL_CONFIRM_TRIES of them, and the one serving ends the search when it is reached. */
   const servingNow = workload.routed_model ? await servingKey(workload) : null;
   let tries = 0;
-  for (const r of cleared) {
-    if (halt) break;
-    if (r.model_id === servingNow) { best = r; confirmations.push({ r, c: { verdict: 'cleared', runs: 0, serving: true } }); break; }
-    if (tries >= config.EVAL_CONFIRM_TRIES) continue;
-    tries += 1;
-    const plainModel = !r.arm_json || String(r.model_id).endsWith('#lighter') || String(r.model_id).endsWith('#cheapest');
-    const c = plainModel ? await confirmOn(r, fresh) : { verdict: 'cleared', runs: 0, live: true };
-    confirmations.push({ r, c });
-    if (c.verdict === 'cleared') { best = r; break; }
+  try {
+    for (const r of cleared) {
+      if (halt) break;
+      if (r.model_id === servingNow) { best = r; confirmations.push({ r, c: { verdict: 'cleared', runs: 0, serving: true } }); break; }
+      if (tries >= config.EVAL_CONFIRM_TRIES) continue;
+      tries += 1;
+      const plainModel = !r.arm_json || String(r.model_id).endsWith('#lighter') || String(r.model_id).endsWith('#cheapest');
+      let c;
+      if (plainModel) c = await confirmOn(r, fresh);
+      else {
+        // a strategy's second look is its live rollout, and it says so rather than nothing
+        c = { verdict: 'cleared', runs: 0, live: true };
+        await db.prepare('UPDATE eval_results SET confirm_runs = 0, confirm_verdict = ? WHERE id = ?').run('live', r.id);
+      }
+      confirmations.push({ r, c });
+      if (c.verdict === 'cleared') { best = r; break; }
+    }
+  } catch (err) {
+    await interrupt(`Something went wrong here while looking again: ${String(err?.message || err).slice(0, 160)}.`, { retryMs: 0 });
+    throw err;
+  }
+  /* Every other result that cleared was never looked at twice: past the models a run looks at again,
+     after one was confirmed, or after the run was cut short. It says so, and is never read as confirmed
+     (see confirmed in src/eval/outcome.js). With nothing written, it sorted first, took "needs a second
+     look" off its workload, and was what an approval with no model named switched to. */
+  const reached = new Set(confirmations.map((x) => x.r.id));
+  for (const r of results) {
+    if (r.verdict !== 'cleared' || reached.has(r.id) || r.model_id === servingNow) continue;
+    r.confirm_verdict = 'not_reached';
+    await db.prepare(`UPDATE eval_results SET confirm_verdict = 'not_reached' WHERE id = ? AND confirm_verdict IS NULL`).run(r.id);
   }
   if (halt === 'stopped') return await endStopped();
 

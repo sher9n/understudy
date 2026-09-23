@@ -238,6 +238,33 @@ const dueNow = async (workloadId) => !!(await db.prepare(
             AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?))`)
   .get(workloadId, now(), now() - 30 * DAY));
 
+/* 1. The second look under "at least as good" ---------------------------------------------- */
+
+test('under "at least as good", the second look is held to a bar read by that same yardstick', async () => {
+  const { workload } = await seed({ poem: true, enabled: ['vendor/fading-poet'], mode: 'auto' });
+  asks.set('vendor/fading-poet', 0);
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const run = await runOf(out.runId);
+  assert.equal(run.yardstick, 'quality', 'no two poems are the same poem, so the bar is "at least as good"');
+  const fading = await resultOf(out.runId, 'vendor/fading-poet');
+  assert.equal(fading.verdict, 'cleared', `its first look: ${fading.gap_pct}% against ${run.floor_pct}%`);
+  // read from the agreement scores as well, this bar came out near 60%, and one call in five clearly worse passed it
+  assert.ok(fading.confirm_floor < 10, `the second look's bar: ${fading.confirm_floor}%`);
+  assert.notEqual(fading.confirm_verdict, 'cleared', `its second look: ${fading.confirm_gap}%, at most ${fading.confirm_hi}%`);
+  assert.equal((await load(workload.id)).routed_model, null, 'a model clearly worse on one call in five is not switched to');
+});
+
+test('a poet as good as the customer\'s own still clears both looks and is switched to', async () => {
+  const { workload } = await seed({ poem: true, enabled: ['vendor/poet-small'], mode: 'auto' });
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const poet = await resultOf(out.runId, 'vendor/poet-small');
+  assert.equal(poet.verdict, 'cleared');
+  assert.equal(poet.confirm_verdict, 'cleared', `${poet.confirm_gap}% against ${poet.confirm_floor}%`);
+  assert.equal((await load(workload.id)).routed_model, 'vendor/poet-small');
+});
+
 /* 3. Stops that stick, failures that back off, retries that use what was bought ---------------- */
 
 test('a new workload\'s first measurement, stopped, is not started again by the hourly pass', async () => {
@@ -337,6 +364,54 @@ test('answers the customer\'s own model gave, or gave as the control of a switch
   const out = await runEvaluation(workload.id);
   const run = await runOf(out.runId);
   assert.equal(run.recorded_refs >= run.sample_size, true, `${run.recorded_refs} of ${run.sample_size}`);
+});
+
+/* 5. A second look never reached is not a second look passed -------------------------------------- */
+
+test('a model the second look never reached is not read as confirmed', async () => {
+  luckyAfter = 120;
+  try {
+    const { workload } = await seed({ n: 400, enabled: ['vendor/lucky-a', 'vendor/lucky-b', 'vendor/steady-small'] });
+    asks.set('vendor/lucky-a', 0);
+    asks.set('vendor/lucky-b', 0);
+    const out = await runEvaluation(workload.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const run = await runOf(out.runId);
+    assert.equal(run.sample_size, 120);
+    const [a, b, steady] = await Promise.all(['vendor/lucky-a', 'vendor/lucky-b', 'vendor/steady-small'].map((m) => resultOf(out.runId, m)));
+    for (const r of [a, b, steady]) assert.equal(r.verdict, 'cleared', `${r.model_id} on its first look`);
+    assert.notEqual(a.confirm_verdict, 'cleared');
+    assert.notEqual(b.confirm_verdict, 'cleared');
+    assert.equal(steady.confirm_verdict, 'not_reached', 'two looks were spent on the two cheaper ones');
+    assert.equal(confirmed(steady), 0);
+    // nothing stood behind any of them twice, so the cheapest comes first, and nobody is told it is ready
+    assert.equal(cheaperCleared(await results(out.runId))[0].model_id, 'vendor/lucky-a');
+    const rest = await restingStatus(workload.id);
+    assert.equal(rest.note, 'A candidate cleared once and needs a second look');
+    const w = await load(workload.id);
+    assert.equal(w.status_note, 'A candidate cleared once and needs a second look');
+    /* the calls the second looks used are kept with the run, like its sample; both looks were on the
+       same calls, so the customer's model was paid for them once */
+    const kept = Number((await db.prepare('SELECT COUNT(DISTINCT call_id) AS n FROM eval_samples WHERE run_id = ?').get(out.runId)).n);
+    assert.equal(b.confirm_runs, a.confirm_runs);
+    assert.equal(kept, run.sample_size + a.confirm_runs, `${kept} calls kept for ${run.sample_size} + ${a.confirm_runs}`);
+  } finally {
+    luckyAfter = 100;
+  }
+});
+
+test('with every call already looked at, there is no second look rather than one on seen calls', async () => {
+  const { workload } = await seed({ n: 200, enabled: ['vendor/steady-small'] });
+  const first = await runEvaluation(workload.id);
+  const one = await resultOf(first.runId, 'vendor/steady-small');
+  assert.equal(one.confirm_verdict, 'cleared', 'the first second look had a hundred calls nobody had seen');
+  const again = await runEvaluation(workload.id);
+  assert.equal(again.ok, true, JSON.stringify(again));
+  const two = await resultOf(again.runId, 'vendor/steady-small');
+  assert.equal(two.verdict, 'cleared');
+  // it used to fall back on calls earlier measurements had used, answered from what they kept, and "confirm" on them
+  assert.equal(two.confirm_verdict, 'insufficient', `${two.confirm_runs} calls`);
+  assert.equal(two.confirm_runs, 0);
 });
 
 /* 6. A switch made during a rollout keeps the rollout's control --------------------------------- */
