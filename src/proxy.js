@@ -119,10 +119,15 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
   if (!served) return no(400, '"model" is required.', 'invalid_request_error');
   const recipe = lead?.recipe ?? null;
   const zdr = await zdrFor(wsId);
-  // whether a long instruction may be marked for caching on this call (see hintApplies)
-  const cacheHint = workload ? await cacheHintFor(wsId, workload) : false;
-  return { workload, requested, served, recipe, strategy, zdr, cacheHint };
+  return { workload, requested, served, recipe, strategy, zdr };
 }
+
+/* Whether a long instruction may be marked for caching on a try sent to this model (see hintApplies
+   and cacheHintFor): decided for the model each try goes to, never once for the whole call, so only
+   a model that answers this workload often enough to read the cache back is marked. Marking only
+   saves money, so a slip while deciding it leaves the call unmarked, never failed or sent elsewhere. */
+const hintFor = async (ready, model) => (ready.workload
+  ? await cacheHintFor(ready.workload.workspace_id, ready.workload, model).catch(() => false) : false);
 
 /* Every model one call could end up paying for: the one it is served by, the customer's own model,
    and whatever a strategy may send it on to. */
@@ -285,11 +290,14 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     const next = tries[k + 1];
     const { served, recipe } = leadOf(strategy, ready);
     let out;
+    // whether this try's instruction is marked for caching, kept so the saving is counted on the call it was marked on
+    let hint = false;
     try {
       if (strategy && strategy.spec.kind !== 'model') {
         out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr, call: liveOpts() });
       } else {
-        const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: ready.cacheHint, ...liveOpts() });
+        hint = await hintFor(ready, served);
+        const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: hint, ...liveOpts() });
         out = { json: r.json, served, cost: Number(r.json?.usage?.cost ?? 0), latencyMs: r.latencyMs ?? Date.now() - started };
       }
     } catch (err) {
@@ -316,7 +324,7 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
       started, body, response: out.json, status: 200, latencyMs: out.latencyMs, source, callId, ref,
       decision: decisionOf(strategy, strategy && strategy.spec.kind !== 'model' ? out : null), holdId: h.holdId,
-      cacheHint: ready.cacheHint && (!strategy || strategy.spec.kind === 'model') });
+      cacheHint: hint });
     return { ok: true, status: 200, json: out.json, served: out.served, requested, callId,
       latencyMs: out.latencyMs, costUsd: out.cost, workload: workload?.slug ?? null };
   }
@@ -422,8 +430,10 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     decision = { ...decision, escalated: use === strategy.spec.strong, check: { by: 'router', p: Math.round(p * 1000) / 1000 } };
   }
   let upstream;
+  // marked for caching only where this model answers the workload often enough (see hintFor)
+  const hint = await hintFor(ready, served);
   try {
-    upstream = await chatStream(body, served, { recipe, zdr: ready.zdr, cacheHint: ready.cacheHint });
+    upstream = await chatStream(body, served, { recipe, zdr: ready.zdr, cacheHint: hint });
   } catch (err) {
     return { ok: false, err, served };
   }
@@ -505,7 +515,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     choices: [{ index: 0, message: { role: 'assistant', content: answer, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason }],
   };
   await settle({ wsId, workload, requested, served, usage, started, body, response, status: 200,
-    ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision, holdId, cacheHint: ready.cacheHint });
+    ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision, holdId, cacheHint: hint });
   return { ok: true };
 }
 

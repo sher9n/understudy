@@ -78,6 +78,8 @@ const DAY = 86400000;
 
 // what the provider was sent, for the cache marking to be seen
 const sent = [];
+// models the provider says are overloaded, to send a switched call on to the customer's own model
+const failing = new Set();
 let jevHold = null;
 let jevActive = 0;
 let jevPeak = 0;
@@ -98,6 +100,11 @@ const provider = http.createServer((req, res) => {
     }
     sent.push(p);
     const model = p.model;
+    if (failing.has(model)) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Provider is overloaded' } }));
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ id: `gen-${sent.length}`, model,
       choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: `answer from ${model}` } }],
@@ -373,6 +380,38 @@ test('a long instruction is marked for caching only where calls come often enoug
   forgetHints();
   await send(s.secret, body);
   assert.equal(typeof sent.filter((p) => p.model === CLAUDE).pop().messages[0].content, 'string');
+});
+
+test('a long instruction is marked only for the model that answers the workload often enough, never for a busy workload\'s every call', async () => {
+  const { cacheHintFor, forgetHints } = await import('../src/workspace.js');
+  const long = `You are the underwriting assistant. ${'Read the schedule, then the exclusions, then decide. '.repeat(100)}`;
+  const s = await shop();
+  const body = (i) => ({ model: CLAUDE, messages: [{ role: 'system', content: long }, { role: 'user', content: `policy #${i}` }] });
+  const w0 = await workloadFor(s.workspace.id, body(1));
+  // switched to a cheaper model, which now answers every call
+  await promote(w0, CHEAP, { spec: { kind: 'model', model: CHEAP, recipe: null }, rollout: false });
+  const w = await load(w0.id);
+  for (let i = 0; i < 5; i += 1) {
+    await recordCall({ workspaceId: s.workspace.id, workloadId: w.id, source: 'routed', requestedModel: CLAUDE, servedModel: CHEAP,
+      statusCode: 200, promptTokens: 1200, completionTokens: 40, costUsd: 0.0004, request: body(70000 + i),
+      response: { choices: [{ message: { content: 'ok' } }] }, armId: w.routed_arm_id, propensity: 1, explored: 0 });
+  }
+  forgetHints();
+  assert.equal(await cacheHintFor(s.workspace.id, w, CHEAP), true, 'the model that answers every call is busy enough');
+  assert.equal(await cacheHintFor(s.workspace.id, w, CLAUDE), false, 'the customer\'s own model answers none of them now');
+  // a call the switch fails is answered by the customer's own model, unmarked: it would write a cache nobody reads back
+  failing.add(CHEAP);
+  try {
+    const r = await send(s.secret, body(70100));
+    assert.equal(r.status, 200);
+    assert.equal(r.served, CLAUDE);
+  } finally {
+    failing.delete(CHEAP);
+  }
+  const toClaude = sent.filter((p) => p.model === CLAUDE).pop();
+  assert.equal(typeof toClaude.messages[0].content, 'string', 'sent as it came, with no mark');
+  const row = await db.prepare(`SELECT hinted FROM calls WHERE workload_id = ? AND served_model = ? AND status_code = 200`).get(w.id, CLAUDE);
+  assert.equal(row.hinted, null, 'and not counted as a marked call');
 });
 
 test('a workspace that allows retention only takes our own requirement away, never the customer\'s', () => {
