@@ -647,3 +647,22 @@ test('a model finished for a strategy goes on from where it stopped, and nothing
   const run = await runOf(out.runId);
   assert.equal(run.reused, run.recorded_refs, 'a first measurement reused nothing an earlier one bought');
 });
+
+test('how often chances came true is read only from chances worked out from evidence', async () => {
+  forgetCalibration();
+  const { workspace, workload } = await seed({ n: 1 });
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model, sample_size, created_at)
+      VALUES ('run_cal_fix', ?, ?, 'done', 'json', ?, 10, ?)`).run(workspace.id, workload.id, REF, now() - DAY);
+  const add = (k, model, rank, verdict) => db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, verdict, created_at, rank_json)
+      VALUES (?, 'run_cal_fix', ?, 10, 1, ?, ?, ?)`).run(`res_cal_fix_${k}`, model, verdict, now(), JSON.stringify(rank));
+  // real chances of 0.85 that came true one time in ten
+  for (let k = 0; k < 60; k += 1) await add(k, `m/model-${k}`, { rawChance: 0.85, chance: 0.85 }, k % 10 === 0 ? 'cleared' : 'missed');
+  // strategies carrying a calibrated chance and no raw one, and fixed guesses, all of which cleared
+  for (let k = 0; k < 40; k += 1) await add(100 + k, `cascade:m/model-${k}`, { chance: 0.85 }, 'cleared');
+  for (let k = 0; k < 40; k += 1) await add(200 + k, `m/ref-${k}#cheapest`, { rawChance: 0.8, chance: 0.8 }, 'cleared');
+  const table = await calibrationFor(workspace.id);
+  assert.equal(table.total, 60, 'only the sixty worked out from evidence');
+  const p = calibrated(table, 0.85);
+  assert.ok(p < 0.25, `a chance of 0.85 that came true one time in ten reads low: ${p}`);
+  forgetCalibration();
+});

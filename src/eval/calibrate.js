@@ -26,7 +26,7 @@ export async function calibrationFor(workspaceId) {
   const hit = memo.get(workspaceId);
   if (hit && Date.now() - hit.at < MEMO_MS) return hit.table;
   const rows = await db.prepare(
-    `SELECT r.rank_json, r.verdict FROM eval_results r
+    `SELECT r.model_id, r.rank_json, r.verdict FROM eval_results r
        JOIN eval_runs e ON e.id = r.run_id
        JOIN workspaces w ON w.id = e.workspace_id
       WHERE e.created_at >= ? AND r.rank_json IS NOT NULL
@@ -36,10 +36,15 @@ export async function calibrationFor(workspaceId) {
   const bins = EDGES.slice(0, -1).map((lo, i) => ({ lo, hi: EDGES[i + 1], n: 0, cleared: 0, said: 0 }));
   let total = 0;
   for (const r of rows) {
+    /* Only a chance worked out from evidence, before it was read through this table, so the table
+       never calibrates itself. A strategy's row carries the calibrated chance of the model it is built
+       on and no raw one, and the customer's own model thinking less, or from its cheapest provider, is
+       given a fixed guess (six in ten, eight in ten) that no evidence moved. Falling back to the
+       calibrated chance counted those, which pushed the chances it hands back upwards. */
     let chance = null;
-    // the chance before it was read through this table, so the table never calibrates itself
-    try { const k = JSON.parse(r.rank_json); chance = k?.rawChance ?? k?.chance ?? null; } catch { chance = null; }
-    if (!Number.isFinite(Number(chance))) continue;
+    try { chance = JSON.parse(r.rank_json)?.rawChance ?? null; } catch { chance = null; }
+    if (chance === null || !Number.isFinite(Number(chance))) continue;
+    if (String(r.model_id).includes('#') || /^(cascade|router):/.test(String(r.model_id))) continue;
     const p = Math.max(0, Math.min(1, Number(chance)));
     const b = bins.find((x) => p >= x.lo && p < x.hi);
     if (!b) continue;
