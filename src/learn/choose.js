@@ -2,6 +2,7 @@ import { db } from '../db/index.js';
 import { track } from '../traffic.js';
 import { upsertArm, armById, referenceSpec } from './arms.js';
 import { beforeHash } from './threads.js';
+import { mayContinue } from './explore.js';
 
 /* Which strategy serves one call.
  *
@@ -79,27 +80,59 @@ async function rolloutChoice(workload, serving, rng) {
    call was, when that was chosen by chance: an experiment or a rollout decides once per task, not once
    per step. A model changing half way through a conversation reads oddly to whoever is in it, and an
    outcome that shows at the end of a task (a tool that failed on step three) belongs to the strategy
-   that ran the whole of it. Found by the conversation's fingerprint, the same way outcomes find it. */
+   that ran the whole of it. Found by the conversation's fingerprint, the same way outcomes find it.
+
+   Only while the reason the task was given there still holds, checked again on every step (see
+   stillChosen): otherwise the step is served the way any call is now. Checked on the first step alone,
+   a fifty step agent task ran on past the day's budget and the workspace's, turning experiments off
+   did not stop the tasks already running, and since each step only had to follow the one before it
+   within a day, a task never ended. So a task is also re-decided once it is older than TASK_MAX_MS,
+   counted from its first step. */
 const THREAD_MS = 24 * 3600000;
+const TASK_MAX_MS = 24 * 3600000;
 async function taskChoice(workload, body, serving) {
   const msgs = Array.isArray(body?.messages) ? body.messages : [];
   if (!msgs.some((m) => m.role === 'assistant' || m.role === 'tool')) return null;
   const before = beforeHash(msgs);
   if (!before) return null;
+  const at = Date.now();
   const parent = await db.prepare(
-    `SELECT arm_id, propensity, explored FROM calls WHERE workspace_id = ? AND after_hash = ? AND created_at >= ?
-        AND workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(workload.workspace_id, before, Date.now() - THREAD_MS, workload.id);
+    `SELECT c.arm_id, c.propensity, c.explored, f.created_at AS started
+       FROM calls c LEFT JOIN calls f ON f.id = COALESCE(c.task_id, c.id)
+      WHERE c.workspace_id = ? AND c.after_hash = ? AND c.created_at >= ? AND c.workload_id = ?
+      ORDER BY c.created_at DESC LIMIT 1`).get(workload.workspace_id, before, at - THREAD_MS, workload.id);
   if (!parent?.arm_id) return null;
+  if (Number(parent.started ?? at) < at - TASK_MAX_MS) return null;
   const chance = parent.propensity === null || parent.propensity === undefined ? 1 : Number(parent.propensity);
-  if (!(Number(parent.explored) === 1 || chance < 1)) return null;
+  const explored = Number(parent.explored) === 1;
+  if (!(explored || chance < 1)) return null;
   const arm = await armById(parent.arm_id);
-  if (!arm?.spec || !['serving', 'trying', 'baseline'].includes(arm.status)) return null;
+  if (!arm?.spec || !stillChosen(workload, serving, arm, explored)) return null;
   const own = (a) => a?.spec?.kind === 'model' && a.spec.model === workload.reference_model && !a.spec.recipe;
   const toOwn = { armId: null, spec: referenceSpec(workload), propensity: 1, explored: false, shadow: null, isFallback: true };
   const toServing = serving && serving.id !== arm.id
     ? { armId: serving.id, spec: serving.spec, propensity: null, explored: false, shadow: null, fallback: own(serving) ? null : toOwn } : null;
-  return { armId: arm.id, spec: arm.spec, propensity: chance, explored: Number(parent.explored) === 1, shadow: null, task: true,
+  return { armId: arm.id, spec: arm.spec, propensity: chance, explored, shadow: null, task: true,
     fallback: toServing || (own(arm) ? null : toOwn) };
+}
+
+/* Whether the reason a task's first step went to `arm` still holds for this step.
+   A switch taking over a share of the calls: its task stays on its side while the rollout is under way,
+   the side before it included, which the switch set aside as resting and the old check turned away,
+   so a conversation that began before the switch was drawn again half way through.
+   An experiment: its task stays only within the limits that let it start (mayContinue).
+   A task what serves was given by chance, beside an experiment: the same, since outside an experiment
+   its calls are no longer given by chance and do not belong in the fair record. */
+function stillChosen(workload, serving, arm, explored) {
+  const rolling = workload.rollout_share !== null && workload.rollout_share !== undefined && Number(workload.rollout_share) < 1;
+  if (rolling) {
+    // no experiment runs while a switch takes over (see chooseStrategy): only the rollout's own sides
+    if (explored) return false;
+    return arm.id === serving.id || (workload.rollout_from_arm_id ? arm.id === workload.rollout_from_arm_id : arm.status === 'baseline');
+  }
+  if (!explored && arm.id !== serving.id) return false;
+  if (!['serving', 'trying', 'baseline'].includes(arm.status)) return false;
+  return mayContinue(workload, serving, arm.id);
 }
 
 /**

@@ -55,9 +55,9 @@ const { workloadFor, recordCall, learningSettled } = await import('../src/traffi
 const { saveCatalog } = await import('../src/openrouter.js');
 const { move } = await import('../src/billing.js');
 const { promote } = await import('../src/eval/promote.js');
-const { onChoose, onServed } = await import('../src/learn/choose.js');
+const { onChoose, onServed, chooseStrategy } = await import('../src/learn/choose.js');
 const {
-  chooseExplore, afterServed, reviewWorkload, markTrying, learningView, forgetState, exploreOf,
+  chooseExplore, afterServed, reviewWorkload, markTrying, learningView, forgetState, exploreOf, stateOf,
 } = await import('../src/learn/explore.js');
 const { rngFrom } = await import('../src/learn/bandit.js');
 const { upsertArm, referenceSpec } = await import('../src/learn/arms.js');
@@ -225,18 +225,18 @@ async function history(s, model, { n, failed = 0, armId = undefined, yardstick =
 }
 
 /* Thousands of calls at once, spread evenly from `from` to `to`, written as recordCall writes them, of
-   which `failPer100` in every hundred were seen to fail. */
+   which `failPer100` in every hundred were seen to fail; each a task of its own, or all steps of `task`. */
 let bulkSeq = 0;
-async function bulk(s, { armId, model, n, propensity, explored = 0, from, to, failPer100 = 0, cost = COST[model] }) {
+async function bulk(s, { armId, model, n, propensity, explored = 0, from, to, failPer100 = 0, cost = COST[model], task = null }) {
   bulkSeq += 1;
   const tag = `call_bulk${bulkSeq}_${process.pid}_`;
   const step = Math.max(1, Math.floor((to - from) / n));
   await db.prepare(`INSERT INTO calls (id, workspace_id, workload_id, source, requested_model, served_model, status_code, prompt_tokens,
         completion_tokens, cost_usd, charged_usd, created_at, request_hash, task_id, step, arm_id, propensity, explored, reward)
-      SELECT ? || g, ?, ?, 'routed', ?, ?, 200, 500, 40, ?, 0, ?::bigint - (g - 1)::bigint * ?::bigint, md5(? || g), ? || g, 1, ?, ?, ?,
-             CASE WHEN g % 100 < ? THEN 0 ELSE NULL END
+      SELECT ? || g, ?, ?, 'routed', ?, ?, 200, 500, 40, ?, 0, ?::bigint - (g - 1)::bigint * ?::bigint, md5(? || g),
+             COALESCE(?::text, ? || g), 1, ?, ?, ?, CASE WHEN g % 100 < ? THEN 0 ELSE NULL END
         FROM generate_series(1, ?) g`)
-    .run(tag, s.workspace.id, s.workload.id, REF, model, cost, to, step, tag, tag, armId, propensity, explored, failPer100, n);
+    .run(tag, s.workspace.id, s.workload.id, REF, model, cost, to, step, tag, task, tag, armId, propensity, explored, failPer100, n);
   forgetState(s.workload.id);
 }
 
@@ -636,4 +636,81 @@ test('a strategy that fails and is answered another way is priced on the calls i
   const customerCalls = 3 + 100 + 60;
   assert.equal(saved.calls, customerCalls, 'the ten failed tries are not calls of the customer\'s: the answers that stood in are');
   close(saved.would, customerCalls * COST[REF], 1e-9, 'each of them once, at the customer\'s own price');
+});
+
+test('a task stays where an experiment put it only while that experiment could still be run, and never past a day', async () => {
+  const s = await shop('task-gates');
+  const yours = await upsertArm(s.workload, referenceSpec(s.workload), { status: 'baseline', offline: { ratio: 1 } });
+  const cheaper = await armOf(s.workload.id, CHEAPER);
+  const load = () => db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id);
+  /* A task's steps, as the customer's app sends them, the first one given to `arm` by an experiment with a
+     chance nothing else is ever given (0.37), so a step that stayed with it can be told from one drawn again. */
+  let k = 0;
+  const step = async (messages, { arm, model, i }) => {
+    const said = { role: 'assistant', content: JSON.stringify(right(i)) };
+    const id = await recordCall({ workspaceId: s.workspace.id, workloadId: s.workload.id, source: 'routed', requestedModel: REF,
+      servedModel: model, statusCode: 200, costUsd: COST[model], request: { model: REF, messages },
+      response: { choices: [{ message: said }] }, armId: arm.id, propensity: 0.37, explored: 1 });
+    await learningSettled();
+    return { id, next: [...messages, said, { role: 'user', content: `and the tax on it? #${i + 500}` }] };
+  };
+  const task = async ({ arm = yours, model = REF } = {}) => {
+    k += 1;
+    return (await step([{ role: 'system', content: `Extract the totals from invoice ${960000 + k}.` }, { role: 'user', content: `document #${8000 + k}` }],
+      { arm, model, i: 8000 + k })).next;
+  };
+  const pick = async (messages) => {
+    await stateOf(await load(), { fresh: true });
+    return chooseStrategy(await load(), { body: { model: REF, messages } });
+  };
+  const stayed = (p, arm) => p?.task === true && p.armId === arm.id && p.propensity === 0.37 && p.explored === true;
+  const steady = await armOf(s.workload.id, STEADY);
+  const usual = (p) => p.armId === steady.id && p.propensity === 1 && p.explored === false;
+
+  assert.ok(stayed(await pick(await task()), yours), 'within every limit, the next step stays with the yardstick');
+  // experiments turned off stop the tasks already running
+  await db.prepare(`UPDATE workloads SET explore_mode = 'off' WHERE id = ?`).run(s.workload.id);
+  assert.ok(usual(await pick(await task())), 'experiments off: the next step is served the usual way');
+  await db.prepare(`UPDATE workloads SET explore_mode = 'normal' WHERE id = ?`).run(s.workload.id);
+  // the day's experiment budget, used up by these very tasks
+  await db.prepare('UPDATE workloads SET explore_budget_usd = 0.0001 WHERE id = ?').run(s.workload.id);
+  assert.ok(usual(await pick(await task())), 'the day\'s budget used: the next step is served the usual way');
+  await db.prepare('UPDATE workloads SET explore_budget_usd = 100 WHERE id = ?').run(s.workload.id);
+  // the workspace's own optimizing budget, used up
+  await db.prepare('UPDATE workspaces SET optimize_budget_usd = 0 WHERE id = ?').run(s.workspace.id);
+  assert.ok(usual(await pick(await task())), 'the workspace\'s optimizing budget used: served the usual way');
+  await db.prepare('UPDATE workspaces SET optimize_budget_usd = NULL WHERE id = ?').run(s.workspace.id);
+  // a runner-up switched off in Models
+  const onCheaper = await task({ arm: cheaper, model: CHEAPER });
+  assert.ok(stayed(await pick(onCheaper), cheaper), 'a runner-up still switched on keeps its task');
+  await db.prepare(`INSERT INTO workspace_models (workspace_id, model_id, enabled, updated_at) VALUES (?, ?, 0, ?)
+      ON CONFLICT (workspace_id, model_id) DO UPDATE SET enabled = 0`).run(s.workspace.id, CHEAPER, now());
+  const off = await pick(onCheaper);
+  assert.ok(!stayed(off, cheaper) && off.armId !== cheaper.id, 'switched off in Models: its task goes elsewhere');
+  await db.prepare('DELETE FROM workspace_models WHERE workspace_id = ? AND model_id = ?').run(s.workspace.id, CHEAPER);
+  // a task older than a day is drawn again, however closely its steps follow each other
+  k += 1;
+  const first = await step([{ role: 'system', content: `Extract the totals from invoice ${960000 + k}.` }, { role: 'user', content: `document #${8000 + k}` }],
+    { arm: yours, model: REF, i: 8000 + k });
+  const second = await step(first.next, { arm: yours, model: REF, i: 8100 + k });
+  assert.equal((await db.prepare('SELECT task_id FROM calls WHERE id = ?').get(second.id)).task_id, first.id, 'one task of two steps');
+  assert.ok(stayed(await pick(second.next), yours), 'a young task keeps its strategy');
+  await db.prepare('UPDATE calls SET created_at = ? WHERE id = ?').run(now() - 25 * 3600000, first.id);
+  await db.prepare('UPDATE calls SET created_at = ? WHERE id = ?').run(now() - 3600000, second.id);
+  const old = await pick(second.next);
+  assert.ok(!(old.task === true) && old.propensity !== 0.37, 'begun a day and an hour ago, its next step is drawn again');
+});
+
+test('evidence is counted in tasks: one forty step task is one piece of evidence, not forty', async () => {
+  const s = await shop('one-task');
+  await history(s, STEADY, { n: 120 });
+  const cheaper = await armOf(s.workload.id, CHEAPER);
+  await bulk(s, { armId: cheaper.id, model: CHEAPER, n: 40, propensity: 0.25, explored: 1, from: now() - 3 * 3600000, to: now() - 2 * 3600000,
+    failPer100: 100, task: `one-long-task-${process.pid}` });
+  assert.deepEqual(await reviewWorkload(s.workload), [], 'forty failed steps of one task are not enough to set a runner-up aside');
+  assert.equal((await armOf(s.workload.id, CHEAPER)).status, 'trying');
+  // forty tasks of one step each are forty pieces of evidence, and do set it aside
+  await bulk(s, { armId: cheaper.id, model: CHEAPER, n: 40, propensity: 0.25, explored: 1, from: now() - 3 * 3600000, to: now() - 2 * 3600000,
+    failPer100: 100 });
+  assert.deepEqual((await reviewWorkload(s.workload)).map((d) => d.kind), ['rest']);
 });

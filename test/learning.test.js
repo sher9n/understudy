@@ -79,14 +79,14 @@ test('the fair record reads every strategy over the same traffic: each task weig
   const { combineDays, fairRecord } = await import('../src/learn/fair.js');
   // one day's sums, as the database adds them up, from tasks { p, steps, worked (steps that worked), ok, cost }
   const day = (ageDays, tasks) => {
-    const d = { ageDays, tasks: tasks.length, n: 0, wn: 0, ws: 0, q: 0, ok: 0, wok: 0, wcost: 0 };
+    const d = { ageDays, tasks: tasks.length, n: 0, w: 0, ws: 0, q: 0, ok: 0, wok: 0, wcost: 0 };
     for (const t of tasks) {
       const w = 1 / t.p;
       const ok = t.ok ?? t.steps;
       d.n += t.steps;
-      d.wn += w * t.steps;
-      d.ws += w * t.worked;
-      d.q += (w * t.steps) ** 2;
+      d.w += w;
+      d.ws += (w * t.worked) / t.steps;
+      d.q += w * w;
       d.ok += ok;
       d.wok += w * ok;
       d.wcost += w * (t.cost ?? 0);
@@ -109,9 +109,14 @@ test('the fair record reads every strategy over the same traffic: each task weig
   const both = fairRecord(combineDays([rollout, after]), { prior });
   close(both.liveRate, (940 / 950 + 0.6) / 2, 1e-9, 'the two days, each as the traffic it stands for');
   assert.ok(both.nEff < 45, `and worth far fewer than its 960 calls, since ten of them stand for a whole day: ${both.nEff}`);
-  // the steps of one conversation are one piece of evidence
+  // the steps of one conversation are one piece of evidence, and one long task does not outweigh many short ones
   const task = fairRecord(combineDays([day(0, [{ p: 0.02, steps: 40, worked: 40 }])]), { prior });
   assert.deepEqual([task.nLive, task.tasks, task.nEff], [40, 1, 1], 'forty steps, one task, worth one');
+  const mixed = fairRecord(combineDays([day(0, [{ p: 0.25, steps: 40, worked: 0 }, ...many(40, { p: 0.25, steps: 1, worked: 1 })])]), { prior });
+  close(mixed.liveRate, 40 / 41, 1e-12, 'one failed task of forty steps beside forty that worked: one task in forty one');
+  assert.equal(mixed.nEff, 41);
+  close(fairRecord(combineDays([day(0, [{ p: 0.5, steps: 4, worked: 3 }])]), { prior }).liveRate, 0.75, 1e-12,
+    'a task is as good as the share of its steps that worked');
   // a day a half-life old counts half
   const aged = fairRecord(combineDays([day(0, many(50, { p: 0.5, steps: 1, worked: 1 })), day(14, many(50, { p: 0.5, steps: 1, worked: 0 }))],
     { halfLifeDays: 14 }), { prior });

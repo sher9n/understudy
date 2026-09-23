@@ -225,7 +225,7 @@ async function readState(workload) {
      here and was paid for there, and counted in it made a strategy that fails look cheaper than it is. */
   const fairRows = began ? await db.prepare(
     `SELECT arm_id, FLOOR((? - started) / 86400000.0) AS age, COUNT(*) AS tasks, SUM(n) AS n,
-            SUM(w * n) AS wn, SUM(w * s) AS ws, SUM(w * w * n * n) AS q,
+            SUM(w) AS w, SUM(w * s / n) AS ws, SUM(w * w) AS q,
             SUM(ok) AS ok, SUM(w * ok) AS wok, SUM(w * cost) AS wcost
        FROM (SELECT arm_id, MIN(created_at) AS started, COUNT(*) AS n,
                     SUM(CASE WHEN status_code = 200 THEN COALESCE(reward, 1) ELSE 0 END) AS s,
@@ -240,7 +240,7 @@ async function readState(workload) {
   const fairDays = new Map();
   for (const r of fairRows) {
     if (!fairDays.has(r.arm_id)) fairDays.set(r.arm_id, []);
-    fairDays.get(r.arm_id).push({ ageDays: Number(r.age), tasks: r.tasks, n: r.n, wn: r.wn, ws: r.ws, q: r.q, ok: r.ok, wok: r.wok, wcost: r.wcost });
+    fairDays.get(r.arm_id).push({ ageDays: Number(r.age), tasks: r.tasks, n: r.n, w: r.w, ws: r.ws, q: r.q, ok: r.ok, wok: r.wok, wcost: r.wcost });
   }
   const shadowRows = await db.prepare(
     `SELECT arm_id, FLOOR((? - created_at) / 86400000.0) AS age, COUNT(*) AS n, SUM(agreement) AS s,
@@ -408,6 +408,26 @@ export async function chooseExplore(workload, servingArm, { rng = Math.random } 
     // an experiment is never worth a failed call: if it cannot be answered, the call is served as usual
     fallback: { armId: serving.id, spec: serving.spec, propensity: null, explored: false, shadow: null, fallback: toOwn },
   };
+}
+
+/**
+ * Whether one more step of a task an experiment gave to `armId` may be served there (see taskChoice in
+ * src/learn/choose.js): only within the same limits that let the task start. Experiments still on for
+ * this workload, the day's budget and the workspace's optimizing budget not spent, and the strategy
+ * still one that may be tried: what serves, the customer's own model while it can be reached, or a
+ * runner-up still being tried whose models are still switched on. Read from the record as last read,
+ * never waiting on it; with nothing read yet, the step is served the usual way.
+ */
+export function mayContinue(workload, servingArm, armId) {
+  const st = peekState(workload);
+  if (!st || !servingArm || !armId) return false;
+  const s = exploreOf(workload, { perDay: st.perDay, dailySaving: st.dailySaving });
+  if (!s.live || s.share <= 0) return false;
+  if (st.extraToday >= s.budgetUsd || spentOut(st)) return false;
+  if (armId === servingArm.id) return true;
+  if (armId === st.baseline.id) return st.baseline.usable !== false;
+  const arm = st.byId.get(armId);
+  return !!arm && arm.status === 'trying' && arm.usable !== false;
 }
 
 /* How closely a background answer matched the one that was used: 1 the same, 0 different. Free
@@ -669,9 +689,11 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
   const ref = workload.reference_model;
   const serving = st.serving;
   const base = st.baseline;
-  // the calls, and the tasks they were steps of where there were fewer: what the evidence is counted in
-  const said = (x) => `${pctOf(x.fair.liveRate)} of ${Math.round(x.fair.nLive)} calls`
-    + (x.fair.tasks && x.fair.tasks < x.fair.nLive ? ` in ${x.fair.tasks} tasks` : '');
+  /* how often it worked, over what the evidence is counted in: its calls, or the tasks they were steps
+     of where a task took more than one call (a task counts as the share of its steps that worked) */
+  const said = (x) => (x.fair.tasks && x.fair.tasks < x.fair.nLive
+    ? `${pctOf(x.fair.liveRate)} of ${x.fair.tasks} tasks (${Math.round(x.fair.nLive)} calls)`
+    : `${pctOf(x.fair.liveRate)} of ${Math.round(x.fair.nLive)} calls`);
   // what the grader found, for a decision it made
   const read = (x) => (x.graded ? `${x.graded.n - x.graded.bad} of ${x.graded.n} answers right` : 'no answers read');
   const why = (d, a, b, bLabel) => (d.by === 'graded'

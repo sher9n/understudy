@@ -642,6 +642,36 @@ test('a conversation stays on the strategy it started with', async () => {
   assert.equal(pick.task, true);
 });
 
+test('a conversation begun on the strategy a switch is replacing stays there while the switch takes over, and only then', async () => {
+  const s = await shop();
+  const system = 'Answer the tenant.';
+  const w0 = await workloadFor(s.workspace.id, request(1, { system }));
+  await promote(w0, CHEAP, { spec: { kind: 'model', model: CHEAP, recipe: null }, rollout: false });
+  const first = await load(w0.id);
+  const before = first.routed_arm_id;
+  // a second switch takes over a share at a time from the first, which is set aside while it does
+  await promote(first, 'judge/small', { spec: { kind: 'model', model: 'judge/small', recipe: null } });
+  const w = await load(w0.id);
+  assert.equal(w.rollout_from_arm_id, before);
+  assert.equal((await db.prepare('SELECT status FROM arms WHERE id = ?').get(before)).status, 'resting');
+  const turn1 = { model: REF, messages: [{ role: 'system', content: system }, { role: 'user', content: 'the boiler #1' }] };
+  await recordCall({ workspaceId: s.workspace.id, workloadId: w.id, source: 'routed', requestedModel: REF, servedModel: CHEAP, statusCode: 200,
+    promptTokens: 10, completionTokens: 5, costUsd: 0.0004, request: turn1,
+    response: { choices: [{ message: { role: 'assistant', content: 'A plumber comes on Monday.' } }] }, armId: before, propensity: 0.95, explored: 0 });
+  await learningSettled();
+  const turn2 = { ...turn1, messages: [...turn1.messages, { role: 'assistant', content: 'A plumber comes on Monday.' }, { role: 'user', content: 'what time?' }] };
+  const pick = await chooseStrategy(w, { rng: () => 0.001, body: turn2 });
+  assert.equal(pick.armId, before, 'the draw says the new side, but the conversation began on the one it replaces');
+  assert.equal(pick.task, true);
+  assert.equal(pick.propensity, 0.95);
+  // once the switch has taken over, a conversation from before it is served the way any call is
+  await db.prepare(`UPDATE workloads SET rollout_share = NULL, rollout_stage = NULL, rollout_started_at = NULL, rollout_from_arm_id = NULL
+      WHERE id = ?`).run(w.id);
+  const later = await chooseStrategy(await load(w.id), { rng: () => 0.001, body: turn2 });
+  assert.equal(later.armId, w.routed_arm_id, 'what serves now');
+  assert.notEqual(later.task, true);
+});
+
 test('a helpful answer that opens with an apology is not a refusal', () => {
   assert.equal(refused("I'm sorry to hear that. Here is how to reset it: open Settings and press Reset."), false);
   assert.equal(refused("I can't wait to help. Here is the plan."), false);
