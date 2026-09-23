@@ -447,8 +447,11 @@ test('the switched card is built from the switch and the calls since, and adds u
   assert.ok(Math.abs(s.volume.monthlyRouted - 360) < 1e-6, `routed a month is ${s.volume.monthlyRouted}`);
   const [month] = s.projection;
   assert.ok(Math.abs(month.saved - perCallSaving * 360) < 1e-6, `a month saves ${month.saved}`);
-  assert.ok(Math.abs(s.volume.allMonthSaved - perCallSaving * (212 / 14) * 30) < 1e-6,
-    'and what routing the copies too would save is there, apart');
+  // projected from the days since the first call, which moves while the test runs (a slow machine moves it
+  // further): within half a percent, as the projection before the switch is
+  const allWant = perCallSaving * (212 / 14) * 30;
+  assert.ok(Math.abs(s.volume.allMonthSaved - allWant) <= 1e-6 + 0.005 * Math.abs(allWant),
+    `and what routing the copies too would save is there, apart: ${s.volume.allMonthSaved} against ${allWant}`);
   assert.ok(s.measuring.spent > 0, 'and what measuring cost is there to be shown');
 
   // calls of no known size cannot be priced: "$0.00 a call" and "0% less" were not findings

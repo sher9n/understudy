@@ -234,12 +234,12 @@ Switching back for safety happens in every mode.
 A call first sets aside the most it can cost, so calls arriving together can never spend the same
 balance twice, and gives back what it did not use. The most is a bound, not a guess:
 
-- the prompt at a token for every byte of its text, which no tokenizer goes past, and never more
-  than the model's context length; pictures, sound and video on their own terms, and a PDF by its
+- the prompt at a token for every byte of the request (its messages, tools and any response schema),
+  which no tokenizer goes past, and never more than the model's context length; pictures, sound and video on their own terms, and a PDF by its
   pages (counted in a separate worker with a time and a memory limit, a few at a time and one per
   workspace at once; one that cannot be counted is refused);
 - the answer at the cap the request names (`max_tokens`), or else the longest answer every provider
-  it can reach publishes, or else the model's whole context length, times `n`;
+  it can reach publishes, or else the model's whole context length, plus any predicted output, times `n`;
 - all at the dearest provider the call can reach: the providers that keep nothing, or, where the
   workspace allows others, every provider of the model, read from OpenRouter; with every published
   exception that can apply (long-prompt prices, dearer hours, cache writes, fees per request).

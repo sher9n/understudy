@@ -61,6 +61,7 @@ const NOWINDOW = 'test/no-window';
 const STREAMY = 'test/streamy';
 const NOUSAGE = 'test/no-usage';
 const PRICEY = 'test/pricey';
+const SLOW = 'test/slow';
 const seen = [];
 // every provider of a model, as OpenRouter's list of them says, for the models a test sets; others answer 404
 const allEndpoints = new Map();
@@ -123,7 +124,7 @@ const provider = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ id, model: p.model,
         choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'billing' } }], usage }));
-    }, 40);
+    }, p.model === SLOW ? 600 : 40);
   });
 });
 let server = null;
@@ -169,6 +170,7 @@ test.before(async () => {
     { model_id: STREAMY, name: 'streamy', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
     { model_id: NOUSAGE, name: 'no usage', context_len: 200000, price_in: 1e-5, price_out: 2e-5, open_weights: 0, zdr: 1, max_output: 8000 },
     { model_id: PRICEY, name: 'pricey', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
+    { model_id: SLOW, name: 'slow', context_len: 400000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
   ]);
 });
 
@@ -563,14 +565,39 @@ test('no provider within a call\'s ceiling is a moment\'s wait, and the model\'s
   assert.equal((await billing.account(workspace.id)).balance_usd, 5, 'and nothing was charged');
 });
 
+test('a customer\'s own max_price that rules out every provider is said as theirs, and nothing is read again', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'theirceiling@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  await db.prepare(`INSERT INTO model_endpoints_all_sync (model_id, synced_at, ok) VALUES (?, ?, 1)
+      ON CONFLICT (model_id) DO UPDATE SET synced_at = excluded.synced_at`).run(PRICEY, Date.now());
+  const r = await call(key.secret, { model: PRICEY, max_tokens: 5, provider: { max_price: { completion: 0.0001 } },
+    messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 400, 'sending it again cannot help, so it is not a 503');
+  const j = await r.json();
+  assert.equal(j.error.type, 'max_price_too_low');
+  assert.match(j.error.message, /max_price your request sets/);
+  assert.ok(await db.prepare('SELECT 1 FROM model_endpoints_all_sync WHERE model_id = ?').get(PRICEY), 'the prices are not read again on its account');
+});
+
 test('a prompt is counted a token a byte, and what parts carry inline is left out by where it sits, not by how it starts', async () => {
   const long = 'x'.repeat(40000);
   // text that starts "data:" is text, in a message or in a text part
   assert.ok((await billing.callShape({ messages: [{ role: 'user', content: `data:${long}` }] })).pin >= 40000);
   assert.ok((await billing.callShape({ messages: [{ role: 'user', content: [{ type: 'text', text: `data: ${long}` }] }] })).pin >= 40000);
-  // characters a rule of thumb undercounts are counted at their bytes at least
-  const odd = await billing.callShape({ messages: [{ role: 'user', content: '\u0001'.repeat(10000) + '\u{1F9EA}'.repeat(1000) }] });
-  assert.ok(odd.pin >= 10000 + 4000, `control characters and emoji: ${odd.pin}`);
+  // characters a rule of thumb undercounts are counted at their bytes at least: two tokens for three digits was short
+  const digits = await billing.callShape({ messages: [{ role: 'user', content: '7'.repeat(30000) }] });
+  assert.ok(digits.pin >= 30000, `digits: ${digits.pin}`);
+  const emoji = await billing.callShape({ messages: [{ role: 'user', content: '\u{1F9EA}'.repeat(1000) }] });
+  assert.ok(emoji.pin >= 4000, `emoji, four bytes each: ${emoji.pin}`);
+  // the whole request is counted: a response_format schema is billed as prompt
+  const schema = await billing.callShape({ messages: [{ role: 'user', content: 'hi' }],
+    response_format: { type: 'json_schema', json_schema: { name: 'x', schema: { type: 'object', description: 'y'.repeat(50000) } } } });
+  assert.ok(schema.pin >= 50000, `a schema: ${schema.pin}`);
+  // a predicted output's unused tokens are billed as answer tokens, so they are held as such
+  const predicted = await billing.callShape({ max_tokens: 10, messages: [{ role: 'user', content: 'hi' }],
+    prediction: { type: 'content', content: 'z'.repeat(20000) } });
+  assert.equal(predicted.predicted, 20000);
+  assert.ok((await billing.callBound(NOCOST, predicted, { zdr: true })).parts.outTokens >= 20010);
   // a picture's data is not text: it is a picture
   const pic = await billing.callShape({ messages: [{ role: 'user', content: [
     { type: 'text', text: 'what is this' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${'A'.repeat(100000)}` } }] }] });
@@ -600,19 +627,29 @@ test('a prompt is counted a token a byte, and what parts carry inline is left ou
 
 test('a request\'s ceiling covers the fallbacks it names, and its hold is read at that ceiling', async () => {
   const { workspace, key } = await auth.createAccount({ email: 'fallceiling@example.test', password: 'password-123' });
-  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 20, note: 'test credit' });
   seen.length = 0;
-  const r = await call(key.secret, { model: NOCOST, models: [LONG], max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] });
-  assert.equal(r.status, 200);
-  const sent = seen.at(-1);
+  // SLOW is cheap with a long window; LONG, the fallback it names, is dear
+  const body = { model: SLOW, models: [LONG], messages: [{ role: 'user', content: 'hi' }] };
+  const going = call(key.secret, body);
+  let held = null;
+  for (let i = 0; i < 100 && held === null; i += 1) {
+    const h = await db.prepare(`SELECT amount_usd FROM balance_holds WHERE workspace_id = ? AND purpose = 'call'`).get(workspace.id);
+    if (h) held = Number(h.amount_usd); else await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal((await going).status, 200);
   // LONG's list price, twice over as its providers are not known one by one: $1e-5 out is $20 a million
-  assert.ok(sent.provider.max_price.completion >= 20, `the fallback's price is let through: ${JSON.stringify(sent.provider.max_price)}`);
-  // and what the call set aside covered NOCOST's own answer at that price, not at its own
-  const shape = await billing.callShape({ model: NOCOST, models: [LONG], max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] });
-  const own = await billing.callBound(NOCOST, shape, { zdr: true });
+  assert.ok(seen.at(-1).provider.max_price.completion >= 20, `the fallback's price is let through: ${JSON.stringify(seen.at(-1).provider.max_price)}`);
+  // so SLOW's longest answer, at LONG's prices, is what the call can cost, and what it set aside
+  const shape = await billing.callShape(body);
+  const own = await billing.callBound(SLOW, shape, { zdr: true });
   const fall = await billing.callBound(LONG, shape, { zdr: true });
   const ceiling = billing.mergeCeilings([own.ceiling, fall.ceiling]);
-  assert.ok(billing.boundAt(own.parts, ceiling) > own.usd, 'dearer at the shared ceiling');
+  const want = billing.withFee(Math.max(billing.boundAt(own.parts, ceiling), billing.boundAt(fall.parts, ceiling)));
+  assert.ok(held !== null, 'a hold was taken');
+  assert.ok(Math.abs(held - want) < want * 1e-3, `held ${held} against ${want}`);
+  assert.ok(held > billing.withFee(Math.max(own.usd, fall.usd)) * 1.5, 'far more than either model at its own prices');
+  assert.equal((await billing.available(workspace.id)).inFlight, 0, 'and given back');
 });
 
 test('an alert about a failure of ours says what failed, not that calls failed', async () => {
@@ -1353,5 +1390,24 @@ test('a PDF that cannot be counted in time is refused, and files are counted a f
     assert.equal(fine.status, 200);
   } finally {
     config.PDF_COUNT_MS = was;
+  }
+});
+
+test('a model\'s own searches are held only when the call asks for search, or the model always searches', async () => {
+  await db.prepare(`INSERT INTO models_catalog (model_id, name, context_len, price_in, price_out, open_weights, zdr, synced_at, pricing_json, max_output)
+      VALUES (?, 'searchy', 200000, 0.000003, 0.000015, 0, 1, ?, ?, 8000), (?, 'sonar', 200000, 0.000001, 0.000001, 0, 1, ?, ?, 8000)`)
+    .run('test/searchy', Date.now(), JSON.stringify({ prompt: '0.000003', completion: '0.000015', web_search: '0.01' }),
+      'perplexity/sonar-test', Date.now(), JSON.stringify({ prompt: '0.000001', completion: '0.000001', web_search: '0.005' }));
+  try {
+    const plain = await billing.callShape({ max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] });
+    const quiet = await billing.callBound('test/searchy', plain, { zdr: true });
+    assert.equal(quiet.parts.searches, 0, 'not asked, so no searches held');
+    assert.ok(quiet.usd < 0.01, `a short call holds a cent at most: ${quiet.usd}`);
+    const asked = await billing.callShape({ max_tokens: 10, web_search_options: {}, messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal((await billing.callBound('test/searchy', asked, { zdr: true })).parts.searches, config.HOLD_SEARCHES_PER_CALL);
+    const always = await billing.callBound('perplexity/sonar-test', plain, { zdr: true });
+    assert.equal(always.parts.searches, config.HOLD_SEARCHES_PER_CALL, 'a model that always searches is held for it');
+  } finally {
+    await db.prepare('DELETE FROM models_catalog WHERE model_id = ANY(?::text[])').run(['test/searchy', 'perplexity/sonar-test']);
   }
 });

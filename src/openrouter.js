@@ -112,27 +112,45 @@ export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHin
      than this, which keeps the hold a bound when a provider is added or reprices after we read the list.
      A ceiling the customer set is kept where it is lower. Rounded up a hair, so a provider at exactly the
      bound is not turned away by the arithmetic. */
-  const cap = priceCaps?.[model];
-  if (cap) {
+  const ours = ceilingSent(priceCaps?.[model]);
+  if (ours) {
     const theirs = out.provider.max_price && typeof out.provider.max_price === 'object' ? out.provider.max_price : {};
-    const perMillion = (v) => Math.ceil(Number(v) * 1e6 * 1e6) / 1e6;
-    const lower = (given, ours) => (Number.isFinite(Number(given)) ? Math.min(Number(given), ours) : ours);
-    out.provider.max_price = {
-      ...theirs,
-      prompt: lower(theirs.prompt, perMillion(cap.prompt)),
-      completion: lower(theirs.completion, perMillion(cap.completion)),
-      ...(cap.request > 0 ? { request: lower(theirs.request, Math.ceil(cap.request * 1e6) / 1e6) } : {}),
-    };
+    const lower = (given, mine) => (Number.isFinite(Number(given)) ? Math.min(Number(given), mine) : mine);
+    out.provider.max_price = { ...theirs };
+    for (const [k, v] of Object.entries(ours)) out.provider.max_price[k] = lower(theirs[k], v);
   }
   return out;
+}
+
+/* Our ceiling for one model as it is sent: per million tokens, and per request where there is a fee. */
+function ceilingSent(cap) {
+  if (!cap) return null;
+  const perMillion = (v) => Math.ceil(Number(v) * 1e6 * 1e6) / 1e6;
+  return {
+    prompt: perMillion(cap.prompt),
+    completion: perMillion(cap.completion),
+    ...(cap.request > 0 ? { request: Math.ceil(cap.request * 1e6) / 1e6 } : {}),
+  };
 }
 
 /* OpenRouter turns a request away when no provider is at or under the price ceiling it carries (see
    buildUpstream): a price moved after we last read it. The call is answered as a moment's wait rather
    than as OpenRouter's 404, which from a chat endpoint reads as a wrong address, and the prices of that
    model are read again now instead of at the next hourly reading, so the next call is held at them. */
-function priceMoved(status, json, model) {
+function priceMoved(status, json, model, body, cap) {
   if (status !== 404 || !/satisfy the max price/i.test(String(json?.error?.message || ''))) return null;
+  /* A max_price the customer sent themselves, at or under ours on any price (or on one we do not set), is
+     what rules the providers out: sending the call again cannot help, so it is said as that, and the
+     prices are not read again on its account. */
+  const theirs = body?.provider?.max_price;
+  const ours = ceilingSent(cap);
+  const theirsBinds = !!theirs && typeof theirs === 'object' && Object.entries(theirs)
+    .some(([k, v]) => Number.isFinite(Number(v)) && (!ours || ours[k] === undefined || Number(v) <= ours[k]));
+  if (theirsBinds) {
+    return new UpstreamError(400, { error: {
+      message: 'No provider of this model is within the max_price your request sets (provider.max_price). Raise it or leave it out: every call through Understudy already carries a ceiling at the price it set aside for.',
+      type: 'max_price_too_low' } });
+  }
   const base = String(model || '').replace(/:[a-z0-9._-]+$/i, '');
   db.prepare('DELETE FROM model_endpoints_all_sync WHERE model_id = ?').run(base).catch(() => {});
   db.prepare(`UPDATE jobs SET run_after = ? WHERE kind = 'model_health' AND status = 'queued' AND run_after > ?`)
@@ -169,7 +187,7 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
       await new Promise((r) => setTimeout(r, Math.min(wait, maxWaitMs ?? config.UPSTREAM_RETRY_WAIT_MAX_MS)));
       continue;
     }
-    if (!res.ok) throw priceMoved(res.status, json, model) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
+    if (!res.ok) throw priceMoved(res.status, json, model, body, priceCaps?.[model]) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
     return { json, latencyMs: Date.now() - started };
   }
 }
@@ -240,7 +258,7 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
       const text = await res.text();
       let json = null;
       try { json = JSON.parse(text); } catch { /* not json */ }
-      throw priceMoved(res.status, json, model) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
+      throw priceMoved(res.status, json, model, body, priceCaps?.[model]) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
     }
     // started: from here the answer may take as long as it is allowed, so long as it keeps coming
     const hush = () => {

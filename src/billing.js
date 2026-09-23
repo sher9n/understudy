@@ -207,9 +207,11 @@ const SEARCH_RESULT_TOKENS = 1500;
 // where a message part carries its inline data, by the part's type
 const INLINE_AT = { image_url: 'image_url', file: 'file', input_audio: 'input_audio', video_url: 'video_url' };
 
-/* The request's text: its messages and tools as they are sent, with the data a part carries inline
-   emptied by where it sits, since each is counted on its own terms. Text that merely starts "data:"
-   stays text. */
+/* The request's text: all of it as it is sent, with the data a part carries inline emptied by where it
+   sits, since each is counted on its own terms. Text that merely starts "data:" stays text. All of it,
+   because providers bill more than the messages as prompt: a response_format schema is sent to the model
+   with them, and counting only messages and tools let a schema of a few megabytes through at a hold of a
+   few bytes. Counting a field no provider bills is only a little too much. */
 function textOf(body) {
   const part = (p) => {
     const key = INLINE_AT[p?.type];
@@ -224,8 +226,20 @@ function textOf(body) {
   };
   const messages = (Array.isArray(body?.messages) ? body.messages : [])
     .map((m) => (Array.isArray(m?.content) ? { ...m, content: m.content.map(part) } : m));
-  return JSON.stringify({ messages, tools: body?.tools ?? [] });
+  return JSON.stringify({ ...(body && typeof body === 'object' ? body : {}), messages });
 }
+
+/* A predicted output (OpenAI's "prediction"): the tokens of it the model does not use are billed as answer
+   tokens, on top of the answer, so it is held as answer tokens, a token a byte. */
+const predictedTokens = (body) => {
+  const p = body?.prediction;
+  if (!p || typeof p !== 'object') return 0;
+  return Buffer.byteLength(typeof p.content === 'string' ? p.content : JSON.stringify(p.content ?? p), 'utf8');
+};
+
+/* Models that search the web on every call, whatever the request says: Perplexity's, and OpenAI's search
+   previews. Any other model with a price per search searches only when the call asks it to. */
+const searchesByItself = (modelId) => /^perplexity\//i.test(modelId) || /search-preview/i.test(modelId) || /:online$/i.test(modelId);
 
 /** The most tokens a request's text can come to: one for every byte of it. */
 export const promptTokensAtMost = (body) => Buffer.byteLength(textOf(body), 'utf8');
@@ -284,7 +298,7 @@ export async function callShape(body, { owner = null } = {}) {
   const searches = (webPlugin ? 1 : 0) + (body?.web_search_options ? 1 : 0) + (/:online$/i.test(String(body?.model || '')) && !webPlugin ? 1 : 0);
   const wants = Array.isArray(body?.modalities) ? body.modalities.map((x) => String(x).toLowerCase()) : [];
   return {
-    pin: promptTokensAtMost(body), cap, n, longCache, audioIn, images,
+    pin: promptTokensAtMost(body), cap, n, longCache, audioIn, images, searches, predicted: predictedTokens(body),
     outputs: wants.filter((x) => x === 'image' || x === 'audio'),
     // a byte of sound, of video or of a file that is not a PDF read as a token, which no encoding comes near
     extraIn: images * config.HOLD_IMAGE_TOKENS + pages * PDF_PAGE_TOKENS + otherBytes
@@ -344,7 +358,8 @@ export function mergeCeilings(list) {
 /** The most one call can cost on one model, with the prices it may be charged at (its ceiling) and
  *  what it is made of, or null when the model is not in the catalogue. */
 export async function callBound(modelId, shape, { zdr = true } = {}) {
-  const { pin: counted, cap, n = 1, extraIn = 0, extraUsd = 0, images = 0, longCache = false, audioIn = false, outputs = [] } = shape;
+  const { pin: counted, cap, n = 1, extraIn = 0, extraUsd = 0, images = 0, longCache = false, audioIn = false, outputs = [],
+    searches: asked = 0, predicted = 0 } = shape;
   const wanted = String(modelId || '');
   const base = baseModelId(wanted);
   // the listing under the exact name first (a model sold only as a variant), else the model it varies
@@ -379,11 +394,16 @@ export async function callBound(modelId, shape, { zdr = true } = {}) {
   // the longest answer: the cap asked for, else what every provider publishes, else the whole window
   const limit = longest ?? window;
   const each = cap !== null ? (limit ? Math.min(cap, limit) : cap) : (limit ?? config.HOLD_MAX_OUTPUT_TOKENS);
-  // a model that searches by itself pays per search, up to HOLD_SEARCHES_PER_CALL of them, and reads what each finds
-  const searches = d.search > 0 ? config.HOLD_SEARCHES_PER_CALL : 0;
+  /* A model with its own price per search is paid for up to HOLD_SEARCHES_PER_CALL searches, and reads what
+     each finds, only when it will search: the call asks for search, or the model searches on every call.
+     Held on every call to a model that publishes such a price (most of the large ones do), it set aside
+     nearly a dollar for a call costing a twentieth of a cent. */
+  const searching = d.search > 0 && (asked > 0 || searchesByItself(m.model_id) || searchesByItself(wanted));
+  const searches = searching ? config.HOLD_SEARCHES_PER_CALL : 0;
   const parts = {
     promptTokens: pin + extraIn + searches * 5 * SEARCH_RESULT_TOKENS,
-    outTokens: each * n,
+    // each answer, and a predicted output's unused tokens, billed as answer tokens too
+    outTokens: (each + predicted) * n,
     requests: n,
     images,
     searches,
