@@ -59,7 +59,7 @@ const { saveCatalog, buildUpstream, hintApplies } = await import('../src/openrou
 const { move } = await import('../src/billing.js');
 const { promote, revert, heldBack, everReverted, rollBack } = await import('../src/eval/promote.js');
 const { chooseStrategy } = await import('../src/learn/choose.js');
-const { reviewWorkload, forgetState } = await import('../src/learn/explore.js');
+const { reviewWorkload, reviewAll, forgetState } = await import('../src/learn/explore.js');
 const { gradeWorkload } = await import('../src/learn/grade.js');
 const { ask, jevSlots } = await import('../src/jev.js');
 const { adviceFor } = await import('../src/eval/advice.js');
@@ -794,4 +794,48 @@ test('a helpful answer that opens with an apology is not a refusal', () => {
   assert.equal(refused("I can't wait to help. Here is the plan."), false);
   assert.equal(refused("I'm sorry, but I can't help with that."), true);
   assert.equal(refused('I cannot provide that.'), true);
+});
+
+test('a strategy served only by the providers it was measured on is switched back or set aside when none of them serves it any more', async () => {
+  const { watchPins } = await import('../src/learn/pins.js');
+  const { saveZdrEndpoints } = await import('../src/openrouter.js');
+  const endpoint = (model, tag) => ({ model_id: model, tag, provider: tag, price_in: 0.2e-6, price_out: 0.6e-6, overrides_json: null,
+    context_len: 128000, max_output: null, max_prompt: null, params_json: null, status: 0, uptime_5m: 100, uptime_30m: 100, uptime_1d: 100,
+    ttft_p50: null, ttft_p90: null, tps_p50: null, tps_p90: null });
+  const pinnedTo = (tags) => ({ kind: 'model', model: CHEAP, recipe: { providers: tags } });
+  const switched = async (system, tags, { zdr = 1 } = {}) => {
+    const s = await shop();
+    await db.prepare('UPDATE workspaces SET zdr_required = ? WHERE id = ?').run(zdr, s.workspace.id);
+    const w0 = await workloadFor(s.workspace.id, request(1, { system }));
+    await promote(w0, CHEAP, { spec: pinnedTo(tags), rollout: false });
+    return load(w0.id);
+  };
+  try {
+    // a list never read says nothing about any provider
+    await db.prepare('DELETE FROM model_endpoints').run();
+    const early = await switched('Match the invoice to the order.', ['alpha-host']);
+    assert.deepEqual(await watchPins(), { reverted: 0, rested: 0 });
+    // the list now names the model on another provider only
+    await saveZdrEndpoints([endpoint(CHEAP, 'beta-host'), endpoint(REF, 'openai'), endpoint('judge/small', 'beta-host')]);
+    const kept = await switched('Match the delivery to the order.', ['beta-host', 'gamma-host']);
+    const loose = await switched('Match the refund to the order.', ['alpha-host'], { zdr: 0 });
+    // and a runner-up pinned to providers that went, on a workload whose serving strategy is fine
+    const trying = await upsertArm(kept, { kind: 'model', model: 'judge/small', recipe: { providers: ['alpha-host', 'delta-host'] } },
+      { status: 'trying' });
+    // a strategy pinned to a provider that is gone is still pinned, and every call it is given fails
+    assert.equal(buildUpstream({ messages: [{ role: 'user', content: 'x' }] }, CHEAP, { providers: ['alpha-host'] }).provider.only[0], 'alpha-host');
+    // the hourly review looks before it reads anything else
+    const r = await reviewAll();
+    assert.deepEqual(r.pins, { reverted: 1, rested: 1 });
+    assert.equal((await load(early.id)).routed_model, null, 'switched back to the customer\'s own model');
+    const act = await db.prepare(`SELECT * FROM activity WHERE workload_id = ? AND kind = 'revert' ORDER BY created_at DESC LIMIT 1`).get(early.id);
+    assert.match(act.detail, /the providers steady-small was measured on \(alpha-host\), and none of them serves it/);
+    assert.match(act.detail, /Another provider does, but it was never measured there/);
+    assert.equal((await load(kept.id)).routed_model, CHEAP, 'one of its providers still serves it: left alone');
+    assert.equal((await load(loose.id)).routed_model, CHEAP, 'a workspace that allows retention is not judged by the list of those that keep nothing');
+    assert.equal((await db.prepare('SELECT status FROM arms WHERE id = ?').get(trying.id)).status, 'resting', 'the runner-up is set aside');
+  } finally {
+    await db.prepare('DELETE FROM model_endpoints').run();
+    await db.prepare('UPDATE models_catalog SET zdr = 1').run();
+  }
 });

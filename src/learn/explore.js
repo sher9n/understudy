@@ -14,6 +14,7 @@ import { serveWith } from './serve.js';
 import { requestText } from './check.js';
 import { graderFor, gradedBy } from './grade.js';
 import { combineDays, fairRecord } from './fair.js';
+import { watchPins } from './pins.js';
 import { memo, forgetState } from './memo.js';
 import { account, optimizeLeft } from '../billing.js';
 
@@ -858,6 +859,14 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
 
 /** Every workload with something to learn about. */
 export async function reviewAll() {
+  /* First, strategies pinned to providers that no longer serve them (src/learn/pins.js): every call
+     they are given would fail and be answered at full price, so they go before anything else is read. */
+  let pins = { reverted: 0, rested: 0 };
+  try {
+    pins = await watchPins();
+  } catch (err) {
+    console.error(`checking pinned providers failed: ${err?.message || err}`);
+  }
   const rows = await db.prepare(
     `SELECT DISTINCT w.id FROM workloads w JOIN arms a ON a.workload_id = w.id
       WHERE a.status IN ('serving', 'trying', 'baseline') AND w.merged_into IS NULL`).all();
@@ -869,7 +878,7 @@ export async function reviewAll() {
       console.error(`learning review of ${r.id} failed: ${err?.message || err}`);
     }
   }
-  return { workloads: rows.length, acted };
+  return { workloads: rows.length, acted, pins };
 }
 
 /**
