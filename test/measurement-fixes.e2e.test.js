@@ -238,6 +238,72 @@ const dueNow = async (workloadId) => !!(await db.prepare(
             AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?))`)
   .get(workloadId, now(), now() - 30 * DAY));
 
+/* 3. Stops that stick, failures that back off, retries that use what was bought ---------------- */
+
+test('a new workload\'s first measurement, stopped, is not started again by the hourly pass', async () => {
+  // busy enough that a measurement nobody asked for pays for itself, so it gets as far as starting
+  const { workload } = await seed({ n: 900, enabled: ['vendor/steady-small'] });
+  // booked an hour ahead when its calls came in, and that hour has passed
+  await db.prepare('UPDATE workloads SET recheck_after = ? WHERE id = ?').run(now() - 1000, workload.id);
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'first' });
+  await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE id = ?`).run(jobId);
+  const out = await runEvaluation(workload.id, { trigger: 'first', jobId });
+  assert.equal(out.stopped, true, JSON.stringify(out));
+  const w = await load(workload.id);
+  assert.ok(w.recheck_after > now() + 29 * DAY, `the next one waits a whole rhythm: ${(w.recheck_after - now()) / DAY} days`);
+  assert.equal(await dueNow(workload.id), false, 'the hourly pass leaves it alone');
+});
+
+test('a measurement taken out of the queue by Stop is not started again by the hourly pass', async () => {
+  const { workload } = await seed({ enabled: ['vendor/steady-small'] });
+  await db.prepare('UPDATE workloads SET recheck_after = ? WHERE id = ?').run(now() - 1000, workload.id);
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic' }, { unique: true });
+  const out = await stopMeasuring(await load(workload.id));
+  assert.equal(out.state, 'cancelled');
+  assert.ok((await load(workload.id)).recheck_after > now() + 29 * DAY);
+  assert.equal(await dueNow(workload.id), false);
+});
+
+test('a measurement cut short by the provider waits a few hours, longer each time, and never an hour', async () => {
+  const { workload } = await seed({ enabled: ['vendor/steady-small'] });
+  await db.prepare('UPDATE workloads SET recheck_after = ? WHERE id = ?').run(now() - 1000, workload.id);
+  failing.set(REF, 503);
+  try {
+    const out = await runEvaluation(workload.id);
+    assert.equal(out.ok, false, JSON.stringify(out));
+    assert.equal((await db.prepare('SELECT outcome FROM eval_runs WHERE workload_id = ?').get(workload.id)).outcome, 'interrupted');
+    const first = Number((await load(workload.id)).recheck_after) - now();
+    assert.ok(first > 5.9 * HOUR && first < 6.1 * HOUR, `put off ${first / HOUR} hours`);
+    assert.equal(await dueNow(workload.id), false);
+    await runEvaluation(workload.id);
+    const second = Number((await load(workload.id)).recheck_after) - now();
+    assert.ok(second > 11.9 * HOUR && second < 12.1 * HOUR, `the second time in a row, ${second / HOUR} hours`);
+  } finally {
+    failing.delete(REF);
+  }
+});
+
+test('the measurement that tries again after one was cut short uses the bar it bought', async () => {
+  const { workload } = await seed({ enabled: ['vendor/steady-small'] });
+  failing.set('vendor/steady-small', 402);
+  let out;
+  try {
+    out = await runEvaluation(workload.id);
+  } finally {
+    failing.delete('vendor/steady-small');
+  }
+  const cut = await db.prepare('SELECT * FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1').get(workload.id);
+  assert.equal(cut.outcome, 'interrupted', JSON.stringify(out));
+  assert.match(cut.error, /account/);
+  const again = await runEvaluation(workload.id);
+  assert.equal(again.ok, true, JSON.stringify(again));
+  // the bar's answers this run paid for, rather than read from the call or from what the cut-short one bought
+  const bought = Number((await db.prepare(`SELECT COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND model_id = ? AND reused = 0`)
+    .get(again.runId, REF)).n);
+  // counted as a finished measurement's calls, they were steered away from, and a whole new bar was paid for
+  assert.ok(bought < 30, `the customer's model was paid for ${bought} of the bar's answers, on ${cut.sample_size} calls`);
+});
+
 /* 4. Recorded answers are the customer's own only ----------------------------------------------- */
 
 const LIGHTER = { kind: 'model', model: REF, recipe: { reasoning: { effort: 'low' } } };
@@ -329,4 +395,63 @@ test('a job split away is never folded back, and the workload\'s own job is neve
   assert.notEqual((await workloadFor(workspace.id, job(C, 5001))).id, parent.id, 'and so does C');
   assert.notEqual((await workloadFor(workspace.id, job(D, 5002))).id, parent.id, 'and now D');
   assert.equal((await workloadFor(workspace.id, job(A, 5003))).id, parent.id, 'A, the workload\'s own job, stays with it');
+});
+
+/* 10. Never two measurements of one workload, and a stopped one stays stopped -------------------- */
+
+async function orphan(workload, workspace, { stopped = false, heartbeatAgo = 20 * 60000, jobId = null, status = 'running' } = {}) {
+  const t = now();
+  const id = `run_${Math.random().toString(36).slice(2)}`;
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model, sample_size,
+              created_at, started_at, heartbeat_at, steps_total, steps_done, job_id, stop_requested_at)
+              VALUES (?, ?, ?, ?, 'json', ?, 100, ?, ?, ?, 300, 40, ?, ?)`)
+    .run(id, workspace.id, workload.id, status, REF, t - 30 * 60000, t - 30 * 60000, t - heartbeatAgo, jobId, stopped ? t - 25 * 60000 : null);
+  return id;
+}
+
+test('a job put back in the queue after its run was stopped does not start again', async () => {
+  const { workspace, workload } = await seed({ enabled: ['vendor/steady-small'] });
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
+  // Stop was pressed, the process running it died, and a restart put its claimed job back and claimed it again
+  const old = await orphan(workload, workspace, { stopped: true, jobId });
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE id = ?`).run(now(), jobId);
+  const out = await runEvaluation(workload.id, { jobId });
+  assert.equal(out.ok, false, JSON.stringify(out));
+  assert.equal(await runsOf(workload.id), 1, 'no second run was started');
+  assert.equal((await runOf(old)).status, 'stopped', 'the run nothing was running any more is closed, as stopped');
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'cancelled');
+  assert.ok((await load(workload.id)).recheck_after > now() + 29 * DAY, 'and the stop sticks');
+});
+
+test('a run stopped by a person but still finishing elsewhere is left to finish, and nothing new starts', async () => {
+  const { workspace, workload } = await seed({ enabled: ['vendor/steady-small'] });
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
+  await orphan(workload, workspace, { stopped: true, jobId, heartbeatAgo: 2000 });
+  const out = await runEvaluation(workload.id, { jobId });
+  assert.equal(out.ok, false, JSON.stringify(out));
+  assert.equal(await runsOf(workload.id), 1);
+});
+
+test('a measurement never runs beside another of the same workload', async () => {
+  const { workspace, workload } = await seed({ enabled: ['vendor/steady-small'] });
+  const other = await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic' });
+  const alive = await orphan(workload, workspace, { jobId: other, heartbeatAgo: 2000 });
+  const asked = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
+  const out = await runEvaluation(workload.id, { jobId: asked, trigger: 'manual' });
+  assert.ok(out.snoozeMs > 0, `one somebody asked for waits its turn: ${JSON.stringify(out)}`);
+  const auto = await runEvaluation(workload.id, { trigger: 'automatic' });
+  assert.equal(auto.ok, false, 'one nobody asked for is not needed');
+  assert.equal(await runsOf(workload.id), 1);
+  assert.equal((await runOf(alive)).status, 'running', 'the live one is left alone');
+  await db.prepare(`UPDATE eval_runs SET status = 'failed' WHERE id = ?`).run(alive);
+});
+
+test('a job whose run was interrupted runs again, and closes the dead run first', async () => {
+  const { workspace, workload } = await seed({ enabled: ['vendor/steady-small'] });
+  const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
+  const dead = await orphan(workload, workspace, { jobId });
+  const out = await runEvaluation(workload.id, { jobId });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal((await runOf(dead)).outcome, 'interrupted');
+  assert.equal(await runsOf(workload.id), 2);
 });

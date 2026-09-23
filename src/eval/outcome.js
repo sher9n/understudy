@@ -55,6 +55,11 @@ export function cheaperCleared(results, feePct = config.ROUTING_FEE_PCT) {
    a cheaper one was confirmed first, carries nothing too. */
 export const confirmed = (r) => (r.confirm_verdict == null || r.confirm_verdict === 'cleared' ? 1 : 0);
 
+/* The outcomes of a finished measurement that found something: it compared models, or it found
+   the bar could not be set. A run that was stopped, interrupted or ran out of balance found nothing,
+   and is never read as though it had. `r` is the table alias with its dot, or '' for none. */
+export const FOUND = (r = '') => `${r}status = 'done' AND ${OUTCOME_OF(r)} IN ('compared', 'unmeasurable', 'refused')`;
+
 
 /* Whether a switch changes anything yet. Only calls that come through Understudy can be sent to
    another model: a copy arrives after the customer's own provider has already answered it. A

@@ -1,5 +1,6 @@
 import { db, now } from '../db/index.js';
 import config from '../config.js';
+import { FOUND, OUTCOME_OF } from './outcome.js';
 
 /* When a workload is next measured by itself.
  *
@@ -14,6 +15,10 @@ import config from '../config.js';
 
 const DAY = 86400000;
 const HOUR = 3600000;
+/* The least a measurement that failed waits before it is tried again by itself, doubled each time it
+   fails again. The job that ran it retries a few times on its own first, half an hour apart, which is
+   what a passing outage needs; this is what follows once those are spent. */
+const RETRY_HOURS = 6;
 
 /** How often a workspace measures by itself, in days; zero means never. */
 export async function cadenceOf(workspaceId) {
@@ -47,6 +52,49 @@ export async function deferAutomatic(workloadId, { waitMs = null } = {}) {
   const at = Math.round(now() + wait);
   await db.prepare('UPDATE workloads SET recheck_after = ? WHERE id = ?').run(at, workloadId);
   return at;
+}
+
+/* Moved later, never earlier: a booking already further out (a backoff after re-checks that found
+   nothing new) is left where it is. Answers when the next one is due. */
+async function putOff(workloadId, at) {
+  const r = await db.prepare(
+    `UPDATE workloads SET recheck_after = GREATEST(COALESCE(recheck_after, 0), ?::bigint)
+      WHERE id = ? RETURNING recheck_after`).run(Math.round(at), workloadId);
+  return r.rows[0] ? Number(r.rows[0].recheck_after) : null;
+}
+
+/* A person stopped a measurement, or took one out of the queue before it started. The next one
+   nobody asks for waits a whole rhythm from now. Stopping one used to be answered by the hourly pass
+   starting another within the hour, because the booking the first was made from had come due: a new
+   workload's first measurement is booked an hour ahead, so stopping it did not stick. A workspace
+   that measures only when asked has nothing booked to move. */
+export async function deferAfterStop(workloadId) {
+  const w = await db.prepare('SELECT workspace_id FROM workloads WHERE id = ?').get(workloadId);
+  if (!w) return null;
+  const cadence = await cadenceOf(w.workspace_id);
+  if (!cadence) return null;
+  return await putOff(workloadId, now() + cadence * DAY);
+}
+
+/* A measurement that ended without finding anything, for a reason that is nobody's verdict: the
+   provider was too busy, our own account with it needed attention, the balance ran out, or something
+   broke here. The next one nobody asks for waits RETRY_HOURS, twice as long for each one in a row
+   that ended the same way, and never longer than the workspace's rhythm. The hourly pass used to
+   start it again every hour, and every attempt paid for a bar of its own. */
+export async function deferAfterFailure(workloadId) {
+  const w = await db.prepare('SELECT workspace_id FROM workloads WHERE id = ?').get(workloadId);
+  if (!w) return null;
+  const cadence = await cadenceOf(w.workspace_id);
+  if (!cadence) return null;
+  // the ones in a row that ended this way, since the last that found anything, this one included
+  const row = await db.prepare(
+    `SELECT COUNT(*) AS n FROM eval_runs r
+      WHERE r.workload_id = ? AND (r.status = 'failed' OR (r.status = 'done' AND ${OUTCOME_OF('r.')} = 'no_balance'))
+        AND r.created_at >= COALESCE((SELECT MAX(x.created_at) FROM eval_runs x WHERE x.workload_id = ? AND ${FOUND('x.')}), 0)`)
+    .get(workloadId, workloadId);
+  const inRow = Math.max(1, Number(row?.n || 0));
+  const wait = Math.min(cadence * DAY, RETRY_HOURS * HOUR * 2 ** Math.min(10, inRow - 1));
+  return await putOff(workloadId, now() + wait);
 }
 
 /* Something changed that could matter: the next measurement of these workloads comes forward to

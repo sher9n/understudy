@@ -11,7 +11,7 @@ import { replayOnce } from './replay.js';
 import { thinkingFit } from './select.js';
 import { loadFacts } from '../models/facts.js';
 import { forgetFleet } from './history.js';
-import { OUTCOME_OF, OUTCOME_CASE, cheaperCleared, confirmed } from './outcome.js';
+import { OUTCOME_OF, OUTCOME_CASE, FOUND, cheaperCleared, confirmed } from './outcome.js';
 import { reportCallFailure } from '../alerts.js';
 import { jevUsable } from '../jev.js';
 import { structureOf, jevCheck, requestText, answerText as checkedText } from '../learn/check.js';
@@ -20,7 +20,7 @@ import { featuresOf, train, predict, leaveOneOutGently } from '../learn/router.j
 import { labelOf, armById, leadModel } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
 import { markTrying } from '../learn/explore.js';
-import { scheduleNext, deferAutomatic } from './schedule.js';
+import { scheduleNext, deferAutomatic, deferAfterStop, deferAfterFailure } from './schedule.js';
 import { notify } from '../notify.js';
 
 /* A measurement, run as a race.
@@ -99,15 +99,21 @@ async function inParallel(items, n, fn) {
   if (failure) throw failure;
 }
 
-/* The calls whose two answers from the customer's own model are already paid for and still young
-   enough to use, so the sample can prefer them. */
-async function paidForCalls(model, callIds) {
-  if (!callIds.length) return new Set();
+/* The calls whose bar is already paid for and still young enough to use, so the sample can prefer
+   them: both of the customer's own model's answers are kept, or its own recorded answer is one of
+   the two (`recorded` says whether a call has one) and the other is kept. A measurement that was
+   stopped or cut short leaves exactly these behind, and the one after it uses them again rather than
+   buying another bar. */
+async function paidForCalls(model, calls, recorded) {
+  if (!calls.length) return new Set();
+  const byId = new Map(calls.map((c) => [c.id, c]));
   const rows = await db.prepare(
-    `SELECT call_id FROM replay_cache WHERE model_id = ? AND status = 200 AND created_at >= ? AND recipe_json IS NULL
-        AND call_id = ANY(?) GROUP BY call_id HAVING COUNT(DISTINCT slot) >= 2`)
-    .all(model, now() - config.REPLAY_REUSE_DAYS * DAY, callIds);
-  return new Set(rows.map((r) => r.call_id));
+    `SELECT call_id, COUNT(DISTINCT slot) AS slots, bool_or(slot = 1) AS second FROM replay_cache
+      WHERE model_id = ? AND status = 200 AND created_at >= ? AND recipe_json IS NULL AND call_id = ANY(?)
+      GROUP BY call_id`)
+    .all(model, now() - config.REPLAY_REUSE_DAYS * DAY, [...byId.keys()]);
+  return new Set(rows.filter((r) => Number(r.slots) >= 2 || (r.second && recorded(byId.get(r.call_id))))
+    .map((r) => r.call_id));
 }
 
 /* What an answer said, to keep beside it, whatever shape it came in. */
@@ -160,6 +166,43 @@ const KIND_WORDS = {
   'unparseable arguments': 'returns broken tool arguments', refused: 'is refused by its provider',
 };
 
+/* Whether a measurement should not start, because a person stopped it or another one of the same
+ * workload is running. Answers what the job should do instead, or null to go ahead.
+ *
+ * A job can reach the queue again after its run has begun: a restart puts every claimed job back,
+ * and a run whose process went away still says it is running. Started anyway, one workload was
+ * measured twice side by side, and a measurement somebody had stopped started again. So, before
+ * anything is planned or spent:
+ *   - a run of this very job that a person stopped ends the job here: they said stop;
+ *   - one of this job still running with a heartbeat (another process has it) is left to finish,
+ *     and so is one that already finished; one that was interrupted is what this job is here to
+ *     try again;
+ *   - every run of the workload that nothing is running any more is closed, as stopped when
+ *     somebody asked for that and as interrupted otherwise, and one that is still alive under
+ *     another job means this one waits for it, or, when nobody asked for this one, is not needed. */
+async function alreadyMeasuring(workload, { jobId, trigger }) {
+  const wait = config.EVAL_STALE_MIN * 60000;
+  if (jobId) {
+    for (const r of await db.prepare(`SELECT * FROM eval_runs WHERE job_id = ? AND status = 'running'`).all(jobId)) {
+      if (isAbandoned(r)) await closeRun(r, r.stop_requested_at ? 'stopped' : 'interrupted', { release: false });
+    }
+    const mine = await db.prepare('SELECT status, stop_requested_at FROM eval_runs WHERE job_id = ?').all(jobId);
+    if (mine.some((r) => r.status === 'stopped' || r.stop_requested_at)) {
+      await db.prepare(`UPDATE jobs SET status = 'cancelled', error = 'stopped by you' WHERE id = ? AND status = 'claimed'`).run(jobId);
+      await deferAfterStop(workload.id);
+      return { ok: false, reason: 'stopped by you' };
+    }
+    if (mine.some((r) => r.status === 'running')) return { snoozeMs: wait, note: 'its measurement is still running' };
+    if (mine.some((r) => r.status === 'done')) return { ok: true, already: true };
+  }
+  await closeAbandoned(workload.id);
+  const live = await db.prepare(`SELECT id FROM eval_runs WHERE workload_id = ? AND status = 'running' LIMIT 1`).get(workload.id);
+  if (!live) return null;
+  return trigger === 'automatic' || trigger === 'first'
+    ? { ok: false, reason: 'another measurement of this workload is running' }
+    : { snoozeMs: wait, note: 'another measurement of this workload is running' };
+}
+
 export async function runEvaluation(workloadId, { trigger = 'manual', jobId = null } = {}) {
   const workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
   if (!workload) return { ok: false, reason: 'gone' };
@@ -167,6 +210,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
 
   const reference = workload.reference_model;
   if (!reference) return { ok: false, reason: 'no reference model' };
+
+  const already = await alreadyMeasuring(workload, { jobId, trigger });
+  if (already) return already;
 
   /* The same plan the page showed, with whatever the page had to go without asked for now: the
      page never waits on Jev, a measurement does. */
@@ -197,17 +243,6 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
             FROM calls WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
              AND source NOT IN ('replay', 'test') AND (status_code IS NULL OR status_code < 400)) x
         WHERE rn <= ?)`).all(String(now()), workloadId, now() - 30 * DAY, config.EVAL_POOL_PER_DAY);
-  /* A re-check measures calls no earlier measurement of this workload used, so a lucky sample is not
-     simply measured again: the same twelve calls, the same cached answers and the same verdict, at
-     no cost, was what a re-measure used to be. */
-  const usedBefore = new Set((await db.prepare(
-    `SELECT DISTINCT s.call_id FROM eval_samples s JOIN eval_runs r ON r.id = s.run_id WHERE r.workload_id = ?`)
-    .all(workloadId)).map((r) => r.call_id));
-  const freshSet = new Set(pool.filter((c) => !usedBefore.has(c.id)).map((c) => c.id));
-  const recheckRun = usedBefore.size > 0;
-  const samples = sampleCalls(pool, plan.sample, now() % 100003,
-    recheckRun ? null : await paidForCalls(reference, pool.map((p) => p.id)),
-    { fresh: recheckRun ? freshSet : null });
   const shape = workload.shape_kind;
   const want = plan.models;
   const ownArm = ownArmKey(workload);
@@ -236,6 +271,24 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       provider: json.provider ?? null, promptTokens: usage.prompt_tokens ?? null,
     };
   };
+  /* What earlier measurements of this workload drew on. A re-check measures calls no finished
+     measurement used, so a lucky sample is not simply measured again: the same twelve calls, the same
+     cached answers and the same verdict, at no cost, was what a re-measure used to be. Only finished
+     ones count here: a measurement that was stopped or cut short found nothing, and counting its calls
+     sent the one that tried again away from the very answers it had just bought, to pay for another
+     bar. Every call any measurement looked at, finished or not, is kept from a second look, which has
+     to be on calls the model has never seen. */
+  const drawnBefore = await db.prepare(
+    `SELECT s.call_id, bool_or(${FOUND('r.')}) AS used FROM eval_samples s JOIN eval_runs r ON r.id = s.run_id
+      WHERE r.workload_id = ? GROUP BY s.call_id`).all(workloadId);
+  const usedBefore = new Set(drawnBefore.filter((r) => r.used).map((r) => r.call_id));
+  const seenBefore = new Set(drawnBefore.map((r) => r.call_id));
+  const freshSet = new Set(pool.filter((c) => !usedBefore.has(c.id)).map((c) => c.id));
+  const recheckRun = usedBefore.size > 0;
+  /* Calls whose bar is already paid for come first within each length band, a re-check's included:
+     among calls no finished measurement used, those are the ones a measurement cut short bought. */
+  const samples = sampleCalls(pool, plan.sample, now() % 100003, await paidForCalls(reference, pool, recorded),
+    { fresh: recheckRun ? freshSet : null });
   const queue = plan.order;
   // the catalogue as the run found it: which models anyone can run, and who sells them
   const factsNow = await loadFacts();
@@ -383,7 +436,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   };
 
   /* Stopped part way. Everything that ran is charged, every model that answered all of its calls
-     keeps its result, and nothing is switched. */
+     keeps its result, and nothing is switched. And the next measurement nobody asks for waits a whole
+     rhythm (see deferAfterStop): somebody said stop. */
   const endStopped = async () => {
     await settle(`Measuring ${workload.slug}, stopped`);
     await keepSavings();
@@ -391,6 +445,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
                   finished_at = ?, phase = NULL, steps_done = ? WHERE id = ? AND status = 'running' RETURNING id`)
       .run(now(), done, run.id);
     await db.prepare('UPDATE eval_runs SET phase = NULL WHERE id = ?').run(run.id);
+    await deferAfterStop(workloadId);
     if (!closed.rows.length) return { ok: true, runId: run.id, stopped: true };
     await rest(workloadId);
     await addActivity(workload.workspace_id, {
@@ -418,7 +473,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   /* Ended by something that is nobody's verdict: the provider was busy on the customer's own
      model, our account with it needs attention, or something broke here. What ran is charged,
      nothing is switched, and the job is asked to try again later, because the same measurement
-     will most likely go through once the problem has passed. */
+     will most likely go through once the problem has passed; the one that tries again uses what
+     this one bought. Once the job has given up, the next measurement nobody asks for waits a while
+     (see deferAfterFailure), rather than starting again at the next hourly pass. */
   const interrupt = async (why, { title, retryMs = 30 * 60000 } = {}) => {
     await settle(`Measuring ${workload.slug}, interrupted`);
     await keepSavings();
@@ -426,6 +483,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
                   finished_at = ?, phase = NULL WHERE id = ? AND status = 'running' RETURNING id`)
       .run(why, now(), run.id);
     if (!closed.rows.length) return await endStopped();
+    await deferAfterFailure(workloadId);
     await rest(workloadId);
     await addActivity(workload.workspace_id, {
       kind: 'floor', title: title || `Measuring ${workload.slug} was interrupted`,
@@ -697,6 +755,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   if (!await settle(`Measuring ${workload.slug}, setting the bar`)) {
     await keepSavings();
     if (!await finish('no_balance', 'balance ran out after the bar was set')) return await endStopped();
+    // what it bought is used again by the next one, which waits a while rather than an hour
+    await deferAfterFailure(workloadId);
     await rest(workloadId);
     await addActivity(workload.workspace_id, {
       kind: 'floor', title: `Measuring ${workload.slug} stopped early`,
@@ -1651,18 +1711,23 @@ export async function rest(workloadId) {
 /* Close a run that nothing is running any more: stopped when somebody asked for that, and
    interrupted otherwise. Nothing is switched and nothing more is charged. What it spent up to
    its last settle is already on the ledger; the calls after that were never charged, which
-   leaves that difference with us rather than with the customer. */
-async function closeRun(run, how) {
+   leaves that difference with us rather than with the customer. The next measurement nobody asks
+   for is put off the way a run's own ending puts it off (see deferAfterStop and deferAfterFailure),
+   so the hourly pass does not start the workload again straight away. `release: false` is for the
+   job that is itself closing its own earlier run, which it still holds. */
+async function closeRun(run, how, { release = true } = {}) {
   const closed = await db.prepare(
     `UPDATE eval_runs SET status = ?, outcome = ?, finished_at = ?, phase = NULL,
             error = COALESCE(error, ?) WHERE id = ? AND status = 'running' RETURNING id`)
     .run(how === 'stopped' ? 'stopped' : 'failed', how, now(),
          how === 'stopped' ? null : 'interrupted', run.id);
   if (!closed.rows.length) return false;
+  if (how === 'stopped') await deferAfterStop(run.workload_id);
+  else await deferAfterFailure(run.workload_id);
   /* and let go of the job that started it. Left claimed, the job still counted as open, so
      Measure now was answered with it and started nothing, and a later boot revived it and ran
      a measurement nobody had asked for then. */
-  if (run.job_id) {
+  if (run.job_id && release) {
     /* Unless another run holds it now. A restart puts a dead run's job back in the queue, and a
        new run takes it under the same id; releasing it from under that run would leave its
        ending unwritten and its retry skipped. */
@@ -1729,6 +1794,10 @@ export async function stopMeasuring(workload, { actorUserId = null } = {}) {
       WHERE kind = 'eval_run' AND status IN ('queued', 'claimed')
         AND (payload::jsonb ->> 'workloadId') = ?
         AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id)`).run(workload.id)).changes;
+  /* A measurement taken out of the queue was stopped by a person as surely as a running one: the
+     next one nobody asks for waits a whole rhythm. Otherwise a new workload's first measurement,
+     booked an hour ahead, was started again by the hourly pass as soon as that hour was up. */
+  if (cancelled) await deferAfterStop(workload.id);
   /* Every run of it, not only the newest: one asked for and one on schedule can be running at
      once, and stopping the workload means stopping both. */
   const runs = await db.prepare(

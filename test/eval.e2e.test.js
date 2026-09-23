@@ -634,8 +634,17 @@ test('a run a restart interrupted lets go of its job, so it can be measured agai
   await closeAbandoned(workload.id);
   assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(orphan)).status, 'failed');
 
-  // and an interrupted run, which nobody stopped, does not keep a new workload from starting itself
-  await db.prepare(`UPDATE workloads SET status = 'new' WHERE id = ?`).run(workload.id);
+  /* and an interrupted run, which nobody stopped, does not keep a new workload from starting itself:
+     it waits a few hours, never the whole rhythm a stop waits, rather than starting again at once
+     (every hourly pass started it again, and each attempt paid for a bar of its own) */
+  const after = await load(workload.id);
+  assert.ok(after.recheck_after >= now() + 5.9 * 3600000 && after.recheck_after <= now() + 6.1 * 3600000,
+    `put off a few hours: ${(after.recheck_after - now()) / 3600000} hours`);
+  await considerMeasuring(workspace.id, { ...after, status: 'new' });
+  assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND status = 'queued'
+                 AND (payload::jsonb ->> 'workloadId') = ?`).get(workload.id)).n, 0, 'not within those hours');
+  // once they have passed, it starts by itself
+  await db.prepare(`UPDATE workloads SET status = 'new', recheck_after = ? WHERE id = ?`).run(now() - 1000, workload.id);
   const before = (await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND status = 'queued'`).get()).n;
   await considerMeasuring(workspace.id, await load(workload.id));
   assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND status = 'queued'`).get()).n,
