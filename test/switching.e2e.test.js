@@ -431,6 +431,65 @@ test('advice: a cap on answer length where a few answers run far longer than the
   assert.match(cap.detail, /Leave it if the long answers are the point/);
 });
 
+test('advice never takes the workload page down: a request Postgres cannot read as JSON is only text to it', async () => {
+  const s = await shop();
+  const system = 'Answer the letter.';
+  const w = await workloadFor(s.workspace.id, request(1, { system }));
+  // JSON.stringify writes both of these as escapes that Postgres refuses to read as jsonb
+  const nul = String.fromCodePoint(0);
+  const lone = String.fromCharCode(0xd800);
+  for (let i = 0; i < 100; i += 1) {
+    const body = { ...request(60000 + i, { system }), ...(i % 3 === 0 ? { max_tokens: 5000 } : {}) };
+    if (i === 7) body.messages[1].content = `a stray ${nul} byte`;
+    if (i === 8) body.messages[1].content = `half a pair ${lone}`;
+    await recordCall({ workspaceId: s.workspace.id, workloadId: w.id, source: 'trace', requestedModel: REF, servedModel: REF, statusCode: 200,
+      promptTokens: 300, completionTokens: i % 50 === 1 ? 6000 : 150, costUsd: 0.002, request: body,
+      response: { choices: [{ message: { content: 'x' } }] } });
+  }
+  const advice = await adviceFor(await load(w.id));
+  const cap = advice.find((a) => a.kind === 'answer_cap');
+  assert.ok(cap, `a third of the calls set a cap, so the advice still stands: ${JSON.stringify(advice)}`);
+  // and a workload where most calls already set one is told nothing, read from the same text
+  const w2 = await workloadFor(s.workspace.id, request(1, { system: 'Write the whole report.' }));
+  for (let i = 0; i < 60; i += 1) {
+    const body = { ...request(61000 + i, { system: 'Write the whole report.' }), ...(i % 5 ? { max_completion_tokens: 9000 } : {}) };
+    await recordCall({ workspaceId: s.workspace.id, workloadId: w2.id, source: 'trace', requestedModel: REF, servedModel: REF, statusCode: 200,
+      promptTokens: 300, completionTokens: i % 30 === 1 ? 6000 : 150, costUsd: 0.002, request: body,
+      response: { choices: [{ message: { content: 'x' } }] } });
+  }
+  assert.equal((await adviceFor(await load(w2.id))).find((a) => a.kind === 'answer_cap'), undefined, 'four in five set a cap already');
+  // anything else going wrong leaves the page without advice, never without a page
+  const broken = { ...(await load(w.id)), get routed_model() { throw new Error('a fault while reading the workload'); } };
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    assert.deepEqual(await adviceFor(broken), []);
+  } finally {
+    console.error = quiet;
+  }
+});
+
+test('advice to mark an instruction for caching is only given where the instruction is long enough to be cached', async () => {
+  const s = await shop();
+  await db.prepare('UPDATE workspaces SET cache_hints = 0 WHERE id = ?').run(s.workspace.id);
+  const long = `You are the claims assistant. ${'Quote the clause, then the amount, then the decision. '.repeat(110)}`;
+  const bodies = { short: 'Reply in one line.', long };
+  const seen = {};
+  for (const [tag, system] of Object.entries(bodies)) {
+    const first = { model: CLAUDE, messages: [{ role: 'system', content: system }, { role: 'user', content: 'claim #1' }] };
+    const w = await workloadFor(s.workspace.id, first);
+    for (let i = 0; i < 60; i += 1) {
+      const body = { model: CLAUDE, messages: [{ role: 'system', content: system }, { role: 'user', content: `claim #${62000 + i}` }] };
+      await recordCall({ workspaceId: s.workspace.id, workloadId: w.id, source: 'routed', requestedModel: CLAUDE, servedModel: CLAUDE,
+        statusCode: 200, promptTokens: 1200, completionTokens: 150, costUsd: 0.004, request: body,
+        response: { choices: [{ message: { content: 'x' } }] } });
+    }
+    seen[tag] = (await adviceFor(await load(w.id))).find((a) => a.kind === 'cache_hints');
+  }
+  assert.equal(seen.short, undefined, 'a short instruction is never cached, so switching marking on would change nothing');
+  assert.ok(seen.long, 'a long one would be, so it is worth saying');
+});
+
 test('a conversation stays on the strategy it started with', async () => {
   const s = await shop();
   const w0 = await workloadFor(s.workspace.id, request(1, { system: 'Chat with the customer.' }));
