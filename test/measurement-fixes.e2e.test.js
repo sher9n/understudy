@@ -272,3 +272,26 @@ test('a switch made while another is still taking over keeps what served in full
   assert.equal(wb.routed_arm_id, control);
   assert.equal(wb.rollout_share, null, 'every call at once');
 });
+
+/* 7. Head splits are for good ----------------------------------------------------------------- */
+
+test('a job split away is never folded back, and the workload\'s own job is never split away', async () => {
+  const { workspace } = await createAccount({ email: `heads-${process.pid}@understudy.dev`, password: 'correct-horse', name: 'h' });
+  const shared = 'You are the assistant for Acme. Follow the house style. Be accurate and brief. Never invent facts.';
+  const job = (opening, i) => ({ model: REF, messages: [{ role: 'system', content: shared }, { role: 'user', content: `${opening}: item ${i} ${words(6, i)}` }] });
+  const [A, B, C, D] = ['Summarise the following thread', 'Translate this into French', 'Classify the sentiment of this review', 'Extract every date mentioned'];
+  // the first sixty: A the commonest, B and C a quarter each
+  let parent = null;
+  for (let i = 0; i < 60; i += 1) parent = await workloadFor(workspace.id, job(i % 2 ? A : i % 4 === 0 ? B : C, i));
+  let p = await load(parent.id);
+  assert.deepEqual(new Set(JSON.parse(p.split_heads)).size, 2, 'B and C are jobs of their own');
+  // then D arrives and overtakes A, and at the 150th call of the parent the openings are looked at again
+  for (let k = 0; k < 90; k += 1) await workloadFor(workspace.id, job(k % 9 < 2 ? A : D, 1000 + k));
+  p = await load(parent.id);
+  const split = JSON.parse(p.split_heads);
+  assert.equal(split.length, 3, `B and C stay split, and D joins them: ${p.split_heads}`);
+  assert.notEqual((await workloadFor(workspace.id, job(B, 5000))).id, parent.id, 'B still has a workload of its own');
+  assert.notEqual((await workloadFor(workspace.id, job(C, 5001))).id, parent.id, 'and so does C');
+  assert.notEqual((await workloadFor(workspace.id, job(D, 5002))).id, parent.id, 'and now D');
+  assert.equal((await workloadFor(workspace.id, job(A, 5003))).id, parent.id, 'A, the workload\'s own job, stays with it');
+});

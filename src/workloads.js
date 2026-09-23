@@ -152,7 +152,14 @@ async function keyed(workspaceId, sig, body, key, slugBase, extra) {
    opens its user turn with is counted; at a few points along the way, when two or more openings each
    carry at least a fifth of its calls (and at least ten) and together most of them, every one but the
    commonest becomes a workload of its own from the next call on. A chat, whose user turns open
-   differently every time, never splits; nor does a workload somebody named. */
+   differently every time, never splits; nor does a workload somebody named.
+
+   A split is for good. The opening that stayed at the first split is the workload's own job
+   (own_head) and is never split away, and a later look only ever adds openings that have grown into
+   jobs of their own. It used to replace the list at every look: an opening split away is no longer
+   counted here, so at the next look it could fall under a fifth and drop off the list, its calls
+   coming back to be served by a switch measured on a different job; and a newer opening that had
+   overtaken the workload's own took its place, splitting the workload's own job away instead. */
 const HEAD_TRACK_CALLS = 300;
 const HEAD_CHECKS = new Set([60, 150, 300]);
 async function byHead(workspaceId, sig, body, w) {
@@ -175,15 +182,35 @@ async function byHead(workspaceId, sig, body, w) {
 }
 
 async function maybeSplit(w) {
-  const heads = await db.prepare('SELECT head_hash, calls FROM workload_heads WHERE workload_id = ? ORDER BY calls DESC')
+  const heads = await db.prepare('SELECT head_hash, calls FROM workload_heads WHERE workload_id = ? ORDER BY calls DESC, head_hash')
     .all(w.id);
   const total = heads.reduce((a, h) => a + Number(h.calls), 0);
   const big = heads.filter((h) => Number(h.calls) >= Math.max(10, 0.2 * total));
-  const covered = big.reduce((a, h) => a + Number(h.calls), 0);
-  if (big.length < 2 || covered < 0.6 * total) return false;
-  const others = big.slice(1).map((h) => h.head_hash);
-  await db.prepare('UPDATE workloads SET split_heads = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(others), now(), w.id);
-  return true;
+  const callsOf = (hs) => hs.reduce((a, h) => a + Number(h.calls), 0);
+  // read afresh: the row the call came in with can be a moment old
+  const cur = await db.prepare('SELECT split_heads, own_head FROM workloads WHERE id = ?').get(w.id);
+  let split = [];
+  try { split = cur?.split_heads ? JSON.parse(cur.split_heads) : []; } catch { split = []; }
+  if (!split.length) {
+    // the first split: the commonest opening stays, and the others that are jobs of their own go
+    if (big.length < 2 || callsOf(big) < 0.6 * total) return false;
+    await db.prepare('UPDATE workloads SET split_heads = ?, own_head = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(big.slice(1).map((h) => h.head_hash)), big[0].head_hash, now(), w.id);
+    return true;
+  }
+  /* A later look adds an opening that has grown into a job of its own, when together with the
+     workload's own job and the ones already split it is most of the calls. The workload's own is the
+     one kept at the first split, or, for one split before that was written down, the commonest opening
+     not split away. */
+  const known = new Set(split);
+  const own = cur?.own_head || heads.find((h) => !known.has(h.head_hash))?.head_hash || null;
+  const more = big.filter((h) => h.head_hash !== own && !known.has(h.head_hash));
+  const covered = callsOf(heads.filter((h) => h.head_hash === own || known.has(h.head_hash) || more.includes(h)));
+  const grow = more.length > 0 && covered >= 0.6 * total;
+  if (!grow && (cur?.own_head || !own)) return false;
+  await db.prepare('UPDATE workloads SET split_heads = ?, own_head = ?, updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(grow ? [...split, ...more.map((h) => h.head_hash)] : split), own, now(), w.id);
+  return grow;
 }
 
 /* One workload per model the customer names. The same prompt sent to two models is two jobs as far as
