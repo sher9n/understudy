@@ -299,6 +299,46 @@ test('the hourly review moves to a cheaper runner-up once its live calls work as
   assert.equal(JSON.parse(arm.stats_json).live.calls, 250);
 });
 
+test('what live results do follows how the workload switches: on its own, after approval, or never', async () => {
+  const evidence = async (s) => {
+    await saveDef(s.workload.id, { events: [{ event: 'ticket_reopened', means: 'failed' }] });
+    await history(s, STEADY, { n: 300 });
+    await history(s, CHEAPER, { n: 250 });
+    await history(s, REF, { n: 200, yardstick: true });
+  };
+  const told = async (s) => Number((await db.prepare(
+    `SELECT COUNT(*) AS n FROM activity WHERE workload_id = ? AND title LIKE '%ready to approve%'`).get(s.workload.id)).n);
+  // never switch: a runner-up as good as what serves is neither switched to nor put to anybody
+  const never = await shop('never', { optimize: 'off' });
+  await evidence(never);
+  assert.deepEqual(await reviewWorkload(never.workload), [], 'never switched, never nagged');
+  assert.equal((await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(never.workload.id)).routed_model, STEADY);
+  assert.equal(await told(never), 0, 'and nothing in the activity feed');
+  // ask first: the same evidence is put in front of whoever approves, once, and nothing is switched
+  const asks = await shop('asks', { optimize: 'ask' });
+  await evidence(asks);
+  assert.deepEqual((await reviewWorkload(asks.workload)).map((d) => d.kind), ['suggest']);
+  assert.equal(await told(asks), 1);
+  assert.equal((await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(asks.workload.id)).routed_model, STEADY);
+  // and a switch back for safety happens whatever the mode
+  const back = await shop('never-back', { optimize: 'off' });
+  await history(back, STEADY, { n: 100, failed: 15 });
+  await history(back, REF, { n: 60, yardstick: true });
+  assert.deepEqual((await reviewWorkload(back.workload)).map((d) => d.kind), ['revert'], 'a workload that never switches is still switched back');
+});
+
+test('background answers on a workload that never switches are shown, never put forward', async () => {
+  const s = await shop('never-shadow', { optimize: 'off', explore: 'shadow', switched: false });
+  const cheaperArm = await armOf(s.workload.id, CHEAPER);
+  await db.prepare(`INSERT INTO shadow_runs (id, workspace_id, workload_id, arm_id, agreement, cost_usd, status, created_at)
+      SELECT ? || g, ?, ?, ?, 1, 0, 200, ? FROM generate_series(1, 1200) g`)
+    .run('shd_never_', s.workspace.id, s.workload.id, cheaperArm.id, now() - 60000);
+  forgetState(s.workload.id);
+  assert.deepEqual(await reviewWorkload(s.workload), [], 'twelve hundred matching answers, and nothing said');
+  const v = await learningView(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id));
+  assert.equal(v.others.find((o) => o.id === cheaperArm.id).shadow.calls, 1200, 'the page still has every one of them');
+});
+
 test('clean calls on a workload where nothing is ever seen decide nothing', async () => {
   const s = await shop('silence');
   await history(s, STEADY, { n: 300 });

@@ -39,19 +39,27 @@ const pctOf = (x) => (x === null || x === undefined ? 'no' : `${(x * 100).toFixe
 
 /**
  * How much a workload may experiment, and how: its own setting, or what its switching mode implies.
+ * Where nobody chose, a workload that asks first answers copies in the background, one that never
+ * switches tries nothing, and one that switches on its own experiments carefully.
  * In "normal" mode the share grows on a quiet workload, so the customer's own model answers about
- * eight calls a day as the yardstick whatever the volume; "careful" stays at its small share.
+ * EXPLORE_YARDSTICK_PER_DAY calls a day as the yardstick whatever the volume; "careful" stays at its
+ * small share, which is what its name and the page promise.
  */
 export function exploreOf(workload, { perDay = null, dailySaving = null } = {}) {
   const chosen = EXPLORE_MODES.includes(workload?.explore_mode) ? workload.explore_mode : null;
-  const mode = chosen || (workload?.optimize_mode === 'ask' ? 'shadow' : 'careful');
+  /* "Never switch" measures on its schedule and nothing else: no call of its is answered another way
+     unless a person chooses experiments for it. It used to fall through to careful experiments, the
+     same as switching on its own. */
+  const switching = workload?.optimize_mode;
+  const mode = chosen || (switching === 'ask' ? 'shadow' : switching === 'off' ? 'off' : 'careful');
   let share = mode === 'normal' ? config.EXPLORE_SHARE_NORMAL
     : mode === 'careful' ? config.EXPLORE_SHARE_CAREFUL
       : mode === 'shadow' ? config.SHADOW_SHARE : 0;
   /* The customer's own model answers enough calls a day, as the yardstick, for a switch that slipped
-     to be caught within days rather than months: the share grows on a quiet workload, careful or
-     normal, up to EXPLORE_SHARE_MAX. */
-  if ((mode === 'normal' || mode === 'careful') && perDay > 0) {
+     to be caught within days rather than months: in normal mode the share grows on a quiet workload,
+     up to EXPLORE_SHARE_MAX, and the page says so with these numbers. Careful mode grew too, to five
+     times what the page promised it would ever use. */
+  if (mode === 'normal' && perDay > 0) {
     share = Math.max(share, Math.min(config.EXPLORE_SHARE_MAX, (2 * config.EXPLORE_YARDSTICK_PER_DAY) / perDay));
   }
   const budget = workload?.explore_budget_usd;
@@ -700,7 +708,11 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
       }
       // promote: shown as good as what serves and as the customer's own model, on enough calls each
       const cheaper = Math.round((1 - a.ratio / (serving.ratio || 1)) * 100);
-      if (workload.optimize_mode !== 'auto') {
+      /* A workload that never switches is never switched and never nagged: what was learned is on its
+         page for a person who looks. Only one that asks first is told, and only one that switches on
+         its own is switched. Any other mode is read as never switching, the safe side. */
+      if (workload.optimize_mode !== 'ask' && workload.optimize_mode !== 'auto') continue;
+      if (workload.optimize_mode === 'ask') {
         if (a.stats?.suggestedAt) continue;
         await addActivity(workload.workspace_id, {
           kind: 'ok',
@@ -728,8 +740,10 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
       }
     }
   }
-  // for approval: background answers that were the same as the live ones, inside the workload's bar
-  if (s.mode === 'shadow') {
+  /* For approval: background answers that were the same as the live ones, inside the workload's bar.
+     Said in the activity feed only where somebody could act on it by switching: never on a workload
+     that never switches, whose page still shows how the background answers matched. */
+  if (s.mode === 'shadow' && (workload.optimize_mode === 'ask' || workload.optimize_mode === 'auto')) {
     const floor = Number(workload.floor_pct) || config.EVAL_FLOOR_MIN_PCT;
     for (const a of cheaperThan(st, serving ? serving.ratio : 1).filter((x) => x.post.nShadow >= min && !x.stats?.suggestedAt)) {
       const sameShare = a.same / a.post.nShadow;
@@ -842,8 +856,11 @@ export async function learningView(workload) {
   return {
     explore: {
       ...s, spentToday: st.extraToday, reason: whyNot(workload, s, st),
-      // the shares each setting means, from the settings themselves, so the page never says a number the server does not use
-      shares: { careful: config.EXPLORE_SHARE_CAREFUL, normal: config.EXPLORE_SHARE_NORMAL, shadow: config.SHADOW_SHARE },
+      /* the shares each setting means, from the settings themselves, so the page never says a number the
+         server does not use: normal grows on a quiet workload, up to `max`, until the customer's own
+         model answers about `yardstickPerDay` calls a day to compare against */
+      shares: { careful: config.EXPLORE_SHARE_CAREFUL, normal: config.EXPLORE_SHARE_NORMAL, shadow: config.SHADOW_SHARE,
+        max: config.EXPLORE_SHARE_MAX, yardstickPerDay: config.EXPLORE_YARDSTICK_PER_DAY },
       servingCostKnown: !st.serving || st.serving.ratio !== null,
       // what "worked" can mean here, and how long evidence takes at this volume and share
       detection: st.detection, hasEvents: st.hasEvents, settleMinutes: Math.round(st.settleMs / 60000), perDay: Math.round(st.perDay),

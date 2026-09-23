@@ -75,6 +75,27 @@ test('experiments go mostly to the candidate most likely to be best', () => {
   close(shares.get('unknown'), 1 - 0.98 ** 3, 0.02, 'something barely known still gets tried');
 });
 
+test('careful stays at the share it promises, normal grows on a quiet workload, and "never switch" tries nothing unless asked', async () => {
+  const { exploreOf } = await import('../src/learn/explore.js');
+  const { default: config } = await import('../src/config.js');
+  // careful: never more than its share, whatever the volume, which is what the page says it is
+  for (const perDay of [5, 100, 1000, 100000]) {
+    assert.equal(exploreOf({ explore_mode: 'careful' }, { perDay }).share, config.EXPLORE_SHARE_CAREFUL, `careful at ${perDay} calls a day`);
+  }
+  // normal: grows until the customer's own model answers EXPLORE_YARDSTICK_PER_DAY a day, never past EXPLORE_SHARE_MAX
+  assert.equal(exploreOf({ explore_mode: 'normal' }, { perDay: 100000 }).share, config.EXPLORE_SHARE_NORMAL, 'a busy workload keeps the base share');
+  assert.equal(exploreOf({ explore_mode: 'normal' }, { perDay: 10 }).share, config.EXPLORE_SHARE_MAX, 'a very quiet one stops at the most there is');
+  const mid = (2 * config.EXPLORE_YARDSTICK_PER_DAY) / 0.07;
+  close(exploreOf({ explore_mode: 'normal' }, { perDay: mid }).share, 0.07, 1e-12, 'grown to what the yardstick needs');
+  // what each way of switching implies where nobody chose
+  assert.equal(exploreOf({ optimize_mode: 'auto' }).mode, 'careful');
+  assert.equal(exploreOf({ optimize_mode: 'ask' }).mode, 'shadow');
+  const never = exploreOf({ optimize_mode: 'off' }, { perDay: 100 });
+  assert.deepEqual([never.mode, never.live, never.share], ['off', false, 0], 'a workload that never switches tries nothing by itself');
+  // a person can still choose experiments for one
+  assert.equal(exploreOf({ optimize_mode: 'off', explore_mode: 'careful' }).mode, 'careful');
+});
+
 test('the split of one call: the yardstick, the candidates, and what serves', () => {
   const serving = { id: 's', post: { a: 90, b: 10 } };
   const baseline = { id: 'b', post: { a: 95, b: 5 } };
