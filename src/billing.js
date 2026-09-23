@@ -2,6 +2,8 @@ import { db, id, now, round8, usd } from './db/index.js';
 import config, { canBill, stripeMode } from './config.js';
 import { addActivity } from './traffic.js';
 import { enqueue } from './jobs.js';
+import { limitsFor } from './workspace.js';
+import { notify } from './notify.js';
 
 const DAY = 86400000;
 
@@ -140,14 +142,77 @@ export function worstCaseTokens(body) {
 /** Can this workspace make a routed call right now? A quick check before the hold is taken. */
 export async function gateRouting(workspaceId) {
   const a = await available(workspaceId);
-  if (a.free > 0) return { ok: true, balance: a.balance };
-  return {
-    ok: false, code: 'no_balance',
-    message: a.balance > 0
-      ? 'Your balance is set aside for calls still in flight. Add credit, or try again in a moment.'
-      : 'Your balance is empty. Add credit in Settings and calls resume immediately.',
-  };
+  if (!(a.free > 0)) {
+    return {
+      ok: false, code: 'no_balance',
+      message: a.balance > 0
+        ? 'Your balance is set aside for calls still in flight. Add credit, or try again in a moment.'
+        : 'Your balance is empty. Add credit in Settings and calls resume immediately.',
+    };
+  }
+  /* The workspace's own ceilings on what its calls may cost through us, days and months told in IST.
+     A limit reached refuses calls rather than spending past it, and says when they resume. */
+  const lim = await limitsFor(workspaceId);
+  if (lim.dailyLimit !== null || lim.monthlyLimit !== null) {
+    const spent = await spentOnCalls(workspaceId);
+    if (lim.dailyLimit !== null && spent.day >= lim.dailyLimit) {
+      tellLimit(workspaceId, 'day', spent.dayStart, lim.dailyLimit);
+      return { ok: false, code: 'daily_limit', limit: lim.dailyLimit, spent: spent.day,
+        message: `Your daily limit of $${lim.dailyLimit.toFixed(2)} is reached. Calls resume at midnight IST, or raise the limit in Settings.` };
+    }
+    if (lim.monthlyLimit !== null && spent.month >= lim.monthlyLimit) {
+      tellLimit(workspaceId, 'month', spent.monthStart, lim.monthlyLimit);
+      return { ok: false, code: 'monthly_limit', limit: lim.monthlyLimit, spent: spent.month,
+        message: `Your monthly limit of $${lim.monthlyLimit.toFixed(2)} is reached. Calls resume on the 1st (IST), or raise the limit in Settings.` };
+    }
+  }
+  return { ok: true, balance: a.balance };
 }
+
+/* What this workspace's calls have cost through us today and this month, days and months told in IST.
+   Read from the ledger at most every fifteen seconds, and kept up to date between readings by every
+   charge made here, so a burst of calls cannot run far past a limit while the reading waits. */
+const IST = 5.5 * 3600000;
+const istDayStart = (t) => Math.floor((t + IST) / DAY) * DAY - IST;
+const istMonthStart = (t) => { const d = new Date(t + IST); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) - IST; };
+const spendMemo = new Map();
+export async function spentOnCalls(workspaceId) {
+  const t = now();
+  const day = istDayStart(t);
+  const month = istMonthStart(t);
+  const hit = spendMemo.get(workspaceId);
+  if (hit && Date.now() - hit.at < 15000 && hit.dayStart === day && hit.monthStart === month) return hit;
+  const r = await db.prepare(
+    `SELECT COALESCE(-SUM(amount_usd) FILTER (WHERE created_at >= ?), 0) AS day,
+            COALESCE(-SUM(amount_usd), 0) AS month
+       FROM ledger WHERE workspace_id = ? AND kind = 'call' AND created_at >= ?`).get(day, workspaceId, Math.min(day, month));
+  const v = { at: Date.now(), dayStart: day, monthStart: month, day: round8(Number(r?.day || 0)), month: round8(Number(r?.month || 0)) };
+  spendMemo.set(workspaceId, v);
+  if (spendMemo.size > 5000) spendMemo.clear();
+  return v;
+}
+/* A limit reached is told once a period, by email as well as on every refused call, and never waits
+   on the email: the refusal answers at once. */
+const told = new Set();
+function tellLimit(workspaceId, period, start, limit) {
+  const key = `${workspaceId}:${period}:${start}`;
+  if (told.has(key)) return;
+  told.add(key);
+  if (told.size > 10000) told.clear();
+  notify(workspaceId, 'money', `limit:${period}:${start}`, {
+    title: `Your ${period === 'day' ? 'daily' : 'monthly'} limit of $${limit.toFixed(2)} is reached`,
+    lines: [
+      `Calls through Understudy are refused until ${period === 'day' ? 'midnight IST' : 'the 1st of next month (IST)'}, so nothing is spent past the limit you set.`,
+      'Raise or remove the limit in Settings and calls resume at once.',
+    ],
+    path: '/settings', linkText: 'Open Settings',
+  }).catch(() => {});
+}
+
+const noteSpend = (workspaceId, amount) => {
+  const hit = spendMemo.get(workspaceId);
+  if (hit) { hit.day = round8(hit.day + amount); hit.month = round8(hit.month + amount); }
+};
 
 /* The monthly plan's measuring allowance ---------------------------------------------
 
@@ -218,10 +283,28 @@ export const withFee = (costUsd) => round8(costUsd * (1 + config.ROUTING_FEE_PCT
 /** Charge a routed call, giving back what its hold set aside in the same step. */
 export async function chargeCall(workspaceId, costUsd, note, { holdId = null } = {}) {
   const amount = withFee(costUsd);
+  let after = null;
   await db.tx(async (tx) => {
     if (holdId) await tx.prepare('DELETE FROM balance_holds WHERE id = ?').run(holdId);
-    if (amount > 0) await move(workspaceId, { kind: 'call', amountUsd: -amount, note }, tx);
+    if (amount > 0) after = (await move(workspaceId, { kind: 'call', amountUsd: -amount, note }, tx))?.balance ?? null;
   });
+  /* The call that takes the balance below the top up threshold, where nothing will top it up, is
+     told by email, once a day: when it runs out, every routed call stops. */
+  if (after !== null && after < config.TOPUP_THRESHOLD_USD && after + amount >= config.TOPUP_THRESHOLD_USD) {
+    const acct = await account(workspaceId);
+    if (!acct.auto_topup || !acct.payment_method) {
+      const day = Math.floor(now() / DAY);
+      notify(workspaceId, 'money', `low:${day}`, {
+        title: `Your Understudy balance is down to $${Math.max(0, after).toFixed(2)}`,
+        lines: [
+          'When it reaches zero, calls through Understudy are refused until credit is added.',
+          'Add credit, or switch on automatic top ups, in Settings.',
+        ],
+        path: '/settings', linkText: 'Add credit',
+      }).catch(() => {});
+    }
+  }
+  if (amount > 0) noteSpend(workspaceId, amount);
   await maybeTopUp(workspaceId);
   return amount;
 }

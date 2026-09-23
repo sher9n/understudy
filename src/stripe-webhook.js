@@ -1,3 +1,4 @@
+import { notify } from './notify.js';
 import { db, now } from './db/index.js';
 import config from './config.js';
 import { stripe, move, account } from './billing.js';
@@ -93,6 +94,15 @@ export async function handleWebhook(req, res) {
           await addActivity(wsId, {
             kind: 'bill', title: 'A top up was declined',
             detail: 'Automatic top up is off until a card is added. Update it in Settings and calls resume.',
+          });
+          // a card that stopped working stops every call once the balance runs out, so it is told by email too
+          await notify(wsId, 'money', `topup-failed:${o.id}`, {
+            title: 'An automatic top up was declined',
+            lines: [
+              `Your card was declined (${code}), so automatic top ups are off.`,
+              'Calls through Understudy stop when the balance runs out. Update the card or add credit in Settings.',
+            ],
+            path: '/settings', linkText: 'Update your card',
           });
         }
         break;

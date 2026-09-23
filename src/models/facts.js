@@ -50,6 +50,8 @@ export async function loadFacts({ fresh = false } = {}) {
       reasoning: parse(m.reasoning_json, null),
       expiresAt: m.expires_at,
       endpoints: byModel.get(m.model_id) || [],
+      // whether anyone can run it, and so whether its providers may run it differently
+      openWeights: !!m.open_weights,
     });
   }
   memo = {

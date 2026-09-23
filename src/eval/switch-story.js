@@ -23,7 +23,7 @@ const DAY = 86400000;
 const TRAFFIC = `source IN ('routed', 'trace') AND (status_code IS NULL OR status_code < 400)`;
 
 async function priceOf(modelId) {
-  return (await db.prepare('SELECT price_in, price_out FROM models_catalog WHERE model_id = ?').get(modelId)) ?? null;
+  return (await db.prepare('SELECT price_in, price_out, price_cache_read FROM models_catalog WHERE model_id = ?').get(modelId)) ?? null;
 }
 
 /* How long a model's answers to this workload run, in tokens. Its own calls for the customer
@@ -144,14 +144,18 @@ export async function switchStory(w) {
     : null;
 
   /* What it has actually saved: every call it has served for the customer since the switch.
-     Paid is what they were charged, fee included. What those calls would have cost on the
-     original model is their real prompts at its prices, and its usual answer length, because
-     how long its answers would have been cannot be read off a call it never answered. */
+     Paid is what they were charged, fee included. What those calls would have cost on the original
+     model is what they cost, divided by what the measurement found the new one costs against it on
+     the same calls, because that carries every difference a list price misses. Without a measured
+     cost, their real prompts at the original's prices, cached prompt tokens priced as cached, and
+     its usual answer length, because how long its answers would have been cannot be read off a call
+     it never answered. Never with our fee on the original: without us they would not pay it. */
   /* A strategy's calls are the ones it answered, whichever of its models did: a cascade call sent
      on is answered by the customer's own model and still paid for as this strategy's, check and
      all. Calls an experiment gave to something else are not this strategy's. */
   const served = await db.prepare(
     `SELECT COUNT(*) AS n, COALESCE(SUM(charged_usd), 0) AS paid, COALESCE(SUM(prompt_tokens), 0) AS pin,
+            COALESCE(SUM(cost_usd), 0) AS cost, COALESCE(SUM(cached_tokens), 0) AS cached,
             COUNT(*) FILTER (WHERE escalated = 1) AS sent_on
        FROM calls WHERE workload_id = ? AND source = 'routed' AND status_code = 200 AND created_at >= ?
         AND (arm_id = ? OR (arm_id IS NULL AND served_model = ?))`).get(w.id, at, w.routed_arm_id ?? '', to);
@@ -161,12 +165,23 @@ export async function switchStory(w) {
   const copies = (await db.prepare(
     `SELECT COUNT(*) AS n FROM calls WHERE workload_id = ? AND source = 'trace' AND created_at >= ?`)
     .get(w.id, at)).n;
-  const wouldHave = fromPrice
-    ? fromPrice.price_in * served.pin + fromPrice.price_out * fromOut * served.n
-    : null;
+  const cachedIn = Math.min(Number(served.pin), Number(served.cached || 0));
+  const cacheRate = fromPrice?.price_cache_read != null ? Number(fromPrice.price_cache_read) : Number(fromPrice?.price_in ?? 0);
+  const wouldHave = measuredRatio !== null && Number(served.cost) > 0
+    ? Number(served.cost) / measuredRatio
+    : fromPrice
+      ? fromPrice.price_in * (served.pin - cachedIn) + cacheRate * cachedIn + fromPrice.price_out * fromOut * served.n
+      : null;
 
   const spent = (await db.prepare(
     'SELECT COALESCE(SUM(spend_usd), 0) AS s FROM eval_runs WHERE workload_id = ?').get(w.id)).s;
+  // what background answers on this workload have cost since the switch, which is optimizing too
+  const background = (await db.prepare(
+    'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM shadow_runs WHERE workload_id = ? AND created_at >= ?').get(w.id, at)).s;
+  const optimizing = withFeeOn(Number(spent) + Number(background), fee);
+  const savedSoFar = wouldHave == null ? null : wouldHave - served.paid;
+  // how long the switch takes to pay back what finding it cost, at the pace it saves now
+  const perDay = projection[0] ? projection[0].saved / 30 : null;
 
   return {
     from, to, at, key, kind,
@@ -206,9 +221,17 @@ export async function switchStory(w) {
       sentOn: Number(served.sent_on || 0), explored: Number(tried || 0),
       paid: round8(served.paid),
       wouldHave: wouldHave == null ? null : round8(wouldHave),
-      saved: wouldHave == null ? null : round8(wouldHave - served.paid),
+      saved: savedSoFar == null ? null : round8(savedSoFar),
+      // how the original was priced: from the measured cost of the new one, or at list price
+      wouldPricedBy: measuredRatio !== null && Number(served.cost) > 0 ? 'measured' : 'list',
+      // and what is left once measuring and background answers are paid for
+      net: savedSoFar == null ? null : round8(savedSoFar - optimizing),
     },
-    measuring: { spent: round8(withFeeOn(spent, fee)) },
+    measuring: {
+      spent: round8(withFeeOn(spent, fee)),
+      background: round8(withFeeOn(background, fee)),
+      paybackDays: perDay && perDay > 0 ? Math.ceil(optimizing / perDay) : null,
+    },
     projection,
   };
 }

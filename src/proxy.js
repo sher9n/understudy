@@ -5,7 +5,7 @@ import { reportCallFailure } from './alerts.js';
 import config, { canRoute } from './config.js';
 import { verifyKey, bearerOf } from './keys.js';
 import { workloadFor, recordCall, addActivity } from './traffic.js';
-import { chat, chatStream, priceCall, UpstreamError, reasonOf } from './openrouter.js';
+import { chat, chatStream, priceCall, UpstreamError, reasonOf, hintApplies } from './openrouter.js';
 import { gateRouting, chargeCall, grantStarterCredit, hold, release, worstCaseTokens, withFee } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
@@ -14,7 +14,7 @@ import { report } from './learn/outcomes.js';
 import { chooseStrategy, served as noteServed } from './learn/choose.js';
 import { serveWith, writeAsStream } from './learn/serve.js';
 import { leadModel } from './learn/arms.js';
-import { zdrFor } from './workspace.js';
+import { zdrFor, cacheHintFor } from './workspace.js';
 import { featuresOf, predict } from './learn/router.js';
 
 export const v1 = safeRouter();
@@ -118,7 +118,9 @@ async function prepare(wsId, body, { classify = true, name = null } = {}) {
   if (!served) return no(400, '"model" is required.', 'invalid_request_error');
   const recipe = lead?.recipe ?? null;
   const zdr = await zdrFor(wsId);
-  return { workload, requested, served, recipe, strategy, zdr };
+  // whether a long instruction may be marked for caching on this call (see hintApplies)
+  const cacheHint = workload ? await cacheHintFor(wsId, workload) : false;
+  return { workload, requested, served, recipe, strategy, zdr, cacheHint };
 }
 
 /* Every model one call could end up paying for: the one it is served by, the customer's own model,
@@ -280,7 +282,7 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
       if (strategy && strategy.spec.kind !== 'model') {
         out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr });
       } else {
-        const r = await chat(body, served, { recipe, zdr: ready.zdr, ...liveOpts(strategy) });
+        const r = await chat(body, served, { recipe, zdr: ready.zdr, cacheHint: ready.cacheHint, ...liveOpts(strategy) });
         out = { json: r.json, served, cost: Number(r.json?.usage?.cost ?? 0), latencyMs: r.latencyMs ?? Date.now() - started };
       }
     } catch (err) {
@@ -306,7 +308,8 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
     // charged for everything the strategy spent on it: a cascade's check, and a call it sent on
     await settle({ wsId, workload, requested, served: out.served, usage: { ...(out.json?.usage || {}), cost: out.cost },
       started, body, response: out.json, status: 200, latencyMs: out.latencyMs, source, callId, ref,
-      decision: decisionOf(strategy, strategy && strategy.spec.kind !== 'model' ? out : null), holdId: h.holdId });
+      decision: decisionOf(strategy, strategy && strategy.spec.kind !== 'model' ? out : null), holdId: h.holdId,
+      cacheHint: ready.cacheHint && (!strategy || strategy.spec.kind === 'model') });
     return { ok: true, status: 200, json: out.json, served: out.served, requested, callId,
       latencyMs: out.latencyMs, costUsd: out.cost };
   }
@@ -406,7 +409,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
   }
   let upstream;
   try {
-    upstream = await chatStream(body, served, { recipe, zdr: ready.zdr });
+    upstream = await chatStream(body, served, { recipe, zdr: ready.zdr, cacheHint: ready.cacheHint });
   } catch (err) {
     return { ok: false, err, served };
   }
@@ -486,12 +489,12 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     choices: [{ index: 0, message: { role: 'assistant', content: answer, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason }],
   };
   await settle({ wsId, workload, requested, served, usage, started, body, response, status: 200,
-    ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision, holdId });
+    ttftMs: firstAt === null ? null : firstAt - started, callId, ref, decision, holdId, cacheHint: ready.cacheHint });
   return { ok: true };
 }
 
 async function finish({ wsId, workload, requested, served, usage, started, body, response, status,
-  latencyMs, ttftMs = null, source = 'routed', callId = null, ref = null, decision = null, holdId = null }) {
+  latencyMs, ttftMs = null, source = 'routed', callId = null, ref = null, decision = null, holdId = null, cacheHint = false }) {
   const cost = Number(usage?.cost ?? 0);
   const note = workload ? `${workload.slug} on ${served}` : `Test call on ${served}`;
   // charged, and what the call set aside given back, in one step
@@ -500,6 +503,9 @@ async function finish({ wsId, workload, requested, served, usage, started, body,
     id: callId, workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested,
     servedModel: served, statusCode: status,
     promptTokens: usage?.prompt_tokens ?? 0, completionTokens: usage?.completion_tokens ?? 0,
+    cachedTokens: usage?.prompt_tokens_details?.cached_tokens ?? null,
+    // whether we marked its instruction for caching, so what that saved is counted as ours
+    hinted: !!(cacheHint && hintApplies(body, served)),
     costUsd: cost, chargedUsd: charged, latencyMs: latencyMs ?? Date.now() - started, ttftMs,
     request: body, response, ref, ...(decision || {}),
   });
@@ -561,6 +567,7 @@ v1.post('/traces', async (req, res) => {
       requestedModel: request.model || null, servedModel: served,
       statusCode: 200,
       promptTokens: usage.prompt_tokens ?? 0, completionTokens: usage.completion_tokens ?? 0,
+      cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? null,
       /* Priced, not charged. A copy is a call the customer already paid their own provider
          for; we take nothing for it. Recording it as charged put their provider's bill into
          "what you paid us", so a customer who only sends copies appeared to be paying us and

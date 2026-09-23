@@ -420,11 +420,18 @@ test('the switched card is built from the switch and the calls since, and adds u
   assert.ok(Math.abs(s.prices.fromPerCall - (2.5e-6 * 800 + 15e-6 * 60)) < 1e-9, `${s.prices.fromPerCall}`);
   assert.ok(Math.abs(s.prices.toPerCall - (2.5e-6 * 800 + 15e-6 * 60) * 0.1 * 1.01) < 1e-9, 'the fee is on the new model');
 
-  // the twelve served calls, actual: what was paid, and the same prompts on the original
+  /* the twelve served calls, actual: what was paid, and what the same calls would have cost on the
+     original. The measurement found the new model costs a tenth of the original on the same calls, so
+     that is what they would have cost: their cost divided by a tenth, with no fee on the original */
   assert.equal(s.soFar.calls, 12);
   assert.ok(Math.abs(s.soFar.paid - 12 * withFee(0.000196)) < 1e-7, `paid ${s.soFar.paid}`);
-  assert.ok(Math.abs(s.soFar.wouldHave - 12 * (2.5e-6 * 800 + 15e-6 * 60)) < 1e-7, `would have ${s.soFar.wouldHave}`);
+  assert.equal(s.soFar.wouldPricedBy, 'measured');
+  assert.ok(Math.abs(s.soFar.wouldHave - 12 * (0.000196 / 0.1)) < 1e-7, `would have ${s.soFar.wouldHave}`);
   assert.ok(Math.abs(s.soFar.saved - (s.soFar.wouldHave - s.soFar.paid)) < 1e-9);
+  // and what is left once the measurement is paid for, which a first day of savings does not cover
+  assert.ok(Math.abs(s.soFar.net - (s.soFar.saved - s.measuring.spent - s.measuring.background)) < 1e-7, `net ${s.soFar.net}`);
+  assert.ok(s.soFar.net < s.soFar.saved);
+  assert.ok(s.measuring.paybackDays > 0, 'and how long the switch takes to pay that back');
 
   /* The saving projected is on the calls that come through us, at their own pace: twelve today
      is 360 a month. It used to be projected from all 212, copies included, which is the saving
@@ -804,7 +811,10 @@ test('a switch on copies waits for routed calls, and copies are never counted as
     costUsd: 0.000196, chargedUsd: withFee(0.000196),
   });
   assert.equal((await trafficOf(await load(workload.id))).carries, true);
-  const saved = (await dailySpend(workspace.id, 30)).reduce((a, d) => a + Math.max(0, d.would - d.paid), 0);
-  const expected = (2.5e-6 * 800 + 15e-6 * 60) * 1.01 - withFee(0.000196);
-  assert.ok(Math.abs(saved - expected) < 1e-7, `saved ${saved}, the one routed call against gpt-5.4 for the same tokens`);
+  const saved = (await dailySpend(workspace.id, 30)).reduce((a, d) => a + (d.would - d.paid), 0);
+  /* the one routed call against what it would have cost on gpt-5.4: the measurement found steady-small
+     costs a tenth of it on the same calls, so a tenth is what this one is held to, and gpt-5.4 carries
+     no fee, because without us nobody pays one */
+  const expected = 0.000196 / 0.1 - withFee(0.000196);
+  assert.ok(Math.abs(saved - expected) < 1e-7, `saved ${saved}, the one routed call against gpt-5.4 on the same calls`);
 });

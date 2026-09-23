@@ -55,8 +55,39 @@ function headers() {
  * `recipe` is how a model was measured, when that differs from the customer's own request: a
  * model that thinks before it answers can be measured with its thinking switched off, and if
  * it is switched to, it is routed the same way, because that is the model that cleared. */
-export function buildUpstream(body, model, recipe = null, { zdr = null } = {}) {
-  const out = { ...body, model };
+/* Whether a call's instruction can be marked for caching: a model that only caches what is marked, a
+   system instruction long enough to be cached, and nothing marked already by the customer. */
+const MARKED_ONLY = /^anthropic\//;
+export function hintApplies(body, model) {
+  if (!MARKED_ONLY.test(String(model || ''))) return false;
+  const msgs = Array.isArray(body?.messages) ? body.messages : [];
+  if (JSON.stringify(msgs).includes('"cache_control"')) return false;
+  const system = msgs.filter((m) => m.role === 'system');
+  if (!system.length) return false;
+  const text = (m) => (typeof m.content === 'string' ? m.content
+    : Array.isArray(m.content) ? m.content.map((p) => p?.text || '').join('') : '');
+  return system.reduce((a, m) => a + text(m).length, 0) >= config.CACHE_HINT_MIN_CHARS;
+}
+
+/* The same call with its instruction marked for the provider to cache: only the last system turn, at
+   its end, so everything before that point is read back from the cache on the next call. The words
+   sent are exactly the customer's; only the mark is added. */
+function withCacheHint(body) {
+  const msgs = body.messages.map((m) => ({ ...m }));
+  let last = -1;
+  msgs.forEach((m, i) => { if (m.role === 'system') last = i; });
+  if (last < 0) return body;
+  const m = msgs[last];
+  const parts = typeof m.content === 'string' ? [{ type: 'text', text: m.content }]
+    : Array.isArray(m.content) ? m.content.map((p) => ({ ...p })) : [];
+  if (!parts.length) return body;
+  parts[parts.length - 1] = { ...parts[parts.length - 1], cache_control: { type: 'ephemeral' } };
+  msgs[last] = { ...m, content: parts };
+  return { ...body, messages: msgs };
+}
+
+export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHint = false } = {}) {
+  const out = { ...(cacheHint && hintApplies(body, model) ? withCacheHint(body) : body), model };
   delete out.stream_options;
   /* What the customer told us, rather than the model: which workload a call is, and their own
      reference for it. A provider has no use for either, and some refuse metadata they did not expect. */
@@ -65,18 +96,21 @@ export function buildUpstream(body, model, recipe = null, { zdr = null } = {}) {
     if (Object.keys(meta).length) out.metadata = meta; else delete out.metadata;
   }
   if (recipe?.reasoning) out.reasoning = { ...recipe.reasoning };
+  // served only by the providers it was measured on, where a switch says so
+  const pinnedTo = Array.isArray(recipe?.providers) && recipe.providers.length ? recipe.providers : null;
   /* A workspace keeps zero data retention unless it chose otherwise on Settings, and nobody's calls
      ever go to a provider that trains on them. Turning retention off lets a workspace reach the models
      that have no provider keeping nothing (o3, the newest Claude models), and says so where it is chosen. */
   const keepNothing = zdr ?? config.ZDR_ONLY;
-  out.provider = { ...(out.provider || {}), data_collection: 'deny', ...(keepNothing ? { zdr: true } : {}) };
+  out.provider = { ...(out.provider || {}), data_collection: 'deny', ...(keepNothing ? { zdr: true } : {}),
+    ...(pinnedTo ? { only: pinnedTo } : {}) };
   if (!keepNothing) delete out.provider.zdr;
   return out;
 }
 
-export async function chat(body, model, { signal, retries = 3, recipe = null, pace = false, maxWaitMs = null, zdr = null } = {}) {
+export async function chat(body, model, { signal, retries = 3, recipe = null, pace = false, maxWaitMs = null, zdr = null, cacheHint = false } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
-  const payload = buildUpstream(body, model, recipe, { zdr });
+  const payload = buildUpstream(body, model, recipe, { zdr, cacheHint });
   for (let attempt = 0; ; attempt += 1) {
     await waitForSlot(model, pace);
     const started = Date.now();
@@ -106,9 +140,9 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
 }
 
 /** Streaming passes straight through; the final chunk carries usage, which is what we bill on. */
-export async function chatStream(body, model, { signal, recipe = null, retries = 0, pace = false, zdr = null } = {}) {
+export async function chatStream(body, model, { signal, recipe = null, retries = 0, pace = false, zdr = null, cacheHint = false } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
-  const payload = buildUpstream(body, model, recipe, { zdr });
+  const payload = buildUpstream(body, model, recipe, { zdr, cacheHint });
   payload.stream = true;
   payload.stream_options = { include_usage: true };
   for (let attempt = 0; ; attempt += 1) {
@@ -267,6 +301,9 @@ export async function fetchModels() {
       context_len: m.context_length || null,
       price_in: Number(m.pricing?.prompt || 0),
       price_out: Number(m.pricing?.completion || 0),
+      // what cached prompt tokens cost, where the model says; null where it does not
+      price_cache_read: m.pricing?.input_cache_read === undefined || m.pricing?.input_cache_read === null
+        ? null : Number(m.pricing.input_cache_read),
       open_weights: /^(mistralai|deepseek|meta-llama|qwen|google\/gemma|nousresearch|microsoft\/phi)/.test(m.id) ? 1 : 0,
       zdr: 0,
       description: typeof m.description === 'string' ? m.description.slice(0, 2000) : null,
@@ -289,12 +326,12 @@ export async function saveCatalog(models) {
     const stmt = tx.prepare(
       `INSERT INTO models_catalog (model_id, name, context_len, price_in, price_out, open_weights, zdr, synced_at,
               description, released_at, params_json, inputs_json, max_output, reasoning_json, expires_at,
-              overrides_json)
+              overrides_json, price_cache_read)
        VALUES (@model_id, @name, @context_len, @price_in, @price_out, @open_weights, @zdr, @synced_at,
               @description, @released_at, @params_json, @inputs_json, @max_output, @reasoning_json, @expires_at,
-              @overrides_json)
+              @overrides_json, @price_cache_read)
        ON CONFLICT(model_id) DO UPDATE SET name = excluded.name, context_len = excluded.context_len,
-         price_in = excluded.price_in, price_out = excluded.price_out,
+         price_in = excluded.price_in, price_out = excluded.price_out, price_cache_read = excluded.price_cache_read,
          open_weights = excluded.open_weights, synced_at = excluded.synced_at,
          description = excluded.description, released_at = excluded.released_at,
          params_json = excluded.params_json, inputs_json = excluded.inputs_json,
@@ -303,7 +340,7 @@ export async function saveCatalog(models) {
     for (const m of models) {
       await stmt.run({
         description: null, released_at: null, params_json: null, inputs_json: null, max_output: null,
-        reasoning_json: null, expires_at: null, overrides_json: null, ...m, synced_at: at,
+        reasoning_json: null, expires_at: null, overrides_json: null, price_cache_read: null, ...m, synced_at: at,
       });
     }
     /* And take out what is no longer offered. Inserting and updating without ever removing

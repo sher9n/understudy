@@ -21,6 +21,7 @@ import { labelOf, armById, leadModel } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
 import { markTrying } from '../learn/explore.js';
 import { scheduleNext, deferAutomatic } from './schedule.js';
+import { notify } from '../notify.js';
 
 /* A measurement, run as a race.
  *
@@ -224,6 +225,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     };
   };
   const queue = plan.order;
+  // the catalogue as the run found it: which models anyone can run, and who sells them
+  const factsNow = await loadFacts();
   const speed = plan.speed || { factor: null };
 
   const gate = await gateEval(workload.workspace_id, { estimatedUsd: plan.estimateUsd });
@@ -423,6 +426,25 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const accountProblem = (r) => `Our account with the model provider needs attention (it answered ${r.status}: `
     + `"${String(r.error || 'no reason given').slice(0, 160)}"), so no model could be asked anything.`;
   const paid = (r) => (r.reused ? Number(r.originalCost || 0) : Number(r.cost || 0));
+  /* How a model that clears is served: the way it was asked, and, for a model whose weights anyone can
+     run, only by the providers that answered it here. The same open model can be run differently by
+     different providers (a smaller number format, an older build), and a switch should serve what was
+     measured, not whatever provider has capacity that day. A model only its maker sells is left to
+     route freely, and so is one whose answering providers cannot be named. */
+  const openWeights = new Map();
+  const servedRecipe = (cand, st) => {
+    const base = cand.recipe ?? null;
+    if (base?.pinned || !st?.providers?.size) return base;
+    const m = factsNow?.models?.get(cand.model);
+    if (!m || !m.openWeights) return base;
+    if (!openWeights.has(cand.model)) {
+      const names = new Set(st.providers.keys());
+      const tags = (m.endpoints || []).filter((e) => names.has(String(e.provider))).map((e) => e.tag);
+      openWeights.set(cand.model, tags);
+    }
+    const tags = openWeights.get(cand.model);
+    return tags.length ? { ...(base || {}), providers: tags } : base;
+  };
   /* Every answer asked for now (a recorded one was not) came back unusable: refused, busy, or not
      the shape the call asks for. */
   const deadNow = (p) => {
@@ -751,6 +773,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const st = {
       runs: 0, counted: 0, sum: 0, failures: 0, errors: 0, errorText: null, lat: [], ttft: [], reused: 0,
       candCost: 0, refCost: 0, kinds: new Map(), pairs: [], stopped: null, calls: [],
+      // which providers answered it, by name, and how often
+      providers: new Map(),
     };
     const key = keyOf(cand);
     // a model already serving this workload is re-checked on fresh answers, so a change in it shows
@@ -793,6 +817,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         if (!r.transient || st.errors >= 2) st.stopped = r.transient ? 'errors' : 'refused';
       } else {
         if (r.latencyMs) st.lat.push(r.latencyMs);
+        if (r.provider) st.providers.set(String(r.provider), (st.providers.get(String(r.provider)) || 0) + 1);
         /* The first word is never later than the last, so an answer that came back in one piece,
            with no first word to time, is counted at its whole time rather than left out, which
            let a model that never streamed pass a first-word limit untimed. */
@@ -923,11 +948,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       errors: st.errors, stopped: finished ? null : st.stopped,
       error_text: st.errorText, difference: kinds.length ? (KIND_WORDS[kinds[0][0]] || kinds[0][0]) : null,
       reused: st.reused,
-      rank_json: JSON.stringify({ chance: cand.chance, savingShare: cand.savingShare, parts: cand.parts, family: cand.family }),
-      recipe_json: cand.recipe ? JSON.stringify(cand.recipe) : null,
+      rank_json: JSON.stringify({ chance: cand.chance, rawChance: cand.rawChance ?? null, savingShare: cand.savingShare, parts: cand.parts, family: cand.family }),
+      recipe_json: servedRecipe(cand, st) ? JSON.stringify(servedRecipe(cand, st)) : null,
+      providers_json: st.providers.size ? JSON.stringify(Object.fromEntries(st.providers)) : null,
       cost_ratio: ratio === null ? null : round8(ratio),
       // the customer's own model thinking less is a strategy of its own, served the way it was measured
-      arm_json: cand.key ? JSON.stringify({ kind: 'model', model: cand.model, recipe: cand.recipe ?? null }) : null,
+      arm_json: cand.key ? JSON.stringify({ kind: 'model', model: cand.model, recipe: servedRecipe(cand, st) ?? null }) : null,
       escalated_pct: null,
       // where the true gap most likely is, and how many calls it would take to clear this bar
       gap_lo: round8(read.lo), gap_hi: round8(read.hi), calls_needed: read.need ?? null,
@@ -1057,12 +1083,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict,
                 gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at,
                 latency_p50, latency_p90, ttft_p50, ttft_p90, errors, stopped, error_text, difference, reused,
-                rank_json, recipe_json, cost_ratio, arm_json, escalated_pct, gap_lo, gap_hi, calls_needed)
+                rank_json, recipe_json, cost_ratio, arm_json, escalated_pct, gap_lo, gap_hi, calls_needed, providers_json)
                 VALUES (@id, @run_id, @model_id, @runs, @gap_pct, @cost_month_usd, @verdict,
                 @gate_structure, @gate_accuracy, @gate_coverage, @gate_complete, @failures, @created_at,
                 @latency_p50, @latency_p90, @ttft_p50, @ttft_p90, @errors, @stopped, @error_text, @difference, @reused,
-                @rank_json, @recipe_json, @cost_ratio, @arm_json, @escalated_pct, @gap_lo, @gap_hi, @calls_needed)`)
-      .run({ gap_lo: null, gap_hi: null, calls_needed: null, ...row });
+                @rank_json, @recipe_json, @cost_ratio, @arm_json, @escalated_pct, @gap_lo, @gap_hi, @calls_needed, @providers_json)`)
+      .run({ gap_lo: null, gap_hi: null, calls_needed: null, providers_json: null, ...row });
     results.push(row);
   };
 
@@ -1265,12 +1291,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const servingArmNow = workload.routed_arm_id ? await armById(workload.routed_arm_id) : null;
   const servingKind = ['cascade', 'router'].includes(servingArmNow?.spec?.kind) ? servingArmNow.spec.kind : null;
   const leadPart = servingKind ? leadModel(servingArmNow.spec) : null;
-  const leadKey = leadPart ? (leadPart.model === reference && leadPart.recipe?.reasoning ? `${reference}#lighter` : leadPart.model) : null;
+  const leadKey = leadPart ? (leadPart.model === reference && leadPart.recipe?.reasoning ? `${reference}#lighter`
+    : leadPart.model === reference && leadPart.recipe?.pinned ? `${reference}#cheapest` : leadPart.model) : null;
   if (!halt) {
     const cheaper = (r) => r.cost_month_usd !== null && (refMonthly === null || r.cost_month_usd < refMonthly);
     // one model, or the customer's own thinking less; never a strategy built on a strategy
     const plain = results.filter((r) => r.verdict !== 'reference' && stats.has(r.model_id)
-      && (!r.arm_json || String(r.model_id).endsWith('#lighter')));
+      && (!r.arm_json || String(r.model_id).endsWith('#lighter') || String(r.model_id).endsWith('#cheapest')));
     // answered every call, and could not manage alone
     const pool = plain.filter((r) => ['missed', 'review'].includes(r.verdict) && !r.stopped && cheaper(r));
     /* Dropped part way for its answers, but it could still save something with the calls it gets
@@ -1345,7 +1372,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     if (r.model_id === servingNow) { best = r; confirmations.push({ r, c: { verdict: 'cleared', runs: 0, serving: true } }); break; }
     if (tries >= config.EVAL_CONFIRM_TRIES) continue;
     tries += 1;
-    const plainModel = !r.arm_json || String(r.model_id).endsWith('#lighter');
+    const plainModel = !r.arm_json || String(r.model_id).endsWith('#lighter') || String(r.model_id).endsWith('#cheapest');
     const c = plainModel ? await confirmOn(r, fresh) : { verdict: 'cleared', runs: 0, live: true };
     confirmations.push({ r, c });
     if (c.verdict === 'cleared') { best = r; break; }
@@ -1470,6 +1497,18 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         + (traffic.carries ? '' : '. Your calls reach us as copies, so a switch starts with the first call that comes through Understudy'),
       workloadId,
     });
+    if (workload.optimize_mode !== 'auto' && !stillServing) {
+      // waiting for somebody's say: worth an email, once for this measurement
+      await notify(workload.workspace_id, 'waiting', `${workloadId}:${run.id}`, {
+        title: `${best.model_id} cleared your bar on ${workload.slug}`,
+        lines: [
+          `It gave the same answers as ${reference} on your own calls, measured twice`
+            + (saving ? `, and would cost about $${saving.toFixed(2)} a month less.` : '.'),
+          'Nothing changes until you approve it on the workload page.',
+        ],
+        path: `/workloads/${workloadId}`, linkText: 'Review and approve',
+      });
+    }
     if (workload.optimize_mode === 'auto') {
       const recipe = best.recipe_json ? JSON.parse(best.recipe_json) : null;
       await promote(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId), best.model_id, {

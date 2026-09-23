@@ -9,8 +9,11 @@ import { startSignUp, checkPassword, startSession, endSession, session, requireU
 import send, { codeEmail, accountExistsEmail } from './email.js';
 import { issueKey, listKeys, revokeKey, revealKey, revealKeyById } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity, track } from './traffic.js';
-import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available } from './billing.js';
-import { planFor, forgetPlan } from './eval/plan.js';
+import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available, optimizeSpent, spentOnCalls } from './billing.js';
+import { notifyPrefs, NOTIFY_KINDS } from './notify.js';
+import { routedSavings } from './eval/actual.js';
+import { adviceFor } from './eval/advice.js';
+import { planFor, forgetPlan, forgetPlanAll } from './eval/plan.js';
 import { recipeKind } from './eval/select.js';
 import { outcomeSummary, outcomeTotals, tasksFor } from './learn/views.js';
 import { nameOfResult } from './learn/arms.js';
@@ -477,8 +480,14 @@ async function overview(workspaceId, days = 30) {
   const spend = await db.prepare(
     `SELECT COALESCE(SUM(charged_usd), 0) AS s, COUNT(*) AS n FROM calls
       WHERE workspace_id = ? AND created_at >= ? AND source NOT IN ('replay', 'test')`).get(workspaceId, since);
-  const series = await dailySpend(workspaceId, days);
-  const saved = round8(series.reduce((a, d) => a + Math.max(0, d.would - d.paid), 0));
+  /* What the customer is actually ahead by: what their routed calls would have cost on their own
+     models, less what they paid us for them, less what measuring and background answers cost. Each
+     part is given, so a screen can say where the figure comes from; it used to count only the days
+     that saved something, and to price their own model with our fee on it. */
+  const actual = await routedSavings({ workspaceId, days, at: now() });
+  const series = actual.series;
+  const optimizing = await optimizeSpent(workspaceId, days);
+  const saved = round8(actual.saved - optimizing);
   const priced = (await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get()).n > 0;
   return {
     days,
@@ -486,6 +495,15 @@ async function overview(workspaceId, days = 30) {
     priced,
     spend: round8(spend.s),
     saved,
+    savings: {
+      // on the calls themselves: their own models' cost against what they paid us, fee included
+      onCalls: actual.saved, paid: actual.paid, would: actual.would,
+      // what optimizing cost over the same days: measurements and background answers, fee included
+      optimizing,
+      net: saved,
+      // how many routed calls a cheaper strategy answered
+      switchedCalls: actual.switched, routedCalls: actual.calls,
+    },
     calls: spend.n,
     workloads: rows.length,
     // switched, and some calls come through us to be switched; a switch on copies alone is waiting
@@ -730,6 +748,8 @@ api.get('/workloads/:id', async (req, res) => {
     model: w.routed_model || w.reference_model, reference: w.reference_model,
     servingKey: servingAs,
     optimizeMode: w.optimize_mode, floor: w.floor_pct,
+    // savings the customer can make in their own code, with what each would save (src/eval/advice.js)
+    advice: await adviceFor(w),
     speedPref: w.speed_pref || null,
     calls: t.calls, cost: round8(t.cost),
     promotedAt: w.promoted_at,
@@ -1142,6 +1162,25 @@ api.get('/settings', async (req, res) => {
     retentionChoices: RETENTION_CHOICES,
     zdrOnly: req.workspace.zdr_required !== 0,
     zdrForced: config.ZDR_FORCED,
+    // how a new workload is switched: ask first, on its own, or not at all
+    defaultOptimizeMode: req.workspace.default_optimize_mode || config.DEFAULT_OPTIMIZE_MODE,
+    // whether this workspace's results (never content) may help other workspaces choose models
+    shareStats: Number(req.workspace.share_stats || 0) === 1,
+    // the most optimizing may spend over thirty days, and what it has
+    optimizeBudget: req.workspace.optimize_budget_usd ?? null,
+    optimizeSpent: await optimizeSpent(req.workspace.id),
+    // marking long instructions for caching where that pays
+    cacheHints: Number(req.workspace.cache_hints ?? 1) !== 0,
+    cacheHintsAvailable: config.CACHE_HINTS,
+    // the most calls may cost through us in a day and a month, and what they have
+    limits: await (async () => {
+      const spent = await spentOnCalls(req.workspace.id);
+      return { dailyUsd: req.workspace.daily_limit_usd ?? null, monthlyUsd: req.workspace.monthly_limit_usd ?? null,
+        spentToday: spent.day, spentMonth: spent.month };
+    })(),
+    // which emails the workspace gets
+    notify: notifyPrefs(req.workspace),
+    notifyKinds: NOTIFY_KINDS,
     canBill: canBill(),
     ledger: await ledger(req.workspace.id, 10),
     routing: await gateRouting(req.workspace.id),
@@ -1165,6 +1204,78 @@ api.post('/settings/zdr', async (req, res) => {
         + 'never to ones that train on it. More models can be used, and measured.',
   });
   return res.json({ ok: true, required });
+});
+
+/* How a new workload is switched. Workloads that exist keep what they have unless asked to follow. */
+api.post('/settings/default-mode', async (req, res) => {
+  const mode = String(req.body?.mode || '');
+  if (!['ask', 'auto', 'off'].includes(mode)) return fail(res, 400, 'Choose ask, auto or off.');
+  await db.prepare('UPDATE workspaces SET default_optimize_mode = ? WHERE id = ?').run(mode, req.workspace.id);
+  let moved = 0;
+  if (req.body?.applyToExisting === true) {
+    moved = (await db.prepare(`UPDATE workloads SET optimize_mode = ?, updated_at = ? WHERE workspace_id = ? AND merged_into IS NULL`)
+      .run(mode, now(), req.workspace.id)).changes;
+  }
+  const words = { ask: 'ask you before switching', auto: 'switch on their own once a model clears twice', off: 'never be switched' };
+  await addActivity(req.workspace.id, {
+    kind: 'connect', title: `New workloads will ${words[mode]}`,
+    detail: moved ? `And the ${moved} workloads you have now do the same.` : 'Workloads you have now keep their own setting.',
+  });
+  return res.json({ ok: true, mode, moved });
+});
+
+/* Whether this workspace's measurement results may help other workspaces choose which models to try.
+   Only which model cleared which kind of workload is ever shared, never a call, an answer or a name. */
+api.post('/settings/share-stats', async (req, res) => {
+  const on = req.body?.enabled === true;
+  await db.prepare('UPDATE workspaces SET share_stats = ? WHERE id = ?').run(on ? 1 : 0, req.workspace.id);
+  return res.json({ ok: true, enabled: on });
+});
+
+/* The most optimizing (measurements and background answers) may spend over thirty days. Null is no
+   ceiling beyond what each measurement is worth. */
+api.post('/settings/optimize-budget', async (req, res) => {
+  const raw = req.body?.amountUsd;
+  const amount = raw === null || raw === undefined || raw === '' ? null : Number(raw);
+  if (amount !== null && (!Number.isFinite(amount) || amount < 0 || amount > 100000)) {
+    return fail(res, 400, 'The budget is a number of dollars between 0 and 100,000, or nothing for no budget.');
+  }
+  await db.prepare('UPDATE workspaces SET optimize_budget_usd = ? WHERE id = ?').run(amount, req.workspace.id);
+  forgetPlanAll();
+  return res.json({ ok: true, amountUsd: amount });
+});
+
+/* Whether long instructions may be marked for caching, on models that only cache what is marked. */
+api.post('/settings/cache-hints', async (req, res) => {
+  const on = req.body?.enabled !== false;
+  await db.prepare('UPDATE workspaces SET cache_hints = ? WHERE id = ?').run(on ? 1 : 0, req.workspace.id);
+  forgetWorkspace(req.workspace.id);
+  return res.json({ ok: true, enabled: on });
+});
+
+/* The most calls may cost through us in a day and in a month, days and months told in IST. */
+api.post('/settings/limits', async (req, res) => {
+  const read = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+  const daily = read(req.body?.dailyUsd);
+  const monthly = read(req.body?.monthlyUsd);
+  for (const v of [daily, monthly]) {
+    if (v !== null && (!Number.isFinite(v) || v <= 0 || v > 1000000)) {
+      return fail(res, 400, 'A limit is a number of dollars above 0, or nothing for no limit.');
+    }
+  }
+  if (daily !== null && monthly !== null && daily > monthly) return fail(res, 400, 'The daily limit cannot be above the monthly one.');
+  await db.prepare('UPDATE workspaces SET daily_limit_usd = ?, monthly_limit_usd = ? WHERE id = ?').run(daily, monthly, req.workspace.id);
+  forgetWorkspace(req.workspace.id);
+  return res.json({ ok: true, dailyUsd: daily, monthlyUsd: monthly });
+});
+
+/* Which emails the workspace gets. */
+api.post('/settings/notify', async (req, res) => {
+  const given = req.body?.kinds && typeof req.body.kinds === 'object' ? req.body.kinds : {};
+  const prefs = notifyPrefs(req.workspace);
+  for (const k of Object.keys(NOTIFY_KINDS)) if (typeof given[k] === 'boolean') prefs[k] = given[k];
+  await db.prepare('UPDATE workspaces SET notify_json = ? WHERE id = ?').run(JSON.stringify(prefs), req.workspace.id);
+  return res.json({ ok: true, notify: prefs });
 });
 
 /* The ledger further back than Settings shows at first, twenty lines at a time. */

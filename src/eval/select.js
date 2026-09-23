@@ -1,4 +1,5 @@
-import { routedCallPrice, callPrice, healthOf } from '../models/facts.js';
+import { calibrated } from './calibrate.js';
+import { routedCallPrice, callPrice, healthOf, healthy } from '../models/facts.js';
 
 /* Which models a measurement tries, and in what order. Pure: everything it needs is handed to
  * it, so the same inputs always give the same answer, and a backtest can run it over any
@@ -423,10 +424,13 @@ export function selectCandidates(input) {
      answers, and it is forgotten once the providers have had time to recover. */
   const ranked = quick.map((k) => {
     const c = chanceOf(k.m, { ...ctx, reference });
+    /* Read through how often chances like it came true (src/eval/calibrate.js), where there is a
+       record to read it through; the chance as worked out is kept beside it for that record. */
+    const answer = calibrated(ctx.calibration, c.chance);
     const reach = k.routes ? { ...k.m, endpoints: k.routes } : k.m;
     const sp = speedChanceOf(reach, k.recipe, { speed, speedHistory, refHealth, profile, config });
     const wasBusy = busy?.get(k.m.id) || null;
-    const overall = c.chance * (sp ? sp.p : 1) * (wasBusy ? 0.35 : 1);
+    const overall = answer * (sp ? sp.p : 1) * (wasBusy ? 0.35 : 1);
     const saving = refPrice === null ? null : refPrice - k.price;
     return {
       model: k.m.id,
@@ -435,7 +439,8 @@ export function selectCandidates(input) {
       refPrice,
       savingShare: refPrice ? saving / refPrice : null,
       chance: overall,
-      answerChance: c.chance,
+      answerChance: answer,
+      rawChance: c.chance,
       speedChance: sp ? sp.p : null,
       speedMeasured: sp ? sp.measured : null,
       busy: !!wasBusy,
@@ -479,6 +484,31 @@ export function selectCandidates(input) {
         parts: [{ source: 'same model', p: chance, w: 1, note: 'your own model, asked to think less' }],
         family: true, recipe: { reasoning }, note: 'your own model, asked to think less', thinks: true, mustThink: false,
         health: refHealth,
+      });
+    }
+  }
+  /* The customer's own model, from the provider that charges least for it. Where several providers
+     sell it at different prices, calls are spread over them, and the one that charges least can be a
+     good deal cheaper than that mix. The same model, so very likely the same answers; but a provider
+     can run it differently (a smaller number format, an older build), so it is measured like any
+     model before anything is switched, and served only from that provider if it clears. */
+  if (refModel && refPrice && !reverted.has(`${reference}#cheapest`)) {
+    const byPrice = refRoutes.filter(healthy)
+      .map((e) => ({ e, price: callPrice({ priceIn: e.price_in, priceOut: e.price_out, overrides: e.overrides }, pin, pout, profile.hours) }))
+      .filter((x) => x.price > 0)
+      .sort((a, b) => a.price - b.price);
+    if (byPrice.length >= 2 && byPrice[0].price < refPrice * 0.9) {
+      const { e, price } = byPrice[0];
+      const chance = 0.8;
+      const where = e.provider || e.tag;
+      ranked.push({
+        model: reference, key: `${reference}#cheapest`, label: `${short(reference)}, from ${where}`, name: refModel.name,
+        price, refPrice, savingShare: (refPrice - price) / refPrice, chance, answerChance: chance, rawChance: chance,
+        speedChance: null, speedMeasured: null, busy: false,
+        expected: (refPrice - price) * chance,
+        parts: [{ source: 'same model', p: chance, w: 1, note: `your own model, from ${where}, the provider that charges least for it` }],
+        family: true, recipe: { providers: [e.tag], pinned: true }, note: `your own model, from ${where}`, thinks: !!refThinks, mustThink: false,
+        health: healthOf({ endpoints: [e] }),
       });
     }
   }

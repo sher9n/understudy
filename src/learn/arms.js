@@ -17,7 +17,16 @@ const lighter = (recipe) => {
 
 /** The same strategy found again has the same key, whatever the order its parts were written in. */
 export function armKey(spec) {
-  const part = (p) => `${p?.model || ''}~${JSON.stringify(p?.recipe || null)}`;
+  /* The providers a model was measured on are how it is served, not what it is: a measurement that
+     happened to be answered by a different pair of providers is the same strategy, and its record
+     must not start again. Only a model pinned to one provider on purpose (#cheapest) keeps it. */
+  const recipeOf = (p) => {
+    const r = p?.recipe || null;
+    if (!r || !r.providers || r.pinned) return r;
+    const { providers, ...rest } = r;
+    return Object.keys(rest).length ? rest : null;
+  };
+  const part = (p) => `${p?.model || ''}~${JSON.stringify(recipeOf(p))}`;
   if (spec.kind === 'cascade') return `cascade:${part(spec.first)}>${part(spec.fallback)}`;
   if (spec.kind === 'router') return `router:${part(spec.cheap)}|${part(spec.strong)}`;
   return `model:${part(spec)}`;
@@ -36,6 +45,7 @@ export function labelOf(spec, reference = null) {
     return `${short(spec.cheap.model)} or ${short(spec.strong.model)}, picked call by call`;
   }
   if (reference && spec.model === reference && lighter(spec.recipe)) return `${short(spec.model)}, thinking less`;
+  if (reference && spec.model === reference && spec.recipe?.pinned) return `${short(spec.model)}, from its cheapest provider`;
   if (reference && spec.model === reference) return `${short(spec.model)} (yours)`;
   return short(spec.model);
 }

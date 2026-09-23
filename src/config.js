@@ -170,6 +170,17 @@ export const config = {
   EVAL_BACKOFF_MAX_DOUBLINGS: num('EVAL_BACKOFF_MAX_DOUBLINGS', 3),
   EVAL_NUDGE_HOURS: num('EVAL_NUDGE_HOURS', 6),
   EVAL_NUDGE_MIN_DAYS: num('EVAL_NUDGE_MIN_DAYS', 7),
+  /* Marking a long, repeated instruction for the provider to cache, on models that only cache what is
+     marked (Anthropic's). A cached instruction costs a tenth of the price to read and a quarter more to
+     write, so it is only marked where calls come often enough to read it back: at least
+     CACHE_HINT_MIN_PER_HOUR an hour, with an instruction of at least CACHE_HINT_MIN_CHARS characters,
+     which is about the smallest a provider will cache. */
+  /* Emails about a workspace's own events (src/notify.js): on, and at most this many a day. */
+  NOTIFY_ENABLED: bool('NOTIFY_ENABLED', true),
+  NOTIFY_MAX_PER_DAY: num('NOTIFY_MAX_PER_DAY', 10),
+  CACHE_HINTS: bool('CACHE_HINTS', true),
+  CACHE_HINT_MIN_CHARS: num('CACHE_HINT_MIN_CHARS', 4400),
+  CACHE_HINT_MIN_PER_HOUR: num('CACHE_HINT_MIN_PER_HOUR', 12),
   /* How a new workload is switched in a workspace that has not chosen: 'ask' (a person approves each
      switch), 'auto' or 'off'. Workspaces choose for themselves in Settings. */
   DEFAULT_OPTIMIZE_MODE: ['ask', 'auto', 'off'].includes(str('DEFAULT_OPTIMIZE_MODE', 'ask')) ? str('DEFAULT_OPTIMIZE_MODE', 'ask') : 'ask',

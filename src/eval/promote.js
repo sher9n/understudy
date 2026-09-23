@@ -1,3 +1,4 @@
+import { notify } from '../notify.js';
 import { db, id, now } from '../db/index.js';
 import { addActivity } from '../traffic.js';
 import { OUTCOME_OF, RECENT_CALLS, carriesOf } from './outcome.js';
@@ -42,7 +43,8 @@ export async function trafficOf(workload) {
    measurement gives the strategy's result, and the name the record of switches keeps. */
 export function keyOfSpec(spec, reference) {
   // the customer's own model thinking less, as a part of a strategy or on its own
-  const part = (p) => (p.model === reference && p.recipe?.reasoning ? `${p.model}#lighter` : p.model);
+  const part = (p) => (p.model === reference && p.recipe?.reasoning ? `${p.model}#lighter`
+    : p.model === reference && p.recipe?.pinned ? `${p.model}#cheapest` : p.model);
   if (spec.kind === 'cascade') return `cascade:${part(spec.first)}`;
   if (spec.kind === 'router') return `router:${part(spec.cheap)}`;
   return part(spec);
@@ -109,6 +111,19 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
       + (traffic.carries ? '' : ' Its calls reach us as copies, so the switch starts with the first one that comes through Understudy.'),
     workloadId: workload.id,
   });
+  // a switch nobody pressed a button for is worth an email; one a person just approved is not
+  if (auto) {
+    await notify(workload.workspace_id, 'switched', `${workload.id}:${arm.id}:${runId || now()}`, {
+      title: `${workload.slug} was switched to ${arm.label}`,
+      lines: [
+        `${arm.label} gave the same answers as ${workload.reference_model} on your own calls, measured twice, and costs less.`,
+        traffic.carries ? 'It starts on a small share of the calls and takes more of them while its live calls hold up.'
+          : 'Its calls reach us as copies, so the switch starts with the first call that comes through Understudy.',
+        'You can switch it back at any time from the workload page.',
+      ],
+      path: `/workloads/${workload.id}`, linkText: 'See the switch',
+    });
+  }
   return { ok: true, from, to: modelId, armId: arm.id, label: arm.label, waiting: !traffic.carries };
 }
 
@@ -140,6 +155,13 @@ export async function revert(workload, { reason = 'you asked for it', actorUserI
     detail: reason,
     workloadId: workload.id,
   });
+  if (auto || soft) {
+    await notify(workload.workspace_id, 'reverted', `${workload.id}:${from}:${now()}`, {
+      title: `${workload.slug} is back on ${workload.reference_model}`,
+      lines: [reason, 'Nothing needs doing: its calls are answered by your own model again from the next one on.'],
+      path: `/workloads/${workload.id}`, linkText: 'See why',
+    });
+  }
   return { ok: true, from, to: workload.reference_model };
 }
 

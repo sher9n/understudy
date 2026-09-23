@@ -11,6 +11,7 @@ import { fitsFor } from './fit.js';
 import { historyFor, fleetHistory } from './history.js';
 import { judgementsFor, judgementCost } from './judge.js';
 import { callsToClear } from './compare.js';
+import { calibrationFor } from './calibrate.js';
 
 /* What a measurement WOULD do, worked out before anything is spent.
  *
@@ -132,6 +133,8 @@ export const onMissingFits = (fn) => { queueFit = fn; };
 const pageMemo = new Map();
 const PAGE_MEMO_MS = 10000;
 export const forgetPlan = (workloadId) => pageMemo.delete(workloadId);
+// every page copy at once, after a workspace-wide setting that changes what a plan says
+export const forgetPlanAll = () => pageMemo.clear();
 
 /* The whole plan, and whether it can run. `reason` is written to be shown to somebody as it
    is: it is the sentence under a button that cannot be pressed. */
@@ -187,6 +190,7 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
     tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, serving: workload.routed_model,
     history, speed, refThinks, speedHistory: fleet.speed, busy: fleet.busy, config, at: now(),
     zdrOnly: await zdrFor(workload.workspace_id),
+    calibration: await calibrationFor(workload.workspace_id),
   };
 
   // who survives the rules, before anything is ranked
