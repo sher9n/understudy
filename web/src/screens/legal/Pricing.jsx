@@ -3,8 +3,6 @@ import { usd } from '../../money.js';
 import { Doc, Sec, To } from './Public.jsx';
 
 /* The figures, written the way every amount in the app is written. */
-const PLAN = usd(49);
-const PLAN_MEASURING = usd(10);
 const TOPUP_LOW = usd(5);
 const TOPUP_HIGH = usd(500);
 
@@ -47,11 +45,6 @@ export default function Pricing({ go }) {
               the background, reading a few live answers a day to check them, and live experiments are all charged
               at what they cost, plus 1%, from your balance.
             </p>
-          </div>
-          <div className="pricecard">
-            <div className="pricek">Monthly plan</div>
-            <div className="pricefig">{PLAN} a month</div>
-            <p>Includes {PLAN_MEASURING} of measurement each month.</p>
           </div>
         </div>
         <p>

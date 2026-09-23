@@ -67,7 +67,8 @@ export default function CodeSignIn({ pitchHtml, digits = 6, purpose = 'sign_in',
     setBusy(true); setError(''); setNote('');
     try {
       const r = await api.verifyCode(email.trim(), code);
-      onDone(r?.fresh || purpose === 'verify');
+      // the first key, made when the email answered, and whether the password typed at sign-up was kept
+      onDone(r?.fresh || purpose === 'verify', r?.key || null, r?.passwordKept ?? null);
     } catch (err) { setError(err.message); setCode(''); codeBox.current?.focus(); }
     finally { setBusy(false); }
   };

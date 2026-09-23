@@ -17,6 +17,7 @@ import { leadModel } from './learn/arms.js';
 import { zdrFor, cacheHintFor } from './workspace.js';
 import { featuresOf, predict } from './learn/router.js';
 import { estimateCost } from './trueup.js';
+import { cadenceOf } from './eval/schedule.js';
 
 /* Roughly how many tokens an answer ran to, from what it wrote: three characters a token, which
    overcounts ordinary text, for charging a call whose provider did not say. */
@@ -583,6 +584,9 @@ async function finish({ wsId, workload, requested, served, usage, started, body,
 /** Once a workload has enough calls to be trusted, it measures itself without being asked. */
 export async function considerMeasuring(wsId, workload) {
   if (workload.status !== 'new') return;
+  /* A workspace that measures only when asked is never measured by itself, and that includes a new
+     workload's first measurement: "only when I ask" is the promise that nothing is spent unasked. */
+  if (!(await cadenceOf(wsId))) return;
   /* A workload somebody stopped measuring is "new" again, but a person has answered it, and the
      very next call must not start it again behind their back: the schedule on Settings takes it
      from there. Only a stop counts. A run a restart interrupted, or one the balance cut short,

@@ -60,19 +60,19 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
         purpose="verify"
         initial={{ email: pending.email, sent: { minutes: pending.minutes, digits: pending.digits } }}
         resend={() => api.signUp(pending.fields)}
-        onDone={() => onDone(true)}
+        onDone={(_fresh, key, kept) => onDone(true, key, kept)}
         onBack={() => { setPending(null); setError(''); }}
       />
     );
   }
 
-  if (mode === 'link') return <LinkSignIn pitchHtml={PITCH} onDone={(fresh) => onDone(fresh)} />;
+  if (mode === 'link') return <LinkSignIn pitchHtml={PITCH} onDone={(fresh, key, kept) => onDone(fresh, key, kept)} />;
 
   if (codeMode) {
     return (
       <CodeSignIn
         pitchHtml={PITCH}
-        onDone={(fresh) => onDone(!!fresh)}
+        onDone={(fresh, key, kept) => onDone(!!fresh, key, kept)}
         onBack={() => go('signin')}
       />
     );

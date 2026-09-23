@@ -69,6 +69,8 @@ function whyOf(r, refSpeed, cert) {
 export default function WorkloadDetail({ id, onBack, onChanged }) {
   const [w, setW] = useState(null);
   const [err, setErr] = useState(null);
+  // what went wrong with something pressed on the page, said beside it; the page itself stays
+  const [actErr, setActErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [barOpen, setBarOpen] = useState(false);
   const [openRun, setOpenRun] = useState(null);
@@ -96,12 +98,20 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
     return () => document.removeEventListener('mousedown', away);
   }, [barOpen]);
 
-  if (err) return <div className="errbox">{err}</div>;
+  if (err && !w) {
+    return (
+      <div className="errbox" role="alert">
+        The workload could not be read: {err}{' '}
+        <button type="button" className="linkbtn" onClick={() => { setErr(null); load(); }}>Try again</button>
+      </div>
+    );
+  }
   if (!w) return <div className="loading">Loading the workload…</div>;
 
   const act = (fn) => async () => {
     setBusy(true);
-    try { await fn(); await load(); onChanged?.(); } catch (e) { setErr(e.message); } finally { setBusy(false); }
+    setActErr(null);
+    try { await fn(); await load(); onChanged?.(); } catch (e) { setActErr(e.message); } finally { setBusy(false); }
   };
 
   /* Either the newest measurement, or the older one somebody opened from the history. The
@@ -113,6 +123,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
     reference: runData.reference, finishedAt: runData.finishedAt,
     referenceCostMonth: runData.referenceCostMonth, results: runData.results,
     refSpeed: runData.refSpeed, reused: runData.reused, saved: runData.saved, plan: runData.plan,
+    yardstick: runData.yardstick ?? 'agreement', recordedRefs: runData.recordedRefs ?? null,
   } : w.certificate;
   /* Whether the measurement shown tried any model. One that could not set a bar, ran out of
      balance or was stopped early tried none, and the sections below say why instead of
@@ -131,6 +142,11 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
   const cand = w.candidate;
   const switched = !!w.promotedAt;
   const hot = !switched && !!cand;
+  /* Approval is offered wherever nothing will switch by itself: a workload that asks first or never
+     switches, a candidate the second look did not confirm, and one switched back from before. In
+     automatic mode the last two used to say "approve it" with no button to press. */
+  const waitsForPerson = hot && (w.optimizeMode !== 'auto'
+    || (cand.confirm && cand.confirm.verdict !== 'cleared') || !!cand.heldBack);
   /* Its calls reach us as copies, after the customer's own provider has answered them: a switch
      here is set up and waits for the first call that comes through Understudy. */
   const copiesOnly = !!w.traffic && !w.traffic.carries;
@@ -158,7 +174,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           <SectionBoundary><SwitchedCard s={w.switched} learn={learn} /></SectionBoundary>
         ) : (
           <>
-            {switched && <span className="eyebrow eyeok">Switched automatically</span>}
+            {switched && <span className="eyebrow eyeok">Switched</span>}
             {hot && <span className="eyebrow">A candidate is ready</span>}
 
             <h2>{headline(w, cand, switched)}</h2>
@@ -203,7 +219,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
         <div className="dacts">
           {switched && <button className="minig" disabled={busy}
             onClick={act(() => api.revert(w.id))}>Switch back to {short(w.reference)}</button>}
-          {hot && w.optimizeMode !== 'auto' && (
+          {waitsForPerson && (
             <>
               <button className="mini" disabled={busy}
                 onClick={act(() => more.promote(w.id, cand.model))}>Approve switch</button>
@@ -227,6 +243,12 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           )}
         </div>
 
+        {actErr && (
+          <div className="errbox" role="alert">
+            {actErr}{' '}
+            <button type="button" className="linkbtn" onClick={() => setActErr(null)}>Close</button>
+          </div>
+        )}
         {copiesOnly && (
           <p className="choicenote">
             Either way, a switch here is set up and waits: it starts with the first call that comes through Understudy.
@@ -236,8 +258,9 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
           {/* The live watch looks at a switched model's calls every hour, and each measurement on
               the workspace's schedule checks its answers again; either switches it back. */}
           {[['auto', 'Optimize automatically', 'We switch once a candidate clears your bar twice, the second time on calls it had never seen. It starts on a small share of your calls and takes more while they hold up, and goes back on its own if it stops clearing your bar, fails calls or slows down. You can switch back yourself at any time.'],
-            ['ask', 'Ask me first', 'We test and recommend. Nothing is switched until you approve it.']].map(([mode, t, s]) => (
-            <button key={mode} className={`choicebox${w.optimizeMode === mode ? ' picked' : ''}`}
+            ['ask', 'Ask me first', 'We test and recommend, and email you when one clears. Nothing is switched until you approve it.'],
+            ['off', 'Never switch', 'We measure and show what we find here, and nothing asks for your approval. Nothing is switched unless you approve it yourself.']].map(([mode, t, s]) => (
+            <button key={mode} type="button" className={`choicebox${w.optimizeMode === mode ? ' picked' : ''}`} aria-pressed={w.optimizeMode === mode}
               disabled={busy} onClick={act(() => api.setMode(w.id, mode))}>
               <span className="cbt">{t}</span><span className="cbs">{s}</span>
             </button>
@@ -428,6 +451,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
 
 /* The second look, in a few words under a verdict. */
 function confirmWords(c) {
+  if (c.verdict === 'not_reached') return 'Second look: not reached in this measurement, so it is not switched to by itself';
   if (c.verdict === 'insufficient' && !c.runs) return 'Second look: not enough calls it had not seen yet';
   const pct = (x) => (x === null || x === undefined ? '?' : `${Number(x).toFixed(2)}%`);
   const said = c.verdict === 'cleared' ? 'cleared again' : c.verdict === 'missed' ? 'did not hold up' : 'needs a look';
@@ -517,18 +541,21 @@ const blurb = (w, cand, switched) => {
       : cand.name.kind === 'router'
         ? `A small model learned from your own calls sends each one either to ${short(cand.name.first)} or to ${short(cand.name.fallback)}.`
         : `The same model, asked to think less before it answers.`;
-    return `${lead} Worked out on your own calls, it stayed inside your bar. `
-      + (w.optimizeMode === 'ask' ? 'Nothing changes until you approve it.' : 'This workload optimizes automatically, so it switches on its own.');
+    return `${lead} Worked out on your own calls, it stayed inside your bar. ${whatNext(w, cand)}`;
   }
   if (cand && cand.confirm && cand.confirm.verdict !== 'cleared') {
-    return `It cleared your bar on the calls it was measured on, but not again on calls it had never seen `
-      + `(${confirmWords(cand.confirm).replace(/^Second look on /, 'on ')}). A model that clears once can be lucky, so nothing was `
-      + 'switched on its own. Approve it if you are satisfied, or the next measurement looks again.';
+    const c = cand.confirm;
+    const why = c.verdict === 'not_reached'
+      ? 'the measurement ended before it could be looked at again on calls it had never seen'
+      : c.verdict === 'insufficient' && !c.runs
+        ? 'there were not yet enough calls it had never seen to look at it again'
+        : `it did not hold up again on calls it had never seen (${confirmWords(c).replace(/^Second look on /, 'on ')})`;
+    return `It cleared your bar on the calls it was measured on, but ${why}. A model that clears once can be lucky, so nothing was `
+      + `switched on its own. ${w.optimizeMode === 'off' ? 'This workload is set never to switch; approve it yourself if you want it.'
+        : 'Approve it if you are satisfied, or the next measurement looks again.'}`;
   }
   if (cand) {
-    return w.optimizeMode === 'ask'
-      ? 'It stayed inside your bar across your own calls, replayed and compared answer by answer. Nothing changes until you approve it.'
-      : 'It stayed inside your bar across your own calls. This workload optimizes automatically, so it switches on its own.';
+    return `It stayed inside your bar across your own calls, replayed and compared answer by answer. ${whatNext(w, cand)}`;
   }
   if (w.label === 'Measuring') {
     return 'Before we can recommend anything we measure how much your own model varies from itself. We replay your calls twice and compare the two answers, and that variation becomes the bar a cheaper model has to clear.';
@@ -556,12 +583,20 @@ const blurb = (w, cand, switched) => {
   return 'Every model we tried drifted further from your own model than your bar allows. We keep trying as new models land.';
 };
 
+/* What happens next to a candidate that cleared, said from the workload's own choice. */
+const whatNext = (w, cand) => {
+  if (w.optimizeMode === 'ask') return 'Nothing changes until you approve it.';
+  if (w.optimizeMode === 'off') return 'This workload is set never to switch, so nothing changes unless you approve it yourself.';
+  if (cand?.heldBack) return 'It was switched back from before, so it is not switched to by itself again; approve it if you are satisfied.';
+  return 'This workload optimizes automatically, so it switches on its own, on a small share of calls first.';
+};
+
 const costLine = (w, cand, switched) => {
   const target = switched
     ? w.certificate?.results.find((r) => r.model === (w.servingKey || w.model))?.costMonth
     : cand?.costMonth;
   const base = w.certificate?.referenceCostMonth;
-  if (!target || !base || base <= 0) return target ? `${usd(target)} a month` : '—';
+  if (!target || !base || base <= 0) return target ? `${usd(target)} a month` : 'not priced yet';
   return `${Math.round((1 - target / base) * 100)}% lower`;
 };
 

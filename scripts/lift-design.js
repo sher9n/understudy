@@ -27,8 +27,10 @@ console.log(`app.css      ${css.length} chars`);
 /* The screens ---------------------------------------------------------------- */
 const SCREENS = ['home', 'signin', 'signup', 'connect'];
 /* Screens the app has taken over. The design board is no longer the source for these,
-   so lifting them again would throw away work done here. */
-const APP_OWNED = new Set(['signin', 'signup']);
+   so lifting them again would throw away work done here: the home page's claims were rewritten
+   to say only what the product does, and the connect screen gained the choice of how a workload is
+   switched and its pressed states. */
+const APP_OWNED = new Set(['home', 'signin', 'signup', 'connect']);
 // where each screen ends: the next sc-if on the board, not the end of the file
 const ENDS = { home: 'signin', signin: 'signup', signup: 'connect', connect: 'dash' };
 

@@ -212,10 +212,10 @@ export default function WorkloadCalls({ workloadId }) {
                   : cell(c, 'answered', c.answered
                     || <span className="cgone">{c.purged ? 'cleared' : 'nothing kept'}</span>)}
               </div>
-              <div className="cmodel m">{c.model ? String(c.model).split('/').pop() : '—'}</div>
+              <div className="cmodel m">{c.model ? String(c.model).split('/').pop() : 'none'}</div>
               <div className="num m">{num(c.promptTokens)} / {num(c.completionTokens)}</div>
-              <div className="num m">{c.latencyMs == null ? '—' : `${num(c.latencyMs)} ms`}</div>
-              <div className="num m">{c.cost ? usd(c.cost) : '—'}</div>
+              <div className="num m">{c.latencyMs == null ? 'not timed' : `${num(c.latencyMs)} ms`}</div>
+              <div className="num m">{c.cost ? usd(c.cost) : 'no charge'}</div>
             </div>
           ))}
         </div>

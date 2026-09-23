@@ -15,12 +15,13 @@ import { notifyPrefs, NOTIFY_KINDS } from './notify.js';
 import { routedSavings } from './eval/actual.js';
 import { adviceFor } from './eval/advice.js';
 import { planFor, forgetPlan, forgetPlanAll } from './eval/plan.js';
+import { cadenceOf } from './eval/schedule.js';
 import { recipeKind } from './eval/select.js';
 import { outcomeSummary, outcomeTotals, tasksFor } from './learn/views.js';
 import { nameOfResult, armById } from './learn/arms.js';
 import { saveDef } from './learn/outcomes.js';
 import { learningView, exploreOf, forgetState, EXPLORE_MODES } from './learn/explore.js';
-import { certificate, promote, revert, trafficOf, servingKey } from './eval/promote.js';
+import { certificate, promote, revert, trafficOf, servingKey, heldBack } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
 import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
 import { switchStory } from './eval/switch-story.js';
@@ -675,7 +676,8 @@ api.get('/workloads/:id', async (req, res) => {
     optimizeBudget: plan.optimizeBudget ?? null,
     // how many of the bar's answers can be read from the customer's own calls rather than bought
     recordedShare: plan.recordedShare ?? 0,
-    // when it is next measured by itself, where the workload has its own schedule
+    // how often the workspace measures by itself, zero for only when asked, and when this one is next looked at
+    everyDays: await cadenceOf(w.workspace_id),
     nextAt: w.recheck_after ? Number(w.recheck_after) : null,
     picked: plan.order.slice(0, plan.models).map((r) => r.model),
     /* How the models were chosen, for the page to explain: what ruled each group out, in what
@@ -818,6 +820,8 @@ api.get('/workloads/:id', async (req, res) => {
       // the second look on calls it had never seen, when it had one: a candidate it did not confirm waits for a person
       confirm: best.confirm_verdict ? { verdict: best.confirm_verdict, runs: best.confirm_runs ?? 0, gap: best.confirm_gap ?? null,
         hi: best.confirm_hi ?? null, floor: best.confirm_floor ?? null } : null,
+      // switched back from before, so switching never picks it again by itself; a person still can
+      heldBack: (await heldBack(w.id)).has(best.model_id),
     },
     /* A switch still taking over: the share of calls it answers now, the steps it passes through, and
        what it has to show at this one before it takes the next. */
@@ -1155,6 +1159,9 @@ api.get('/models', async (req, res) => {
     if (!s.m) continue;
     where.set(s.m, [...(where.get(s.m) || []), s.slug]);
   }
+  /* How many providers that keep nothing serve each model, once that list has been read at least once;
+     before then nothing is known, and the page says "not reported" rather than "none". */
+  const zdrKnown = !!(await db.prepare(`SELECT 1 FROM fact_sync WHERE source = 'zdr'`).get());
   res.json({
     zdrOnly: req.workspace.zdr_required !== 0,
     models: rows.map((m) => ({
@@ -1162,6 +1169,7 @@ api.get('/models', async (req, res) => {
       priceIn: round8(m.price_in * 1e6), priceOut: round8(m.price_out * 1e6),
       openWeights: !!m.open_weights, enabled: !!m.enabled,
       where: where.get(m.model_id) || [],
+      zdr: zdrKnown ? Number(m.zdr || 0) : null,
     })),
   });
 });
@@ -1581,7 +1589,8 @@ api.post('/billing/checkout', async (req, res) => {
         },
       },
     } : {}),
-    success_url: `${config.PUBLIC_URL}/settings?credit=${dollars}`,
+    // the session travels back, so the page asks us what was paid rather than reading it from the address
+    success_url: `${config.PUBLIC_URL}/settings?credit=paid&session={CHECKOUT_SESSION_ID}`,
     cancel_url: `${config.PUBLIC_URL}/settings?credit=cancelled`,
     metadata: { workspace_id: req.workspace.id, auto_topup: autoTopUp ? '1' : '0' },
   }, {
@@ -1591,6 +1600,21 @@ api.post('/billing/checkout', async (req, res) => {
     idempotencyKey: `checkout:${req.workspace.id}:${dollars}:${autoTopUp ? 'auto' : 'once'}:${Math.floor(Date.now() / 60000)}`,
   });
   res.json({ url: session.url });
+});
+
+/* What a payment page that sent somebody back actually took, asked of Stripe: the amount, whether it
+   was paid, and whether it is on the balance yet. Only this workspace's own sessions are answered. */
+api.get('/billing/checkout/:id', async (req, res) => {
+  const s = await stripe();
+  if (!s) return fail(res, 503, 'Payments are not set up here.');
+  const sid = String(req.params.id || '');
+  if (!/^cs_[A-Za-z0-9_]+$/.test(sid)) return fail(res, 404, 'No such payment.');
+  let session;
+  try { session = await s.checkout.sessions.retrieve(sid); } catch { return fail(res, 404, 'No such payment.'); }
+  if (session?.metadata?.workspace_id !== req.workspace.id) return fail(res, 404, 'No such payment.');
+  const intent = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+  const credited = intent ? !!(await db.prepare('SELECT 1 FROM ledger WHERE workspace_id = ? AND ref = ?').get(req.workspace.id, intent)) : false;
+  return res.json({ amount: (session.amount_total ?? 0) / 100, paid: session.payment_status === 'paid', credited });
 });
 
 /* Automatic top up: on only with a card saved, off at any time, and for an amount the customer picks. */
@@ -1674,6 +1698,12 @@ api.get('/connect', async (req, res) => {
     defaultMode: req.workspace.default_optimize_mode || config.DEFAULT_OPTIMIZE_MODE,
     turnedAway,
     key: live?.secret ?? null,
+    // which key that is, by name, so replacing it replaces that one and says so
+    keyId: live?.id ?? null,
+    keyName: live?.name ?? null,
+    // what the workspace chose about what is kept, for the promise the page makes
+    zdrOnly: req.workspace.zdr_required !== 0,
+    retentionDays: req.workspace.retention_days ?? null,
     balance: round8(acct.balance_usd),
     refused,
     /* Routed calls need credit; copies never do. Saying so only when it is actually in the

@@ -74,6 +74,10 @@ const send = async (method, path, body) => {
   return json;
 };
 
+/** The one way to the server, for the few calls kept in moreApi.js: the same errors, and the same
+    notice when a session ends, whichever screen made the call. */
+export const request = send;
+
 /* Who wants to hear a workload's name the moment it is read: the frame, which titles the tab
    after the workload whose page is open. */
 const nameListeners = new Set();
@@ -154,7 +158,8 @@ export const api = {
   // money: an amount for automatic top ups, and credit that asks for them only when chosen
   setTopUp: (b) => send('POST', '/settings/auto-topup', b),
   checkout: (amountUsd, autoTopUp) => send('POST', '/billing/checkout', { amountUsd, autoTopUp }),
-  ledgerMore: (before) => send('GET', `/settings/ledger?before=${before}`),
+  checkoutSession: (id) => send('GET', `/billing/checkout/${encodeURIComponent(id)}`),
+  ledgerMore: (before, beforeId = null) => send('GET', `/settings/ledger?before=${before}${beforeId ? `&beforeId=${encodeURIComponent(beforeId)}` : ''}`),
 };
 
 /* Money is written by one formatter, in money.js, and every screen that imports it from here

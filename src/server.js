@@ -14,6 +14,7 @@ import { slug, shapeSignals } from './classify.js';
 import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
 import { trueUp } from './trueup.js';
+import { parse as parseRoute } from '../web/src/router.js';
 import { nudgeForCatalog } from './eval/schedule.js';
 import { runTopUp, sweepHolds } from './billing.js';
 import { pruneLimits } from './limits.js';
@@ -458,7 +459,14 @@ app.use('/api', api);
 const dist = path.resolve(process.cwd(), 'web/dist');
 if (fs.existsSync(dist)) {
   app.use(express.static(dist));
-  app.get(/^(?!\/(api|v1)\b).*/, (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+  /* Every address outside /api and /v1 gets the app, which draws the page, or its own "not found"
+     page for an address it has no page for. The status says the same as the page: 404 for an address
+     the app's own route table does not know, so a link checker or a search engine is told the truth
+     instead of being handed a page that says one thing with a status that says another. */
+  app.get(/^(?!\/(api|v1)\b).*/, (req, res) => {
+    const known = parseRoute(req.path).screen !== 'notfound';
+    res.status(known ? 200 : 404).sendFile(path.join(dist, 'index.html'));
+  });
 } else {
   app.get('/', (_req, res) => res.type('text/plain').send(
     'Understudy is running. The web build is missing: run `npm run build`.'));

@@ -8,7 +8,7 @@ import { ServingFlow, inHundred } from '../LearnCharts.jsx';
  * It used to show an accuracy and a bar read from whichever measurement happened to be newest.
  * When that one could not set a bar, it knew nothing about the model serving the workload, and
  * the card printed the zero it fell back to as though it were a fact: 100% accuracy, a bar of
- * 100%, and a cost of "—" put down to a month of traffic that had nothing to do with it. Every
+ * 100%, and a cost drawn as a dash put down to a month of traffic that had nothing to do with it. Every
  * figure here comes from the measurement the switch was actually made on, from the calls that
  * have actually run since, or from list prices, and each one says which. */
 
@@ -52,6 +52,16 @@ function whyLine(s) {
   return `You approved it after the measurement on ${timeIST(ev.at)} IST, where ${measured}, against a bar of ${pct2(ev.floor)}.`;
 }
 
+/* How many more days of saving pay back what is still short. The card has the days that pay back the
+   whole of what measuring cost; what is left is that share of it, not all of it again. */
+function leftDays(s, so) {
+  const m = s.measuring || {};
+  const total = (m.spent || 0) + (m.background || 0) + (m.graded || 0);
+  if (!(m.paybackDays > 0) || !(total > 0) || !(so?.net < 0)) return null;
+  const perDay = total / m.paybackDays;
+  return Math.max(1, Math.ceil(-so.net / perDay));
+}
+
 /** What the newest measurement since the switch found about it, or when the next one is due. */
 function checkLine(s) {
   const from = short(s.from);
@@ -60,7 +70,7 @@ function checkLine(s) {
   if (!c) {
     if (!s.cadenceDays) return 'It has not been checked again since. It is only re-measured when you press Measure now.';
     return s.nextCheckAt
-      ? `It has not been checked again yet. The next measurement is due around ${dateIST(s.nextCheckAt)}.`
+      ? `It has not been checked again yet. The next measurement is due around ${dateIST(s.nextCheckAt)} IST.`
       : 'It has not been checked again yet.';
   }
   const when = `Checked again on ${timeIST(c.at)} IST`;
@@ -197,7 +207,7 @@ export default function SwitchedCard({ s, learn = null }) {
             </div>
             {so.calls > 0 ? (
               <div className="swrow swactual" role="row">
-                <span role="cell">Since {dateIST(s.at)}, {num(so.calls)} {so.calls === 1 ? 'call' : 'calls'} <em>actual</em></span>
+                <span role="cell">Since {dateIST(s.at)} IST, {num(so.calls)} {so.calls === 1 ? 'call' : 'calls'} <em>actual</em></span>
                 <span role="cell" className="num">{usd(so.wouldHave)}</span>
                 <span role="cell" className="num">{usd(so.paid)}</span>
                 <span role="cell"><Saved v={so.saved} /></span>
@@ -234,7 +244,7 @@ export default function SwitchedCard({ s, learn = null }) {
               {so.net != null && so.calls > 0
                 ? (so.net >= 0
                   ? ` With that paid for, the switch is ${usd(so.net)} ahead so far.`
-                  : ` With that counted, it is ${usd(-so.net)} short of paying for itself so far${s.measuring.paybackDays ? `, about ${num(s.measuring.paybackDays)} ${s.measuring.paybackDays === 1 ? 'day' : 'days'} of saving at this pace` : ''}.`)
+                  : ` With that counted, it is ${usd(-so.net)} short of paying for itself so far${leftDays(s, so) ? `, about ${num(leftDays(s, so))} ${leftDays(s, so) === 1 ? 'day' : 'days'} more of saving at this pace` : ''}.`)
                 : s.measuring.paybackDays ? ` At the pace above, the saving pays that back in about ${num(s.measuring.paybackDays)} ${s.measuring.paybackDays === 1 ? 'day' : 'days'}.` : ''}
             </p>
           )}

@@ -58,11 +58,11 @@ export async function issueKey(workspaceId, name = 'production') {
 /** This workspace's live key, in full, or null when we genuinely cannot recover it. */
 export async function revealKey(workspaceId) {
   const row = await db.prepare(
-    `SELECT prefix, secret_enc FROM api_keys
+    `SELECT id, name, prefix, secret_enc FROM api_keys
       WHERE workspace_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1`)
     .get(workspaceId);
   if (!row) return null;
-  return { prefix: row.prefix, secret: open(row.secret_enc) };
+  return { id: row.id, name: row.name, prefix: row.prefix, secret: open(row.secret_enc) };
 }
 
 /** One key of this workspace's, in full when it can be opened; null when there is no such live key. */

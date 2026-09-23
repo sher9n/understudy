@@ -57,14 +57,15 @@ function takeParam(name) {
   } catch { return null; }
 }
 
-/* What Stripe's payment page sent back: ?credit=20.00 after paying, ?credit=cancelled after
-   turning back. Nothing was said about either before, so a payment ended in silence. */
+/* What Stripe's payment page sent back: ?credit=paid&session=cs_... after paying, ?credit=cancelled
+   after turning back. Nothing was said about either before, so a payment ended in silence. The amount
+   is never read from the address, which anybody can type: it is asked of the server, which asks Stripe. */
 function takeCredit() {
   const v = takeParam('credit');
+  const session = takeParam('session');
   if (v === null) return null;
   if (v === 'cancelled') return { kind: 'cancelled' };
-  const n = Number(v);
-  return { kind: 'paid', amount: /^\d{1,6}(\.\d{1,2})?$/.test(v) && n > 0 ? n : null };
+  return { kind: 'paid', amount: null, credited: false, session: session && /^cs_[A-Za-z0-9_]+$/.test(session) ? session : null };
 }
 
 const nextFromUrl = () => {
@@ -84,6 +85,8 @@ export default function App() {
   const [me, setMe] = useState(null);
   const [{ screen, openId }, setWhere] = useState(() => parse());
   const [freshKey, setFreshKey] = useState(null);
+  // an account confirmed from another browser than the one that signed up keeps no password (see startSignUp)
+  const [pwNote, setPwNote] = useState(false);
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   /* The window the dashboard and the workload list are read over. Kept here so switching
@@ -274,9 +277,18 @@ export default function App() {
     api.status().then((s) => {
       if (live && s?.payments === 'test_refused') setCredit((c) => (c ? { ...c, test: true } : c));
     }).catch(() => {});
+    // what was paid, and whether it has landed, from Stripe by way of the server
+    const ask = () => {
+      if (!ARRIVED_CREDIT.session) return;
+      api.checkoutSession(ARRIVED_CREDIT.session)
+        .then((r) => { if (live) setCredit((c) => (c ? { ...c, amount: r.amount || null, credited: !!r.credited } : c)); })
+        .catch(() => {});
+    };
+    ask();
     const timers = [4000, 12000, 30000].map((ms) => setTimeout(() => {
       const w = whereRef.current;
       if (w.screen === 'settings' && !w.openId) refreshRef.current?.('settings').catch(() => {});
+      ask();
     }, ms));
     return () => { live = false; timers.forEach(clearTimeout); };
   }, []);
@@ -380,8 +392,8 @@ export default function App() {
         <><b>That was a test payment.</b> Test payments are not added to balances on this deployment, so your balance has not changed.</>
       ) : (
         <>
-          <b>Thank you. Your payment{credit.amount ? ` of ${usd(credit.amount)}` : ''} is with Stripe.</b>{' '}
-          It is added to your balance as soon as Stripe confirms it, usually within a minute.
+          <b>Thank you. Your payment{credit.amount ? ` of ${usd(credit.amount)}` : ''} {credit.credited ? 'is on your balance.' : 'is with Stripe.'}</b>
+          {credit.credited ? null : <>{' '}It is added to your balance as soon as Stripe confirms it, usually within a minute.</>}
         </>
       )}
     </Notice>
@@ -427,8 +439,9 @@ export default function App() {
           }}
           dark={dark}
           setDark={setDark}
-          onDone={async (fresh, key) => {
+          onDone={async (fresh, key, kept) => {
             if (key) setFreshKey(key);
+            if (kept === false) setPwNote(true);
             /* Signed in from the form shown in place of the page they opened (a bookmarked
                workload, say): they land on that page, not on the dashboard. */
             if (!AUTH.has(screen) && !nextRef.current) nextRef.current = safeNext(hereNow());
@@ -440,6 +453,14 @@ export default function App() {
       </div>
     );
   }
+
+  const pwNoteEl = pwNote && (
+    <Notice key="pw" tone="warn" onClose={() => setPwNote(false)}>
+      <b>Your email is confirmed.</b> It was confirmed in a different browser from the one you signed up in, so the
+      password typed there was not kept.{' '}
+      <a href={href('settings')} onClick={plainClick(() => go('settings'))}>Choose a password in Settings</a> for next time.
+    </Notice>
+  );
 
   const endedNote = ended && (
     <Notice key="ended" tone="warn">
@@ -460,6 +481,7 @@ export default function App() {
           locked onSignOut={signOut}>
           {endedNote}
           {creditNote}
+          {pwNoteEl}
           <ConnectWizard go={go} freshKey={freshKey} onFreshKey={setFreshKey}
             onDone={async () => { await api.finishOnboarding(); setMe(await api.me()); }} />
         </Shell>
@@ -521,6 +543,7 @@ export default function App() {
       >
         {endedNote}
         {creditNote}
+        {pwNoteEl}
         {body()}
       </Shell>
     </div>

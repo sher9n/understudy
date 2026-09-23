@@ -9,19 +9,39 @@
 .linkbtn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 3px; }
 
 /* A button that does something that cannot be undone, asked for a second time. */
-.mini.danger { background: var(--bad, #c0392b); border-color: var(--bad, #c0392b); color: #fff; }
+.mini.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+/* the dark theme's red is light, so white on it reads at about 3 to 1; near-black reads at about 7 */
+[data-mode='dark'] .mini.danger { color: #1a0503; }
 
 /* A switch still taking over: how much of the traffic it answers now, and what moves it on. */
-.rolloutbar { display: grid; gap: 10px; padding: 14px 16px; margin: 0 0 16px; border-radius: 12px; background: var(--card2, rgba(15, 98, 254, 0.06)); border: 1px solid var(--line, rgba(0, 0, 0, 0.08)); }
+.rolloutbar { display: grid; gap: 10px; padding: 14px 16px; margin: 0 0 16px; border-radius: 12px; background: var(--brandq); border: 1px solid var(--line); }
 .rolloutbar p { margin: 0; line-height: 1.55; }
 .rolloutbar .minig { justify-self: start; }
-.rolloutmeter { height: 6px; border-radius: 999px; background: var(--line, rgba(0, 0, 0, 0.08)); overflow: hidden; }
-.rolloutmeter i { display: block; height: 100%; background: var(--accent, #0f62fe); }
+.rolloutmeter { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.rolloutmeter i { display: block; height: 100%; background: var(--brand); }
 
 /* Choosing, while connecting, how a workload is switched once a cheaper model clears. */
 .wizmode { display: grid; gap: 8px; margin: 14px 0 6px; }
 .wizmode .t { font-weight: 600; }
-.wizmode .modeb { display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line, rgba(0, 0, 0, 0.12)); background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.wizmode .modeb { display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; font: inherit; }
 .wizmode .modeb span { font-size: 13px; color: var(--mut); }
-.wizmode .modeb.on { border-color: var(--accent, #0f62fe); box-shadow: 0 0 0 1px var(--accent, #0f62fe) inset; }
+.wizmode .modeb.on { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand) inset; }
 .wizmodenote { font-size: 12.5px; color: var(--mut); }
+
+/* What a save in Settings said, at the foot of the window, where it can be seen from any section.
+   Above the phone's tab bar on a phone. */
+.settoast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 40; display: flex;
+  gap: 12px; align-items: center; box-sizing: border-box; max-width: min(640px, calc(100vw - 32px)); padding: 12px 14px;
+  border-radius: 12px; border: 1px solid var(--line); background: var(--raise); color: var(--ink);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18); }
+.settoast.good { border-color: var(--ok); }
+.settoast.bad { border-color: var(--bad); color: var(--bad); }
+.settoastx { font-size: 18px; line-height: 1; color: var(--mut); padding: 2px 6px; flex: 0 0 auto; }
+@media (max-width: 640px) { .settoast { bottom: calc(76px + env(safe-area-inset-bottom)); } }
+
+/* The name of the key Connect shows, beside its label. */
+.rowkname { font-weight: 400; color: var(--mut-read); }
+
+/* A key shown in full, on a row of its own under the key it belongs to, with a way to copy it. */
+.keyshow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0 2px; min-width: 0; }
+.keyshow code { min-width: 0; overflow-wrap: anywhere; word-break: break-all; font-size: 12.5px; }

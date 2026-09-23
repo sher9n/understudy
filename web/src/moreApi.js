@@ -1,26 +1,11 @@
-import { ApiError, messageOf, OFFLINE } from './api.js';
+import { request } from './api.js';
 
 /* The calls the newer screens make: workspace choices in Settings, and what a workload's page needs
-   about a switch in progress. The same rules as the main client: every failure is an ApiError with
-   a sentence somebody can read. */
+   about a switch in progress. They go through the main client, so a failure is an ApiError with a
+   sentence somebody can read, and a session that ended is told to the frame like any other; a copy of
+   the client here used to throw that 401 away, so the app never offered to sign in again. */
 
-const send = async (method, path, body) => {
-  let res;
-  try {
-    res = await fetch(`/api${path}`, {
-      method,
-      headers: body ? { 'Content-Type': 'application/json' } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-  } catch {
-    throw new ApiError(OFFLINE, { network: true });
-  }
-  const text = await res.text().catch(() => '');
-  let json = null;
-  try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
-  if (!res.ok) throw new ApiError(messageOf(json, res.status), { status: res.status, signedOut: res.status === 401 });
-  return json;
-};
+const send = request;
 
 export const more = {
   // how new workloads are switched, and whether workloads you have follow

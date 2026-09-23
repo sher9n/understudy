@@ -16,15 +16,25 @@ const tokenFrom = () => {
 export default function LinkSignIn({ pitchHtml, onDone }) {
   const [token] = useState(tokenFrom);
   const [state, setState] = useState({ phase: token ? 'checking' : 'dead' });
+  const [tries, setTries] = useState(0);
 
+  /* Only an answer that says the link is spent or expired means it has run out. A connection that
+     dropped, a busy server or too many tries from one place used to say "That link has run out" too,
+     and the person asked for a new link they did not need; those say what happened, and offer to
+     check again. */
   useEffect(() => {
     if (!token) return undefined;
     let live = true;
+    setState((s) => ({ ...s, phase: 'checking' }));
     api.peekLink(token)
       .then((r) => { if (live) setState(r?.ok ? { phase: 'ready', email: r.email, purpose: r.purpose } : { phase: 'dead' }); })
-      .catch((e) => { if (live) setState({ phase: 'dead', error: e.message }); });
+      .catch((e) => {
+        if (!live) return;
+        const passing = e?.network || e?.status === 429 || (e?.status >= 500);
+        setState({ phase: passing ? 'trouble' : 'dead', error: e.message });
+      });
     return () => { live = false; };
-  }, [token]);
+  }, [token, tries]);
 
   const press = async () => {
     setState((s) => ({ ...s, busy: true, error: '' }));
@@ -32,7 +42,7 @@ export default function LinkSignIn({ pitchHtml, onDone }) {
       const r = await api.redeemLink(token);
       // the token has done its job: keep it out of the history and off the screen
       window.history.replaceState(null, '', '/signin/link');
-      onDone(!!r?.fresh);
+      onDone(!!r?.fresh, r?.key || null, r?.passwordKept ?? null);
     } catch (e) {
       setState((s) => ({ ...s, busy: false, error: e.message }));
     }
@@ -62,6 +72,13 @@ export default function LinkSignIn({ pitchHtml, onDone }) {
                   <button className="btn full" type="button" onClick={press} disabled={state.busy}>
                     {state.busy ? 'One moment…' : confirming ? 'Confirm and continue' : `Continue as ${state.email}`}
                   </button>
+                </>
+              )}
+              {state.phase === 'trouble' && (
+                <>
+                  <h1>We could not check the link</h1>
+                  <p className="sub">{state.error}</p>
+                  <button className="btn full" type="button" onClick={() => setTries((n) => n + 1)}>Check it again</button>
                 </>
               )}
               {state.phase === 'dead' && (

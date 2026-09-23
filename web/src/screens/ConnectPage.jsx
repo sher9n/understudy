@@ -49,7 +49,7 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
   const regenerate = async () => {
     setRotating(true); setKeyError('');
     try {
-      const r = await api.regenerateKey();
+      const r = await api.replaceKey(data.keyId);
       onFreshKey(r.key);
       setConfirming(false);
       await reload();
@@ -138,7 +138,7 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
               <Copy text={data.baseUrl} />
             </div>
             <div className="rowpair">
-              <span className="rowk">API key</span>
+              <span className="rowk">API key{data.keyName ? <span className="rowkname">, {data.keyName}</span> : null}</span>
               <code className="rowv keyfull">{shown || 'no key yet'}</code>
               <span className="keyacts2">
                 {usable && <Copy text={usable} />}
@@ -156,7 +156,7 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
             )}
             {confirming && (
               <div className="keynote warn">
-                <div><b>Anything already using your current key stops working.</b> Whatever
+                <div><b>Anything already using {data.keyName ? <>the key &ldquo;{data.keyName}&rdquo;</> : 'your current key'} stops working.</b> Whatever
                   you have deployed will need the new key pasted in before it can send
                   another call.</div>
                 <div className="keyacts">
@@ -262,8 +262,13 @@ export default function ConnectPage({ data, reload, freshKey, onFreshKey }) {
 
             <div style={{ height: 14 }} />
             <p className="sticknote">
-              Routed calls only reach providers that keep nothing. What we store is cleared
-              after the window you chose in Settings.
+              {data.zdrOnly === false
+                ? 'Routed calls may reach providers that keep what they are sent for a while, never ones that train on it, as you chose in Settings.'
+                : 'Routed calls only reach providers that keep nothing.'}
+              {' '}
+              {data.retentionDays
+                ? `What we store is cleared after ${data.retentionDays} days, the window you chose in Settings.`
+                : 'What we store is kept until you delete it, as you chose in Settings.'}
             </p>
           </div>
         </aside>

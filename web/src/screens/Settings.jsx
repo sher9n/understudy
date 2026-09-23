@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api, usd, usdHeld, dateIST, ago } from '../api.js';
 import { more } from '../moreApi.js';
 
@@ -20,6 +20,12 @@ const MODES = [
   { mode: 'off', label: 'Never switch', note: 'Workloads are measured and nothing is ever switched.' },
 ];
 const money = (v) => (v === null || v === undefined || v === '' ? '' : String(v));
+/* An amount as typed: empty for none, or dollars with at most two places. Anything else is refused
+   here, because "25..5" used to be sent as nothing, which the server stores as "no limit", while the
+   page said the limit was saved. */
+const MONEY = /^\d{1,7}(\.\d{1,2})?$/;
+const typedOk = (v) => v === '' || MONEY.test(v);
+const typedNum = (v) => (v === '' ? null : Number(v));
 
 export default function Settings({ data, reload }) {
   const [busy, setBusy] = useState(false);
@@ -29,12 +35,24 @@ export default function Settings({ data, reload }) {
     setBusy(true); setErr(null); setOk(null);
     try { await fn(); await reload(); if (said) setOk(said); } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
+  // a confirmation goes on its own after a while; a failure stays until it is read and closed
+  useEffect(() => {
+    if (!ok) return undefined;
+    const t = setTimeout(() => setOk(null), 6000);
+    return () => clearTimeout(t);
+  }, [ok]);
 
   return (
     <div className="settingspage">
       <div className="phead"><h1>Settings</h1></div>
-      {err && <div className="errbox" role="alert">{err}</div>}
-      {ok && <div className="okbox" role="status">{ok}</div>}
+      {/* Said where it can be seen: at the foot of the window, whichever section was saved. At the top
+          of a long page a confirmation or a refusal landed out of sight of the button pressed. */}
+      {(err || ok) && (
+        <div className={`settoast ${err ? 'bad' : 'good'}`} role={err ? 'alert' : 'status'}>
+          <span>{err || ok}</span>
+          <button type="button" className="settoastx" aria-label="Close" onClick={() => { setErr(null); setOk(null); }}>×</button>
+        </div>
+      )}
       <Account data={data} busy={busy} run={run} />
       <Keys data={data} busy={busy} run={run} />
       <Money data={data} busy={busy} run={run} setErr={setErr} />
@@ -53,6 +71,9 @@ function Account({ data, busy, run }) {
   const [code, setCode] = useState('');
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
+  const [emailPw, setEmailPw] = useState('');
+  const min = data.passwordMin || 8;
+  const moving = email.trim().toLowerCase() !== data.email;
   return (
     <section className="opt" aria-labelledby="s-account">
       <div className="opthead"><h2 id="s-account">Account</h2></div>
@@ -67,11 +88,19 @@ function Account({ data, busy, run }) {
         <span className="kvk" id="s-email">Email</span>
         <span className="kvv">
           <input className="inp" type="email" aria-labelledby="s-email" value={email} onChange={(e) => setEmail(e.target.value)} />
-          <span className="segnote">A new address is only used once you type the code we send to it.</span>
+          {moving && !data.needsPassword && (
+            <input className="inp" type="password" autoComplete="current-password" placeholder="Your current password"
+              aria-label="Your current password, to change your email" value={emailPw} onChange={(e) => setEmailPw(e.target.value)} />
+          )}
+          <span className="segnote">
+            {data.needsPassword
+              ? 'Choose a password first, under Password below, then change your email.'
+              : 'Changing it needs your current password. A new address is only used once you type the code we send to it, and every other session is then signed out.'}
+          </span>
         </span>
         <span className="kva">
-          <button type="button" className="minig" disabled={busy || email.trim().toLowerCase() === data.email}
-            onClick={run(async () => { const r = await api.profile({ email }); setPending(r.pendingEmail || null); },
+          <button type="button" className="minig" disabled={busy || !moving || data.needsPassword || !emailPw}
+            onClick={run(async () => { const r = await api.profile({ email, password: emailPw }); setPending(r.pendingEmail || null); setEmailPw(''); },
               'A code is on its way to the new address.')}>Change</button>
         </span>
       </div>
@@ -97,7 +126,7 @@ function Account({ data, busy, run }) {
             <input className="inp" type="password" autoComplete="current-password" placeholder="Current password" aria-label="Current password"
               value={current} onChange={(e) => setCurrent(e.target.value)} />
           )}
-          <input className="inp" type="password" autoComplete="new-password" placeholder="New password, at least 10 characters" aria-label="New password"
+          <input className="inp" type="password" autoComplete="new-password" placeholder={`New password, at least ${min} characters`} aria-label="New password"
             value={next} onChange={(e) => setNext(e.target.value)} />
           <span className="segnote">
             {data.needsPassword ? 'You signed in with an emailed code, so choose a password for next time. '
@@ -105,7 +134,7 @@ function Account({ data, busy, run }) {
           </span>
         </span>
         <span className="kva">
-          <button type="button" className="minig" disabled={busy || next.length < 10 || (!data.needsPassword && !current)}
+          <button type="button" className="minig" disabled={busy || next.length < min || (!data.needsPassword && !current)}
             onClick={run(async () => { await api.changePassword(current, next); setCurrent(''); setNext(''); }, 'Your password is changed. Other sessions are signed out.')}>
             {data.needsPassword ? 'Set' : 'Change'}
           </button>
@@ -128,12 +157,20 @@ function Keys({ data, busy, run }) {
   const [names, setNames] = useState({});
   const [newName, setNewName] = useState('production');
   const [sure, setSure] = useState(null);
+  const [copied, setCopied] = useState(null);
   const cols = { gridTemplateColumns: 'minmax(0, 1fr) 150px 120px 120px 190px' };
+  const copy = (id, text) => {
+    navigator.clipboard?.writeText(text).then(() => { setCopied(id); setTimeout(() => setCopied(null), 2500); }).catch(() => {});
+  };
   return (
     <section className="opt" aria-labelledby="s-keys">
       <div className="opthead">
         <h2 id="s-keys">API keys</h2>
-        <span className="s">Each key can be named, shown again, and revoked on its own. A revoked key stops working at once.</span>
+        <span className="s">
+          {data.canRevealKeys
+            ? 'Each key can be named, shown again, and revoked on its own. A revoked key stops working at once.'
+            : 'Each key can be named and revoked on its own. This deployment cannot show a key again after it is made, so copy a new one when it appears. A revoked key stops working at once.'}
+        </span>
       </div>
       <div className="gthead" style={cols} aria-hidden="true">
         <span>Name</span><span>Key</span><span>Created</span><span>Last used</span><span />
@@ -145,23 +182,32 @@ function Keys({ data, busy, run }) {
               onChange={(e) => setNames((m) => ({ ...m, [k.id]: e.target.value }))}
               onBlur={() => { const v = (names[k.id] ?? k.name).trim(); if (v && v !== k.name) run(() => api.renameKey(k.id, v))(); }} />
           </div>
-          <div className="mdl">{shown[k.id] || `${k.prefix}…`}</div>
-          <div className="shp">{dateIST(k.created_at)}</div>
-          <div className="shp">{k.last_used_at ? ago(k.last_used_at) : 'never'}</div>
+          <div className="mdl"><span className="vh">Key </span>{`${k.prefix}…`}</div>
+          <div className="shp"><span className="vh">Created </span>{dateIST(k.created_at)} IST</div>
+          <div className="shp"><span className="vh">Last used </span>{k.last_used_at ? ago(k.last_used_at) : 'never'}</div>
           <div style={{ textAlign: 'right', display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-            <button type="button" className="minig" disabled={busy}
-              onClick={run(async () => {
-                if (shown[k.id]) { setShown((m) => ({ ...m, [k.id]: null })); return; }
-                const r = await api.revealKeyById(k.id);
-                setShown((m) => ({ ...m, [k.id]: r.secret }));
-              })}>{shown[k.id] ? 'Hide' : 'Show'}</button>
+            {data.canRevealKeys && (
+              <button type="button" className="minig" disabled={busy} aria-expanded={!!shown[k.id]}
+                aria-label={`${shown[k.id] ? 'Hide' : 'Show'} the key ${k.name}`}
+                onClick={run(async () => {
+                  if (shown[k.id]) { setShown((m) => ({ ...m, [k.id]: null })); return; }
+                  const r = await api.revealKeyById(k.id);
+                  setShown((m) => ({ ...m, [k.id]: r.key }));
+                })}>{shown[k.id] ? 'Hide' : 'Show'}</button>
+            )}
             {sure === k.id ? (
-              <button type="button" className="mini danger" disabled={busy}
+              <button type="button" className="mini danger" disabled={busy} aria-label={`Yes, revoke the key ${k.name}`}
                 onClick={run(async () => { await api.revokeKey(k.id); setSure(null); }, 'The key is revoked. Calls with it are refused from now on.')}>Yes, revoke</button>
             ) : (
-              <button type="button" className="minig" disabled={busy} onClick={() => setSure(k.id)}>Revoke</button>
+              <button type="button" className="minig" disabled={busy} aria-label={`Revoke the key ${k.name}`} onClick={() => setSure(k.id)}>Revoke</button>
             )}
           </div>
+          {shown[k.id] && (
+            <div className="keyshow" style={{ gridColumn: '1 / -1' }}>
+              <code className="m">{shown[k.id]}</code>
+              <button type="button" className="minig" onClick={() => copy(k.id, shown[k.id])}>{copied === k.id ? 'Copied' : 'Copy'}</button>
+            </div>
+          )}
         </div>
       ))}
       <div className="barnote" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -170,7 +216,13 @@ function Keys({ data, busy, run }) {
           onClick={run(async () => { const r = await api.newKey(newName.trim()); setFresh(r.key); })}>Create a key</button>
         <span>Name it after where it is used, so you know which to revoke.</span>
       </div>
-      {fresh && <div className="okbox" role="status"><code>{fresh}</code></div>}
+      {fresh && (
+        <div className="okbox keyshow" role="status">
+          <span>Your new key{data.canRevealKeys ? '' : '. Copy it now: it cannot be shown again'}:</span>
+          <code className="m">{fresh}</code>
+          <button type="button" className="minig" onClick={() => copy('fresh', fresh)}>{copied === 'fresh' ? 'Copied' : 'Copy'}</button>
+        </div>
+      )}
     </section>
   );
 }
@@ -179,8 +231,12 @@ function Money({ data, busy, run, setErr }) {
   const [picking, setPicking] = useState(false);
   const [paying, setPaying] = useState(null);
   const [withTopUp, setWithTopUp] = useState(false);
-  const [ledger, setLedger] = useState(data.ledger || []);
+  /* The first page comes with Settings, so a payment that just landed shows the moment Settings is read
+     again; older pages are added below it and let go whenever the first page changes. */
+  const [older, setOlder] = useState([]);
   const [ended, setEnded] = useState(false);
+  useEffect(() => { setOlder([]); setEnded(false); }, [data.ledger]);
+  const ledger = [...(data.ledger || []), ...older];
   const buy = async (amountUsd) => {
     setPaying(amountUsd); setErr(null);
     try {
@@ -192,20 +248,22 @@ function Money({ data, busy, run, setErr }) {
     const last = ledger[ledger.length - 1];
     if (!last) return;
     try {
-      const r = await api.ledgerMore(last.created_at);
+      const r = await api.ledgerMore(last.created_at, last.id);
       const rows = r.rows || r.ledger || [];
-      if (!rows.length) setEnded(true);
-      setLedger((l) => [...l, ...rows]);
+      if (!rows.length || r.more === false) setEnded(true);
+      setOlder((l) => [...l, ...rows]);
     } catch (e) { setErr(e.message); }
   };
   const pay = data.payments;
+  // only a card saved at a checkout that said so is ever charged automatically
+  const topUpCard = !!data.card?.forTopUps;
   return (
     <section className="opt" aria-labelledby="s-money">
       <div className="opthead">
         <h2 id="s-money">Money</h2>
         {pay === 'off' && <span className="s">No payment provider is set up here, so balances are read only.</span>}
         {pay === 'test' && <span className="s">Payments here are in test mode: cards are not charged.</span>}
-        {pay === 'test_refused' && <span className="s">This deployment takes live payments only; a test card adds nothing.</span>}
+        {pay === 'test_refused' && <span className="s">Payments are switched off here: this deployment has only a test payment key, and it adds nothing to a balance.</span>}
       </div>
       <div className="kvrow">
         <span className="kvk">Balance</span>
@@ -240,20 +298,25 @@ function Money({ data, busy, run, setErr }) {
         <span className="kvk">Automatic top up</span>
         <span className="kvv">
           <span className="seg" role="group" aria-label="Top up amount">
-            {TOPUPS.filter((a) => a >= (data.topUpMin ?? 0) && a <= (data.topUpMax ?? 1e9)).map((a) => (
-              <button type="button" key={a} disabled={busy || !data.card} className={a === data.topUpAmount ? 'segb on' : 'segb'}
-                aria-pressed={a === data.topUpAmount} onClick={run(() => api.setTopUp({ enabled: data.autoTopUp, amountUsd: a }))}>${a}</button>
-            ))}
+            {/* the amount in force is always one of the choices, whatever it is */}
+            {[...new Set([...TOPUPS, Number(data.topUpAmount)].filter((a) => Number.isFinite(a)))]
+              .sort((a, b) => a - b)
+              .filter((a) => a >= (data.topUpMin ?? 0) && a <= (data.topUpMax ?? 1e9)).map((a) => (
+                <button type="button" key={a} disabled={busy || !topUpCard} className={a === data.topUpAmount ? 'segb on' : 'segb'}
+                  aria-pressed={a === data.topUpAmount} onClick={run(() => api.setTopUp({ enabled: data.autoTopUp, amountUsd: a }))}>${a}</button>
+              ))}
           </span>
           <span className="segnote">
-            {data.card
+            {topUpCard
               ? `Charges ${usd(data.topUpAmount)} to your card when the balance falls below ${usd(data.topUpThreshold)}, at most ${data.topUpMaxPerDay} times a day.`
-              : 'Needs a saved card: add credit first and tick the box to save it for top ups.'}
+              : data.card
+                ? 'The card on file was not saved for top ups. Add credit again and tick the box there, which saves it for them and shows you what that means.'
+                : 'Needs a card saved for top ups: add credit and tick the box to top up automatically, which saves the card for them.'}
             {data.cardNote ? ` Turned off after the card was declined (${data.cardNote}).` : ''}
           </span>
         </span>
         <span className="kva">
-          <Sw label="Automatic top up" on={data.autoTopUp} busy={busy || !data.canBill || !data.card}
+          <Sw label="Automatic top up" on={data.autoTopUp} busy={busy || !data.canBill || !topUpCard}
             onClick={run(() => api.setTopUp({ enabled: !data.autoTopUp, amountUsd: data.topUpAmount }))} />
         </span>
       </div>
@@ -272,7 +335,7 @@ function Money({ data, busy, run, setErr }) {
           {ledger.map((l) => (
             <div key={l.id || `${l.created_at}-${l.amount_usd}`}>{l.amount_usd >= 0 ? '+' : ''}{usd(l.amount_usd)} · {l.note || l.kind} · {ago(l.created_at)}</div>
           ))}
-          {!ended && ledger.length >= 10 && <button type="button" className="lnk linkbtn" onClick={moreLedger}>Show more</button>}
+          {!ended && ledger.length >= 10 && <button type="button" className="lnk linkbtn" onClick={moreLedger}>Show older movements</button>}
         </div>
       )}
     </section>
@@ -283,8 +346,9 @@ function Limits({ data, busy, run }) {
   const l = data.limits || {};
   const [daily, setDaily] = useState(money(l.dailyUsd));
   const [monthly, setMonthly] = useState(money(l.monthlyUsd));
-  const num = (v) => (v === '' ? null : Number(v));
-  const changed = num(daily) !== (l.dailyUsd ?? null) || num(monthly) !== (l.monthlyUsd ?? null);
+  const num = typedNum;
+  const valid = typedOk(daily) && typedOk(monthly);
+  const changed = valid && (num(daily) !== (l.dailyUsd ?? null) || num(monthly) !== (l.monthlyUsd ?? null));
   return (
     <section className="opt" aria-labelledby="s-limits">
       <div className="opthead">
@@ -294,15 +358,21 @@ function Limits({ data, busy, run }) {
       <div className="kvrow">
         <span className="kvk" id="s-daily">A day</span>
         <span className="kvv">
-          <input className="inp" inputMode="decimal" placeholder="No limit" aria-labelledby="s-daily" value={daily} onChange={(e) => setDaily(e.target.value.replace(/[^\d.]/g, ''))} />
-          <span className="segnote">{usd(l.spentToday || 0)} spent on calls today.</span>
+          <input className="inp" inputMode="decimal" placeholder="No limit" aria-labelledby="s-daily" aria-invalid={!typedOk(daily)}
+            value={daily} onChange={(e) => setDaily(e.target.value.replace(/[^\d.]/g, ''))} />
+          <span className="segnote">
+            {typedOk(daily) ? `${usd(l.spentToday || 0)} spent on calls today.` : 'Write an amount in dollars, like 25 or 12.50, or leave it empty for no limit.'}
+          </span>
         </span>
       </div>
       <div className="kvrow">
         <span className="kvk" id="s-monthly">A month</span>
         <span className="kvv">
-          <input className="inp" inputMode="decimal" placeholder="No limit" aria-labelledby="s-monthly" value={monthly} onChange={(e) => setMonthly(e.target.value.replace(/[^\d.]/g, ''))} />
-          <span className="segnote">{usd(l.spentMonth || 0)} spent on calls this month.</span>
+          <input className="inp" inputMode="decimal" placeholder="No limit" aria-labelledby="s-monthly" aria-invalid={!typedOk(monthly)}
+            value={monthly} onChange={(e) => setMonthly(e.target.value.replace(/[^\d.]/g, ''))} />
+          <span className="segnote">
+            {typedOk(monthly) ? `${usd(l.spentMonth || 0)} spent on calls this month.` : 'Write an amount in dollars, like 250 or 99.50, or leave it empty for no limit.'}
+          </span>
         </span>
         <span className="kva">
           <button type="button" className="minig" disabled={busy || !changed} onClick={run(() => more.setLimits(num(daily), num(monthly)), 'Your limits are saved.')}>Save</button>
@@ -316,7 +386,8 @@ function Optimizing({ data, busy, run }) {
   const [apply, setApply] = useState(false);
   const [budget, setBudget] = useState(money(data.optimizeBudget));
   const mode = MODES.find((m) => m.mode === data.defaultOptimizeMode) || MODES[0];
-  const budgetNum = budget === '' ? null : Number(budget);
+  const budgetOk = typedOk(budget);
+  const budgetNum = typedNum(budget);
   return (
     <section className="opt" aria-labelledby="s-opt">
       <div className="opthead"><h2 id="s-opt">Optimizing</h2></div>
@@ -369,14 +440,16 @@ function Optimizing({ data, busy, run }) {
       <div className="kvrow">
         <span className="kvk" id="s-budget">Optimizing budget</span>
         <span className="kvv">
-          <input className="inp" inputMode="decimal" placeholder="No budget" aria-labelledby="s-budget" value={budget} onChange={(e) => setBudget(e.target.value.replace(/[^\d.]/g, ''))} />
+          <input className="inp" inputMode="decimal" placeholder="No budget" aria-labelledby="s-budget" aria-invalid={!budgetOk}
+            value={budget} onChange={(e) => setBudget(e.target.value.replace(/[^\d.]/g, ''))} />
           <span className="segnote">
-            The most measuring, background answers and answers read in the background may spend over thirty days.
-            {' '}{usd(data.optimizeSpent || 0)} spent in the last thirty days.
+            {budgetOk
+              ? <>The most measuring, background answers, answers read in the background and live experiments may spend over thirty days, together.{' '}{usd(data.optimizeSpent || 0)} spent in the last thirty days.</>
+              : 'Write an amount in dollars, like 20 or 7.50, or leave it empty for no budget.'}
           </span>
         </span>
         <span className="kva">
-          <button type="button" className="minig" disabled={busy || budgetNum === (data.optimizeBudget ?? null)}
+          <button type="button" className="minig" disabled={busy || !budgetOk || budgetNum === (data.optimizeBudget ?? null)}
             onClick={run(() => more.setOptimizeBudget(budgetNum), 'Your optimizing budget is saved.')}>Save</button>
         </span>
       </div>

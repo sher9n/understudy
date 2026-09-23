@@ -93,6 +93,8 @@ export default function ConnectWizard({ go, freshKey, onFreshKey, signedIn, onDo
     regenLabel: rotating ? 'working…' : (shownKey ? 'Replace' : 'Regenerate'),
     askCls: (mode || data.defaultMode) === 'ask' ? 'modeb on' : 'modeb',
     autoCls: (mode || data.defaultMode) === 'auto' ? 'modeb on' : 'modeb',
+    askOn: (mode || data.defaultMode) === 'ask',
+    autoOn: (mode || data.defaultMode) === 'auto',
     /* Nothing beside the key. The row is the key, a way to copy it and a way to replace it,
        and any line of commentary next to all three only competed with them. */
   };
@@ -130,7 +132,7 @@ export default function ConnectWizard({ go, freshKey, onFreshKey, signedIn, onDo
       if (rotating) return;
       setRotating(true);
       try {
-        const r = await api.regenerateKey();
+        const r = await api.replaceKey(data.keyId);
         setOwnKey(r.key);
         if (onFreshKey) onFreshKey(r.key);
         await load();

@@ -13,6 +13,7 @@ import React, { useEffect, useRef } from 'react';
      data-cls="x"   className comes from vals.x
      data-text="x"  text content comes from vals.x
      data-go="x"    click calls on.x()
+     data-pressed="x"  aria-pressed comes from vals.x, for a choice drawn as a row of buttons
 
    Two more, for the places a design has to carry example content:
 
@@ -75,6 +76,10 @@ export default function Board({ html, vals = {}, on = {}, hrefs = {}, subs, repe
     for (const el of root.querySelectorAll('[data-cls]')) {
       const next = vals[el.getAttribute('data-cls')];
       if (typeof next === 'string') el.setAttribute('class', next);
+    }
+    // a choice drawn as buttons says which one is chosen, to a screen reader as well as by its look
+    for (const el of root.querySelectorAll('[data-pressed]')) {
+      el.setAttribute('aria-pressed', vals[el.getAttribute('data-pressed')] ? 'true' : 'false');
     }
     for (const el of root.querySelectorAll('[data-text]')) {
       const next = vals[el.getAttribute('data-text')];
