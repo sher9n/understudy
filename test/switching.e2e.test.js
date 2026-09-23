@@ -786,6 +786,7 @@ test('a conversation begun on the strategy a switch is replacing stays there whi
   assert.equal(pick.armId, before, 'the draw says the new side, but the conversation began on the one it replaces');
   assert.equal(pick.task, true);
   assert.equal(pick.propensity, 0.95);
+  assert.equal(pick.fallback?.spec?.model, REF, 'if it fails, the customer\'s own model answers, as for any call on that side, never the new one');
   // once the switch has taken over, a conversation from before it is served the way any call is
   await db.prepare(`UPDATE workloads SET rollout_share = NULL, rollout_stage = NULL, rollout_started_at = NULL, rollout_from_arm_id = NULL
       WHERE id = ?`).run(w.id);

@@ -110,11 +110,16 @@ async function taskChoice(workload, body, serving) {
   if (!arm?.spec || !stillChosen(workload, serving, arm, explored)) return null;
   const own = (a) => a?.spec?.kind === 'model' && a.spec.model === workload.reference_model && !a.spec.recipe;
   const toOwn = { armId: null, spec: referenceSpec(workload), propensity: 1, explored: false, shadow: null, isFallback: true };
-  const toServing = serving && serving.id !== arm.id
+  /* If this step fails: an experiment's step is served the way the call would have been, by what serves;
+     a rollout's step as rolloutChoice serves it, by the customer's own model, never by the other side. */
+  const toServing = !rolling(workload) && serving && serving.id !== arm.id
     ? { armId: serving.id, spec: serving.spec, propensity: null, explored: false, shadow: null, fallback: own(serving) ? null : toOwn } : null;
   return { armId: arm.id, spec: arm.spec, propensity: chance, explored, shadow: null, task: true,
     fallback: toServing || (own(arm) ? null : toOwn) };
 }
+
+// a switch still taking over a share of the calls
+const rolling = (workload) => workload.rollout_share !== null && workload.rollout_share !== undefined && Number(workload.rollout_share) < 1;
 
 /* Whether the reason a task's first step went to `arm` still holds for this step.
    A switch taking over a share of the calls: its task stays on its side while the rollout is under way,
@@ -124,8 +129,7 @@ async function taskChoice(workload, body, serving) {
    A task what serves was given by chance, beside an experiment: the same, since outside an experiment
    its calls are no longer given by chance and do not belong in the fair record. */
 function stillChosen(workload, serving, arm, explored) {
-  const rolling = workload.rollout_share !== null && workload.rollout_share !== undefined && Number(workload.rollout_share) < 1;
-  if (rolling) {
+  if (rolling(workload)) {
     // no experiment runs while a switch takes over (see chooseStrategy): only the rollout's own sides
     if (explored) return false;
     return arm.id === serving.id || (workload.rollout_from_arm_id ? arm.id === workload.rollout_from_arm_id : arm.status === 'baseline');
