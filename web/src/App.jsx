@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from './api.js';
-import { parse, go as navigate, onPop, href } from './router.js';
+import { parse, go as navigate, onPop, PUBLIC } from './router.js';
 import Shell from './Shell.jsx';
 import Auth from './screens/Auth.jsx';
 import Home from './screens/Home.jsx';
@@ -11,8 +11,22 @@ import Models from './screens/Models.jsx';
 import Settings from './screens/Settings.jsx';
 import ConnectWizard from './screens/ConnectWizard.jsx';
 import ConnectPage from './screens/ConnectPage.jsx';
+import { PublicPage } from './screens/legal/Public.jsx';
+import Traffic from './screens/legal/Traffic.jsx';
+import Pricing from './screens/legal/Pricing.jsx';
+import Terms from './screens/legal/Terms.jsx';
+import Privacy from './screens/legal/Privacy.jsx';
+import Dpa from './screens/legal/Dpa.jsx';
+import Subprocessors from './screens/legal/Subprocessors.jsx';
+import Security from './screens/legal/Security.jsx';
+import Contact from './screens/legal/Contact.jsx';
+import Status from './screens/legal/Status.jsx';
 
 const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
+
+/* The pages anybody can read. Each is drawn inside the same public frame as the home page. */
+const PAGES = { traffic: Traffic, pricing: Pricing, terms: Terms, privacy: Privacy, dpa: Dpa,
+  subprocessors: Subprocessors, security: Security, contact: Contact, status: Status };
 
 /* Every one of these screens is built out of the customer's own traffic, so before the guide
    is finished they are either empty or half a story. Settings is deliberately not on the
@@ -84,22 +98,41 @@ export default function App() {
     if (me?.signedIn && APP.has(screen) && !openId && !data) load(screen);
   }, [me, screen, openId, data, load]);
 
-  const go = (next, id = null) => {
-    navigate(next, id);
+  /* Going somewhere starts at the top of it, the way following a link does. The page used to
+     keep the scroll position of the one before, so a link at the foot of a long page opened the
+     next one scrolled to its foot too. A place on a page (#how) is scrolled to instead. */
+  const go = (next, id = null, opts = {}) => {
+    navigate(next, id, opts);
     setWhere({ screen: next, openId: id });
     setData(null);
+    if (opts.hash) {
+      setTimeout(() => document.getElementById(opts.hash)?.scrollIntoView({ block: 'start' }), 0);
+    } else {
+      window.scrollTo(0, 0);
+    }
   };
 
-  if (!me) return <div className="u" data-mode="light"><div className="loading">Loading…</div></div>;
+  /* The public pages do not wait for the account check. The status page most of all: somebody
+     opens it when something is wrong, and it must not sit on "Loading" because the thing it
+     reports on is slow to answer. The header simply leaves out the sign-in buttons until it
+     knows whether they apply. */
+  if (PUBLIC.has(screen)) {
+    const Page = PAGES[screen];
+    return (
+      <div className="u" data-mode={dark ? 'dark' : 'light'}>
+        <PublicPage me={me} go={go} dark={dark} setDark={setDark} here={screen}>
+          <Page me={me} go={go} />
+        </PublicPage>
+      </div>
+    );
+  }
+
+  if (!me) return <div className="u" data-mode={dark ? 'dark' : 'light'}><div className="loading">Loading…</div></div>;
 
   if (screen === 'home') {
     return (
       <div className="u" data-mode={dark ? 'dark' : 'light'}>
-        <Home
-          go={(where) => go(me.signedIn ? (me.connected ? 'dash' : 'connect') : where)}
-          dark={dark}
-          setDark={setDark}
-        />
+        <Home me={me} go={go} dark={dark} setDark={setDark} />
       </div>
     );
   }

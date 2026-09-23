@@ -153,6 +153,11 @@ aside.side.mini {
 .acctrow.acctsw .sw { flex: 0 0 auto; width: 32px; height: 19px; border-radius: 10px; }
 .acctrow.acctsw .sw i { width: 13px; height: 13px; top: 2px; left: 2px; }
 .acctrow.acctsw .sw.swon i { left: 16px; }
+/* The public pages, from inside the account menu: small, in one row, above the way out. */
+.acctlinks { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 2px 10px 8px; }
+.acctlinks a { font-size: 12.5px; line-height: 1.8; color: var(--mut-read); text-decoration: underline;
+  text-underline-offset: 2px; text-decoration-thickness: 1px; }
+.acctlinks a:hover { color: var(--ink); }
 
 
 /* A workload row is now a real link, so it would otherwise inherit the stylesheet's link

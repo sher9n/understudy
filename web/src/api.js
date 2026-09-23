@@ -11,8 +11,20 @@ const send = async (method, path, body) => {
   return json;
 };
 
+/* The one address outside /api the screens read: the plain health check, which answers as long
+   as the application and its database do. */
+const health = async () => {
+  const res = await fetch('/health', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`The health check answered ${res.status}.`);
+  return res.json();
+};
+
 export const api = {
   me: () => send('GET', '/me'),
+  // the public pages: the contact form, and what is working right now
+  contact: (b) => send('POST', '/contact', b),
+  status: () => send('GET', '/status'),
+  health,
   signUp: (b) => send('POST', '/auth/sign-up', b),
   signIn: (b) => send('POST', '/auth/sign-in', b),
   signOut: () => send('POST', '/auth/sign-out'),
@@ -127,6 +139,13 @@ export const timeIST = (ms) => new Date(ms).toLocaleString('en-GB', {
   day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
   hour12: false, timeZone: 'Asia/Kolkata',
 });
+
+/* A moment in full, with its year and its zone named, for a page that may be read long after:
+   "23 Sept 2026, 14:05 IST". */
+export const stampIST = (ms) => `${new Date(ms).toLocaleString('en-GB', {
+  day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  hour12: false, timeZone: 'Asia/Kolkata',
+})} IST`;
 
 export const feedDot = { ok: 'ok', bad: 'bad', run: 'on', connect: 'ok', floor: 'mut', revert: 'bad',
   bill: 'mut', call: 'call', copy: 'copy', test: 'test' };

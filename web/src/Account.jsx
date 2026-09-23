@@ -63,6 +63,13 @@ export default function Account({ me, dark, setDark, onSignOut, go }) {
             <span className={dark ? 'sw swon' : 'sw'} aria-hidden="true"><i /></span>
           </button>
           <div className="acctsep" />
+          {/* The pages anybody can read, reachable from inside the app too: what it costs,
+              whether it is up, and how to reach us. */}
+          <div className="acctlinks">
+            {[['pricing', 'Pricing'], ['status', 'Status'], ['contact', 'Contact us']].map(([k, label]) => (
+              <a key={k} href={href(k)} onClick={plainClick(() => { setOpen(false); if (go) go(k); })}>{label}</a>
+            ))}
+          </div>
           <button className="acctrow acctout" onClick={() => { setOpen(false); onSignOut(); }}>
             <svg {...S24}><path d="M10 4H6a2 2 0 00-2 2v12a2 2 0 002 2h4" /><path d="M16 15l4-3-4-3" /><path d="M20 12H10" /></svg>
             Sign out

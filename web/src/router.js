@@ -3,16 +3,32 @@
    back button walks them. */
 
 export const ROUTES = [
-  { screen: 'home', path: '/' },
-  { screen: 'signin', path: '/signin' },
-  { screen: 'signincode', path: '/signin/code' },
-  { screen: 'signup', path: '/signup' },
-  { screen: 'connect', path: '/connect' },
-  { screen: 'dash', path: '/dashboard' },
-  { screen: 'work', path: '/workloads' },
-  { screen: 'models', path: '/models' },
-  { screen: 'settings', path: '/settings' },
+  { screen: 'home', path: '/', title: 'Understudy, cheaper models proven on your own calls' },
+  { screen: 'signin', path: '/signin', title: 'Sign in' },
+  { screen: 'signincode', path: '/signin/code', title: 'Sign in with a code' },
+  { screen: 'signup', path: '/signup', title: 'Create an account' },
+  { screen: 'connect', path: '/connect', title: 'Connect' },
+  { screen: 'dash', path: '/dashboard', title: 'Dashboard' },
+  { screen: 'work', path: '/workloads', title: 'Workloads' },
+  { screen: 'models', path: '/models', title: 'Models' },
+  { screen: 'settings', path: '/settings', title: 'Settings' },
+  // the pages anybody can read, signed in or not
+  { screen: 'traffic', path: '/traffic', title: 'What happens to your traffic' },
+  { screen: 'pricing', path: '/pricing', title: 'Pricing' },
+  { screen: 'terms', path: '/terms', title: 'Terms of service' },
+  { screen: 'privacy', path: '/privacy', title: 'Privacy' },
+  { screen: 'dpa', path: '/dpa', title: 'Data processing terms' },
+  { screen: 'subprocessors', path: '/subprocessors', title: 'Subprocessors' },
+  { screen: 'security', path: '/security', title: 'Security' },
+  { screen: 'contact', path: '/contact', title: 'Contact us' },
+  { screen: 'status', path: '/status', title: 'Status' },
 ];
+
+/* The pages that read the same to everybody. They need no account and never send anybody to
+   sign in: a person checking what we keep, what it costs or whether the service is up should
+   be able to do that before they have an account, and after they have left one. */
+export const PUBLIC = new Set(['traffic', 'pricing', 'terms', 'privacy', 'dpa', 'subprocessors',
+  'security', 'contact', 'status']);
 
 /** What a URL means. A workload's own page carries its id. */
 export function parse(pathname = window.location.pathname) {
@@ -23,15 +39,16 @@ export function parse(pathname = window.location.pathname) {
   return hit ? { screen: hit.screen, openId: null } : { screen: 'home', openId: null, unknown: clean };
 }
 
-/** The address for a place in the app. */
-export function href(screen, openId = null) {
-  if (openId) return `/workloads/${openId}`;
-  return ROUTES.find((r) => r.screen === screen)?.path ?? '/';
+/** The address for a place in the app, optionally with a place on that page. */
+export function href(screen, openId = null, hash = '') {
+  const tail = hash ? `#${hash}` : '';
+  if (openId) return `/workloads/${openId}${tail}`;
+  return `${ROUTES.find((r) => r.screen === screen)?.path ?? '/'}${tail}`;
 }
 
-export function go(screen, openId = null, { replace = false } = {}) {
-  const to = href(screen, openId);
-  if (to === window.location.pathname) return;
+export function go(screen, openId = null, { replace = false, hash = '', search = '' } = {}) {
+  const to = `${href(screen, openId)}${search}${hash ? `#${hash}` : ''}`;
+  if (to === `${window.location.pathname}${window.location.search}${window.location.hash}`) return;
   window.history[replace ? 'replaceState' : 'pushState']({ screen, openId }, '', to);
 }
 

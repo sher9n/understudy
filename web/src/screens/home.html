@@ -1,27 +1,5 @@
 <div style="display: flex; flex-direction: column;">
-  <header class="top">
-    <span style="font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink);">Understudy</span>
-    <nav style="display: flex; gap: 22px; font-size: 13.5px;">
-      <a href="#how">How it works</a>
-    </nav>
-    <div style="flex-grow: 1;"></div>
-    <button class="ni" style="width: auto;" data-go="toggleTheme" aria-label="Switch the theme">
-      <span data-if="dark">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-          <circle cx="12" cy="12" r="4"></circle>
-          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"></path>
-        </svg>
-      </span>
-      <span data-if="light">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-          <path d="M21 13a8.5 8.5 0 01-10-10 8.5 8.5 0 1010 10z"></path>
-        </svg>
-      </span>
-    </button>
-    <a data-go="go_signin" class="plain" style="font-size: 13.5px;">Sign in</a>
-    <a data-go="go_signup" class="btn">Get an API key</a>
-  </header>
-  <div class="lp">
+  <main class="lp" id="main">
 
     <section style="text-align: center; padding-top: 104px;">
       <h1 class="hero-h1" style="line-height: 1.04; letter-spacing: -0.044em; font-weight: 700; margin: 0 auto; max-width: 880px; text-wrap: balance;"><span style="white-space: nowrap;">Continuously optimize</span> <span style="white-space: nowrap;">every LLM workload</span></h1>
@@ -227,6 +205,7 @@
           <div class="m" style="font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ok); font-weight: 600;">Dedicated endpoints</div>
           <h2 style="font-weight: 600; letter-spacing: -0.03em; margin: 12px 0 0; text-wrap: balance;">Built for stricter data requirements</h2>
           <p style="font-size: 15px; color: var(--mut-read); line-height: 1.6; margin: 12px 0 0; max-width: 52ch;">For workloads that need it, dedicated endpoints support zero data retention, EU or US residency, and configurable retention windows for measurement data.</p>
+          <p class="lp-links"><a data-go="go_traffic">What happens to your traffic</a><a data-go="go_pricing">What it costs</a></p>
         </div>
         <div style="border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 26px 24px;">
           <svg viewBox="0 0 360 168" width="100%" role="img" aria-label="Your call entering a dedicated Understudy endpoint inside a dashed region marked as your own, which fans out to two model providers, over three chips: zero data retention available, EU or US residency, and configurable retention.">
@@ -279,10 +258,5 @@
       </div>
     </section>
 
-  </div>
-  <footer class="foot">
-    <span class="m" style="font-size: 12px; color: var(--mut);">Understudy</span>
-    <div style="flex-grow: 1;"></div>
-    <span class="m" style="font-size: 12px; color: var(--mut);">Zero data retention at the provider. Stored calls deleted after 30 days.</span>
-  </footer>
+  </main>
 </div>
