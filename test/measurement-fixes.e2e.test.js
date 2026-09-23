@@ -646,6 +646,13 @@ test('a measurement never runs beside another of the same workload', async () =>
   await db.prepare(`UPDATE eval_runs SET status = 'failed' WHERE id = ?`).run(alive);
 });
 
+test('two measurements of one workload that start at the same moment do not both run', async () => {
+  const { workload } = await seed({ enabled: ['vendor/steady-small'] });
+  const both = await Promise.all([runEvaluation(workload.id), runEvaluation(workload.id)]);
+  assert.equal(await runsOf(workload.id), 1, JSON.stringify(both));
+  assert.ok(both.some((o) => o.snoozeMs > 0), 'the one that came second waits its turn');
+});
+
 test('a job whose run was interrupted runs again, and closes the dead run first', async () => {
   const { workspace, workload } = await seed({ enabled: ['vendor/steady-small'] });
   const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });

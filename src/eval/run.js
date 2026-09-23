@@ -197,11 +197,14 @@ async function alreadyMeasuring(workload, { jobId, trigger }) {
   }
   await closeAbandoned(workload.id);
   const live = await db.prepare(`SELECT id FROM eval_runs WHERE workload_id = ? AND status = 'running' LIMIT 1`).get(workload.id);
-  if (!live) return null;
-  return trigger === 'automatic' || trigger === 'first'
-    ? { ok: false, reason: 'another measurement of this workload is running' }
-    : { snoozeMs: wait, note: 'another measurement of this workload is running' };
+  return live ? measuringAlready(trigger) : null;
 }
+
+/* Another run of the workload is alive: one somebody asked for waits its turn, and one nobody asked
+   for is not needed, since the one running finds what it would. */
+const measuringAlready = (trigger) => (trigger === 'automatic' || trigger === 'first'
+  ? { ok: false, reason: 'another measurement of this workload is running' }
+  : { snoozeMs: config.EVAL_STALE_MIN * 60000, note: 'another measurement of this workload is running' });
 
 export async function runEvaluation(workloadId, { trigger = 'manual', jobId = null } = {}) {
   const workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
@@ -343,12 +346,21 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     models_planned: Math.min(want, queue.length), heartbeat_at: now(),
     plan_json: JSON.stringify(planRecord), judge: plan.judge, job_id: jobId,
   };
-  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+  /* That nothing else is measuring this workload, and this run's own row, in one step under a lock
+     on the workload: two jobs of it that reach this point together both passed the check made before
+     planning, and without the lock both started. */
+  const began = await db.tx(async (tx) => {
+    await tx.prepare('SELECT pg_advisory_xact_lock(hashtext(?))').get(`eval_run:${workloadId}`);
+    if (await tx.prepare(`SELECT 1 FROM eval_runs WHERE workload_id = ? AND status = 'running' LIMIT 1`).get(workloadId)) return false;
+    await tx.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
               sample_size, created_at, started_at, steps_total, steps_done, phase, trigger, models_planned,
               heartbeat_at, plan_json, judge, job_id)
               VALUES (@id, @workspace_id, @workload_id, @status, @shape_kind, @reference_model,
               @sample_size, @created_at, @started_at, @steps_total, @steps_done, @phase, @trigger,
               @models_planned, @heartbeat_at, @plan_json, @judge, @job_id)`).run(run);
+    return true;
+  });
+  if (!began) return measuringAlready(trigger);
   /* Whatever started it, a workload being measured says so from the moment the run exists. */
   await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), workloadId);
   if (trigger === 'first') {
