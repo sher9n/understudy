@@ -50,10 +50,20 @@ export function cheaperCleared(results, feePct = config.ROUTING_FEE_PCT) {
     .sort((a, b) => (confirmed(b) - confirmed(a)) || (a.cost_month_usd - b.cost_month_usd));
 }
 
-/* Whether the second look stood behind a result. Runs before the second look existed carry
-   nothing, and are read as they were then; a model the second look was never reached for, because
-   a cheaper one was confirmed first, carries nothing too. */
-export const confirmed = (r) => (r.confirm_verdict == null || r.confirm_verdict === 'cleared' ? 1 : 0);
+/* Whether the second look stood behind a result: it cleared again on calls it had never seen
+   ('cleared'), or it is a strategy, whose second look is its live rollout, a small share of the
+   calls at a time ('live'). Nothing else is. A result the second look never reached ('not_reached':
+   past the models a run looks at twice, or after the run was cut short), one there were too few
+   unseen calls for ('insufficient'), one that did not hold up, and a row with nothing written at
+   all all wait for a person or the next measurement. Reading nothing as confirmed let a model that
+   was never looked at twice sort first, drop "needs a second look" from its workload, and be the
+   one an approval with no model named switched to. */
+export const confirmed = (r) => (r.confirm_verdict === 'cleared' || r.confirm_verdict === 'live' ? 1 : 0);
+
+/* The outcomes of a finished measurement that found something: it compared models, or it found
+   the bar could not be set. A run that was stopped, interrupted or ran out of balance found nothing,
+   and is never read as though it had. `r` is the table alias with its dot, or '' for none. */
+export const FOUND = (r = '') => `${r}status = 'done' AND ${OUTCOME_OF(r)} IN ('compared', 'unmeasurable', 'refused')`;
 
 
 /* Whether a switch changes anything yet. Only calls that come through Understudy can be sent to

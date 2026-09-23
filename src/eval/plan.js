@@ -9,9 +9,14 @@ import { profileOf, speedRule } from './profile.js';
 import { selectCandidates, refThinksOf } from './select.js';
 import { fitsFor } from './fit.js';
 import { historyFor, fleetHistory } from './history.js';
-import { judgementsFor, judgementCost } from './judge.js';
+import { judgePrices, canJudge } from './judge.js';
 import { callsToClear } from './compare.js';
 import { calibrationFor } from './calibrate.js';
+import { FOUND, OUTCOME_OF } from './outcome.js';
+import { servingKey, heldBack } from './promote.js';
+import { armKey, referenceSpec } from '../learn/arms.js';
+
+const parseRecipe = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
 
 /* What a measurement WOULD do, worked out before anything is spent.
  *
@@ -22,19 +27,32 @@ import { calibrationFor } from './calibrate.js';
 
 const DAY = 86400000;
 
+/* Which recorded answers are the customer's own model's, as a condition on a call `c` with its
+   parameters in order: the reference, the workload, and the key of the plain reference strategy.
+   A call answered through a switch records its lead model as the one that served it, and for the
+   customer's own model thinking less, or pinned to its cheapest provider, that model is the reference
+   itself: taken as the customer's own answer, a lighter answer was held against a full one, which
+   loosened the bar for every candidate and scored the strategy partly against its own answers. Only
+   a call no strategy served, or one the customer's own model served as it is (the control a switch is
+   held against, the yardstick), carries the customer's own answer. */
+const OWN_ANSWER = (c) => `${c}response_json IS NOT NULL AND ${c}served_model = ?
+  AND (${c}arm_id IS NULL OR ${c}arm_id IN (SELECT a.id FROM arms a WHERE a.workload_id = ? AND a.key = ?))`;
+export const ownArmKey = (workload) => armKey(referenceSpec(workload));
+
 /** The calls a run is allowed to replay: this workload's own traffic, with content kept, at most
     EVAL_POOL_PER_DAY from each day, exactly as the run draws them. And how many of them carry the
     answer the customer's own model gave, which the run uses instead of paying for it again. */
-async function eligible(workloadId, reference) {
+async function eligible(workload) {
+  const perDay = config.EVAL_POOL_PER_DAY;
   const r = await db.prepare(
-    `SELECT COALESCE(SUM(LEAST(n, ?)), 0) AS n, COALESCE(SUM(LEAST(own, ?)), 0) AS own FROM (
-        SELECT (created_at / 86400000) AS d, COUNT(*) AS n,
-               COUNT(*) FILTER (WHERE response_json IS NOT NULL AND served_model = ?) AS own
-          FROM calls
-         WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
-           AND source NOT IN ('replay', 'test') AND (status_code IS NULL OR status_code < 400)
+    `SELECT COALESCE(SUM(LEAST(n, ?)), 0) AS n, COALESCE(SUM(own::float * LEAST(1.0, ?::float / n)), 0) AS own FROM (
+        SELECT (c.created_at / 86400000) AS d, COUNT(*) AS n,
+               COUNT(*) FILTER (WHERE ${OWN_ANSWER('c.')}) AS own
+          FROM calls c
+         WHERE c.workload_id = ? AND c.request_json IS NOT NULL AND c.created_at >= ?
+           AND c.source NOT IN ('replay', 'test') AND (c.status_code IS NULL OR c.status_code < 400)
          GROUP BY 1) x`)
-    .get(config.EVAL_POOL_PER_DAY, config.EVAL_POOL_PER_DAY, String(reference ?? ''), workloadId, now() - 30 * DAY);
+    .get(perDay, perDay, String(workload.reference_model ?? ''), workload.id, ownArmKey(workload), workload.id, now() - 30 * DAY);
   const n = Number(r?.n || 0);
   return { n, recordedShare: n && config.EVAL_USE_RECORDED ? Math.min(1, Number(r.own || 0) / n) : 0 };
 }
@@ -60,12 +78,19 @@ async function monthOf(workloadId) {
    slipped is caught), which counts for EVAL_PROTECT_SHARE of it.
 
    A measurement nobody asked for runs only when that pays for it within EVAL_PAYBACK_MONTHS, and our
-   fee is taken off the saving first, because the saving is only worth what the customer keeps. */
-export function worthOf({ ranked, refPer, month, serving, tries, fee = config.ROUTING_FEE_PCT }) {
+   fee is taken off the saving first, because the saving is only worth what the customer keeps.
+
+   What serves is found by its own name (`servingAs`, see servingKey): the customer's own model
+   thinking less, or from its cheapest provider, is the reference by model, and looked for by model it
+   was never found, so its saving counted as protecting nothing and it was counted again as a new
+   saving to find. A strategy is known by its lead model's row, the nearest there is. */
+export function worthOf({ ranked, refPer, month, serving, servingAs = null, tries, fee = config.ROUTING_FEE_PCT }) {
   const perMonth = refPer > 0 ? refPer * month.calls : month.cost;
-  const servingRow = serving ? ranked.find((r) => r.model === serving && !r.key) : null;
+  const nameOf = (r) => r.key || r.model;
+  const servingRow = serving ? (ranked.find((r) => servingAs && nameOf(r) === servingAs)
+    || ranked.find((r) => r.model === serving && !r.key)) : null;
   const servingShare = serving ? Math.max(0, Number(servingRow?.savingShare ?? 0)) : 0;
-  const pool = ranked.filter((r) => r.savingShare !== null && r.savingShare > servingShare && !(serving && r.model === serving && !r.key))
+  const pool = ranked.filter((r) => r.savingShare !== null && r.savingShare > servingShare && r !== servingRow)
     .slice(0, Math.max(1, tries))
     .sort((a, b) => b.savingShare - a.savingShare);
   let none = 1;
@@ -103,22 +128,77 @@ export function modelCountFor(ws) {
   return Math.max(1, Math.min(config.EVAL_MODELS_MAX, Math.round(n)));
 }
 
-async function enabledSet(workspaceId) {
+export async function enabledSet(workspaceId) {
   return new Set((await db.prepare(
     `SELECT c.model_id FROM models_catalog c
        LEFT JOIN workspace_models wm ON wm.model_id = c.model_id AND wm.workspace_id = ?
       WHERE COALESCE(wm.enabled, 1) = 1`).all(workspaceId)).map((r) => r.model_id));
 }
 
-/* How much of the bar is already paid for: answers from the customer's own model to this
-   workload's recent calls, still young enough to use again. */
-async function cachedBarShare(workload, sample) {
-  const n = (await db.prepare(
-    `SELECT COUNT(*) AS n FROM replay_cache r
-      WHERE r.model_id = ? AND r.status = 200 AND r.created_at >= ? AND r.recipe_json IS NULL
-        AND r.call_id IN (SELECT id FROM calls WHERE workload_id = ? AND created_at >= ?)`)
-    .get(workload.reference_model, now() - config.REPLAY_REUSE_DAYS * DAY, workload.id, now() - 30 * DAY)).n;
-  return Math.min(1, Number(n) / Math.max(1, sample * 2));
+/* What earlier measurements of this workload have drawn on, among the calls a run could draw now,
+   and how much of a bar is already paid for on the calls it would actually draw. As shares of those
+   calls, so they can be read against the pool, which is capped a day at a time.
+
+   A run steers away from every call a finished measurement used, so that a lucky sample is not
+   simply measured again, and what those calls bought is no help to its bar: counted as paid for, it
+   quoted a re-check a nearly free bar that it then bought in full. Calls a measurement that was
+   stopped or cut short drew are not steered away from, and what it bought for them is used again.
+   A second look never uses a call any measurement has looked at. A call's bar is paid for when both
+   of the customer's model's answers are kept, or when its own recorded answer is one of them and the
+   other is kept. */
+async function drawnFor(workload) {
+  const row = await db.prepare(
+    `WITH eligible AS (
+        SELECT c.id, (?::boolean AND ${OWN_ANSWER('c.')}) AS rec
+          FROM calls c
+         WHERE c.workload_id = ? AND c.request_json IS NOT NULL AND c.created_at >= ?
+           AND c.source NOT IN ('replay', 'test') AND (c.status_code IS NULL OR c.status_code < 400)),
+      drawn AS (
+        SELECT s.call_id, bool_or(${FOUND('r.')}) AS used
+          FROM eval_samples s JOIN eval_runs r ON r.id = s.run_id
+         WHERE r.workload_id = ? GROUP BY s.call_id),
+      kept AS (
+        SELECT k.call_id, COUNT(DISTINCT k.slot) AS slots, bool_or(k.slot = 1) AS second
+          FROM replay_cache k
+         WHERE k.model_id = ? AND k.status = 200 AND k.recipe_json IS NULL AND k.created_at >= ?
+           AND k.call_id IN (SELECT id FROM eligible)
+         GROUP BY k.call_id)
+     SELECT COUNT(*) AS n,
+            COUNT(*) FILTER (WHERE d.used) AS used,
+            COUNT(*) FILTER (WHERE d.call_id IS NOT NULL) AS seen,
+            COUNT(*) FILTER (WHERE NOT COALESCE(d.used, false) AND (k.slots >= 2 OR (e.rec AND k.second))) AS paid_fresh,
+            COUNT(*) FILTER (WHERE d.used AND (k.slots >= 2 OR (e.rec AND k.second))) AS paid_used
+       FROM eligible e LEFT JOIN drawn d ON d.call_id = e.id LEFT JOIN kept k ON k.call_id = e.id`)
+    .get(!!config.EVAL_USE_RECORDED, String(workload.reference_model ?? ''), workload.id, ownArmKey(workload),
+      workload.id, now() - 30 * DAY, workload.id, String(workload.reference_model ?? ''), now() - config.REPLAY_REUSE_DAYS * DAY);
+  const n = Number(row?.n || 0);
+  const share = (x) => (n ? Number(x || 0) / n : 0);
+  return { used: share(row?.used), seen: share(row?.seen), paidFresh: share(row?.paid_fresh), paidUsed: share(row?.paid_used) };
+}
+
+/* Which of these models a measurement of this workload would try: switched on in its workspace,
+   able to do what its calls ask (their length, tools and structured answers, and keeping nothing when
+   the workspace requires that), able to answer within its cap on answers, not being retired,
+   answering reliably, cheaper than the customer's model at the price that would really be paid, not
+   far too slow by what its providers publish, and not switched back before. The plan's own rules, on
+   these models alone, from what is already known: nothing is asked of anybody. */
+export async function wouldTry(workload, modelIds) {
+  if (!workload?.reference_model || !modelIds?.length) return [];
+  const facts = await loadFacts();
+  const asked = new Set(modelIds.filter((m) => facts.models.has(m)));
+  if (!asked.size) return [];
+  const keep = new Set([...asked, workload.reference_model, workload.routed_model].filter(Boolean));
+  const models = new Map([...facts.models].filter(([m]) => keep.has(m)));
+  const profile = await profileOf(workload);
+  const sel = selectCandidates({
+    facts: { ...facts, models }, profile, reference: workload.reference_model,
+    enabled: await enabledSet(workload.workspace_id), want: keep.size, tryMultiple: 1,
+    reverted: await heldBack(workload.id), serving: workload.routed_model, servingAs: await servingKey(workload),
+    speed: speedRule(workload, profile, config),
+    refThinks: refThinksOf(facts.models.get(workload.reference_model) || null, profile.refThinking, profile.thinking),
+    config, at: now(), zdrOnly: await zdrFor(workload.workspace_id),
+  });
+  return sel.ranked.filter((r) => !r.key && asked.has(r.model) && r.model !== workload.routed_model).map((r) => r.model);
 }
 
 /* Work for Jev a later look at the page will want: readings of how each model suits this
@@ -149,14 +229,14 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   }
   const ws = await db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workload.workspace_id);
   const models = modelCountFor(ws);
-  const { n: pool, recordedShare } = await eligible(workload.id, workload.reference_model);
+  const { n: pool, recordedShare } = await eligible(workload);
   const sample = sampleSizeFor(pool);
   const plan = {
     pool, sample, models, candidates: [], order: [], funnel: [], excluded: [], waiting: 0,
     estimateUsd: null, canRun: false, reason: null, reference: workload.reference_model,
     judge: jevUsable() ? 'jev' : 'llm', jevResting: jevResting(), factsAt: {}, speed: null, profile: null, pendingJev: 0,
     difficulty: null, cachedBar: 0, refThinks: null, recordedShare, worth: null, notWorth: false,
-    ceilingUsd: config.EVAL_MAX_USD_PER_RUN, optimizeBudget: null,
+    ceilingUsd: config.EVAL_MAX_USD_PER_RUN, optimizeBudget: null, unseenPool: pool, yardstick: null,
   };
 
   if (!canRoute) {
@@ -185,9 +265,11 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   plan.profile = profile;
   plan.speed = speed;
   plan.refThinks = refThinks;
+  const servingAs = workload.routed_model ? await servingKey(workload) : null;
   const base = {
     facts, profile, reference: workload.reference_model, enabled, want: models,
-    tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, serving: workload.routed_model,
+    tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, serving: workload.routed_model, servingAs,
+    servingRecipe: parseRecipe(workload.routed_recipe),
     history, speed, refThinks, speedHistory: fleet.speed, busy: fleet.busy, config, at: now(),
     zdrOnly: await zdrFor(workload.workspace_id),
     calibration: await calibrationFor(workload.workspace_id),
@@ -201,8 +283,19 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
      that would not pay for itself costs nothing at all to turn down. */
   const month = await monthOf(workload.id);
   const tries = Math.max(models, Math.round(models * config.EVAL_TRY_MULTIPLE));
-  plan.cachedBar = await cachedBarShare(workload, sample);
-  plan.worth = worthOf({ ranked: first.ranked, refPer: first.refPrice ?? 0, month, serving: workload.routed_model, tries });
+  /* The calls this run would draw, and how many of them earlier measurements already paid a bar for;
+     and the calls no measurement has looked at, which is all a second look may use. */
+  const drawn = await drawnFor(workload);
+  const freshPool = Math.round(pool * (1 - drawn.used));
+  const paidFresh = Math.round(pool * drawn.paidFresh);
+  const paidUsed = Math.round(pool * drawn.paidUsed);
+  plan.cachedBar = sample ? Math.min(sample, paidFresh + Math.min(Math.max(0, sample - freshPool), paidUsed)) / sample : 0;
+  plan.unseenPool = Math.round(pool * (1 - drawn.seen));
+  // the yardstick the last measurement that compared anything used, when there was one: it decides what the judging costs
+  plan.yardstick = (await db.prepare(
+    `SELECT yardstick FROM eval_runs WHERE workload_id = ? AND yardstick IS NOT NULL AND ${FOUND()} AND ${OUTCOME_OF()} = 'compared'
+      ORDER BY created_at DESC LIMIT 1`).get(workload.id))?.yardstick ?? null;
+  plan.worth = worthOf({ ranked: first.ranked, refPer: first.refPrice ?? 0, month, serving: workload.routed_model, servingAs, tries });
   /* A measurement nobody asked for waits until it has enough calls to show anything: on too few, even a
      model that matched every answer could not clear the bar, and all it would buy is a bar. */
   if (automatic) {
@@ -261,7 +354,7 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   }
 
   plan.estimateUsd = estimate(plan, profile, facts, workload);
-  plan.worth = worthOf({ ranked: sel.ranked, refPer: sel.refPrice ?? 0, month, serving: workload.routed_model, tries });
+  plan.worth = worthOf({ ranked: sel.ranked, refPer: sel.refPrice ?? 0, month, serving: workload.routed_model, servingAs, tries });
   plan.ceilingUsd = ceilingFor(plan.worth);
   plan.worth.worthIt = plan.estimateUsd <= plan.worth.budgetUsd;
   if (plan.estimateUsd > plan.ceilingUsd) {
@@ -304,54 +397,92 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   return plan;
 }
 
-/* What a measurement is expected to cost, from this workload's own average call.
+/* What a measurement is expected to cost, from this workload's own average call: what the run will
+ * actually do, so that the quote a person sees, the test of whether a measurement nobody asked for
+ * pays for itself, and the limit a run keeps to are never below what it spends.
  *
- * The bar is the customer's own model twice on every sampled call, less whatever is already
- * paid for. The models are the ones measured to the end, every call, plus the ones dropped
- * early, which are charged for the few calls they answered before being dropped. Judging
- * written answers is part of the work and is counted. */
+ * The bar: the customer's own model twice on each sampled call, one of the two read from the call
+ * itself where its own answer was recorded, less the calls whose bar is already paid for among the
+ * ones this run will draw (see drawnFor). A re-check draws calls no finished measurement used, so
+ * what earlier ones bought seldom helps it.
+ *
+ * The race: the models measured to the end answer every call, and the ones dropped early the few
+ * calls they answered first.
+ *
+ * The second look: up to EVAL_CONFIRM_TRIES of the cheapest that clear, each on calls no measurement
+ * of this workload has looked at, as many as the run would take, with the customer's model answering
+ * them too (once: every look in a run is on the same calls). It used to price one look though a run
+ * takes two.
+ *
+ * Written answers are judged, and each judgement is priced at what it costs (see judgePrices): the
+ * bar's pairs, the pairs whose answer is known that test the judge, and every candidate answer. When
+ * the customer's own model varies too much for "the same answer" to be a bar, every pair is read again
+ * for "at least as good", and the candidates are judged that way, always by the language model. The
+ * run finds out which it needs as it goes, so a workload not compared before is quoted the dearer.
+ *
+ * Strategies for the cheaper models that cannot manage alone, and Jev's reading of how the models
+ * suit the task, which the measurement pays for, are counted too. */
+const FIT_TOKENS = 1500;
 function estimate(plan, profile, facts, workload) {
   const pin = profile.promptAvg || 0;
   const pout = profile.outAvg || 0;
   const refModel = facts.models.get(workload.reference_model);
   const refPer = plan.refPrice ?? (refModel ? routedCallPrice(refModel, pin, pout, profile.hours)
     ?? callPrice(refModel, pin, pout, profile.hours) : 0) ?? 0;
-  /* The bar's two answers for each call, less those already paid for, and less the one the customer's
-     own model recorded, which is read rather than bought. */
-  const barPaid = Math.max(0, plan.sample * 2 * (1 - (plan.cachedBar || 0)) - plan.sample * (plan.recordedShare || 0));
-  let total = refPer * barPaid;
+  const s = plan.sample;
+  const recorded = Math.max(0, Math.min(1, plan.recordedShare || 0));
+  // the customer's model on a call it has not answered before: two answers, one of them read where it was recorded
+  const refCall = refPer * (2 - recorded);
+  const covered = Math.min(s, Math.round((plan.cachedBar || 0) * s));
+  let total = refCall * (s - covered);
+
   const finalists = plan.order.slice(0, plan.models);
-  /* The second look: the cheapest that clears, on calls it has never seen, as many as a perfect run
-     at the lowest bar needs, times EVAL_CONFIRM_MULTIPLE. Only when there are that many to look at. */
-  const least = callsToClear(config.EVAL_FLOOR_MIN_PCT);
-  const fresh = Math.max(0, (plan.pool || 0) - plan.sample);
-  if (fresh >= least && finalists.length) {
-    const looks = Math.min(fresh, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * least), plan.sample));
-    const cheapestPrice = Math.min(...finalists.map((c) => c.price));
-    total += looks * (cheapestPrice + refPer * (2 - (plan.recordedShare || 0)));
-    if (workload.shape_kind === 'free_text') {
-      const llm = facts.models.get(config.EVAL_JUDGE_MODEL);
-      const llmPer = llm ? callPrice(llm, Math.min(pin, 600) + 400, 6) : 0;
-      total += looks * judgementCost(pin, pout, llmPer);
-    }
-  }
   const extra = plan.order.slice(plan.models);
-  for (const c of finalists) total += c.price * plan.sample;
-  for (const c of extra) total += c.price * Math.min(plan.sample, config.EVAL_SCREEN_CALLS);
+  const screened = Math.min(s, config.EVAL_SCREEN_CALLS);
+  for (const c of finalists) total += c.price * s;
+  for (const c of extra) total += c.price * screened;
+
+  // judging written answers, by the yardstick the run will use, or the dearer when that is not known yet
+  const prices = workload.shape_kind === 'free_text' && canJudge()
+    ? judgePrices(pin, pout, facts.models.get(config.EVAL_JUDGE_MODEL)) : null;
+  const yardsticks = !prices ? []
+    : !config.EVAL_QUALITY_YARDSTICK || plan.yardstick === 'agreement' ? ['agreement']
+      : plan.yardstick === 'quality' ? ['quality'] : ['agreement', 'quality'];
+  const judging = yardsticks.map((yard) => {
+    const quality = yard === 'quality';
+    const pair = quality ? prices.quality : prices.bar;
+    const answer = quality ? prices.quality : prices.candidate;
+    // every pair read for sameness first, and again for "at least as good"; and up to four known pairs
+    const bar = s * prices.bar + (quality ? s * prices.quality : 0) + 4 * pair;
+    return { pair, answer, cost: bar + (finalists.length * s + extra.length * screened) * answer };
+  }).sort((a, b) => b.cost - a.cost)[0] || null;
+  if (judging) total += judging.cost;
+
+  /* The second look. Whether there are enough unseen calls for one is read at the loosest bar this
+     workload can be expected to have, and how many it takes at the bar it had last, or at the
+     tightest there is when it has had none, so the quote is never short of a look the run takes. */
+  const looseBar = Number(workload.floor_pct) > 0 ? Number(workload.floor_pct)
+    : workload.shape_kind === 'free_text' ? config.EVAL_FIRST_FLOOR_TEXT_PCT : config.EVAL_FLOOR_MIN_PCT;
+  const sizeBar = Number(workload.floor_pct) > 0 ? Number(workload.floor_pct) : config.EVAL_FLOOR_MIN_PCT;
+  const unseen = Math.max(0, Math.round(plan.unseenPool ?? plan.pool ?? 0) - s);
+  const looked = [...finalists].sort((a, b) => a.price - b.price).slice(0, Math.max(0, config.EVAL_CONFIRM_TRIES));
+  if (looked.length && unseen >= callsToClear(looseBar)) {
+    const looks = Math.min(unseen, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(sizeBar)), s));
+    // the customer's model on the looked-at calls, and its two answers compared, once for every look
+    total += looks * refCall + (judging ? looks * judging.pair : 0);
+    for (const c of looked) total += looks * (c.price + (judging ? judging.answer : 0));
+  }
+
   /* Strategies for the cheaper models that cannot manage alone: up to two dropped part way have
      their other calls finished, and up to three have each answer checked once by Jev. */
   const cheapest = [...plan.order].sort((a, b) => a.price - b.price).slice(0, 3);
-  for (const c of cheapest.slice(0, 2)) total += c.price * plan.sample * 0.5;
+  for (const c of cheapest.slice(0, 2)) total += c.price * s * 0.5;
   if (jevUsable()) {
     const perCheck = ((Math.min(pin, 700) + Math.min(pout, 700) + 350) * config.JEV_PRICE_PER_MTOK) / 1e6;
-    total += cheapest.length * plan.sample * perCheck;
+    total += cheapest.length * s * perCheck;
   }
-  const judged = judgementsFor(workload.shape_kind, plan.sample, finalists.length);
-  if (judged) {
-    const llm = facts.models.get(config.EVAL_JUDGE_MODEL);
-    const llmPer = llm ? callPrice(llm, Math.min(pin, 600) + 400, 6) : 0;
-    total += judged * judgementCost(pin, pout, llmPer);
-  }
+  // Jev's reading of how the models suit the task: what the run paid, or what the ones not read yet will cost
+  total += plan.fitCost > 0 ? plan.fitCost : ((plan.pendingJev || 0) * FIT_TOKENS * config.JEV_PRICE_PER_MTOK) / 1e6;
   return Math.round(total * 1e8) / 1e8;
 }
 

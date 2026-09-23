@@ -56,6 +56,7 @@ const { promote } = await import('../src/eval/promote.js');
 const { scheduleNext, deferAutomatic, nudgeForCatalog } = await import('../src/eval/schedule.js');
 const { calibrationFor, calibrated, forgetCalibration } = await import('../src/eval/calibrate.js');
 const { planFor } = await import('../src/eval/plan.js');
+const { forgetFacts } = await import('../src/models/facts.js');
 
 await migrate({ quiet: true });
 
@@ -272,12 +273,21 @@ test('a new cheaper model brings forward the next measurement of the workloads i
       VALUES ('run_recent_b', ?, ?, 'done', 'json', 'openai/gpt-5.4', 10, ?)`).run(b.workspace.id, b.workload.id, now() - 2 * DAY);
   const before = await db.prepare('SELECT model_id, price_in, price_out FROM models_catalog').all();
   const after = [...before, { model_id: 'vendor/brand-new', price_in: 0.05e-6, price_out: 0.1e-6 }];
-  const moved = await nudgeForCatalog(before, after);
-  assert.ok(moved.added >= 1);
-  const wa = await load(a.workload.id);
-  const wb = await load(b.workload.id);
-  assert.ok(wa.recheck_after <= now() + config.EVAL_NUDGE_HOURS * 3600000 + 1000, 'brought forward');
-  assert.ok(wb.recheck_after > now() + 10 * DAY, 'not for one measured in the last week');
+  // in the catalogue, as the sync that read it saves it before nudging: only a model a measurement would try nudges
+  await db.prepare(`INSERT INTO models_catalog (model_id, name, context_len, price_in, price_out, open_weights, zdr, synced_at)
+      VALUES ('vendor/brand-new', 'brand new', 128000, 0.05e-6, 0.1e-6, 1, 1, ?)`).run(now());
+  forgetFacts();
+  try {
+    const moved = await nudgeForCatalog(before, after);
+    assert.ok(moved.added >= 1);
+    const wa = await load(a.workload.id);
+    const wb = await load(b.workload.id);
+    assert.ok(wa.recheck_after <= now() + config.EVAL_NUDGE_HOURS * 3600000 + 1000, 'brought forward');
+    assert.ok(wb.recheck_after > now() + 10 * DAY, 'not for one measured in the last week');
+  } finally {
+    await db.prepare(`DELETE FROM models_catalog WHERE model_id = 'vendor/brand-new'`).run();
+    forgetFacts();
+  }
 });
 
 test('calls are grouped the way the customer means: by name, by model, and by the job behind a shared instruction', async () => {

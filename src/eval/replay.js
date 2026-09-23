@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import config from '../config.js';
 import { db, now } from '../db/index.js';
-import { chat, streamCollect, UpstreamError, reasonOf } from '../openrouter.js';
+import { chat, streamCollect, UpstreamError, reasonOf, priceCall } from '../openrouter.js';
 import { recordCall } from '../traffic.js';
 import { zdrFor } from '../workspace.js';
 
@@ -19,6 +19,46 @@ import { zdrFor } from '../workspace.js';
 
 const DAY = 86400000;
 const HOUR = 3600000;
+
+const lengthOf = (v) => (typeof v === 'string' ? v.length : v === null || v === undefined ? 0 : JSON.stringify(v).length);
+// what a request said, and what an answer said, in characters
+const askedChars = (body) => (Array.isArray(body?.messages)
+  ? body.messages.reduce((a, m) => a + lengthOf(m?.content), 0) : lengthOf(body));
+const answeredChars = (json) => {
+  const m = json?.choices?.[0]?.message;
+  if (!m) return 0;
+  if (Array.isArray(m.tool_calls) && m.tool_calls.length) return m.tool_calls.reduce((a, c) => a + lengthOf(c?.function?.arguments), 0);
+  return lengthOf(m.content);
+};
+
+/**
+ * What one model call a measurement made cost. The provider's own figure when the answer carries
+ * one. Otherwise its tokens at the model's catalogue price: the answer's own count of them, or,
+ * with no usage on it at all, its text at three characters a token. A model the catalogue does not
+ * list is priced at what its calls have cost in this workspace, and failing that at a typical
+ * catalogue price. Never nothing for a call that was made: read as `usage.cost ?? 0`, an answer that
+ * came back without a cost on it was recorded, and charged to the customer's optimizing, as free.
+ */
+export async function costOfCall({ json, model, request = null, workspaceId = null }) {
+  const usage = json?.usage || null;
+  const said = Number(usage?.cost);
+  if (usage && usage.cost !== null && usage.cost !== undefined && Number.isFinite(said)) return Math.max(0, said);
+  const tokensIn = Number(usage?.prompt_tokens) > 0 ? Number(usage.prompt_tokens) : Math.ceil(askedChars(request) / 3);
+  const tokensOut = Number(usage?.completion_tokens) > 0 ? Number(usage.completion_tokens) : Math.ceil(answeredChars(json) / 3);
+  const listed = await priceCall(model, tokensIn, tokensOut);
+  if (listed !== null && Number.isFinite(listed)) return Math.max(0, listed);
+  if (workspaceId) {
+    const had = await db.prepare(
+      `SELECT SUM(cost_usd) AS cost, SUM(prompt_tokens + completion_tokens) AS tokens FROM calls
+        WHERE workspace_id = ? AND served_model = ? AND cost_usd > 0 AND source IN ('routed', 'trace') AND created_at >= ?`)
+      .get(workspaceId, model, now() - 30 * DAY);
+    if (Number(had?.tokens) > 0) return (Number(had.cost) / Number(had.tokens)) * (tokensIn + tokensOut);
+  }
+  const typical = await db.prepare(
+    `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price_in) AS pin, percentile_cont(0.5) WITHIN GROUP (ORDER BY price_out) AS pout
+       FROM models_catalog WHERE price_in > 0 OR price_out > 0`).get();
+  return Math.max(0, Number(typical?.pin || 0) * tokensIn + Number(typical?.pout || 0) * tokensOut);
+}
 
 /* The parts of a request that change nothing about the answer. */
 const VOLATILE = ['stream', 'stream_options', 'user', 'metadata', 'store', 'model'];
@@ -122,7 +162,8 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
       error: null,
       latencyMs: got.latencyMs,
       ttftMs: got.ttftMs,
-      cost: Number(usage.cost ?? 0),
+      // worked out below, outside the provider's try: a slip in reading a price is not a refusal
+      cost: 0,
       completionTokens: usage.completion_tokens ?? null,
       reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? null,
       provider: got.json?.provider ?? null,
@@ -136,6 +177,8 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
       promptTokens: null,
     };
   }
+  // an answer came back, so it was paid for, whether or not it says what it cost
+  if (out.ok) out.cost = await costOfCall({ json: out.json, model, request: clean, workspaceId: workload.workspace_id });
 
   if (out.ok || lasting(out.status)) {
     await remember(key, {

@@ -80,7 +80,13 @@ export async function servingKey(workload) {
     const arm = await armById(workload.routed_arm_id);
     if (arm?.spec) return keyOfSpec(arm.spec, workload.reference_model);
   }
-  return workload.routed_model;
+  /* A switch made before strategies were kept names only a model and how it was asked. The
+     customer's own model asked to think less, or pinned to its cheapest provider, is still a
+     strategy of its own, and named as one: by the model alone it read as the customer's model,
+     which is served by nothing. */
+  let recipe = null;
+  try { recipe = workload.routed_recipe ? JSON.parse(workload.routed_recipe) : null; } catch { recipe = null; }
+  return keyOfSpec({ kind: 'model', model: workload.routed_model, recipe }, workload.reference_model);
 }
 
 export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined, spec: given = null, detail = null, rollout = true } = {}) {
@@ -114,15 +120,23 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
   const arm = await upsertArm(workload, spec, { status: 'serving', originRunId: runId, offline });
   const lead = leadModel(spec);
   /* A switch starts on a share of the calls (see reviewRollout in src/learn/explore.js), and the rest
-     stay with what served before it: the strategy it replaces, or the customer's own model. */
-  const stages = config.ROLLOUT_ENABLED && rollout ? config.ROLLOUT_STAGES : [];
+     stay with what served before it: the strategy it replaces, or the customer's own model.
+
+     "What served before it" is what served in full. A switch made while another is still taking
+     over a share at a time keeps that one's control: the strategy on a twentieth of the calls has
+     not passed a single stage, and made the control it would have been given nineteen calls in
+     twenty straight away, marked as resting, and served on every call by a roll back. A switch back
+     to the control itself has nothing to roll out, and serves every call at once. */
+  const midRollout = workload.rollout_share !== null && workload.rollout_share !== undefined;
+  const control = midRollout ? (workload.rollout_from_arm_id ?? null) : (workload.routed_arm_id ?? null);
+  const stages = config.ROLLOUT_ENABLED && rollout && control !== arm.id ? config.ROLLOUT_STAGES : [];
   const staged = stages.length > 0;
   await db.tx(async (tx) => {
     await tx.prepare(`UPDATE workloads SET routed_model = ?, routed_recipe = ?, routed_arm_id = ?, promoted_at = ?, promoted_run_id = ?,
                 status = 'promoted', status_note = NULL, updated_at = ?,
                 rollout_share = ?, rollout_stage = ?, rollout_started_at = ?, rollout_from_arm_id = ? WHERE id = ?`)
       .run(lead.model, lead.recipe ? JSON.stringify(lead.recipe) : null, arm.id, now(), runId, now(),
-        staged ? stages[0] : null, staged ? 0 : null, staged ? now() : null, staged ? (workload.routed_arm_id ?? null) : null, workload.id);
+        staged ? stages[0] : null, staged ? 0 : null, staged ? now() : null, staged ? control : null, workload.id);
     await record(workload, { action: 'promote', from_model: from, to_model: modelId, reason, run_id: runId, actor_user_id: actorUserId }, tx);
   });
   if (workload.routed_arm_id && workload.routed_arm_id !== arm.id) await setStatus(workload.routed_arm_id, 'resting');
