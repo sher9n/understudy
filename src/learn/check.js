@@ -121,7 +121,10 @@ export async function jevCheck(body, response, shape, { scope = null, ask = askJ
   await db.prepare(`INSERT INTO judge_cache (key, score, detail_json, judged_by, created_at) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (key) DO UPDATE SET score = excluded.score, detail_json = excluded.detail_json, created_at = excluded.created_at`)
     .run(key, p, JSON.stringify({ choice: a.choice ?? null, ms: r.ms }), 'jev-check', now());
-  return { p, choice: a.choice ?? null, cost: r.costUsd, ms: r.ms, reused: false };
+  // what it cost, and whether that was worked out from what Jev read rather than reported (see jevCost)
+  const said = r.usage?.cost;
+  const costEstimated = !(said !== undefined && said !== null && said !== '' && Number.isFinite(Number(said)));
+  return { p, choice: a.choice ?? null, cost: r.costUsd, ms: r.ms, reused: false, costEstimated };
 }
 
 /** The whole check: shape first, then Jev. Passes when both do and Jev is sure enough. */
@@ -129,5 +132,5 @@ export async function checkAnswer(body, response, shape, { threshold, scope = nu
   const s = structureOf(body, response, shape);
   if (!s.ok) return { pass: false, by: 'shape', reason: s.reason, p: 0, cost: 0, ms: 0 };
   const j = await jevCheck(body, response, shape, { scope, ask, live });
-  return { pass: j.p >= threshold, by: 'jev', p: j.p, choice: j.choice, cost: j.cost, ms: j.ms, reused: j.reused };
+  return { pass: j.p >= threshold, by: 'jev', p: j.p, choice: j.choice, cost: j.cost, ms: j.ms, reused: j.reused, costEstimated: !!j.costEstimated };
 }

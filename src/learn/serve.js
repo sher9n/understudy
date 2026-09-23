@@ -92,8 +92,9 @@ export async function serveWith(spec, given, { shape, scope = null, check = chec
       return toFallback('check failed', cheap, { reason: String(err?.message || err).slice(0, 120) });
     }
     const readings = { by: c.by, p: c.p === null || c.p === undefined ? null : Math.round(c.p * 1000) / 1000, reason: c.reason ?? null, ms: c.ms ?? 0 };
-    // the check says what it cost: what Jev reported, or worked out from what it read (see jevCost), and nothing when kept or when only the shape was read
-    const sofar = { cost: cheap.cost + (Number(c.cost) || 0), estimated: cheap.estimated };
+    /* the check says what it cost: what Jev reported, or worked out from what it read (see jevCost), which
+       is an estimate too, and nothing when its verdict was kept or only the shape was read */
+    const sofar = { cost: cheap.cost + (Number(c.cost) || 0), estimated: cheap.estimated || !!c.costEstimated };
     if (c.pass) {
       return { json: costing(first.json, sofar.cost, sofar.estimated), served: spec.first.model, recipe: spec.first.recipe ?? null,
         cost: sofar.cost, costEstimated: sofar.estimated, latencyMs: Date.now() - started, escalated: false, check: readings };

@@ -817,6 +817,12 @@ test('a part of a call whose provider states no cost is counted at an estimate, 
     near(stated.cost, 0.0004 + 0.0001, 'stated');
     assert.equal(stated.costEstimated, false);
     near(stated.json.usage.cost, 0.0005, 'written into the answer');
+    // every model stated its cost, but the check's own was worked out from what it read: the total is not stated either
+    const guessedCheck = async () => ({ pass: true, by: 'jev', p: 0.9, cost: 0.0001, ms: 5, costEstimated: true });
+    const guessed = await serveWith(cascade, body, { shape: 'free_text', check: guessedCheck });
+    near(guessed.cost, 0.0005, 'the same total');
+    assert.equal(guessed.costEstimated, true);
+    assert.equal('cost' in guessed.json.usage, false);
     // the cheap answer states no cost: estimated from its tokens at the catalogue price, never nothing
     noCost.add(CHEAP);
     const quiet = await serveWith(cascade, body, { shape: 'free_text', check: pass });
