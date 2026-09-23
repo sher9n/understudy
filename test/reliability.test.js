@@ -55,7 +55,14 @@ const CHEAP = 'vendor/cheap';
 // how the provider behaves for each model, changed by the tests as they go
 const behave = new Map();
 const seen = [];
+// the model list OpenRouter answers with, set by the test that reads it
+let modelList = [];
 const provider = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url.endsWith('/models')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ data: modelList }));
+    return;
+  }
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
@@ -290,4 +297,55 @@ test('a process being stopped hands its measurements over at once, and leaves a 
   finish();
   await going;
   assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(sid)).status, 'done');
+});
+
+test('a much shorter model list is kept out the first time, and taken when it comes back the same', async () => {
+  const many = Array.from({ length: 30 }, (_, i) => ({ id: `vendor/m${i}`, name: `m${i}`, context_length: 8192,
+    pricing: { prompt: '0.0000001', completion: '0.0000004' } }));
+  const row = (m) => ({ model_id: m.id, name: m.name, context_len: 8192, price_in: 1e-7, price_out: 4e-7, open_weights: 0, zdr: 1 });
+  const ours = [
+    { model_id: REF, name: 'gpt-5.4', context_len: 200000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1 },
+    { model_id: CHEAP, name: 'cheap', context_len: 8192, price_in: 0.1e-6, price_out: 0.4e-6, open_weights: 1, zdr: 1 },
+  ];
+  await saveCatalog([...many.map(row), ...ours]);
+  const count = async () => Number((await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get()).n);
+  assert.equal(await count(), 32);
+  // only this reading runs: anything else waiting is set aside
+  await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE status = 'queued'`).run();
+  modelList = many.slice(0, 10);
+  await jobs.enqueue('catalog_sync', {});
+  assert.equal(await jobs.runOnce(), true);
+  assert.equal(await count(), 32, 'ten models against thirty two, seen once: kept out');
+  const seenOnce = await db.prepare(`SELECT note FROM fact_sync WHERE source = 'catalog_shrink'`).get();
+  assert.equal(seenOnce?.note, '10', 'the sighting is kept in the database, so a restart still counts it');
+  const again = await db.prepare(`SELECT run_after FROM jobs WHERE kind = 'catalog_sync' AND status = 'queued'`).all();
+  assert.equal(again.length, 1, 'one reading booked');
+  assert.ok(Number(again[0].run_after) < now() + 20 * 60000, 'and soon');
+  const readNow = async () => {
+    await db.prepare(`UPDATE jobs SET run_after = ? WHERE kind = 'catalog_sync' AND status = 'queued'`).run(now() - 1000);
+    assert.equal(await jobs.runOnce(), true);
+  };
+  // the whole list comes back: taken, and the earlier sighting goes with it
+  modelList = many;
+  await readNow();
+  assert.equal(await count(), 30);
+  assert.equal(await db.prepare(`SELECT 1 FROM fact_sync WHERE source = 'catalog_shrink'`).get(), undefined, 'a full list clears the sighting');
+  // so a short list after it is a first sighting again, and kept out
+  await saveCatalog([...many.map(row), ...ours]);
+  modelList = many.slice(0, 10);
+  await readNow();
+  assert.equal(await count(), 32, 'not taken on the strength of a sighting from before a full list');
+  // the same short list again: the catalogue did shrink, and it is taken
+  await readNow();
+  assert.equal(await count(), 10, 'taken the second time');
+  assert.equal(await db.prepare(`SELECT 1 FROM fact_sync WHERE source = 'catalog_shrink'`).get(), undefined, 'and the sighting is cleared');
+  const next = await db.prepare(`SELECT MIN(run_after) AS t FROM jobs WHERE kind = 'catalog_sync' AND status = 'queued'`).get();
+  assert.ok(Number(next.t) <= now() + 31 * 60000, 'read again within the half hour, in case it was a mistake');
+  // a list that is not much shorter is taken at once, as before
+  modelList = many.slice(0, 8);
+  await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE status = 'queued'`).run();
+  await jobs.enqueue('catalog_sync', {});
+  assert.equal(await jobs.runOnce(), true);
+  assert.equal(await count(), 8);
+  await saveCatalog(ours);
 });

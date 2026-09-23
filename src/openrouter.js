@@ -108,10 +108,10 @@ export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHin
   out.provider = { ...(out.provider || {}), data_collection: 'deny', ...(keepNothing ? { zdr: true } : {}),
     ...(pinnedTo ? { only: pinnedTo } : {}) };
   /* The most any provider may charge on this call, per million tokens and per request: the prices the
-     call's hold was sized on (see callBound). OpenRouter never sends the call to a provider dearer than
-     this, which is what makes the hold a bound when providers are not all known one by one. A ceiling the
-     customer set is kept where it is lower. Rounded up a hair, so a provider at exactly the bound is not
-     turned away by the arithmetic. */
+     call's hold was worked out at (see callBound). OpenRouter never sends the call to a provider dearer
+     than this, which keeps the hold a bound when a provider is added or reprices after we read the list.
+     A ceiling the customer set is kept where it is lower. Rounded up a hair, so a provider at exactly the
+     bound is not turned away by the arithmetic. */
   const cap = priceCaps?.[model];
   if (cap) {
     const theirs = out.provider.max_price && typeof out.provider.max_price === 'object' ? out.provider.max_price : {};
@@ -125,6 +125,21 @@ export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHin
     };
   }
   return out;
+}
+
+/* OpenRouter turns a request away when no provider is at or under the price ceiling it carries (see
+   buildUpstream): a price moved after we last read it. The call is answered as a moment's wait rather
+   than as OpenRouter's 404, which from a chat endpoint reads as a wrong address, and the prices of that
+   model are read again now instead of at the next hourly reading, so the next call is held at them. */
+function priceMoved(status, json, model) {
+  if (status !== 404 || !/satisfy the max price/i.test(String(json?.error?.message || ''))) return null;
+  const base = String(model || '').replace(/:[a-z0-9._-]+$/i, '');
+  db.prepare('DELETE FROM model_endpoints_all_sync WHERE model_id = ?').run(base).catch(() => {});
+  db.prepare(`UPDATE jobs SET run_after = ? WHERE kind = 'model_health' AND status = 'queued' AND run_after > ?`)
+    .run(now(), now()).catch(() => {});
+  return new UpstreamError(503, { error: {
+    message: 'The price of this model moved a moment ago, so no provider was within what this call set aside. Send it again in a moment.',
+    type: 'not_ready' } });
 }
 
 export async function chat(body, model, { signal, retries = 3, recipe = null, pace = false, maxWaitMs = null, zdr = null, cacheHint = false,
@@ -154,7 +169,7 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
       await new Promise((r) => setTimeout(r, Math.min(wait, maxWaitMs ?? config.UPSTREAM_RETRY_WAIT_MAX_MS)));
       continue;
     }
-    if (!res.ok) throw new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
+    if (!res.ok) throw priceMoved(res.status, json, model) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
     return { json, latencyMs: Date.now() - started };
   }
 }
@@ -225,7 +240,7 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
       const text = await res.text();
       let json = null;
       try { json = JSON.parse(text); } catch { /* not json */ }
-      throw new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
+      throw priceMoved(res.status, json, model) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
     }
     // started: from here the answer may take as long as it is allowed, so long as it keeps coming
     const hush = () => {
@@ -464,6 +479,65 @@ export async function saveCatalog(models) {
  * refused on every call, which is what happened to aion-3.0 on production. Read with our key,
  * the list also carries each provider's first-token time and writing speed over the last half
  * hour, for everybody's traffic, which is a rough guide and never a measurement of ours. */
+/* Every provider of one model, with its prices and limits, for a call that may reach any of them (a
+   workspace that allows providers keeping data briefly). Read from OpenRouter the first time a call needs
+   it, kept for ALL_ENDPOINTS_HOURS, and read again after a failure ten minutes later. Calls for the same
+   model arriving together wait on one reading. Answers the rows, or null when nothing could be read. */
+const ALL_ENDPOINTS_HOURS = 6;
+const reading = new Map();
+export async function allEndpointsOf(modelId) {
+  const id = String(modelId || '');
+  const seen = await db.prepare('SELECT synced_at, ok FROM model_endpoints_all_sync WHERE model_id = ?').get(id);
+  if (seen && now() - Number(seen.synced_at) < ALL_ENDPOINTS_HOURS * 3600000) {
+    if (!Number(seen.ok)) return null;
+    const rows = await db.prepare('SELECT * FROM model_endpoints_all WHERE model_id = ?').all(id);
+    return rows.length ? rows : null;
+  }
+  if (reading.has(id)) return reading.get(id);
+  const p = (async () => {
+    try {
+      if (!canRoute()) return null;
+      const res = await fetch(`${config.OPENROUTER_BASE}/models/${id}/endpoints`, { headers: headers(), signal: AbortSignal.timeout(4000) });
+      if (!res.ok) throw new Error(`endpoints for ${id} answered ${res.status}`);
+      const body = await res.json();
+      const list = Array.isArray(body?.data?.endpoints) ? body.data.endpoints : [];
+      const at = now();
+      const rows = list.map((e) => ({
+        model_id: id,
+        tag: String(e.tag || e.provider_name || e.name || 'default'),
+        provider: String(e.provider_name || e.name || e.tag || ''),
+        price_in: Number(e.pricing?.prompt || 0),
+        price_out: Number(e.pricing?.completion || 0),
+        overrides_json: json(e.pricing?.overrides ?? null),
+        pricing_json: json(e.pricing ?? null),
+        context_len: e.context_length ?? null,
+        max_output: e.max_completion_tokens ?? null,
+        synced_at: at,
+      }));
+      await db.tx(async (tx) => {
+        await tx.prepare('DELETE FROM model_endpoints_all WHERE model_id = ?').run(id);
+        const put = tx.prepare(`INSERT INTO model_endpoints_all (model_id, tag, provider, price_in, price_out, overrides_json, pricing_json,
+            context_len, max_output, synced_at) VALUES (@model_id, @tag, @provider, @price_in, @price_out, @overrides_json, @pricing_json,
+            @context_len, @max_output, @synced_at) ON CONFLICT (model_id, tag) DO NOTHING`);
+        for (const r of rows) await put.run(r);
+        await tx.prepare(`INSERT INTO model_endpoints_all_sync (model_id, synced_at, ok) VALUES (?, ?, ?)
+            ON CONFLICT (model_id) DO UPDATE SET synced_at = excluded.synced_at, ok = excluded.ok`).run(id, at, rows.length ? 1 : 0);
+      });
+      return rows.length ? rows : null;
+    } catch {
+      // looked at again in ten minutes, rather than on every call meanwhile
+      await db.prepare(`INSERT INTO model_endpoints_all_sync (model_id, synced_at, ok) VALUES (?, ?, 0)
+          ON CONFLICT (model_id) DO UPDATE SET synced_at = excluded.synced_at, ok = 0`)
+        .run(id, now() - (ALL_ENDPOINTS_HOURS * 3600000 - 600000)).catch(() => {});
+      return null;
+    } finally {
+      reading.delete(id);
+    }
+  })();
+  reading.set(id, p);
+  return p;
+}
+
 export async function fetchZdrEndpoints() {
   const res = await fetch(`${config.OPENROUTER_BASE}/endpoints/zdr`, {
     headers: canRoute() ? { Authorization: `Bearer ${config.OPENROUTER_API_KEY}` } : {},

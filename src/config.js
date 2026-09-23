@@ -396,15 +396,19 @@ export const config = {
   /* Money set aside for a call in flight: the most it could cost (see callBound), reserved before it
      is sent and given back once it is answered. A hold lapses after this long, longer than the longest
      streamed answer allowed (UPSTREAM_STREAM_MAX_MS) with room for the tries before it, so a process that
-     died mid-call cannot freeze a balance, and a live call never outlives its own hold. A request with no cap on its answer, to a
-     model that publishes neither a longest answer nor a context length, is sent capped at
-     HOLD_MAX_OUTPUT_TOKENS, so what was set aside stays a bound. */
+     died mid-call cannot freeze a balance, and a live call never outlives its own hold. A request with no
+     cap on its answer, to a model that publishes neither a longest answer nor a context length (almost
+     none do), is held as if it wrote HOLD_MAX_OUTPUT_TOKENS; the request itself is never changed. */
   HOLD_TTL_MIN: num('HOLD_TTL_MIN', 45),
   /* What a call can cost beyond its text: a picture given by its address is held as this many prompt
      tokens (a large picture at full detail reads as a few thousand), and a call that searches the web
      as this much (the dearest search is a few cents). */
   HOLD_IMAGE_TOKENS: num('HOLD_IMAGE_TOKENS', 6000),
+  // how long a PDF sent inline may take to count its pages before the call is refused (see pdf-pages.js)
+  PDF_COUNT_MS: num('PDF_COUNT_MS', 5000),
   HOLD_WEB_SEARCH_USD: num('HOLD_WEB_SEARCH_USD', 0.05),
+  // a model that searches by itself (it has its own price per search) is held for up to this many searches a call
+  HOLD_SEARCHES_PER_CALL: num('HOLD_SEARCHES_PER_CALL', 20),
   /* Where the providers a call can reach are not each known (zero retention off), a hold prices it at
      the list price times this, and the request tells OpenRouter never to use a provider dearer than
      that (provider.max_price), so the margin is a bound and not a hope. A model with no known price is

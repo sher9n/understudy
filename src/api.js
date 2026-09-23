@@ -10,7 +10,7 @@ import { startSignUp, checkPassword, startSession, endSession, session, requireU
 import send, { codeEmail, accountExistsEmail, noticeEmail } from './email.js';
 import { issueKey, listKeys, revokeKey, revealKey, revealKeyById } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity, track } from './traffic.js';
-import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available, optimizeSpent, spentOnCalls } from './billing.js';
+import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available, optimizeSpent, spentOnCalls, maybeTopUp } from './billing.js';
 import { notifyPrefs, NOTIFY_KINDS } from './notify.js';
 import { routedSavings } from './eval/actual.js';
 import { adviceFor } from './eval/advice.js';
@@ -1650,6 +1650,9 @@ api.post('/settings/auto-topup', async (req, res) => {
     }
     await db.prepare(`UPDATE billing_accounts SET auto_topup = ?, topup_failed_note = NULL, updated_at = ?
                  WHERE workspace_id = ?`).run(b.enabled ? 1 : 0, now(), req.workspace.id);
+    /* Switched on with the balance already low: a top up is booked now. Otherwise the next one waited
+       for a call to be charged, and with an empty balance every call is refused before it is charged. */
+    if (b.enabled) await maybeTopUp(req.workspace.id).catch(() => {});
   }
   const after = await account(req.workspace.id);
   res.json({ ok: true, enabled: !!after.auto_topup, amountUsd: topUpAmountOf(after) });

@@ -232,13 +232,25 @@ Switching back for safety happens in every mode.
 ## Money and limits
 
 A call first sets aside the most it can cost, so calls arriving together can never spend the same
-balance twice, and gives back what it did not use. The most is a bound, not a guess: the cap the
-request names (`max_tokens`), or else the longest answer the model writes, times `n`, at the
-dearest provider that keeps nothing; for a model that publishes no longest answer, its whole
-context length. The request is sent as it came; only for a model that publishes neither is it
-capped at `HOLD_MAX_OUTPUT_TOKENS`. When less is free than a call could cost it
-runs only alone, so at most one call's overrun ever lands below zero; a call refused for that says
-how much it set aside, and that naming `max_tokens` sets aside less.
+balance twice, and gives back what it did not use. The most is a bound, not a guess:
+
+- the prompt at a token for every byte of its text, which no tokenizer goes past, and never more
+  than the model's context length; pictures, sound and video on their own terms, and a PDF by its
+  pages (counted in a separate worker with a time and a memory limit, a few at a time and one per
+  workspace at once; one that cannot be counted is refused);
+- the answer at the cap the request names (`max_tokens`), or else the longest answer every provider
+  it can reach publishes, or else the model's whole context length, times `n`;
+- all at the dearest provider the call can reach: the providers that keep nothing, or, where the
+  workspace allows others, every provider of the model, read from OpenRouter; with every published
+  exception that can apply (long-prompt prices, dearer hours, cache writes, fees per request).
+
+The request is sent as it came, but for a price ceiling (`provider.max_price`) at those prices, so
+OpenRouter never sends it to a dearer provider, fallbacks included. Where a model's providers cannot
+be read one by one, the ceiling is its list price times `HOLD_PRICE_MULTIPLE`. A provider that
+raised its price since we last read it is turned away; the call is answered `503 not_ready` and the
+model's prices are read again at once. When less is free than a call could cost it runs only alone,
+so at most one call's overrun ever lands below zero; a call refused for that says how much it set
+aside, and that naming `max_tokens` sets aside less.
 
 An answer that states no cost is charged from its tokens at list price, and a streamed answer that
 breaks off part way is charged for what it wrote; both are corrected a minute later to what
@@ -246,9 +258,11 @@ OpenRouter recorded for the call. A live stream may run as long as it keeps comi
 (`UPSTREAM_IDLE_MS` of silence at most, `UPSTREAM_STREAM_MAX_MS` in all).
 
 Automatic top up is opt-in, charges only a card saved for it at a checkout that said so, runs at
-most `TOPUP_MAX_PER_DAY` times a day, and is switched off only by a problem with the card (and the
-owner emailed); anything else is retried. Refunds and disputes take the money back off the balance,
-and a dispute decided for us gives it back. For that, the Stripe webhook needs these events:
+most `TOPUP_MAX_PER_DAY` times a day, and asks Stripe before every charge whether one is already
+under way. It is switched off by a problem with the card (and the owner emailed), by a refund and by
+a dispute; anything else is retried, and a top up that still fails stays on, tells the owner once and
+is tried again within the hour. Switching it on with the balance already low tops up at once.
+Refunds and disputes take the money back off the balance, and a dispute decided for us gives it back. For that, the Stripe webhook needs these events:
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
 `checkout.session.async_payment_failed`, `payment_intent.succeeded`,
 `payment_intent.payment_failed`, `charge.refunded`, `charge.dispute.created`,

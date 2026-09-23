@@ -47,7 +47,10 @@ function meaningFor(kind, status) {
     return 'An automatic top up did not go through for a reason that is not the customer\'s card.';
   }
   if (kind === 'charging a call') return 'An answer was sent to a customer and charging for it failed. Its hold was given back, and the call is not charged.';
-  if (kind === 'model catalogue' || kind === 'provider list') return 'A list we read from OpenRouter looked wrong, so the one we have was kept.';
+  if (kind === 'model catalogue' || kind === 'provider list') {
+    return status ? `OpenRouter did not give us the list (http ${status}). The one we have is kept, and it is read again soon.`
+      : 'A list we read from OpenRouter looked wrong, so the one we have was kept.';
+  }
   return meaning(status);
 }
 
@@ -61,14 +64,20 @@ const headlineFor = (kind) => ({
 function compose(kind, w) {
   const many = w.count > 1;
   const headline = headlineFor(kind);
+  const aboutCalls = !['automatic top up', 'model catalogue', 'provider list'].includes(kind);
+  // only the first letter lowered, so a name inside the headline ("OpenRouter") keeps its capitals
+  const inline = headline.charAt(0).toLowerCase() + headline.slice(1);
+  const minutes = Math.round((Date.now() - w.openedAt) / 60000);
   const subject = many
-    ? `Understudy: ${w.count} failed calls (${kind})`
-    : `Understudy: a call failed (${kind})`;
+    ? `Understudy: ${w.count} ${aboutCalls ? 'failed calls' : 'failures'} (${kind})`
+    : `Understudy: ${aboutCalls ? 'a call failed' : inline} (${kind})`;
+  // what happened, in words that fit it: calls that failed, or a failure of ours that happened several times
+  const lead = many
+    ? (aboutCalls ? `${w.count} calls failed in the last ${minutes} minutes` : `${headline}, ${w.count} times in the last ${minutes} minutes`)
+    : headline;
 
   const lines = [
-    many
-      ? `${w.count} calls failed in the last ${Math.round((Date.now() - w.openedAt) / 60000)} minutes.`
-      : `${headline}.`,
+    `${lead}.`,
     '',
     meaningFor(kind, w.worstStatus),
     '',
@@ -82,8 +91,7 @@ function compose(kind, w) {
   const html = `<!doctype html><html><body style="margin:0;background:#f7f7f8;padding:28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
   <div style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #e7e7e9;border-radius:14px;padding:26px;">
     <div style="font-weight:700;font-size:16px;letter-spacing:-0.03em;color:#0d0d12;">Understudy</div>
-    <p style="font-size:15px;line-height:1.55;color:#0d0d12;margin:16px 0 4px;font-weight:600;">${
-      many ? `${w.count} calls failed in the last ${Math.round((Date.now() - w.openedAt) / 60000)} minutes` : headline}</p>
+    <p style="font-size:15px;line-height:1.55;color:#0d0d12;margin:16px 0 4px;font-weight:600;">${escape(lead)}</p>
     <p style="font-size:14px;line-height:1.6;color:#55555f;margin:0 0 18px;">${meaningFor(kind, w.worstStatus)}</p>
     <div style="font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;line-height:1.7;color:#0d0d12;
                 background:#f7f7f8;border:1px solid #e7e7e9;border-radius:9px;padding:12px 14px;white-space:pre-wrap;">${
@@ -159,3 +167,6 @@ export const canAlert = () => config.ALERTS_ENABLED && !!config.ALERT_EMAIL && c
 export async function flushAllAlerts() {
   for (const kind of [...windows.keys()]) await flush(kind);
 }
+
+// for tests: an alert email as it would be sent, from a window of failures
+export { compose as composeAlert };

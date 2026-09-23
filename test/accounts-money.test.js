@@ -59,10 +59,21 @@ const NOCOST = 'test/no-cost';
 const NOLIMIT = 'test/no-limit';
 const NOWINDOW = 'test/no-window';
 const STREAMY = 'test/streamy';
+const NOUSAGE = 'test/no-usage';
+const PRICEY = 'test/pricey';
 const seen = [];
+// every provider of a model, as OpenRouter's list of them says, for the models a test sets; others answer 404
+const allEndpoints = new Map();
 const records = new Map();
 let gen = 0;
 const provider = http.createServer((req, res) => {
+  const listed = req.method === 'GET' && req.url.match(/\/models\/(.+)\/endpoints/);
+  if (listed) {
+    const list = allEndpoints.get(decodeURIComponent(listed[1]));
+    res.writeHead(list ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(list ? { data: { id: listed[1], endpoints: list } } : { error: { message: 'no such model' } }));
+    return;
+  }
   if (req.method === 'GET' && req.url.includes('/generation')) {
     const id = new URL(req.url, 'http://x').searchParams.get('id');
     if (!records.has(id)) { res.writeHead(404); res.end('{}'); return; }
@@ -76,6 +87,11 @@ const provider = http.createServer((req, res) => {
     const p = JSON.parse(body || '{}');
     seen.push(p);
     const id = `gen-${++gen}`;
+    if (p.model === PRICEY) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 404, message: 'No endpoints found that satisfy the max price for this request' } }));
+      return;
+    }
     if (p.model === STREAMY && p.stream) {
       const how = String(p.messages?.at(-1)?.content || '');
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -101,6 +117,8 @@ const provider = http.createServer((req, res) => {
       } else if (p.model === NOCOST) {
         usage = { prompt_tokens: 100, completion_tokens: 10 };
         records.set(id, 0.0005);
+      } else if (p.model === NOUSAGE) {
+        usage = null;
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ id, model: p.model,
@@ -149,6 +167,8 @@ test.before(async () => {
     { model_id: NOLIMIT, name: 'no limit', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
     { model_id: NOWINDOW, name: 'no window', context_len: null, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1 },
     { model_id: STREAMY, name: 'streamy', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
+    { model_id: NOUSAGE, name: 'no usage', context_len: 200000, price_in: 1e-5, price_out: 2e-5, open_weights: 0, zdr: 1, max_output: 8000 },
+    { model_id: PRICEY, name: 'pricey', context_len: 200000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 8000 },
   ]);
 });
 
@@ -487,27 +507,126 @@ test('many calls with no cap on their answer cannot spend a small balance many t
   if (refused.status === 402) assert.match((await refused.json()).error.message, /Add credit/);
 });
 
-test('a request is sent as it came where every provider publishes its longest answer, and capped where not', async () => {
+test('a request is sent as it came but for a price ceiling: the known providers\' own prices, or the list price with a margin', async () => {
   const { workspace, key } = await auth.createAccount({ email: 'nolimit@example.test', password: 'password-123' });
   await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
   await saveZdrEndpoints([
     { model_id: NOCOST, tag: 'a', provider: 'A', price_in: 1e-6, price_out: 2e-6, context_len: 200000, max_output: 8000 },
   ]);
   seen.length = 0;
-  // every provider that keeps nothing publishes its longest answer: that is the bound, and the call goes as it came
+  // every provider that keeps nothing is known, with its prices and its longest answer: the call goes exactly as it came
   assert.equal((await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
-  assert.equal(seen.at(-1).max_tokens, undefined, 'sent as it came');
-  assert.ok(seen.at(-1).provider?.max_price, 'with the price ceiling the hold was sized on');
-  // providers not each known: sent capped at what the window has room for after the prompt
+  assert.equal(seen.at(-1).max_tokens, undefined, 'no cap added');
+  // the dearest known provider's prices, per million: a prompt held at what caching it costs, a quarter more
+  assert.deepEqual(seen.at(-1).provider?.max_price, { prompt: 1.25, completion: 2 }, 'a ceiling at the known prices');
+  // providers not known one by one: still no cap, and a ceiling at the list price with its margin
   assert.equal((await call(key.secret, { model: NOLIMIT, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
-  assert.ok(seen.at(-1).max_tokens > 0 && seen.at(-1).max_tokens < 200000, `capped at its room: ${seen.at(-1).max_tokens}`);
-  // no window known either: sent with the cap it was held for
+  assert.equal(seen.at(-1).max_tokens, undefined, 'no cap added');
+  assert.deepEqual(seen.at(-1).provider?.max_price, { prompt: 2.5, completion: 4 }, 'a ceiling at twice the list price');
   assert.equal((await call(key.secret, { model: NOWINDOW, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
-  assert.equal(seen.at(-1).max_tokens, config.HOLD_MAX_OUTPUT_TOKENS, 'sent with the cap it was held for');
+  assert.equal(seen.at(-1).max_tokens, undefined, 'no cap added, even with no window known');
   // a request that names its own cap is sent with it
   assert.equal((await call(key.secret, { model: NOLIMIT, max_tokens: 77, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
   assert.equal(seen.at(-1).max_tokens, 77);
   await saveZdrEndpoints([]);
+});
+
+test('an answer that reports no usage at all is charged for its prompt as well as its answer', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'nousage@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  const prompt = 'word '.repeat(3000);
+  const r = await call(key.secret, { model: NOUSAGE, max_tokens: 50, messages: [{ role: 'user', content: prompt }] });
+  assert.equal(r.status, 200);
+  const charged = -Number((await db.prepare(`SELECT SUM(amount_usd) AS s FROM ledger WHERE workspace_id = ? AND kind = 'call'`).get(workspace.id)).s);
+  const promptOnly = billing.promptTokensOf({ messages: [{ role: 'user', content: prompt }] }) * 1e-5;
+  assert.ok(charged >= promptOnly, `the prompt is in the estimate: charged ${charged}, prompt alone ${promptOnly}`);
+  const row = await db.prepare('SELECT cost_estimated FROM calls WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 1').get(workspace.id);
+  assert.equal(Number(row.cost_estimated), 1, 'an estimate, to be corrected from the provider\'s record');
+});
+
+test('no provider within a call\'s ceiling is a moment\'s wait, and the model\'s prices are read again', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'pricemoved@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  await db.prepare(`INSERT INTO model_endpoints_all_sync (model_id, synced_at, ok) VALUES (?, ?, 1)
+      ON CONFLICT (model_id) DO UPDATE SET synced_at = excluded.synced_at`).run(PRICEY, Date.now());
+  await enqueue('model_health', {}, { runAfter: Date.now() + 3600000, unique: true });
+  const r = await call(key.secret, { model: PRICEY, max_tokens: 5, messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 503, 'not a 404, which from a chat endpoint reads as a wrong address');
+  const j = await r.json();
+  assert.equal(j.error.type, 'not_ready');
+  assert.match(j.error.message, /Send it again in a moment/);
+  await new Promise((done) => setTimeout(done, 50));
+  assert.equal(await db.prepare('SELECT 1 FROM model_endpoints_all_sync WHERE model_id = ?').get(PRICEY), undefined, 'its providers are read again');
+  const health = await db.prepare(`SELECT run_after FROM jobs WHERE kind = 'model_health' AND status = 'queued'`).get();
+  assert.ok(Number(health.run_after) <= Date.now(), 'and the providers that keep nothing now, not in an hour');
+  assert.equal((await billing.available(workspace.id)).inFlight, 0, 'the hold was given back');
+  assert.equal((await billing.account(workspace.id)).balance_usd, 5, 'and nothing was charged');
+});
+
+test('a prompt is counted a token a byte, and what parts carry inline is left out by where it sits, not by how it starts', async () => {
+  const long = 'x'.repeat(40000);
+  // text that starts "data:" is text, in a message or in a text part
+  assert.ok((await billing.callShape({ messages: [{ role: 'user', content: `data:${long}` }] })).pin >= 40000);
+  assert.ok((await billing.callShape({ messages: [{ role: 'user', content: [{ type: 'text', text: `data: ${long}` }] }] })).pin >= 40000);
+  // characters a rule of thumb undercounts are counted at their bytes at least
+  const odd = await billing.callShape({ messages: [{ role: 'user', content: '\u0001'.repeat(10000) + '\u{1F9EA}'.repeat(1000) }] });
+  assert.ok(odd.pin >= 10000 + 4000, `control characters and emoji: ${odd.pin}`);
+  // a picture's data is not text: it is a picture
+  const pic = await billing.callShape({ messages: [{ role: 'user', content: [
+    { type: 'text', text: 'what is this' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${'A'.repeat(100000)}` } }] }] });
+  assert.ok(pic.pin < 1000, `the picture's bytes are not read as text: ${pic.pin}`);
+  assert.equal(pic.images, 1);
+  assert.ok(pic.extraIn >= config.HOLD_IMAGE_TOKENS);
+  // video sent inline is counted by its bytes
+  const video = await billing.callShape({ messages: [{ role: 'user', content: [
+    { type: 'video_url', video_url: { url: `data:video/mp4;base64,${'A'.repeat(40000)}` } }] }] });
+  assert.ok(video.extraIn >= 30000, `video: ${video.extraIn}`);
+  assert.ok(video.pin < 1000);
+  // a PDF given as file.url is counted by its pages, as one given as file_data is
+  const { PDFDocument } = await import('pdf-lib');
+  const doc = await PDFDocument.create();
+  for (let i = 0; i < 5; i += 1) doc.addPage([60, 60]);
+  const pdf = `data:application/pdf;base64,${Buffer.from(await doc.save()).toString('base64')}`;
+  const viaUrl = await billing.callShape({ messages: [{ role: 'user', content: [{ type: 'file', file: { filename: 'a.pdf', url: pdf } }] }] });
+  assert.ok(viaUrl.extraUsd >= 5 * 0.0025 - 1e-12, `five pages: ${viaUrl.extraUsd}`);
+  // and a file carrying inline data beside an address is refused, since the address could be read instead
+  const { workspace, key } = await auth.createAccount({ email: 'twofields@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  const both = await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: [
+    { type: 'file', file: { filename: 'a.pdf', file_data: pdf, url: 'https://example.test/a.pdf' } }] }] });
+  assert.equal(both.status, 400);
+  assert.match((await both.json()).error.message, /address/);
+});
+
+test('a request\'s ceiling covers the fallbacks it names, and its hold is read at that ceiling', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'fallceiling@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  seen.length = 0;
+  const r = await call(key.secret, { model: NOCOST, models: [LONG], max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 200);
+  const sent = seen.at(-1);
+  // LONG's list price, twice over as its providers are not known one by one: $1e-5 out is $20 a million
+  assert.ok(sent.provider.max_price.completion >= 20, `the fallback's price is let through: ${JSON.stringify(sent.provider.max_price)}`);
+  // and what the call set aside covered NOCOST's own answer at that price, not at its own
+  const shape = await billing.callShape({ model: NOCOST, models: [LONG], max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] });
+  const own = await billing.callBound(NOCOST, shape, { zdr: true });
+  const fall = await billing.callBound(LONG, shape, { zdr: true });
+  const ceiling = billing.mergeCeilings([own.ceiling, fall.ceiling]);
+  assert.ok(billing.boundAt(own.parts, ceiling) > own.usd, 'dearer at the shared ceiling');
+});
+
+test('an alert about a failure of ours says what failed, not that calls failed', async () => {
+  const { composeAlert } = await import('../src/alerts.js');
+  const window = (count) => ({ count, openedAt: Date.now() - 12 * 60000, worstStatus: 0,
+    samples: [{ at: '12:00', model: 'stripe', status: 0, message: 'gave up after 5 tries' }] });
+  const many = composeAlert('automatic top up', window(3));
+  assert.match(many.subject, /3 failures \(automatic top up\)/);
+  assert.match(many.text, /^An automatic top up failed, 3 times in the last 12 minutes\./);
+  assert.doesNotMatch(many.text, /calls failed/);
+  const one = composeAlert('model catalogue', window(1));
+  assert.match(one.subject, /the model list from OpenRouter looked wrong/, 'OpenRouter keeps its capitals');
+  const calls = composeAlert('routed call', window(4));
+  assert.match(calls.text, /^4 calls failed in the last 12 minutes\./);
 });
 
 test('a daily limit counts calls in flight, so a burst cannot run far past it', async () => {
@@ -787,14 +906,24 @@ test('a fallback list, web search, pictures by address and price tiers all count
   assert.ok(outs.includes(402), `the fallback's cost was set aside: ${outs.join(',')}`);
 });
 
-test('a provider that publishes no longest answer means the call is sent capped', async () => {
+test('a provider that publishes no longest answer means the call is held for the whole window, and never capped', async () => {
   await saveZdrEndpoints([
     { model_id: NOCOST, tag: 'a', provider: 'A', price_in: 1e-6, price_out: 2e-6, context_len: 200000, max_output: 8000 },
     { model_id: NOCOST, tag: 'b', provider: 'B', price_in: 1e-6, price_out: 2e-6, context_len: 200000, max_output: null },
   ]);
-  const b = await billing.callBound(NOCOST, { pin: 10, cap: null, n: 1 }, { zdr: true });
-  assert.equal(b.known, false, 'one provider could write on, so the bound needs a cap');
-  assert.equal(b.each, 8000, 'the cap is the model\'s own longest answer');
+  const open = await billing.callBound(NOCOST, { pin: 10, cap: null, n: 1 }, { zdr: true });
+  assert.equal(open.each, 200000, 'one provider could write to the end of the window');
+  assert.equal(open.known, true);
+  const want = { prompt: 1.25e-6, completion: 2e-6, request: 0, image: 0, search: 0 };
+  for (const k of Object.keys(want)) assert.ok(Math.abs(open.ceiling[k] - want[k]) < 1e-15, `the known providers' own ${k} price: ${open.ceiling[k]}`);
+  // every provider publishes its longest answer: the longest of them is the bound
+  await saveZdrEndpoints([
+    { model_id: NOCOST, tag: 'a', provider: 'A', price_in: 1e-6, price_out: 2e-6, context_len: 200000, max_output: 8000 },
+    { model_id: NOCOST, tag: 'b', provider: 'B', price_in: 1e-6, price_out: 3e-6, context_len: 200000, max_output: 6000 },
+  ]);
+  const closed = await billing.callBound(NOCOST, { pin: 10, cap: null, n: 1 }, { zdr: true });
+  assert.equal(closed.each, 8000);
+  assert.ok(Math.abs(closed.usd - (10 * 1e-6 * 1.25 + 8000 * 3e-6)) < 1e-12, `the dearest provider, no margin: ${closed.usd}`);
   await saveZdrEndpoints([]);
 });
 
@@ -944,6 +1073,10 @@ test('tools the provider runs itself, and videos by address, are refused; free p
   const free = await call(key.secret, { model: 'liquid/lfm-2.5-2.6b:free', messages: [{ role: 'user', content: 'hi' }] });
   assert.equal(free.status, 400);
   assert.match((await free.json()).error.message, /free variant/);
+  // even where the paid model is one we route: a free variant is a different offer, never routed or charged for
+  const freeOfOurs = await call(key.secret, { model: `${NOCOST}:free`, messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(freeOfOurs.status, 400);
+  assert.match((await freeOfOurs.json()).error.message, /free variant/);
 });
 
 test('a fallback named without its maker is sent under the name it was priced as', async () => {
@@ -971,7 +1104,7 @@ test('a call with no model is checked against the model its workload was made wi
   assert.match((await r.json()).error.message, /workload's model is not one we route to/);
 });
 
-test('with zero retention off, a short uncapped call holds the model\'s own longest answer at a capped price, and says so upstream', async () => {
+test('with zero retention off, a call is bounded by every provider OpenRouter lists, or by the list price with a ceiling when the list cannot be read', async () => {
   await saveCatalog([
     { model_id: MODEL, name: 'gpt-5.4', context_len: 400000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1, max_output: 128000,
       overrides_json: JSON.stringify([{ min_prompt_tokens: 272000, prompt: '0.000005', completion: '0.0000225' }]) },
@@ -983,22 +1116,50 @@ test('with zero retention off, a short uncapped call holds the model\'s own long
     { model_id: 'test/pictures', name: 'pictures', context_len: 100000, price_in: 1e-6, price_out: 2e-6, open_weights: 0, zdr: 1, max_output: 4000,
       pricing_json: JSON.stringify({ prompt: '0.000001', completion: '0.000002', image_output: '0.00012', request: '0.01' }) },
   ]);
+  // every provider of the model, one dearer than the list price, each publishing its longest answer
+  allEndpoints.set(MODEL, [
+    { tag: 'a', provider_name: 'A', context_length: 400000, max_completion_tokens: 128000, pricing: { prompt: '0.0000025', completion: '0.000015' } },
+    { tag: 'b', provider_name: 'B', context_length: 400000, max_completion_tokens: 64000, pricing: { prompt: '0.000003', completion: '0.00002' } },
+  ]);
+  await db.prepare('DELETE FROM model_endpoints_all_sync').run();
+  const known = await billing.callBound(MODEL, { pin: 20, cap: null, n: 1 }, { zdr: false });
+  assert.equal(known.each, 128000, 'the longest answer any provider writes');
+  assert.equal(known.known, true);
+  assert.ok(Math.abs(known.ceiling.completion - 2e-5) < 1e-15, 'the ceiling is the dearest provider\'s price, no margin');
+  assert.ok(Math.abs(known.usd - (20 * 3e-6 * 1.25 + 128000 * 2e-5)) < 1e-9, `the dearest provider, no margin: ${known.usd}`);
+  // the list is kept: a second call does not ask again
+  const asked = await db.prepare('SELECT COUNT(*) AS n FROM model_endpoints_all WHERE model_id = ?').get(MODEL);
+  assert.equal(Number(asked.n), 2);
+  // OpenRouter's list cannot be read: the list price with its margin, a ceiling that makes the margin hold, the whole window
+  allEndpoints.delete(MODEL);
+  await db.prepare('DELETE FROM model_endpoints_all_sync').run();
   const short = await billing.callBound(MODEL, { pin: 20, cap: null, n: 1 }, { zdr: false });
-  // the model's own longest answer at twice the list price, and the long-prompt tier left out for a short prompt
-  assert.ok(short.usd < 128000 * 15e-6 * 2 * 1.01 + 1e-6, `not the whole window: ${short.usd}`);
-  assert.equal(short.each, 128000);
-  assert.equal(short.known, false, 'the request carries the cap');
-  assert.ok(Math.abs(short.caps.completion - 15e-6 * 2) < 1e-12, 'and a price ceiling that makes the margin a bound');
+  assert.equal(short.each, 400000, 'no provider is known to stop sooner than the window');
+  assert.equal(short.known, false);
+  assert.ok(Math.abs(short.ceiling.completion - 15e-6 * 2) < 1e-12, 'and a price ceiling that makes the margin a bound');
   const long = await billing.callBound(MODEL, { pin: 300000, cap: 100, n: 1 }, { zdr: false });
-  assert.ok(Math.abs(long.caps.completion - 22.5e-6 * 2) < 1e-12, 'a prompt long enough for the tier is priced at it');
+  assert.ok(Math.abs(long.ceiling.completion - 22.5e-6 * 2) < 1e-12, 'a prompt long enough for the tier is priced at it');
   // pictures written, and a fee per request, are priced as such
   const pic = await billing.callBound('test/pictures', { pin: 10, cap: 4000, n: 1, outputs: ['image'] }, { zdr: false });
   assert.ok(pic.usd >= 4000 * 0.00012 * 2 + 0.01 * 2 - 1e-9, `pictures: ${pic.usd}`);
   // and the request tells OpenRouter the ceiling
   const { buildUpstream } = await import('../src/openrouter.js');
-  const up = buildUpstream({ messages: [], provider: { max_price: { prompt: 0.5 } } }, MODEL, null, { zdr: false, priceCaps: { [MODEL]: short.caps } });
+  const up = buildUpstream({ messages: [], provider: { max_price: { prompt: 0.5 } } }, MODEL, null, { zdr: false, priceCaps: { [MODEL]: short.ceiling } });
   assert.equal(up.provider.max_price.prompt, 0.5, 'a lower ceiling the customer set is kept');
   assert.ok(up.provider.max_price.completion >= 30 && up.provider.max_price.completion < 30.001, `per million: ${up.provider.max_price.completion}`);
+  // end to end, for a workspace that allows providers keeping data: the request goes exactly as it came
+  const { workspace, key } = await auth.createAccount({ email: 'retention@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 20, note: 'test credit' });
+  await db.prepare('UPDATE workspaces SET zdr_required = 0 WHERE id = ?').run(workspace.id);
+  allEndpoints.set(NOCOST, [
+    { tag: 'a', provider_name: 'A', context_length: 200000, max_completion_tokens: 8000, pricing: { prompt: '0.000001', completion: '0.000002' } },
+  ]);
+  seen.length = 0;
+  assert.equal((await call(key.secret, { model: NOCOST, messages: [{ role: 'user', content: 'hello' }] })).status, 200);
+  const sent = seen.find((p) => p.model === NOCOST);
+  assert.equal(sent.max_tokens, undefined, 'no cap added');
+  assert.deepEqual(sent.provider?.max_price, { prompt: 1.25, completion: 2 }, 'a ceiling at the prices OpenRouter listed');
+  allEndpoints.clear();
 });
 
 test('a PDF sent inline is counted by its pages, however small each page is', async () => {
@@ -1024,8 +1185,8 @@ test('a second top up job asks Stripe first, even on its first try, so one low b
   assert.equal(made, 0);
 });
 
-test('declines Stripe says to retry are retried, and giving up pauses top up and tells the owner once', async () => {
-  const { workspace } = await auth.createAccount({ email: 'retrydecline@example.test', password: 'password-123' });
+test('declines Stripe says to retry are retried, and giving up keeps top up on, tells the owner once and books the next try', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'retrydecline@example.test', password: 'password-123' });
   const s = await billing.stripe();
   s.paymentIntents.list = async () => ({ data: [] });
   await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_4', payment_method = 'pm_4', card_for_topups = 1,
@@ -1034,13 +1195,31 @@ test('declines Stripe says to retry are retried, and giving up pauses top up and
     e.raw = { decline_code: 'try_again_later' }; throw e; };
   await assert.rejects(billing.runTopUp(workspace.id));
   assert.equal((await billing.account(workspace.id)).auto_topup, 1, 'still on: this decline is worth another try');
+  // Stripe's own word about the same decline leaves it on too
+  await webhook(event('payment_intent.payment_failed', { id: 'pi_retry_later', object: 'payment_intent', metadata: { topup: '1', workspace_id: workspace.id },
+    last_payment_error: { code: 'card_declined', decline_code: 'try_again_later' } }));
+  assert.equal((await billing.account(workspace.id)).auto_topup, 1, 'the webhook does not switch it off for a decline to retry');
   const before = mail.filter((m) => m.includes('to: retrydecline@example.test')).length;
   assert.equal(await billing.giveUpTopUp(workspace.id, new Error('Stripe down')), true);
-  assert.equal(await billing.giveUpTopUp(workspace.id, new Error('Stripe down')), false, 'a second give up changes nothing');
-  const acct = await billing.account(workspace.id);
-  assert.equal(acct.auto_topup, 0);
-  assert.equal(acct.topup_failed_note, 'unreachable');
+  assert.equal(await billing.giveUpTopUp(workspace.id, new Error('Stripe down')), false, 'a second give up says nothing more');
+  assert.equal((await billing.account(workspace.id)).auto_topup, 1, 'nothing is wrong with the card, so top up stays on');
   assert.equal(mail.filter((m) => m.includes('to: retrydecline@example.test')).length - before, 1, 'told once');
+  const rows = Number((await db.prepare(`SELECT COUNT(*) AS n FROM activity WHERE workspace_id = ? AND title = 'An automatic top up is taking longer'`).get(workspace.id)).n);
+  assert.equal(rows, 1, 'one line on the activity feed');
+  // the next try is booked with no call charged: by the hourly sweep, and by a call turned away for balance
+  const payload = JSON.stringify({ workspaceId: workspace.id });
+  const queued = async () => Number((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'topup' AND payload = ? AND status = 'queued'`).get(payload)).n);
+  await db.prepare(`DELETE FROM jobs WHERE kind = 'topup' AND payload = ?`).run(payload);
+  assert.ok(await billing.sweepTopUps() >= 1);
+  assert.equal(await queued(), 1, 'the sweep booked it');
+  await db.prepare(`DELETE FROM jobs WHERE kind = 'topup' AND payload = ?`).run(payload);
+  await db.prepare('UPDATE billing_accounts SET balance_usd = 0 WHERE workspace_id = ?').run(workspace.id);
+  assert.equal((await call(key.secret, { model: NOCOST, max_tokens: 5, messages: [{ role: 'user', content: 'hi' }] })).status, 402);
+  for (let i = 0; i < 50 && (await queued()) === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(await queued(), 1, 'the call turned away booked it');
+  // a new low balance, after a credit landed, is told again
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 1, note: 'test credit', ref: 'pi_new_episode' });
+  assert.equal(await billing.giveUpTopUp(workspace.id, new Error('Stripe down')), true, 'a new low balance is a new telling');
 });
 
 test('the limit totals never move a day backwards, and are read again from the ledger', async () => {
@@ -1060,4 +1239,119 @@ test('the limit totals never move a day backwards, and are read again from the l
   assert.ok(await billing.reconcileLimitTotals() >= 1);
   const fee = 1 + config.ROUTING_FEE_PCT / 100;
   assert.ok(Math.abs((await billing.spentOnCalls(workspace.id)).day - 0.75 * fee) < 1e-9);
+  // a row already on a later day (another process's clock, a charge just after midnight) is left as it is
+  await db.prepare('UPDATE billing_accounts SET call_day_start = ?, call_day_usd = 0.33 WHERE workspace_id = ?').run(Number(acct.call_day_start) + 86400000, workspace.id);
+  await billing.reconcileLimitTotals();
+  const later = await db.prepare('SELECT call_day_start, call_day_usd FROM billing_accounts WHERE workspace_id = ?').get(workspace.id);
+  assert.equal(Number(later.call_day_start), Number(acct.call_day_start) + 86400000, 'the later day stays');
+  assert.equal(Number(later.call_day_usd), 0.33, 'and so does its total');
+});
+
+test('switching automatic top up on with the balance already low books a top up at once', async () => {
+  const { workspace, user } = await auth.createAccount({ email: 'switchon@example.test', password: 'password-123' });
+  await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_on', payment_method = 'pm_on', card_for_topups = 1,
+                     balance_usd = 0.5, auto_topup = 0 WHERE workspace_id = ?`).run(workspace.id);
+  const sess = `us_session=${await auth.startSession(user.id)}`;
+  const r = await post('/api/settings/auto-topup', { enabled: true }, { cookie: sess });
+  assert.equal(r.status, 200);
+  const booked = Number((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'topup' AND payload = ? AND status = 'queued'`)
+    .get(JSON.stringify({ workspaceId: workspace.id }))).n);
+  assert.equal(booked, 1, 'booked now, not after a call is charged');
+});
+
+test('the check before a top up ignores payments already credited, and reads every page Stripe has', async () => {
+  const { workspace } = await auth.createAccount({ email: 'precheck@example.test', password: 'password-123' });
+  const s = await billing.stripe();
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 10, note: 'test credit', ref: 'pi_landed' });
+  await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_5', payment_method = 'pm_5', card_for_topups = 1,
+                     balance_usd = 1, auto_topup = 1 WHERE workspace_id = ?`).run(workspace.id);
+  let made = 0;
+  const keys = [];
+  s.paymentIntents.create = async (_b, opts) => { made += 1; keys.push(opts.idempotencyKey); return { id: `pi_pc_${made}` }; };
+  // a top up that already landed, in the same second as this one's window opened: it does not stand in for this one
+  s.paymentIntents.list = async () => ({ data: [{ id: 'pi_landed', status: 'succeeded', metadata: { topup: '1', workspace_id: workspace.id } }], has_more: false });
+  const out = await billing.runTopUp(workspace.id, { attempt: 0, jobId: 'job_a' });
+  assert.notEqual(out.already, true);
+  assert.equal(made, 1, 'charged');
+  // one still under way, on the second page of what Stripe has, is found
+  const pages = [];
+  s.paymentIntents.list = async (q) => {
+    pages.push(q.starting_after ?? null);
+    return q.starting_after
+      ? { data: [{ id: 'pi_going', status: 'processing', metadata: { topup: '1', workspace_id: workspace.id } }], has_more: false }
+      : { data: Array.from({ length: 100 }, (_, i) => ({ id: `pi_other_${i}`, status: 'succeeded', metadata: {} })), has_more: true };
+  };
+  const again = await billing.runTopUp(workspace.id, { attempt: 0, jobId: 'job_b' });
+  assert.equal(again.already, true);
+  assert.equal(made, 1, 'no second charge');
+  assert.deepEqual(pages, [null, 'pi_other_99']);
+  // a later job for the same low balance sends Stripe a label of its own, so it never gets an earlier job's answer back
+  s.paymentIntents.list = async () => ({ data: [], has_more: false });
+  await billing.runTopUp(workspace.id, { attempt: 0, jobId: 'job_c' });
+  assert.equal(made, 2);
+  assert.notEqual(keys[0], keys[1], `one label per job: ${keys.join(' / ')}`);
+});
+
+test('a refund switches automatic top up off, so the card is not charged straight back', async () => {
+  const { workspace } = await auth.createAccount({ email: 'refundoff@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 20, note: 'test credit', ref: 'pi_refundoff' });
+  await db.prepare(`UPDATE billing_accounts SET stripe_customer = 'cus_r', payment_method = 'pm_r', card_for_topups = 1, auto_topup = 1
+                     WHERE workspace_id = ?`).run(workspace.id);
+  await webhook(event('charge.refunded', { id: 'ch_refundoff', object: 'charge', amount_refunded: 1700, metadata: { workspace_id: workspace.id } }));
+  const acct = await billing.account(workspace.id);
+  assert.equal(acct.balance_usd, 3);
+  assert.equal(acct.auto_topup, 0, 'off');
+  const payload = JSON.stringify({ workspaceId: workspace.id });
+  await billing.sweepTopUps();
+  assert.equal(Number((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'topup' AND payload = ?`).get(payload)).n), 0, 'and nothing books a charge');
+  const said = await db.prepare(`SELECT detail FROM activity WHERE workspace_id = ? AND title LIKE '%came off your balance' ORDER BY created_at DESC LIMIT 1`).get(workspace.id);
+  assert.match(said.detail, /Automatic top up is off/);
+});
+
+test('a PDF that cannot be counted in time is refused, and files are counted a few at a time', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'slowpdf@example.test', password: 'password-123' });
+  await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+  const { pdfCounting } = await import('../src/pdf-pages.js');
+  // a page tree that points twice at the same node at every level: a trillion ways down to one page
+  const dag = (depth, salt) => {
+    const objs = ['1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n'];
+    for (let i = 0; i < depth; i += 1) objs.push(`${2 + i} 0 obj\n<< /Type /Pages /Kids [${3 + i} 0 R ${3 + i} 0 R] /Count 2 >>\nendobj\n`);
+    objs.push(`${2 + depth} 0 obj\n<< /Type /Page /Parent ${1 + depth} 0 R /MediaBox [0 0 10 10] >>\nendobj\n`);
+    const text = `%PDF-1.4\n%${salt}\n${objs.join('')}trailer\n<< /Root 1 0 R /Size ${3 + depth} >>\n%%EOF\n`;
+    return `data:application/pdf;base64,${Buffer.from(text).toString('base64')}`;
+  };
+  const asFile = (data) => ({ model: NOCOST, max_tokens: 5, messages: [{ role: 'user', content: [
+    { type: 'text', text: 'read this' }, { type: 'file', file: { filename: 'a.pdf', file_data: data } }] }] });
+  const was = config.PDF_COUNT_MS;
+  config.PDF_COUNT_MS = 400;
+  try {
+    const slow = await call(key.secret, asFile(dag(40, 'one')));
+    assert.equal(slow.status, 400);
+    assert.match((await slow.json()).error.message, /could not be counted \(took too long to count\)/);
+    // this workspace sends two at once and another workspace one: each workspace has one counted at a time,
+    // so the other's is counted straight away and this one's second waits behind its own first
+    const other = await auth.createAccount({ email: 'slowpdf-other@example.test', password: 'password-123' });
+    await billing.move(other.workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
+    const three = Promise.all([
+      call(key.secret, asFile(dag(40, 'a'))), call(key.secret, asFile(dag(40, 'b'))), call(other.key.secret, asFile(dag(40, 'c'))),
+    ].map((p) => p.then((r) => r.status)));
+    await new Promise((r) => setTimeout(r, 250));
+    assert.deepEqual(pdfCounting(), { active: 2, waiting: 0, held: 1 }, 'two counters busy, one file waiting behind its own workspace');
+    assert.deepEqual(await three, [400, 400, 400]);
+    assert.deepEqual(pdfCounting(), { active: 0, waiting: 0, held: 0 }, 'every counter given back');
+    // three files that could not be counted in ten minutes: the next is refused at once, unread
+    const started = Date.now();
+    const rested = await call(key.secret, asFile(dag(40, 'd')));
+    assert.equal(rested.status, 503);
+    assert.match((await rested.json()).error.message, /could not be counted in the last ten minutes/);
+    assert.ok(Date.now() - started < 300, 'without being parsed');
+    // the other workspace is not held to it, and an ordinary PDF still goes through
+    const { PDFDocument } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    doc.addPage([100, 100]);
+    const fine = await call(other.key.secret, asFile(`data:application/pdf;base64,${Buffer.from(await doc.save()).toString('base64')}`));
+    assert.equal(fine.status, 200);
+  } finally {
+    config.PDF_COUNT_MS = was;
+  }
 });

@@ -17,7 +17,7 @@ import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.
 import { trueUp } from './trueup.js';
 import { parse as parseRoute } from '../web/src/router.js';
 import { nudgeForCatalog } from './eval/schedule.js';
-import { runTopUp, giveUpTopUp, reconcileLimitTotals, sweepHolds } from './billing.js';
+import { runTopUp, giveUpTopUp, reconcileLimitTotals, sweepHolds, sweepTopUps } from './billing.js';
 import { pruneLimits } from './limits.js';
 import { revert, watchLive, watchCatalogue } from './eval/promote.js';
 import { onFollowUp, readFollowUp } from './learn/outcomes.js';
@@ -64,13 +64,34 @@ handle('catalog_sync', async () => {
   /* A list that comes back empty, or less than half as long as the one we have, is a fault on the way
      rather than a catalogue that shrank: saved, it would stop routing every model it left out until the
      next reading, six hours on. It is kept out, we are told, and the reading is tried again soon. */
-  if (!list.length || (before.length >= 20 && list.length < before.length / 2)) {
+  /* A shorter list that comes back the same twice within a few hours is the catalogue, and is taken: once
+     is a fault on the way, twice is not. The first sighting is kept in the database, so a restart or
+     another process reading it next still counts it. */
+  const shrunk = list.length > 0 && before.length >= 20 && list.length < before.length / 2;
+  let seenBefore = false;
+  if (shrunk) {
+    const seen = await db.prepare(`SELECT synced_at, note FROM fact_sync WHERE source = 'catalog_shrink'`).get();
+    seenBefore = !!seen && now() - Number(seen.synced_at) < 3 * 3600000
+      && Math.abs(Number(seen.note) - list.length) <= Math.max(2, list.length * 0.05);
+  }
+  if (!list.length || (shrunk && !seenBefore)) {
+    if (shrunk) {
+      await db.prepare(`INSERT INTO fact_sync (source, synced_at, note) VALUES ('catalog_shrink', ?, ?)
+          ON CONFLICT (source) DO UPDATE SET synced_at = excluded.synced_at, note = excluded.note`).run(now(), String(list.length));
+    }
     reportCallFailure({ kind: 'model catalogue', status: 0,
       message: `the model list came back with ${list.length} models against ${before.length}; kept the list we have` });
     await enqueue('catalog_sync', {}, { runAfter: now() + 15 * 60000, unique: true, sooner: true });
     return { ok: false, note: `refused a list of ${list.length} models` };
   }
   const n = await saveCatalog(list);
+  // any list taken clears a sighting: a shorter list seen once, then a full one, is not a shrink seen twice
+  await db.prepare(`DELETE FROM fact_sync WHERE source = 'catalog_shrink'`).run();
+  if (shrunk) {
+    console.log(JSON.stringify({ at: new Date().toISOString(), kind: 'catalog', note: `took a list of ${list.length} models against ${before.length}, seen twice` }));
+    // read again soon, so a shrink taken by mistake is put right within the half hour
+    await enqueue('catalog_sync', {}, { runAfter: now() + 30 * 60000, unique: true, sooner: true });
+  }
   forgetFacts();
   /* A model worth trying that was not there before, or one serving somebody that got dearer, brings
      the next measurement of the workloads it could matter to forward (see src/eval/schedule.js). */
@@ -158,7 +179,7 @@ onMissingFits((workloadId) => {
    it, so calls simply stopped at zero. The last try tells the owner, and us. */
 handle('topup', async ({ workspaceId }, job) => {
   try {
-    return await runTopUp(workspaceId, { attempt: Math.max(0, Number(job?.attempts || 1) - 1) });
+    return await runTopUp(workspaceId, { attempt: Math.max(0, Number(job?.attempts || 1) - 1), jobId: job?.id ?? null });
   } catch (err) {
     // the last try: automatic top up is paused and its owner told, once for this low balance
     if (Number(job?.attempts || 0) >= 5) await giveUpTopUp(workspaceId, err);
@@ -401,6 +422,8 @@ handle('recheck', async () => {
   await closeAbandoned();
   // the spending limits' running totals, read again from the ledger (see reconcileLimitTotals)
   await reconcileLimitTotals().catch((err) => console.error(`reconciling limit totals failed: ${err?.message || err}`));
+  // automatic top ups a low balance is still waiting on, booked again (see nudgeTopUp in billing.js)
+  await sweepTopUps().catch((err) => console.error(`booking waiting top ups failed: ${err?.message || err}`));
   await settleOutcomes();
   /* A workload saying "Ready to optimize" or "Nothing cleared yet" is read again from what its
      measurements found. The code before this set the first from whether a bar had ever been

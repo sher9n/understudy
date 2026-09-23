@@ -1,7 +1,7 @@
 import { notify } from './notify.js';
 import { db, now } from './db/index.js';
 import config from './config.js';
-import { stripe, move, account } from './billing.js';
+import { stripe, move, account, stripeErrorKind } from './billing.js';
 import { addActivity } from './traffic.js';
 
 /* Credits are written here and nowhere else, keyed on the Stripe object under a unique
@@ -94,6 +94,11 @@ export async function handleWebhook(req, res) {
       case 'payment_intent.payment_failed':
         if (wsId && o.metadata?.topup === '1') {
           const code = o.last_payment_error?.decline_code || o.last_payment_error?.code || 'declined';
+          /* A decline Stripe says to try again (the issuer out of reach, try again later) is the top up
+             job's to retry, as it does; switched off here, the retry found no card to charge. */
+          const kind = stripeErrorKind({ type: 'StripeCardError', code: o.last_payment_error?.code,
+            raw: { decline_code: o.last_payment_error?.decline_code } });
+          if (kind === 'retry') break;
           /* Switched off here only if it was still on: when the top up job already heard the refusal, it
              has switched it off and told the owner, and saying it again is a second email about one card. */
           const wasOn = (await db.prepare(`UPDATE billing_accounts SET auto_topup = 0, topup_failed_note = ?, updated_at = ?
@@ -218,11 +223,16 @@ async function takeBack(workspaceId, sourceId, totalUsd, kind, note) {
   if (!out) return;
   const { more, r } = out;
   if (!r.duplicate) {
+    /* A refund switches automatic top up off, as a dispute does: the balance it lowers would otherwise
+       be charged straight back to the same card, within the hour, undoing the refund. */
+    const wasOn = kind === 'refund' && (await db.prepare(`UPDATE billing_accounts SET auto_topup = 0, updated_at = ?
+        WHERE workspace_id = ? AND auto_topup = 1 RETURNING workspace_id`).run(now(), workspaceId)).rows.length > 0;
     await addActivity(workspaceId, {
       kind: 'bill', title: `$${more.toFixed(2)} came off your balance`,
       detail: kind === 'dispute'
         ? 'A payment was disputed with your bank, so its credit was taken back and automatic top up is off.'
-        : 'A payment was refunded to your card, so its credit was taken back.',
+        : `A payment was refunded to your card, so its credit was taken back.${wasOn
+          ? ' Automatic top up is off, so the card is not charged again; switch it back on in Settings.' : ''}`,
     });
   }
 }

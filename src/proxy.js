@@ -6,7 +6,8 @@ import config, { canRoute } from './config.js';
 import { verifyKey, bearerOf } from './keys.js';
 import { workloadFor, recordCall, addActivity } from './traffic.js';
 import { chat, chatStream, priceCall, UpstreamError, reasonOf, hintApplies } from './openrouter.js';
-import { gateRouting, chargeCall, grantStarterCredit, hold, release, callShape, callBound, withFee, baseModelId } from './billing.js';
+import { gateRouting, chargeCall, grantStarterCredit, hold, release, callShape, callBound, withFee, baseModelId, promptTokensOf,
+  boundAt, mergeCeilings } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
 import { workloadNameOf, pinnedOf } from './classify.js';
@@ -88,7 +89,10 @@ export async function canonicalModel(name) {
   if (hit && Date.now() - hit.at < (hit.v.known ? 600000 : 60000)) return hit.v;
   const any = Number((await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get())?.n ?? 0) > 0;
   let v;
-  if (bare.includes('/')) {
+  if (/:free$/i.test(bare)) {
+    // a free variant is never routed, whether or not its paid model is (see unknownModelWords)
+    v = { model: bare, known: false, empty: false };
+  } else if (bare.includes('/')) {
     const found = !!(await db.prepare('SELECT 1 FROM models_catalog WHERE model_id = ANY(?::text[])').get([bare, baseModelId(bare)]));
     v = { model: bare, known: found, empty: !any };
   } else {
@@ -124,8 +128,8 @@ const PLUGINS_WE_PRICE = new Set(['web', 'file-parser', 'response-healing', 'con
 function unpriceable(body) {
   for (const m of Array.isArray(body?.messages) ? body.messages : []) {
     for (const p of Array.isArray(m?.content) ? m.content : []) {
-      const data = p?.type === 'file' ? (p.file?.file_data ?? p.file?.url) : null;
-      if (typeof data === 'string' && !data.startsWith('data:')) {
+      const given = p?.type === 'file' ? [p.file?.file_data, p.file?.url] : [];
+      if (given.some((data) => typeof data === 'string' && data && !data.startsWith('data:'))) {
         return 'A file given by its address can be any length, so what the call would cost is not known before it is sent. '
           + 'Send the file\'s contents inline (as a data URL), or send us a copy of the call instead.';
       }
@@ -264,30 +268,39 @@ function modelsOf(ready) {
   return [...out];
 }
 
-/* Set aside what this call could cost before it is sent: the most it can cost on the dearest model it
-   could touch (see callBound), twice that when a strategy can pay for two models on one call. A model
-   with no known price is held at a fixed amount. Only when the request names no cap and some model it
-   may reach publishes neither a longest answer nor a context length is the call sent capped, at
-   HOLD_MAX_OUTPUT_TOKENS, so what was set aside is still a bound. */
+/* Set aside what this call could cost before it is sent: the most it can cost (see callBound) on the
+   dearest of the requests it may send, twice that when a strategy can pay for two models on one call,
+   and a quarter more for a cascade's check. A model the call can reach that cannot be priced refuses the
+   call; nothing is held at a guess. The request itself is never changed but for the price ceiling it
+   carries, which is what makes the hold a bound. */
 async function holdFor(wsId, body, ready) {
-  const shape = await callShape(body);
-  let worst = 0;
-  let capTo = null;
-  // the most a provider may charge per token on this call, per model, as OpenRouter is told
-  const caps = {};
-  // the models the request itself names to fall back to count too: any of them may answer, and be paid for
+  const shape = await callShape(body, { owner: wsId });
+  if (shape.refuse) return { ok: false, refused: shape.refuse, busy: !!shape.busy };
+  // the models the request itself names to fall back to: any of them may answer a request, and be paid for
   const fallbacks = Array.isArray(body.models) ? body.models.filter((m) => typeof m === 'string') : [];
-  for (const m of [...new Set([...modelsOf(ready), ...fallbacks])]) {
+  // each of these is sent a request of its own, carrying those fallbacks
+  const senders = modelsOf(ready);
+  const bounds = {};
+  for (const m of new Set([...senders, ...fallbacks])) {
     const b = await callBound(m, shape, { zdr: ready.zdr });
     /* A model the call can reach that cannot be priced (the catalogue changed a moment ago) is not
        held at a guess: the call is refused, and the next one finds the catalogue as it is now. */
     if (!b) return { ok: false, unpriced: m };
-    caps[m] = b.caps;
-    if (!b.known) capTo = capTo === null ? b.each : Math.min(capTo, b.each);
-    if (b.usd > worst) worst = b.usd;
+    bounds[m] = b;
   }
-  // where the bound needs a cap to be true, the request carries it, no larger than any model's room
-  if (capTo !== null && shape.cap === null) body.max_tokens = capTo;
+  /* OpenRouter applies one ceiling to a request, whichever of its models answers: the one it is sent to,
+     or a fallback it names. So each request's ceiling is the dearest of those models' own, and what the
+     request can cost is read at that ceiling for each of them, with the tokens each can use: a cheap
+     model with a long window, let through at a dearer fallback's prices, is counted at them. A strategy's
+     requests are separate, so each keeps its own ceiling. */
+  let worst = 0;
+  const caps = {};
+  for (const m of senders) {
+    const group = [m, ...fallbacks];
+    const ceiling = mergeCeilings(group.map((x) => bounds[x].ceiling));
+    caps[m] = ceiling;
+    for (const x of group) worst = Math.max(worst, boundAt(bounds[x].parts, ceiling));
+  }
   const est = worst;
   /* A strategy can pay for two models on one call (a cheap answer, then the one it sends on to), and a
      cascade also pays for the check that reads the cheap answer: twice, and a quarter more for that. */
@@ -301,6 +314,9 @@ async function holdFor(wsId, body, ready) {
    said as that limit; otherwise the balance is empty, or what is free is set aside for calls in
    flight, and a call with no cap on its answer sets aside the most its longest answer could cost. */
 const cannotCover = (h) => {
+  // a PDF counter that is busy is a moment's wait, said as one; a file that cannot be counted is refused
+  if (h.refused && h.busy) return { status: 503, json: { error: { message: h.refused, type: 'not_ready' } } };
+  if (h.refused) return { status: 400, json: { error: { message: h.refused, type: 'unsupported_feature' } } };
   if (h.unpriced) {
     return { status: 503, json: { error: {
       message: `${String(h.unpriced).slice(0, 80)} cannot be priced just now, so the call was not sent. Try again shortly.`,
@@ -675,7 +691,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
     let charged = 0;
     try {
       cost = hasCost(usage) ? Number(usage.cost)
-        : await estimateCost(served, usage?.prompt_tokens ?? callShape(body).pin, usage?.completion_tokens ?? writtenTokens(partial));
+        : await estimateCost(served, usage?.prompt_tokens ?? promptTokensOf(body), usage?.completion_tokens ?? writtenTokens(partial));
       charged = await chargeCall(wsId, cost, `${workload?.slug ?? 'a call'} on ${served}, broken off`, { holdId });
     } catch (e) {
       console.error(`charging a broken stream ${callId} failed: ${e?.message || e}`);
@@ -709,7 +725,7 @@ async function finish({ wsId, workload, requested, served, usage, started, body,
      marked an estimate that stands, because its several generations cannot be read back as one. */
   const estimated = !hasCost(usage);
   const cost = estimated
-    ? await estimateCost(served, usage?.prompt_tokens ?? callShape(body).pin, usage?.completion_tokens ?? writtenTokens(response))
+    ? await estimateCost(served, usage?.prompt_tokens ?? promptTokensOf(body), usage?.completion_tokens ?? writtenTokens(response))
     : Number(usage.cost);
   const note = workload ? `${workload.slug} on ${served}` : `Test call on ${served}`;
   // charged, and what the call set aside given back, in one step
