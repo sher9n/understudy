@@ -4,6 +4,7 @@ import { chat } from '../openrouter.js';
 import { db, now } from '../db/index.js';
 import { ask, clip, jevUsable } from '../jev.js';
 import { callPrice } from '../models/facts.js';
+import { costOfCall } from './replay.js';
 
 /* Deciding whether two written answers say the same thing.
  *
@@ -67,20 +68,23 @@ export async function judgePair(request, a, b) {
     'Answer B:',
     fence('B', second),
   ].join('\n');
+  const body = {
+    messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: text }],
+    max_tokens: 6,
+    temperature: 0,
+  };
+  let json;
   try {
-    const { json } = await chat({
-      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: text }],
-      max_tokens: 6,
-      temperature: 0,
-    }, config.EVAL_JUDGE_MODEL, { pace: true });
-    const said = String(json?.choices?.[0]?.message?.content ?? '').trim().toUpperCase();
-    const cost = Number(json?.usage?.cost ?? 0);
-    if (said.startsWith('SAME')) return { score: 0, cost, judged: true };
-    if (said.startsWith('DIFFERENT')) return { score: 1, cost, judged: true };
-    return { score: 1, cost, judged: false };
+    ({ json } = await chat(body, config.EVAL_JUDGE_MODEL, { pace: true }));
   } catch {
     return { score: 1, cost: 0, judged: false };
   }
+  // an answer came back, so it was paid for, whether or not it says what it cost (see costOfCall)
+  const cost = await costOfCall({ json, model: config.EVAL_JUDGE_MODEL, request: body });
+  const said = String(json?.choices?.[0]?.message?.content ?? '').trim().toUpperCase();
+  if (said.startsWith('SAME')) return { score: 0, cost, judged: true };
+  if (said.startsWith('DIFFERENT')) return { score: 1, cost, judged: true };
+  return { score: 1, cost, judged: false };
 }
 
 /* Numbers, checked in code, because Jev's own guide says it is not reliable with them. When two
@@ -382,23 +386,26 @@ export async function judgeQuality(request, answer, reference, { scope = null } 
     'The second answer:',
     fence('SECOND', second),
   ].join('\n');
-  let out;
+  const body = {
+    messages: [{ role: 'system', content: QUALITY }, { role: 'user', content: text }],
+    max_tokens: 6,
+    temperature: 0,
+  };
+  let json;
   try {
-    const { json } = await chat({
-      messages: [{ role: 'system', content: QUALITY }, { role: 'user', content: text }],
-      max_tokens: 6,
-      temperature: 0,
-    }, config.EVAL_JUDGE_MODEL, { pace: true });
-    const said = String(json?.choices?.[0]?.message?.content ?? '').trim().toUpperCase();
-    const cost = Number(json?.usage?.cost ?? 0);
-    const better = said.startsWith('FIRST') ? 'first' : said.startsWith('SECOND') ? 'second' : said.startsWith('TIE') ? 'tie' : null;
-    if (!better) out = { score: null, judgedBy: null, detail: null, cost, transient: true };
-    else {
-      const worse = better !== 'tie' && (better === 'first') !== answerFirst;
-      out = { score: worse ? 1 : 0, judgedBy: 'llm-quality', detail: { better, kind: worse ? 'worse' : null }, cost };
-    }
+    ({ json } = await chat(body, config.EVAL_JUDGE_MODEL, { pace: true }));
   } catch {
-    out = { score: null, judgedBy: null, detail: null, cost: 0, transient: true };
+    return { score: null, judgedBy: null, detail: null, cost: 0, transient: true };
+  }
+  // an answer came back, so it was paid for, whether or not it says what it cost (see costOfCall)
+  const cost = await costOfCall({ json, model: config.EVAL_JUDGE_MODEL, request: body });
+  const said = String(json?.choices?.[0]?.message?.content ?? '').trim().toUpperCase();
+  const better = said.startsWith('FIRST') ? 'first' : said.startsWith('SECOND') ? 'second' : said.startsWith('TIE') ? 'tie' : null;
+  let out;
+  if (!better) out = { score: null, judgedBy: null, detail: null, cost, transient: true };
+  else {
+    const worse = better !== 'tie' && (better === 'first') !== answerFirst;
+    out = { score: worse ? 1 : 0, judgedBy: 'llm-quality', detail: { better, kind: worse ? 'worse' : null }, cost };
   }
   if (!out.transient) await keep(key, out);
   return out;

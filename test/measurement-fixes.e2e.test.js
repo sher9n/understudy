@@ -58,6 +58,8 @@ const { forgetFacts } = await import('../src/models/facts.js');
 const { upsertArm, referenceSpec } = await import('../src/learn/arms.js');
 const { enqueue } = await import('../src/jobs.js');
 const { cheaperCleared, confirmed } = await import('../src/eval/outcome.js');
+const { replayOnce } = await import('../src/eval/replay.js');
+const { judgePair, judgeQuality } = await import('../src/eval/judge.js');
 
 await migrate({ quiet: true });
 
@@ -113,6 +115,8 @@ let thinkerReasoning = 0;
 let refusesFrom = null;
 // every call to these models answered with this status
 const failing = new Map();
+// answers from these models carry no cost ('cost'), no usage at all ('usage'), or a cost of nothing ('zero')
+const costless = new Map();
 const fenced = (text, label) => (text.match(new RegExp(`<<<${label}\\n([\\s\\S]*?)\\n${label}>>>`)) || [])[1] || '';
 
 const server = http.createServer((req, res) => {
@@ -124,10 +128,12 @@ const server = http.createServer((req, res) => {
     const sys = p.messages?.find((m) => m.role === 'system')?.content || '';
     const user = String(p.messages?.find((m) => m.role === 'user')?.content || '');
     const send = (content, extra = {}) => {
+      const how = costless.get(model);
+      const usage = how === 'usage' ? null
+        : { prompt_tokens: 800, completion_tokens: 60, ...(how === 'cost' ? {} : { cost: how === 'zero' ? 0 : perCall(model) }), ...extra };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ id: `gen-${Math.random().toString(36).slice(2)}`, model,
-        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }],
-        usage: { prompt_tokens: 800, completion_tokens: 60, cost: perCall(model), ...extra } }));
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }], ...(usage ? { usage } : {}) }));
     };
     const refuse = (status) => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -648,6 +654,41 @@ test('a job whose run was interrupted runs again, and closes the dead run first'
   assert.equal(out.ok, true, JSON.stringify(out));
   assert.equal((await runOf(dead)).outcome, 'interrupted');
   assert.equal(await runsOf(workload.id), 2);
+});
+
+/* 11. An answer that says nothing of its cost is not free --------------------------------------- */
+
+test('a replay or a judgement whose answer says nothing of its cost is charged at its price, never as free', async () => {
+  const { workload } = await seed({ n: 1 });
+  const body = { model: REF, messages: [{ role: 'system', content: 'Extract the totals.' }, { role: 'user', content: 'document #7' }] };
+  const [pin, pout] = PRICES['vendor/fifth-small'];
+  costless.set('vendor/steady-small', 'cost');
+  costless.set('vendor/fifth-small', 'usage');
+  costless.set('judge/small', 'cost');
+  try {
+    // no cost on it: its own count of tokens, at its catalogue price, where it used to be nothing
+    const noCost = await replayOnce({ body, model: 'vendor/steady-small', workload, reuse: false });
+    assert.ok(Math.abs(noCost.cost - perCall('vendor/steady-small')) < 1e-12, `${noCost.cost}`);
+    const row = await db.prepare(`SELECT cost_usd FROM calls WHERE workload_id = ? AND source = 'replay' AND served_model = ?`)
+      .get(workload.id, 'vendor/steady-small');
+    assert.ok(Number(row.cost_usd) > 0, 'and the replay is recorded at it');
+    // no usage at all: its text at three characters a token
+    const noUsage = await replayOnce({ body, model: 'vendor/fifth-small', workload, reuse: false });
+    const asked = body.messages.reduce((a, m) => a + m.content.length, 0);
+    const answered = JSON.stringify(right(7)).length;
+    assert.ok(Math.abs(noUsage.cost - (pin * Math.ceil(asked / 3) + pout * Math.ceil(answered / 3))) < 1e-15, `${noUsage.cost}`);
+    // the language-model judges, the same way
+    const pair = await judgePair('a request', 'one answer of some length', 'another answer entirely');
+    assert.ok(Math.abs(pair.cost - perCall('judge/small')) < 1e-12, `${pair.cost}`);
+    const quality = await judgeQuality('another request', 'a first answer', 'a second answer', { scope: workload.workspace_id });
+    assert.ok(Math.abs(quality.cost - perCall('judge/small')) < 1e-12, `${quality.cost}`);
+    // a cost the provider does give is taken as it is, even when it is nothing
+    costless.set('vendor/steady-small', 'zero');
+    const free = await replayOnce({ body, model: 'vendor/steady-small', workload, reuse: false });
+    assert.equal(free.cost, 0);
+  } finally {
+    costless.clear();
+  }
 });
 
 /* Lower severity ------------------------------------------------------------------------------ */
