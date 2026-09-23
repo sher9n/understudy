@@ -5,7 +5,7 @@ import { reportCallFailure } from './alerts.js';
 import config, { canRoute } from './config.js';
 import { verifyKey, bearerOf } from './keys.js';
 import { workloadFor, recordCall, addActivity } from './traffic.js';
-import { chat, chatStream, priceCall, UpstreamError } from './openrouter.js';
+import { chat, chatStream, priceCall, UpstreamError, reasonOf } from './openrouter.js';
 import { gateRouting, chargeCall, grantStarterCredit, hold, release, worstCaseTokens, withFee } from './billing.js';
 import { enqueue } from './jobs.js';
 import { refOf } from './learn/threads.js';
@@ -13,6 +13,7 @@ import { report } from './learn/outcomes.js';
 import { chooseStrategy, served as noteServed } from './learn/choose.js';
 import { serveWith, writeAsStream } from './learn/serve.js';
 import { leadModel } from './learn/arms.js';
+import { zdrFor } from './workspace.js';
 import { featuresOf, predict } from './learn/router.js';
 
 export const v1 = safeRouter();
@@ -59,6 +60,31 @@ v1.get('/models', async (req, res) => {
   });
 });
 
+/* A model named the way its maker's own SDK names it ("gpt-4o", "claude-sonnet-5") is found in the
+   catalogue under its maker ("openai/gpt-4o"), so pointing an existing client at Understudy needs only
+   the address changed. Where several makers sell the same name, the one that made it comes first. */
+const MAKERS = ['openai', 'anthropic', 'google', 'meta-llama', 'mistralai', 'deepseek', 'qwen', 'x-ai', 'cohere', 'amazon'];
+const canonical = new Map();
+export async function canonicalModel(name) {
+  if (typeof name !== 'string' || !name.trim() || name.includes('/')) return { model: name, known: true };
+  const bare = name.trim();
+  const hit = canonical.get(bare);
+  if (hit && Date.now() - hit.at < 600000) return hit.v;
+  const rows = await db.prepare(`SELECT model_id FROM models_catalog WHERE model_id LIKE ?`).all(`%/${bare.replace(/[\\%_]/g, '\\$&')}`);
+  const any = Number((await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get())?.n ?? 0) > 0;
+  let v;
+  if (rows.length) {
+    const rank = (id) => { const i = MAKERS.indexOf(id.split('/')[0]); return i < 0 ? MAKERS.length : i; };
+    v = { model: rows.map((r) => r.model_id).sort((a, b) => rank(a) - rank(b))[0], known: true };
+  } else {
+    // with no catalogue read yet nothing can be said, so the name goes through as it came
+    v = { model: bare, known: !any };
+  }
+  canonical.set(bare, { at: Date.now(), v });
+  if (canonical.size > 2000) canonical.clear();
+  return v;
+}
+
 /* Everything a routed call needs before it is sent, or the reason it cannot be, so the
    streaming path, the ordinary path and Connect's test call all answer the same way. */
 async function prepare(wsId, body, { classify = true } = {}) {
@@ -67,6 +93,14 @@ async function prepare(wsId, body, { classify = true } = {}) {
     return no(400, '"messages" is required.', 'invalid_request_error');
   }
   if (!canRoute()) return no(503, 'Routing is not configured on this deployment yet.', 'not_configured');
+  if (body.model) {
+    const named = await canonicalModel(body.model);
+    if (!named.known) {
+      return no(400, `"${String(body.model).slice(0, 80)}" is not a model we know. Name it with its maker, `
+        + 'for example openai/gpt-5.4; every model is listed at GET /v1/models.', 'model_not_found');
+    }
+    body.model = named.model;
+  }
   await grantStarterCredit(wsId);
   const gate = await gateRouting(wsId);
   if (!gate.ok) return { error: { status: 402, json: { error: { message: gate.message, type: gate.code } } } };
@@ -82,7 +116,8 @@ async function prepare(wsId, body, { classify = true } = {}) {
   const served = lead?.model || requested;
   if (!served) return no(400, '"model" is required.', 'invalid_request_error');
   const recipe = lead?.recipe ?? null;
-  return { workload, requested, served, recipe, strategy };
+  const zdr = await zdrFor(wsId);
+  return { workload, requested, served, recipe, strategy, zdr };
 }
 
 /* Every model one call could end up paying for: the one it is served by, the customer's own model,
@@ -168,14 +203,44 @@ const failureOf = (err) => ({
 
 /* An experiment's call that the provider failed, kept as its own row so what learning reads about
    that strategy includes the failure, before the call is served the usual way instead. */
-async function keepFailedTry({ wsId, workload, requested, served, started, body, ref, source, strategy, err }) {
+async function keepFailedTry({ wsId, workload, requested, served, started, body, ref, source, strategy, err, fellBack = false }) {
   const f = failureOf(err);
   await recordCall({
     workspaceId: wsId, workloadId: workload?.id ?? null, source, requestedModel: requested, servedModel: served,
     statusCode: f.status, latencyMs: Date.now() - started, request: body, ref, costUsd: Number(err?.spent) || 0,
-    ...(decisionOf(strategy) || {}), check: { by: 'experiment failed', status: f.status },
+    ...(decisionOf(strategy) || {}),
+    // "fell back" is what the watch and the learning review count against what serves
+    check: { by: fellBack ? 'fell back' : 'experiment failed', status: f.status, why: reasonOf(err).slice(0, 160) },
   }).catch(() => { /* never let bookkeeping stand in the way of the answer */ });
 }
+
+/* The strategies one call may be served by, in order: an experiment, then what serves, then the
+   customer's own model. */
+const chainOf = (strategy) => {
+  const out = [];
+  for (let s = strategy, n = 0; s && n < 4; s = s.fallback, n += 1) out.push(s);
+  return out;
+};
+
+/* Whether the customer's own model would likely answer where what serves failed: the provider was
+   down, busy or slow, the model has gone, or the call is longer or asks for more than this model
+   takes. A request that is simply malformed would fail on their model too, and is answered as it is. */
+export function worthFallback(err) {
+  const st = err instanceof UpstreamError ? err.status : 502;
+  if (st === 0 || st === 404 || st === 408 || st === 429 || st >= 500) return true;
+  if (st === 400 || st === 413 || st === 422) {
+    return /context|too long|too many tokens|maximum|max_tokens|token limit|length|not supported|unsupported|does not support|no endpoints|not available/i
+      .test(reasonOf(err));
+  }
+  return false;
+}
+
+/* How long a live call waits on a busy provider. A measurement can wait out a rate limit; somebody
+   whose app is waiting on this call cannot, so a live call gets one short retry and then the next
+   strategy in its chain, and an experiment gets none and a time limit. */
+const liveOpts = (strategy) => (strategy?.explored
+  ? { retries: 0, signal: AbortSignal.timeout(config.EXPERIMENT_TIMEOUT_MS) }
+  : { retries: config.LIVE_RETRIES, maxWaitMs: config.LIVE_RETRY_WAIT_MAX_MS });
 
 /* The bookkeeping after an answer, apart from the provider's part: a slip in it is logged, and never
    turns an answer the customer has already been sent, and paid for, into an error. */
@@ -203,22 +268,23 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
   // made up front, so the answer can carry it and the customer can report how this call went
   const callId = id('call');
   const started = Date.now();
-  // the strategy for this call, and what serves as usual in case it was an experiment that failed
-  const tries = [ready.strategy, ready.strategy?.fallback].filter(Boolean);
+  // the strategy for this call, then what serves as usual, then the customer's own model
+  const tries = chainOf(ready.strategy);
   if (!tries.length) tries.push(null);
   for (const [k, strategy] of tries.entries()) {
+    const next = tries[k + 1];
     const { served, recipe } = leadOf(strategy, ready);
     let out;
     try {
       if (strategy && strategy.spec.kind !== 'model') {
-        out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId });
+        out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr });
       } else {
-        const r = await chat(body, served, { recipe });
+        const r = await chat(body, served, { recipe, zdr: ready.zdr, ...liveOpts(strategy) });
         out = { json: r.json, served, cost: Number(r.json?.usage?.cost ?? 0), latencyMs: r.latencyMs ?? Date.now() - started };
       }
     } catch (err) {
-      if (k < tries.length - 1) {
-        await keepFailedTry({ wsId, workload, requested, served, started, body, ref, source, strategy, err });
+      if (next && (!next.isFallback || worthFallback(err))) {
+        await keepFailedTry({ wsId, workload, requested, served, started, body, ref, source, strategy, err, fellBack: !!next.isFallback });
         continue;
       }
       const f = failureOf(err);
@@ -272,17 +338,17 @@ v1.post('/chat/completions', async (req, res) => {
   const { workload, requested } = ready;
   const callId = id('call');
   const started = Date.now();
-  const tries = [ready.strategy, ready.strategy?.fallback].filter(Boolean);
+  const tries = chainOf(ready.strategy);
   if (!tries.length) tries.push(null);
   for (const [k, strategy] of tries.entries()) {
-    const last = k === tries.length - 1;
+    const next = tries[k + 1];
     const r = await streamWith({ res, wsId, workload, requested, body, ref, callId, started, strategy, ready, holdId: h.holdId });
     // an answer that failed part way was never charged, so what it set aside goes back
     if (r.sent) await release(h.holdId).catch(() => {});
     if (r.ok || r.sent) return undefined;
-    // nothing has reached the customer yet: an experiment that failed is kept, and the call served as usual
-    if (!last) {
-      await keepFailedTry({ wsId, workload, requested, served: r.served, started, body, ref, source: 'routed', strategy, err: r.err });
+    // nothing has reached the customer yet: a failure is kept, and the call served the next way
+    if (next && (!next.isFallback || worthFallback(r.err))) {
+      await keepFailedTry({ wsId, workload, requested, served: r.served, started, body, ref, source: 'routed', strategy, err: r.err, fellBack: !!next.isFallback });
       continue;
     }
     const f = failureOf(r.err);
@@ -312,7 +378,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
        would have; a measurement holds a cascade to the workload's speed setting on exactly that. */
     let out;
     try {
-      out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId });
+      out = await serveWith(strategy.spec, body, { shape: workload.shape_kind, scope: wsId, zdr: ready.zdr });
     } catch (err) {
       return { ok: false, err, served };
     }
@@ -337,7 +403,7 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
   }
   let upstream;
   try {
-    upstream = await chatStream(body, served, { recipe });
+    upstream = await chatStream(body, served, { recipe, zdr: ready.zdr });
   } catch (err) {
     return { ok: false, err, served };
   }
@@ -473,6 +539,12 @@ v1.post('/traces', async (req, res) => {
   for (const t of list) {
     const request = t?.request;
     if (!request || !Array.isArray(request.messages)) continue;
+    // a copy names its model however the customer's SDK did; it is priced and grouped under the catalogue's name
+    if (request.model) request.model = (await canonicalModel(request.model)).model;
+    if (t?.response?.model && !String(t.response.model).includes('/')) {
+      const named = await canonicalModel(t.response.model);
+      if (named.model.includes('/')) t.response.model = named.model;
+    }
     const workload = await workloadFor(wsId, request);
     const usage = t?.response?.usage || {};
     const served = t?.response?.model || request.model || null;

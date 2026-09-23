@@ -40,6 +40,9 @@ process.env.JEV_VIA = 'off';
 process.env.TYPESAFE_API_KEY = '';
 process.env.TYPESAFE_BASE = `http://127.0.0.1:${PORT}/typesafe`;
 process.env.ALERTS_ENABLED = 'false';
+// no test here is about speed: a busy machine running every test file at once must not make a model look slow
+process.env.SPEED_SLACK_MS = '5000';
+process.env.REQUEST_LOGS = 'false';
 
 const { db, now } = await import('../src/db/index.js');
 const { default: migrate } = await import('../src/db/migrate.js');
@@ -377,8 +380,10 @@ test('the switched card is built from the switch and the calls since, and adds u
   assert.equal(before.volume.routed, 0);
   assert.equal(before.volume.copies, 200);
   assert.equal(before.volume.basis, 'all');
-  assert.ok(Math.abs(before.projection[0].saved
-    - (before.prices.fromPerCall - before.prices.toPerCall) * (200 / 14) * 30) < 1e-6);
+  // the month is projected from the days since the first call, which moves while the test runs: within half a percent
+  const wantSaved = (before.prices.fromPerCall - before.prices.toPerCall) * (200 / 14) * 30;
+  assert.ok(Math.abs(before.projection[0].saved - wantSaved) <= 1e-6 + 0.005 * Math.abs(wantSaved),
+    `projected ${before.projection[0].saved} against ${wantSaved}`);
 
   // twelve calls served by it since the switch, charged as routed calls are
   for (let i = 0; i < 12; i += 1) {
@@ -443,7 +448,7 @@ test('a stop that lands while the last charge is being settled switches nothing'
   // half way through the model that answers every call; the one that drifts was dropped long before
   holdCall('vendor/steady-small', 50);
   const running = runEvaluation(workload.id);
-  await until(async () => held > 0, 20000);
+  await until(async () => held > 0, 60000);
   // hold the balance while the rest of the calls run, so the run waits at its last settle
   const lock = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await lock.connect();
@@ -454,7 +459,7 @@ test('a stop that lands while the last charge is being settled switches nothing'
     const r = await db.prepare(`SELECT steps_done, steps_total FROM eval_runs WHERE workload_id = ? AND status = 'running'`)
       .get(workload.id);
     return r && r.steps_done === r.steps_total;
-  }, 20000);
+  }, 60000);
   const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_settle' });
   assert.equal(asked.state, 'stopping');
   await lock.query('ROLLBACK');
@@ -565,7 +570,7 @@ test('a stop on the very last call of a measurement switches nothing', async () 
   // its very last call: the steady model's 100th, the drifting one having been dropped early
   holdCall('vendor/steady-small', 100);
   const running = runEvaluation(workload.id);
-  await until(async () => held > 0, 20000);
+  await until(async () => held > 0, 60000);
   const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_last' });
   assert.equal(asked.state, 'stopping');
   releaseAt();

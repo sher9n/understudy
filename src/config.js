@@ -69,8 +69,11 @@ export const config = {
   OPENROUTER_API_KEY: str('OPENROUTER_API_KEY'),
   OPENROUTER_BASE: str('OPENROUTER_BASE', 'https://openrouter.ai/api/v1'),
   ROUTING_FEE_PCT: num('ROUTING_FEE_PCT', 1),
-  // a call only ever reaches a provider that keeps nothing
+  /* A call only reaches a provider that keeps nothing, unless the workspace chose otherwise on
+     Settings (it still never reaches one that trains on it). ZDR_FORCED takes the choice away from
+     every workspace on this deployment. */
   ZDR_ONLY: bool('ZDR_ONLY', true),
+  ZDR_FORCED: bool('ZDR_FORCED', false),
   MODEL_MIN_GAP_MS: num('MODEL_MIN_GAP_MS', 3200),
   UPSTREAM_TIMEOUT_MS: num('UPSTREAM_TIMEOUT_MS', 120000),
   /* The longest we wait before retrying when a provider says it is busy, whatever it asks for.
@@ -78,6 +81,13 @@ export const config = {
      a measurement is allowed (EVAL_STALE_MIN), so a slow but live run would be closed as
      abandoned. Capped, the slowest call is four timeouts and three of these waits. */
   UPSTREAM_RETRY_WAIT_MAX_MS: num('UPSTREAM_RETRY_WAIT_MAX_MS', 30000),
+  /* A live call is somebody's app waiting. It gets this many retries on a busy provider, each
+     waiting at most this long, and then the next way of serving it: the customer's own model. Up to
+     three waits of thirty seconds each left a customer's call hanging for a minute and a half. */
+  LIVE_RETRIES: num('LIVE_RETRIES', 1),
+  LIVE_RETRY_WAIT_MAX_MS: num('LIVE_RETRY_WAIT_MAX_MS', 2000),
+  /* The longest an experiment's call may take before it gives way to what serves. */
+  EXPERIMENT_TIMEOUT_MS: num('EXPERIMENT_TIMEOUT_MS', 45000),
 
   // what we keep, and for how long
   RETENTION_DAYS: num('RETENTION_DAYS', 30),
@@ -322,6 +332,14 @@ export const config = {
   // background work
   JOBS_ENABLED: bool('JOBS_ENABLED', true),
   JOBS_TICK_MS: num('JOBS_TICK_MS', 5000),
+  /* How much background work runs at once, and how many measurements of it. Every tick used to start
+     another runner while the last was still busy, so measurements piled up side by side without
+     limit, all on the connections live calls use. Background work now has its own connections too. */
+  JOBS_CONCURRENCY: num('JOBS_CONCURRENCY', 3),
+  EVAL_CONCURRENCY: num('EVAL_CONCURRENCY', 2),
+  PG_BG_POOL_MAX: num('PG_BG_POOL_MAX', 6),
+  /* One line per customer call, per change made from a screen, and per failure, in the deploy log. */
+  REQUEST_LOGS: bool('REQUEST_LOGS', true),
   CATALOG_SYNC_HOURS: num('CATALOG_SYNC_HOURS', 6),
 };
 

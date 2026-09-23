@@ -218,6 +218,46 @@ export function failingClearly(k, n, before) {
   return k >= 5 && rate > 0.05 && rate > 2 * before && tailAtLeast(k, n, base) < 0.01;
 }
 
+/* Every model a serving strategy can send a call to, besides the customer's own. */
+function modelsServing(workload, spec) {
+  if (!spec) return [workload.routed_model].filter(Boolean);
+  if (spec.kind === 'cascade') return [spec.first?.model].filter(Boolean);
+  if (spec.kind === 'router') return [spec.cheap?.model].filter(Boolean);
+  return [spec.model].filter(Boolean);
+}
+
+/* What serves a workload has to still be something we can send calls to. A model that left the
+   catalogue, or lost the last provider that keeps nothing while the workspace requires one, fails
+   every call it is given, and a quiet workload never makes enough failures for the live watch to
+   notice. Checked every hour, and switched back softly: it can be measured again once it returns. */
+export async function watchCatalogue() {
+  const { zdrFor } = await import('../workspace.js');
+  const rows = await db.prepare('SELECT * FROM workloads WHERE routed_model IS NOT NULL').all();
+  let reverted = 0;
+  for (const w of rows) {
+    let spec = null;
+    if (w.routed_arm_id) {
+      const arm = await db.prepare('SELECT spec_json FROM arms WHERE id = ?').get(w.routed_arm_id);
+      try { spec = arm?.spec_json ? JSON.parse(arm.spec_json) : null; } catch { spec = null; }
+    }
+    const zdr = await zdrFor(w.workspace_id);
+    let why = null;
+    for (const m of modelsServing(w, spec)) {
+      if (m === w.reference_model) continue;
+      const row = await db.prepare('SELECT zdr FROM models_catalog WHERE model_id = ?').get(m);
+      if (!row) { why = `${m} is no longer offered by the provider`; break; }
+      if (zdr && Number(row.zdr) === 0) { why = `no provider that keeps nothing serves ${m} any more`; break; }
+    }
+    if (!why) continue;
+    const r = await revert(w, { auto: true, soft: true, reason: `${why}. Switched back to ${w.reference_model}, and it can be measured again once that changes.` });
+    if (r.ok) reverted += 1;
+  }
+  return reverted;
+}
+
+// a call the serving strategy failed and the customer's own model answered instead, for a reason of the strategy's
+const fellBack = (c) => /"by":"fell back"/.test(String(c.check_json || ''));
+
 export async function watchLive({ minCalls = 20, speedFactor = null } = {}) {
   const { default: config } = await import('../config.js');
   const { profileOf, speedRule } = await import('./profile.js');
@@ -225,28 +265,30 @@ export async function watchLive({ minCalls = 20, speedFactor = null } = {}) {
     'SELECT * FROM workloads WHERE routed_model IS NOT NULL AND promoted_at IS NOT NULL').all();
   let reverted = 0;
   for (const w of rows) {
-    const since = Math.max(w.promoted_at, now() - DAY);
+    /* The last day for a busy workload, up to a week for a quiet one: the 500 newest calls since the
+       switch, so a workload with a few calls a day still gathers enough to be judged. */
+    const since = Math.max(w.promoted_at, now() - 7 * DAY);
     // the calls the switched-to strategy served: all of a cascade's, the ones it sent on included
     const after = w.routed_arm_id
       ? await db.prepare(
-        `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND arm_id = ?
+        `SELECT status_code, latency_ms, ttft_ms, check_json FROM calls WHERE workload_id = ? AND source = 'routed' AND arm_id = ?
             AND created_at >= ? ORDER BY created_at DESC LIMIT 500`).all(w.id, w.routed_arm_id, since)
       : await db.prepare(
-        `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ?
+        `SELECT status_code, latency_ms, ttft_ms, check_json FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ?
             AND created_at >= ? ORDER BY created_at DESC LIMIT 500`).all(w.id, w.routed_model, since);
     if (after.length < minCalls) continue;
     const before = await db.prepare(
       `SELECT status_code, latency_ms, ttft_ms FROM calls WHERE workload_id = ? AND source = 'routed' AND served_model = ?
           AND created_at < ? AND created_at >= ? ORDER BY created_at DESC LIMIT 500`)
       .all(w.id, w.reference_model, w.promoted_at, w.promoted_at - 14 * DAY);
-    const failed = (xs) => xs.filter((c) => providerFailed(c.status_code ?? 200)).length;
+    const failed = (xs) => xs.filter((c) => providerFailed(c.status_code ?? 200) || fellBack(c)).length;
     const errAfter = after.length ? failed(after) / after.length : 0;
     const errBefore = before.length ? failed(before) / before.length : 0;
     if (failingClearly(failed(after), after.length, errBefore)) {
       const r = await revert(w, {
         auto: true,
         soft: true,
-        reason: `${Math.round(errAfter * 100)}% of its live calls over the last day failed (${failed(after)} of `
+        reason: `${Math.round(errAfter * 100)}% of its recent live calls failed (${failed(after)} of `
           + `${after.length}), against ${Math.round(errBefore * 100)}% on ${w.reference_model} before the switch. `
           + `Switched back, and it can be tried again in ${WATCH_COOL_OFF_DAYS} days.`,
       });

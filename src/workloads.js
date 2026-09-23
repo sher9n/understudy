@@ -80,14 +80,22 @@ const remember = (workspaceId, sig, workloadId) => db.prepare(
    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, fingerprint) DO NOTHING`)
   .run(workspaceId, sig.cacheKey, workloadId, sig.simhash, sig.structKey, now());
 
-/** Count the call, and promote the workload onto the screens once it has earned a row. */
+/** Count the call, and promote the workload onto the screens once it has earned a row.
+ *
+ *  One statement, so calls arriving together each add one: read, added to and written back, twenty
+ *  at once counted as a handful, and the workload that should have become live on its twentieth call
+ *  could miss its moment. Exactly one call sees it become live, so it is announced once. */
 async function count(workload) {
-  const seen = (workload.calls_seen ?? 0) + 1;
-  const becomesLive = workload.state === 'candidate' && seen >= config.WORKLOAD_MIN_CALLS;
-  await db.prepare(
-    `UPDATE workloads SET calls_seen = ?, state = ?, updated_at = ? WHERE id = ?`)
-    .run(seen, becomesLive ? 'live' : workload.state, now(), workload.id);
-  return { ...workload, calls_seen: seen, state: becomesLive ? 'live' : workload.state, becameLive: becomesLive };
+  const r = await db.prepare(
+    `UPDATE workloads SET calls_seen = COALESCE(calls_seen, 0) + 1,
+            state = CASE WHEN state = 'candidate' AND COALESCE(calls_seen, 0) + 1 >= ?::int THEN 'live' ELSE state END,
+            updated_at = ?
+      WHERE id = ? RETURNING calls_seen, state`)
+    .run(config.WORKLOAD_MIN_CALLS, now(), workload.id);
+  const after = r.rows[0] || { calls_seen: (workload.calls_seen ?? 0) + 1, state: workload.state };
+  const becameLive = after.state === 'live' && Number(after.calls_seen) === config.WORKLOAD_MIN_CALLS
+    && workload.state !== 'live';
+  return { ...workload, calls_seen: Number(after.calls_seen), state: after.state, becameLive };
 }
 
 /**
@@ -129,7 +137,11 @@ export async function matchWorkload(workspaceId, body) {
     named_at: null, name_source: sig.toolNames.length ? 'tool' : (sig.schemaTitle ? 'schema' : 'words'),
     created_at: now(), updated_at: now(),
   };
-  await db.prepare(`INSERT INTO workloads
+  /* Calls of a brand new shape usually arrive together: an app starting up sends its first burst at
+     once. Every one of them finds nothing and tries to make the workload, and only one can. The
+     others used to fail on the unique index and answer the customer with a 500; now they find the
+     one that was made and join it. */
+  const made = await db.prepare(`INSERT INTO workloads
       (id, workspace_id, slug, fingerprint, struct_key, simhash, shape_kind, reference_model,
        routed_model, optimize_mode, status, status_note, floor_pct, promoted_at, promoted_run_id,
        sample_prompt, tool_names, calls_seen, state, merged_into, named_at, name_source,
@@ -137,7 +149,17 @@ export async function matchWorkload(workspaceId, body) {
       VALUES (@id, @workspace_id, @slug, @fingerprint, @struct_key, @simhash, @shape_kind,
        @reference_model, @routed_model, @optimize_mode, @status, @status_note, @floor_pct,
        @promoted_at, @promoted_run_id, @sample_prompt, @tool_names, @calls_seen, @state,
-       @merged_into, @named_at, @name_source, @created_at, @updated_at)`).run(row);
+       @merged_into, @named_at, @name_source, @created_at, @updated_at)
+      ON CONFLICT (workspace_id, fingerprint) DO NOTHING RETURNING id`).run(row);
+  if (!made.rows.length) {
+    const winner = await db.prepare('SELECT * FROM workloads WHERE workspace_id = ? AND fingerprint = ?')
+      .get(workspaceId, sig.cacheKey);
+    const target = winner ? await resolve(winner) : null;
+    if (target) {
+      await remember(workspaceId, sig, target.id);
+      return await count(target);
+    }
+  }
   await remember(workspaceId, sig, row.id);
   return await count(row);
 }

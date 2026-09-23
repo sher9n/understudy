@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { db, id, now } from './db/index.js';
+import { db, id, now, background } from './db/index.js';
 import config from './config.js';
 
 const handlers = new Map();
@@ -38,22 +38,28 @@ export async function enqueue(kind, payload = {}, { runAfter = now(), unique = n
   return row.id;
 }
 
-/** One row at a time, claimed atomically so a restart cannot run it twice. */
-async function claim() {
+/** One row at a time, claimed atomically so a restart cannot run it twice. Kinds that are already
+ *  running as many at once as they may are stepped over, so one kind cannot hold up the rest. */
+async function claim(skipKinds = []) {
   /* SKIP LOCKED is why this is safe with more than one worker: a row another worker has
      already taken is stepped over rather than waited for, so two runners never collide on
      the same job and neither of them blocks. */
   const r = await db.prepare(
     `UPDATE jobs SET status = 'claimed', claimed_at = ?, attempts = attempts + 1
-      WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND run_after <= ?
+      WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND run_after <= ? AND NOT (kind = ANY(?))
                    ORDER BY run_after LIMIT 1 FOR UPDATE SKIP LOCKED)
-      RETURNING *`).run(now(), now());
+      RETURNING *`).run(now(), now(), skipKinds);
   return r.rows[0] || null;
 }
 
-export async function runOnce() {
-  const job = await claim();
+export async function runOnce({ skipKinds = [] } = {}) {
+  const job = await claim(skipKinds);
   if (!job) return false;
+  await background.run(true, () => runJob(job));
+  return true;
+}
+
+async function runJob(job) {
   const fn = handlers.get(job.kind);
   if (!fn) {
     await db.prepare(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`)
@@ -80,22 +86,54 @@ export async function runOnce() {
     } else {
       await db.prepare(`UPDATE jobs SET status = 'failed', error = ? WHERE id = ?`).run(msg, job.id);
     }
+    console.log(JSON.stringify({ at: new Date().toISOString(), kind: 'job', job: job.kind, id: job.id, ok: false, error: msg.slice(0, 200) }));
   }
-  return true;
 }
 
 let timer = null;
 let stopping = false;
 
+/* One scheduler, a fixed number of jobs at once, and at most EVAL_CONCURRENCY measurements among them.
+   A tick used to start a whole new runner every five seconds while earlier ones were still busy, so a
+   queue of measurements all ran side by side, sharing one per-model pace and the connections live
+   calls use. */
+let active = 0;
+const activeByKind = new Map();
+const limitOf = (kind) => (kind === 'eval_run' ? config.EVAL_CONCURRENCY : config.JOBS_CONCURRENCY);
+let pumping = false;
+async function pump() {
+  if (pumping || stopping) return;
+  pumping = true;
+  try {
+    while (!stopping && active < config.JOBS_CONCURRENCY) {
+      const full = [...activeByKind.entries()].filter(([k, n]) => n >= limitOf(k)).map(([k]) => k);
+      let job;
+      try { job = await claim(full); } catch { break; }
+      if (!job) break;
+      active += 1;
+      activeByKind.set(job.kind, (activeByKind.get(job.kind) || 0) + 1);
+      const t0 = Date.now();
+      background.run(true, () => runJob(job))
+        .catch(() => { /* runJob records its own failures; the loop must not die */ })
+        .finally(() => {
+          active -= 1;
+          activeByKind.set(job.kind, Math.max(0, (activeByKind.get(job.kind) || 1) - 1));
+          if (job.kind !== 'learn' || Date.now() - t0 > 1000) {
+            console.log(JSON.stringify({ at: new Date().toISOString(), kind: 'job', job: job.kind, id: job.id, ms: Date.now() - t0 }));
+          }
+          void pump();
+        });
+    }
+  } finally {
+    pumping = false;
+  }
+}
+
 export function startJobs() {
   if (!config.JOBS_ENABLED || timer) return;
-  const tick = async () => {
-    if (stopping) return;
-    try { while (await runOnce()) { if (stopping) break; } } catch { /* the loop must not die */ }
-  };
-  timer = setInterval(tick, config.JOBS_TICK_MS);
+  timer = setInterval(() => { void pump(); }, config.JOBS_TICK_MS);
   if (timer.unref) timer.unref();
-  tick();
+  void pump();
 }
 
 export async function stopJobs() {

@@ -20,7 +20,7 @@ const usd = (json) => Number(json?.usage?.cost ?? 0);
 const costing = (json, cost) => (json && typeof json === 'object'
   ? { ...json, usage: { ...(json.usage || {}), cost: Math.round(cost * 1e10) / 1e10 } } : json);
 
-export async function serveWith(spec, given, { shape, scope = null, check = checkAnswer } = {}) {
+export async function serveWith(spec, given, { shape, scope = null, check = checkAnswer, zdr = null } = {}) {
   const started = Date.now();
   /* Every answer here is worked out whole, whatever the customer asked for: a cascade has to read
      an answer before anybody sees it, and a customer who asked for a stream is sent the finished
@@ -32,7 +32,7 @@ export async function serveWith(spec, given, { shape, scope = null, check = chec
   if (spec.kind === 'router') {
     const p = predict(spec, featuresOf(body));
     const use = p >= spec.threshold ? spec.cheap : spec.strong;
-    const r = await chat(body, use.model, { recipe: use.recipe ?? null });
+    const r = await chat(body, use.model, { recipe: use.recipe ?? null, zdr });
     return { json: r.json, served: use.model, recipe: use.recipe ?? null, cost: usd(r.json),
       latencyMs: Date.now() - started, escalated: use === spec.strong, check: { by: 'router', p: Math.round(p * 1000) / 1000 } };
   }
@@ -40,7 +40,7 @@ export async function serveWith(spec, given, { shape, scope = null, check = chec
     const toFallback = async (why, spent = 0, readings = {}) => {
       let r;
       try {
-        r = await chat(body, spec.fallback.model, { recipe: spec.fallback.recipe ?? null });
+        r = await chat(body, spec.fallback.model, { recipe: spec.fallback.recipe ?? null, zdr });
       } catch (err) {
         // what was already spent on this call is kept on the failure, so it is recorded
         err.spent = (err.spent || 0) + spent;
@@ -54,7 +54,7 @@ export async function serveWith(spec, given, { shape, scope = null, check = chec
     let first;
     try {
       // once, with no retries: a cheap model that is busy hands the call on at once, not after waiting
-      first = await chat(body, spec.first.model, { recipe: spec.first.recipe ?? null, retries: 0 });
+      first = await chat(body, spec.first.model, { recipe: spec.first.recipe ?? null, retries: 0, zdr });
     } catch (err) {
       if (err instanceof UpstreamError && (err.status === 401 || err.status === 402)) throw err;
       return toFallback('first failed', 0, { status: err?.status ?? 0 });
@@ -73,7 +73,7 @@ export async function serveWith(spec, given, { shape, scope = null, check = chec
     }
     return toFallback(c.by === 'shape' ? 'shape' : 'unsure', usd(first.json) + (c.cost || 0), readings);
   }
-  const r = await chat(body, spec.model, { recipe: spec.recipe ?? null });
+  const r = await chat(body, spec.model, { recipe: spec.recipe ?? null, zdr });
   return { json: r.json, served: spec.model, recipe: spec.recipe ?? null, cost: usd(r.json), latencyMs: Date.now() - started,
     escalated: false, check: null };
 }

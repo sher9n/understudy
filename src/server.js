@@ -15,7 +15,7 @@ import { routeOnce } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
 import { runTopUp, sweepHolds } from './billing.js';
 import { pruneLimits } from './limits.js';
-import { revert, watchLive } from './eval/promote.js';
+import { revert, watchLive, watchCatalogue } from './eval/promote.js';
 import { onFollowUp, readFollowUp } from './learn/outcomes.js';
 import { onChoose, onServed } from './learn/choose.js';
 import { chooseExplore, afterServed, reviewAll } from './learn/explore.js';
@@ -348,6 +348,8 @@ handle('recheck', async () => {
   /* A switch that has started failing calls, or slowing down, under the customer's own load is
      undone now rather than at the next measurement. */
   await watchLive();
+  // and one that can no longer be served at all goes back before its calls start failing
+  await watchCatalogue();
   const spaces = await db.prepare('SELECT id, measure_every_days FROM workspaces').all();
   let queued = 0;
   for (const ws of spaces) {
@@ -383,6 +385,25 @@ app.get('/health', async (_req, res) => res.json({
   ok: true, routing: canRoute(), models: (await db.prepare('SELECT COUNT(*) AS n FROM models_catalog').get()).n,
 }));
 
+/* One line for every customer call, every change made from a screen, and anything that failed, so the
+   deploy log says what the service is doing. The screens' own reads, which poll every few seconds,
+   are left out unless they fail. Never the body: it is the customer's content. */
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/v1') && !req.path.startsWith('/api')) return next();
+  const t0 = process.hrtime.bigint();
+  res.on('finish', () => {
+    const quietRead = req.path.startsWith('/api') && req.method === 'GET' && res.statusCode < 400;
+    if (quietRead || !config.REQUEST_LOGS) return;
+    const ms = Number((process.hrtime.bigint() - t0) / 1000000n);
+    console.log(JSON.stringify({
+      at: new Date().toISOString(), kind: 'request', method: req.method, path: req.path.replace(/[a-z]{2,5}_[a-z0-9]{8,}/g, ':id'),
+      status: res.statusCode, ms, ws: req.key?.workspace_id?.slice(-6) ?? req.workspace?.id?.slice(-6) ?? null,
+      call: res.getHeader('x-understudy-call-id') ?? null,
+    }));
+  });
+  return next();
+});
+
 // the customer's own traffic, authenticated by their key
 app.use('/v1', v1);
 // the screens
@@ -403,11 +424,27 @@ if (fs.existsSync(dist)) {
    counts as one. Without this a thrown error is an unhandled rejection, which ends the
    process, so a single bad request would take the service down for everybody. */
 app.use((err, req, res, _next) => {
+  const machine = req.path.startsWith('/api') || req.path.startsWith('/v1');
+  /* A body that is not JSON, or is too big, is the request's problem, not ours: it is answered
+     with what is wrong, as a 400 or a 413, and nobody is paged about it. The copies example on the
+     Connect page, pasted with its placeholder in it, used to come back as a 500 "on our side". */
+  if (err?.type === 'entity.parse.failed' || err?.type === 'entity.too.large') {
+    if (res.headersSent) { res.end(); return; }
+    const status = err.type === 'entity.too.large' ? 413 : 400;
+    const message = status === 413
+      ? 'The request body is larger than we take. Send less at once.'
+      : `The request body is not valid JSON${err.message ? ` (${String(err.message).slice(0, 120)})` : ''}.`;
+    const body = req.path.startsWith('/v1') ? { error: { message, type: 'invalid_request_error' } } : { error: message };
+    res.status(status).json(body);
+    return;
+  }
   reportCrash({ where: `${req.method} ${req.path}`, err });
   if (res.headersSent) { res.end(); return; }
-  const machine = req.path.startsWith('/api') || req.path.startsWith('/v1');
-  if (machine) res.status(500).json({ error: { message: 'Something went wrong on our side.' } });
-  else res.status(500).type('text/plain').send('Something went wrong on our side.');
+  if (machine) {
+    // /api answers carry a plain message and /v1 answers the OpenAI shape, as every other answer does
+    if (req.path.startsWith('/v1')) res.status(500).json({ error: { message: 'Something went wrong on our side.', type: 'server_error' } });
+    else res.status(500).json({ error: 'Something went wrong on our side.' });
+  } else res.status(500).type('text/plain').send('Something went wrong on our side.');
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {

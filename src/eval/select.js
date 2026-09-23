@@ -301,7 +301,8 @@ export function selectCandidates(input) {
     refThinks = null, speedHistory = null, busy = null,
     config, at = Date.now(),
   } = input;
-  const zdrOnly = config.ZDR_ONLY;
+  // the workspace's own choice, where it made one; the deployment's otherwise
+  const zdrOnly = input.zdrOnly ?? config.ZDR_ONLY;
   const ctx = {
     profile, reference, zdrKnown: facts.zdrKnown, zdrOnly, room: config.EVAL_THINKING_ROOM_TOKENS,
     expiryMs: config.EVAL_EXPIRY_DAYS * 86400000, at, minUptime: config.EVAL_MIN_UPTIME_PCT,

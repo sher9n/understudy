@@ -1,6 +1,6 @@
 import { db } from '../db/index.js';
 import { track } from '../traffic.js';
-import { upsertArm, armById } from './arms.js';
+import { upsertArm, armById, referenceSpec } from './arms.js';
 
 /* Which strategy serves one call.
  *
@@ -60,5 +60,12 @@ export async function chooseStrategy(workload) {
     }
     if (pick) return pick;
   }
-  return serving ? { armId: serving.id, spec: serving.spec, propensity: 1, explored: false, shadow: null } : null;
+  if (!serving) return null;
+  /* What serves a switched workload can fail where the customer's own model would not: a provider
+     that is down or busy, a model that has left the catalogue, a call longer than the new model
+     takes. The call is then answered by the customer's own model, and the failure is kept against
+     the strategy so the watch can switch it back. Without this the customer's call simply failed. */
+  const fallback = { armId: null, spec: referenceSpec(workload), propensity: 1, explored: false, shadow: null, isFallback: true };
+  const same = serving.spec?.kind === 'model' && serving.spec.model === workload.reference_model && !serving.spec.recipe;
+  return { armId: serving.id, spec: serving.spec, propensity: 1, explored: false, shadow: null, fallback: same ? null : fallback };
 }

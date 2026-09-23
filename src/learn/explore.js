@@ -87,7 +87,8 @@ export function peekState(workload) {
 
 /* Failures that are the serving side's doing: a provider that failed or could not be reached, or
    a model nobody would serve. A request the customer got wrong, or our own account, is nobody's. */
-const COUNTED = `(status_code = 200 OR status_code IN (0, 404, 408, 429) OR status_code >= 500)`;
+// a call the strategy failed and the customer's own model answered, for a reason of the strategy's, counts against it
+const COUNTED = `(status_code = 200 OR status_code IN (0, 404, 408, 429) OR status_code >= 500 OR check_json LIKE '%"by":"fell back"%')`;
 /* And only calls whose outcomes could be read at all: those recorded since outcomes were kept, which
    carry their fingerprint. An older call has no signals, so it can only ever read as having worked,
    and counted in, the customer's own model's months of history outvoted the serving strategy's first
@@ -306,8 +307,11 @@ export async function chooseExplore(workload, servingArm, { rng = Math.random } 
   const plan = explorePlan({ share: s.share, serving, candidates, baseline: st.baseline.usable ? st.baseline : null });
   if (plan.length === 1) return null;
   const pick = pickFrom(plan, rng());
+  // what serves falls back to the customer's own model when it fails, as it does outside experiments
+  const own = serving.spec?.kind === 'model' && serving.spec.model === workload.reference_model && !serving.spec.recipe;
+  const toOwn = own ? null : { armId: null, spec: referenceSpec(workload), propensity: 1, explored: false, shadow: null, isFallback: true };
   if (pick.arm.id === serving.id) {
-    return { armId: serving.id, spec: serving.spec, propensity: pick.p, explored: false, shadow: null };
+    return { armId: serving.id, spec: serving.spec, propensity: pick.p, explored: false, shadow: null, fallback: toOwn };
   }
   let arm = pick.arm;
   if (arm.virtual) {
@@ -326,7 +330,7 @@ export async function chooseExplore(workload, servingArm, { rng = Math.random } 
   return {
     armId: arm.id, spec: arm.spec, propensity: pick.p, explored: true, shadow: null, why: pick.why,
     // an experiment is never worth a failed call: if it cannot be answered, the call is served as usual
-    fallback: { armId: serving.id, spec: serving.spec, propensity: null, explored: false, shadow: null },
+    fallback: { armId: serving.id, spec: serving.spec, propensity: null, explored: false, shadow: null, fallback: toOwn },
   };
 }
 

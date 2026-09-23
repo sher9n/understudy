@@ -22,6 +22,7 @@ import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
 import { switchStory } from './eval/switch-story.js';
 import { enqueue } from './jobs.js';
 import { routeOnce } from './proxy.js';
+import { forgetWorkspace } from './workspace.js';
 
 export const api = safeRouter();
 api.use(express.json({ limit: '2mb' }));
@@ -1054,7 +1055,7 @@ api.get('/models', async (req, res) => {
     where.set(s.m, [...(where.get(s.m) || []), s.slug]);
   }
   res.json({
-    zdrOnly: config.ZDR_ONLY,
+    zdrOnly: req.workspace.zdr_required !== 0,
     models: rows.map((m) => ({
       id: m.model_id, name: m.name,
       priceIn: round8(m.price_in * 1e6), priceOut: round8(m.price_out * 1e6),
@@ -1123,11 +1124,31 @@ api.get('/settings', async (req, res) => {
     measureEveryDays: req.workspace.measure_every_days ?? config.MEASURE_EVERY_DAYS,
     measureChoices: MEASURE_OPTIONS,
     retentionChoices: RETENTION_CHOICES,
-    zdrOnly: config.ZDR_ONLY,
+    zdrOnly: req.workspace.zdr_required !== 0,
+    zdrForced: config.ZDR_FORCED,
     canBill: canBill(),
     ledger: await ledger(req.workspace.id, 10),
     routing: await gateRouting(req.workspace.id),
   });
+});
+
+/* Whether this workspace's calls only go to providers that keep nothing. Turning it off is a real
+   choice with a real cost, so it is said in the activity feed in words, and it never reaches
+   providers that train on what they are sent. */
+api.post('/settings/zdr', async (req, res) => {
+  if (config.ZDR_FORCED) return fail(res, 400, 'Zero data retention is required for every workspace on this deployment.');
+  const required = req.body?.required !== false;
+  await db.prepare('UPDATE workspaces SET zdr_required = ? WHERE id = ?').run(required ? 1 : 0, req.workspace.id);
+  forgetWorkspace(req.workspace.id);
+  await addActivity(req.workspace.id, {
+    kind: 'connect',
+    title: required ? 'Only providers that keep nothing' : 'Providers that keep data briefly are allowed',
+    detail: required
+      ? 'Every call goes only to providers that keep nothing of what they are sent.'
+      : 'Calls may go to providers that keep what they are sent for a while (usually for abuse checks), '
+        + 'never to ones that train on it. More models can be used, and measured.',
+  });
+  return res.json({ ok: true, required });
 });
 
 /* The ledger further back than Settings shows at first, twenty lines at a time. */

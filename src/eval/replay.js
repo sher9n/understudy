@@ -3,6 +3,7 @@ import config from '../config.js';
 import { db, now } from '../db/index.js';
 import { chat, streamCollect, UpstreamError, reasonOf } from '../openrouter.js';
 import { recordCall } from '../traffic.js';
+import { zdrFor } from '../workspace.js';
 
 /* Replaying one of a workload's calls on one model, remembering what was paid for.
  *
@@ -94,13 +95,15 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
     }
   }
 
+  // replayed the way this workspace's own calls are sent: to providers that keep nothing, unless it chose otherwise
+  const zdr = await zdrFor(workload.workspace_id);
   const clean = { ...body };
   delete clean.stream;
   let out;
   try {
     let got;
     try {
-      got = await streamCollect(clean, model, { recipe });
+      got = await streamCollect(clean, model, { recipe, zdr });
     } catch (err) {
       /* A stream that broke for a reason of its own, rather than a refusal, is asked once more
          without streaming. The answer is what matters; its first-word time is then unknown. One
@@ -108,7 +111,7 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
          answer would only say so twice. */
       if (err instanceof UpstreamError) throw err;
       if (err?.name === 'TimeoutError' || err?.name === 'AbortError') throw err;
-      const plain = await chat(clean, model, { recipe, pace: true });
+      const plain = await chat(clean, model, { recipe, pace: true, zdr });
       got = { json: plain.json, latencyMs: plain.latencyMs, ttftMs: null };
     }
     const usage = got.json?.usage || {};

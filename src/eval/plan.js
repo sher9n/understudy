@@ -2,6 +2,7 @@ import { db, now } from '../db/index.js';
 import config from '../config.js';
 import { jevUsable, jevResting } from '../jev.js';
 import { gateEval } from '../billing.js';
+import { zdrFor } from '../workspace.js';
 import { loadFacts, routedCallPrice, callPrice } from '../models/facts.js';
 import { ratingsFor } from '../models/arena.js';
 import { profileOf, speedRule } from './profile.js';
@@ -125,6 +126,7 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
     facts, profile, reference: workload.reference_model, enabled, want: models,
     tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, serving: workload.routed_model,
     history, speed, refThinks, speedHistory: fleet.speed, busy: fleet.busy, config, at: now(),
+    zdrOnly: await zdrFor(workload.workspace_id),
   };
 
   // who survives the rules, before anything is ranked

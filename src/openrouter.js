@@ -55,31 +55,43 @@ function headers() {
  * `recipe` is how a model was measured, when that differs from the customer's own request: a
  * model that thinks before it answers can be measured with its thinking switched off, and if
  * it is switched to, it is routed the same way, because that is the model that cleared. */
-export function buildUpstream(body, model, recipe = null) {
+export function buildUpstream(body, model, recipe = null, { zdr = null } = {}) {
   const out = { ...body, model };
   delete out.stream_options;
   if (recipe?.reasoning) out.reasoning = { ...recipe.reasoning };
-  if (config.ZDR_ONLY) out.provider = { ...(out.provider || {}), zdr: true, data_collection: 'deny' };
+  /* A workspace keeps zero data retention unless it chose otherwise on Settings, and nobody's calls
+     ever go to a provider that trains on them. Turning retention off lets a workspace reach the models
+     that have no provider keeping nothing (o3, the newest Claude models), and says so where it is chosen. */
+  const keepNothing = zdr ?? config.ZDR_ONLY;
+  out.provider = { ...(out.provider || {}), data_collection: 'deny', ...(keepNothing ? { zdr: true } : {}) };
+  if (!keepNothing) delete out.provider.zdr;
   return out;
 }
 
-export async function chat(body, model, { signal, retries = 3, recipe = null, pace = false } = {}) {
+export async function chat(body, model, { signal, retries = 3, recipe = null, pace = false, maxWaitMs = null, zdr = null } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
-  const payload = buildUpstream(body, model, recipe);
+  const payload = buildUpstream(body, model, recipe, { zdr });
   for (let attempt = 0; ; attempt += 1) {
     await waitForSlot(model, pace);
     const started = Date.now();
-    const res = await fetch(`${config.OPENROUTER_BASE}/chat/completions`, {
-      method: 'POST', headers: headers(), body: JSON.stringify(payload),
-      signal: signal ?? AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS),
-    });
+    let res;
+    try {
+      res = await fetch(`${config.OPENROUTER_BASE}/chat/completions`, {
+        method: 'POST', headers: headers(), body: JSON.stringify(payload),
+        signal: signal ?? AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS),
+      });
+    } catch (err) {
+      // no answer at all, or none in time: a provider that cannot be reached, said as one
+      throw new UpstreamError(err?.name === 'TimeoutError' || err?.name === 'AbortError' ? 408 : 0,
+        { error: { message: err?.name === 'TimeoutError' ? 'The provider did not answer in time.' : 'The provider could not be reached.' } });
+    }
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch { /* upstream sent something unparseable */ }
     if (res.status === 429 && attempt < retries) {
       const after = Number(res.headers.get('retry-after')) * 1000;
       const wait = Number.isFinite(after) && after > 0 ? after : 2000 * 2 ** attempt;
-      await new Promise((r) => setTimeout(r, Math.min(wait, config.UPSTREAM_RETRY_WAIT_MAX_MS)));
+      await new Promise((r) => setTimeout(r, Math.min(wait, maxWaitMs ?? config.UPSTREAM_RETRY_WAIT_MAX_MS)));
       continue;
     }
     if (!res.ok) throw new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
@@ -88,9 +100,9 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
 }
 
 /** Streaming passes straight through; the final chunk carries usage, which is what we bill on. */
-export async function chatStream(body, model, { signal, recipe = null, retries = 0, pace = false } = {}) {
+export async function chatStream(body, model, { signal, recipe = null, retries = 0, pace = false, zdr = null } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
-  const payload = buildUpstream(body, model, recipe);
+  const payload = buildUpstream(body, model, recipe, { zdr });
   payload.stream = true;
   payload.stream_options = { include_usage: true };
   for (let attempt = 0; ; attempt += 1) {
@@ -124,8 +136,8 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
  * being written, that moment is what they feel, and a total time hides it. Words and tool calls
  * both count as the first thing written; a model's hidden thinking does not, because nobody sees
  * it. Tool calls arrive in pieces and are joined by their index, the way every client joins them. */
-export async function streamCollect(body, model, { recipe = null, retries = 3, signal, pace = true } = {}) {
-  const res = await chatStream(body, model, { recipe, retries, signal, pace });
+export async function streamCollect(body, model, { recipe = null, retries = 3, signal, pace = true, zdr = null } = {}) {
+  const res = await chatStream(body, model, { recipe, retries, signal, pace, zdr });
   /* Timed from when the request actually left, after any spacing, so waiting our turn is
      never counted against a model's speed. */
   const started = res.sentAt ?? Date.now();
