@@ -121,6 +121,26 @@ export async function deferAfterFailure(workloadId) {
   return await putOff(workloadId, now() + wait);
 }
 
+/* Which of a workspace's workloads the hourly pass measures again now: due by their own booking where they have
+   one (spaced out while re-checks keep confirming, brought forward by a change that could matter), otherwise by
+   the workspace's rhythm of `days`. Never one being measured, or one already waiting in the queue: that
+   measurement answers the pass. A booking can come due while its measurement is still going, because a new
+   workload's is held only an hour for it to start, and a measurement can take longer than that, or wait its turn
+   behind two others first. Queued again then, it waited behind the two and started over the moment the first
+   ended: on 24 Sep two workloads were measured twice back to back that way. Answers their ids. */
+export async function dueForRecheck(workspaceId, days) {
+  return db.prepare(
+    `SELECT w.id FROM workloads w
+      WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
+        AND ((w.recheck_after IS NOT NULL AND w.recheck_after <= ?)
+          OR (w.recheck_after IS NULL
+              AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?))
+        AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.workload_id = w.id AND r.status = 'running')
+        AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'eval_run' AND j.status IN ('queued', 'claimed')
+                          AND (j.payload::jsonb ->> 'workloadId') = w.id)`)
+    .all(workspaceId, now(), now() - days * DAY);
+}
+
 /* Something changed that could matter: the next measurement of these workloads comes forward to
    within EVAL_NUDGE_HOURS, but never to sooner than the workspace's rhythm after the last
    measurement of it (nor EVAL_NUDGE_MIN_DAYS), and only in a workspace that measures by itself.
