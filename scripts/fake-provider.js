@@ -14,6 +14,9 @@
 import http from 'node:http';
 
 const PORT = Number(process.env.FAKE_PORT || 4790);
+/* How long an answer takes, as a real provider's does: FAKE_LATENCY_MS on average, anywhere from half to one and a
+   half times that. None by default. A walk that times a measurement wants it, or waiting for answers never shows. */
+const LATENCY_MS = Number(process.env.FAKE_LATENCY_MS || 0);
 
 const MODELS = [
   { id: 'openai/gpt-5.4', name: 'GPT-5.4', context_length: 400000, pricing: { prompt: '0.0000025', completion: '0.000015' } },
@@ -93,18 +96,23 @@ const server = http.createServer((req, res) => {
           + (wobbles ? 'A colleague will follow up shortly.' : 'We have looked into it and will follow up.');
     const prompt_tokens = 700 + Math.floor(steady * 300);
     const completion_tokens = 40 + Math.floor(wobbled * 120);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      id: `gen-${seq}`,
-      model,
-      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: answer } }],
-      usage: {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens: prompt_tokens + completion_tokens,
-        cost: Number(price.prompt) * prompt_tokens + Number(price.completion) * completion_tokens,
-      },
-    }));
+    const id = `gen-${seq}`;
+    const answerNow = () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id,
+        model,
+        choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: answer } }],
+        usage: {
+          prompt_tokens,
+          completion_tokens,
+          total_tokens: prompt_tokens + completion_tokens,
+          cost: Number(price.prompt) * prompt_tokens + Number(price.completion) * completion_tokens,
+        },
+      }));
+    };
+    if (LATENCY_MS > 0) setTimeout(answerNow, Math.round(LATENCY_MS * (0.5 + Math.random())));
+    else answerNow();
   });
 });
 

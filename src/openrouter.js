@@ -4,21 +4,68 @@ import { db, now } from './db/index.js';
 /* One account, one key. Every call states that it will only accept a provider that
    retains nothing, and every call reports its own cost so nothing is estimated. */
 
-const lastCallAt = new Map();
+/* Measurement calls are paced per model by how that model behaves, not by a fixed gap. At most
+   MODEL_MAX_IN_FLIGHT of one model's measurement calls are out at once, in the order they asked, started at least
+   MODEL_MIN_GAP_MS apart (none by default). A model that turns one away for coming too fast (a 429) is slowed:
+   the gap before its next call doubles, from MODEL_BACKOFF_START_MS up to MODEL_BACKOFF_MAX_MS, and halves again
+   after every MODEL_BACKOFF_EASE_AFTER calls in a row it takes, down to none.
 
-/* Measurement calls are spaced out per model, because a new provider account is held to a
-   few calls a minute and a measurement would otherwise trip it and lose calls to refusals.
-   A customer's own calls are never spaced: they were, through this same function, so every
-   routed call to a popular model could wait up to the full gap behind anybody else's. */
-const waitForSlot = async (model, pace) => {
-  const gap = config.MODEL_MIN_GAP_MS;
-  if (!gap || !pace) return;
-  const last = lastCallAt.get(model) || 0;
-  const wait = last + gap - Date.now();
-  /* The slot is taken before waiting, not after, so two callers arriving together for the
-     same model queue up one gap apart instead of both waking at once and calling together. */
-  lastCallAt.set(model, Math.max(Date.now(), last + gap));
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+   It used to be a fixed 3.2 s between any two measurement calls to a model, because a new provider account was
+   held to a few calls a minute. That held every measurement to one call a model every 3.2 s, the judge included,
+   which every model being tried and every measurement running shares: a measurement of written answers took an
+   hour, most of it queued for the judge. Over the week to 25 Sep 2026 providers turned away 8 of 2,144
+   measurement calls for coming too fast, all from three models. A turned-away call is still tried again (see
+   chat), after the wait the provider asks for. A customer's own calls are never paced: they were, through this
+   same function, so every routed call to a popular model could wait up to the full gap behind anybody else's. */
+const paces = new Map();
+const paceOf = (model) => {
+  let p = paces.get(model);
+  if (!p) { p = { out: 0, gap: 0, nextAt: 0, easy: 0, queue: [], timer: null }; paces.set(model, p); }
+  return p;
+};
+// hands out what the cap and the gap allow, first come first served, and wakes itself for a gap still to run
+function drain(p) {
+  while (p.queue.length && p.out < Math.max(1, config.MODEL_MAX_IN_FLIGHT)) {
+    const wait = p.nextAt - Date.now();
+    if (wait > 0) {
+      /* kept alive while a call waits on it: a call waiting its turn is work still to do, so the process must
+         not end under it (only set while somebody waits, so nothing is held open otherwise) */
+      if (!p.timer) p.timer = setTimeout(() => { p.timer = null; drain(p); }, wait);
+      return;
+    }
+    p.out += 1;
+    p.nextAt = Date.now() + Math.max(config.MODEL_MIN_GAP_MS, p.gap);
+    p.queue.shift()();
+  }
+}
+/** A turn to send one paced call to `model`, or null for a call that is not paced. Given back with giveBack. */
+export async function takeSlot(model, pace) {
+  if (!pace) return null;
+  const p = paceOf(model);
+  await new Promise((resolve) => { p.queue.push(resolve); drain(p); });
+  return p;
+}
+/** A paced call is over: `refused` when the provider turned it away for coming too fast. */
+export function giveBack(p, { refused = false } = {}) {
+  if (!p) return;
+  p.out = Math.max(0, p.out - 1);
+  if (refused) {
+    p.gap = Math.min(config.MODEL_BACKOFF_MAX_MS, Math.max(config.MODEL_BACKOFF_START_MS, p.gap * 2));
+    p.easy = 0;
+    p.nextAt = Math.max(p.nextAt, Date.now() + p.gap);
+  } else if (p.gap > 0) {
+    p.easy += 1;
+    if (p.easy >= config.MODEL_BACKOFF_EASE_AFTER) {
+      p.gap = p.gap / 2 < config.MODEL_BACKOFF_START_MS / 2 ? 0 : Math.round(p.gap / 2);
+      p.easy = 0;
+    }
+  }
+  drain(p);
+}
+/** How one model is being paced, for tests and the page. */
+export const paceNow = (model) => {
+  const p = paces.get(model);
+  return p ? { out: p.out, gap: p.gap, waiting: p.queue.length } : { out: 0, gap: 0, waiting: 0 };
 };
 
 export class UpstreamError extends Error {
@@ -166,7 +213,7 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
   const payload = buildUpstream(body, model, recipe, { zdr, cacheHint, priceCaps });
   for (let attempt = 0; ; attempt += 1) {
-    await waitForSlot(model, pace);
+    const slot = await takeSlot(model, pace);
     const started = Date.now();
     let res;
     try {
@@ -175,11 +222,18 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
         signal: signal ?? AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS),
       });
     } catch (err) {
+      giveBack(slot);
       // no answer at all, or none in time: a provider that cannot be reached, said as one
       throw new UpstreamError(err?.name === 'TimeoutError' || err?.name === 'AbortError' ? 408 : 0,
         { error: { message: err?.name === 'TimeoutError' ? 'The provider did not answer in time.' : 'The provider could not be reached.' } });
     }
-    const text = await res.text();
+    let text;
+    try {
+      text = await res.text();
+    } finally {
+      // the turn is over once the answer is in; one turned away for coming too fast slows this model down
+      giveBack(slot, { refused: res.status === 429 });
+    }
     let json = null;
     try { json = JSON.parse(text); } catch { /* upstream sent something unparseable */ }
     if (res.status === 429 && attempt < retries) {
@@ -209,7 +263,10 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
   payload.stream = true;
   payload.stream_options = { include_usage: true };
   for (let attempt = 0; ; attempt += 1) {
-    await waitForSlot(model, pace);
+    const slot = await takeSlot(model, pace);
+    // given back exactly once, however this try ends (letGo is reached from every ending)
+    let freed = false;
+    const free = (refused = false) => { if (!freed) { freed = true; giveBack(slot, { refused }); } };
     const sentAt = Date.now();
     const ctl = new AbortController();
     const stop = (why) => { if (!ctl.signal.aborted) ctl.abort(why); };
@@ -228,6 +285,7 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
       clearTimeout(whole);
       clearTimeout(quiet);
       if (signal) signal.removeEventListener('abort', onOuter);
+      free();
     };
     whole = setTimeout(() => stop(timedOut('The answer took longer than allowed.')), wholeMs);
     whole.unref?.();
@@ -247,6 +305,7 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
       clearTimeout(toStart);
     }
     if (res.status === 429 && attempt < retries) {
+      free(true);
       letGo();
       await res.text().catch(() => '');
       const after = Number(res.headers.get('retry-after')) * 1000;
@@ -255,6 +314,7 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
       continue;
     }
     if (!res.ok) {
+      free(res.status === 429);
       letGo();
       const text = await res.text();
       let json = null;

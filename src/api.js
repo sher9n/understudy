@@ -27,7 +27,7 @@ import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
 import { routingModeOf, ROUTING_MODES } from './eval/confidence.js';
 import { switchStory } from './eval/switch-story.js';
 import { valueOf } from './eval/value.js';
-import { enqueue } from './jobs.js';
+import { enqueue, wakeJobs } from './jobs.js';
 import { routeOnce } from './proxy.js';
 import { forgetWorkspace } from './workspace.js';
 
@@ -668,13 +668,14 @@ api.get('/workloads/:id', async (req, res) => {
   /* A measurement asked for and not started yet is a job waiting its turn, which can be a few
      seconds or, when the balance is short, much longer. The page shows it as one, with its Stop
      button, rather than hiding the panel at its first check and leaving a run to start a moment
-     later with nobody watching it. A job claimed more than a minute ago with no run behind it
-     was abandoned, and is not shown as waiting. */
+     later with nobody watching it. One the job runner has taken up is choosing its models (Jev is
+     asked which fit) and says so; one taken up longer ago than that could take (EVAL_PLANNING_MAX_MS)
+     with no run behind it was abandoned, and is not shown as waiting. */
   const waiting = running ? null : await db.prepare(
-    `SELECT id, run_after FROM jobs WHERE kind = 'eval_run'
+    `SELECT id, run_after, status FROM jobs WHERE kind = 'eval_run'
         AND (status = 'queued' OR (status = 'claimed' AND claimed_at > ?))
         AND (payload::jsonb ->> 'workloadId') = ?
-      ORDER BY run_after LIMIT 1`).get(now() - 60000, w.id);
+      ORDER BY run_after LIMIT 1`).get(now() - config.EVAL_PLANNING_MAX_MS, w.id);
   const last = await db.prepare(
     `SELECT ${RUN_COLUMNS} FROM eval_runs WHERE workload_id = ? AND status != 'running'
       ORDER BY created_at DESC LIMIT 1`).get(w.id);
@@ -757,8 +758,12 @@ api.get('/workloads/:id', async (req, res) => {
       // as a duration, worked out here: the browser's clock is not the server's
       quietMs: Math.max(0, now() - (running.heartbeat_at ?? running.started_at ?? now())),
       staleMin: config.EVAL_STALE_MIN,
+      // about how long is left, at the pace it has kept so far (see leftOf)
+      leftMs: leftOf(running),
     } : waiting ? {
       queued: true, startsAt: waiting.run_after, total: 0, done: 0, spend: 0, phase: null,
+      // taken up by the job runner and choosing which models to try, rather than waiting for a place
+      planning: waiting.status === 'claimed',
     } : null,
   };
 
@@ -1124,6 +1129,18 @@ api.post('/workloads/:id/speed', async (req, res) => {
  * It used to mark the workload "Measuring" and queue a job that quietly declined a moment
  * later, so a workload with too few calls sat saying "Measuring" for ever and nobody was
  * ever told why. The same plan the button was shown decides here. */
+/* About how long a running measurement has left, from the pace it has kept so far: the time each of its model calls
+   has taken on average, times the calls still to come. Nothing until it has made a few and run a little while, when
+   any pace would be a guess. The calls still to come are counted afresh as models are dropped and the next tried,
+   and grow when the second look starts, so this can move; the page says "about". */
+export function leftOf(r, at = now()) {
+  const done = Number(r?.steps_done) || 0;
+  const total = Number(r?.steps_total) || 0;
+  const took = at - Number(r?.started_at || at);
+  if (done < 5 || took < 20000 || total <= done) return null;
+  return Math.round((took / done) * (total - done));
+}
+
 api.post('/workloads/:id/measure', async (req, res) => {
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
     .get(req.params.id, req.workspace.id);
@@ -1140,13 +1157,15 @@ api.post('/workloads/:id/measure', async (req, res) => {
      UNION ALL
      SELECT id FROM jobs WHERE kind = 'eval_run' AND (payload::jsonb ->> 'workloadId') = ?
         AND (status = 'queued' OR (status = 'claimed' AND claimed_at > ?))
-     LIMIT 1`).get(w.id, w.id, now() - 60000);
+     LIMIT 1`).get(w.id, w.id, now() - config.EVAL_PLANNING_MAX_MS);
   if (running) return res.json({ ok: true, already: true });
 
   const plan = await planFor(w, { canRoute: canRoute() });
   if (!plan.canRun) return fail(res, 400, plan.reason);
 
   await enqueue('eval_run', { workloadId: w.id, trigger: 'manual' }, { unique: true });
+  // looked at now, not at the next tick: somebody is watching for it to start (it has places of its own, see src/jobs.js)
+  wakeJobs();
   await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), w.id);
   return res.json({ ok: true, sample: plan.sample, models: plan.candidates.length, estimateUsd: plan.estimateUsd });
 });
