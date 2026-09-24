@@ -3,7 +3,7 @@ import config, { canRoute } from '../config.js';
 import { priceCall } from '../openrouter.js';
 import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval } from '../billing.js';
-import { planFor, ownArmKey } from './plan.js';
+import { planFor, ownArmKey, barNeed } from './plan.js';
 import { judgeBarPair, judgeCandidate, judgeQuality, canJudge } from './judge.js';
 import { extract, disagreement, gates, floorFrom, verdictWith, sampleCalls, barIsMeaningful, structuredCompare, proseText, callsToClear } from './compare.js';
 import { promote, revert, trafficOf, everReverted } from './promote.js';
@@ -2320,6 +2320,15 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   await scheduleNext(workloadId, {
     changed: !automatic || switchedBack || !!second || !!unlooked || servingClose || !!servingUnjudged || !!leftOnly || (!!best && !stillServing),
   });
+  /* A measurement on too few calls for its own bar, as a person's Measure now on a new workload can be, could not
+     have switched anything, even to a model that matched every answer. Booked a whole rhythm out like one that
+     could, the measurement that can was a month away however soon its calls came. It waits for them instead
+     (waitForCalls), so the call that brings them starts it, with the rhythm kept as the fallback. Never in a
+     workspace that measures only when asked, and never for a bar no sample could clear. */
+  const need = callsToClear(floor);
+  if (kept.length < need && need <= config.EVAL_SAMPLE_MAX && (await cadenceOf(workload.workspace_id)) > 0) {
+    await waitForCalls(workloadId, barNeed(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId)).calls);
+  }
   return { ok: true, runId: run.id, floor, results: results.length, partial: halt === 'balance', reused: reusedCount };
 }
 

@@ -18,7 +18,9 @@ import { leadModel } from './learn/arms.js';
 import { zdrFor, cacheHintFor } from './workspace.js';
 import { estimateCost } from './trueup.js';
 import { cadenceOf } from './eval/schedule.js';
-import { planFor, usableCalls } from './eval/plan.js';
+import { planFor, usableCalls, barNeed } from './eval/plan.js';
+import { callsToClear } from './eval/compare.js';
+import { OUTCOME_OF } from './eval/outcome.js';
 
 /* Roughly how many tokens an answer ran to, from what it wrote: three characters a token, which
    overcounts ordinary text, for charging a call whose provider did not say. */
@@ -820,7 +822,8 @@ export async function startWaiting() {
    calls were guessed to arrive. Each is given the count it waits for, and one that has it already is measured now.
    Only workloads never measured, because the booking of one that was is its workspace's rhythm and never a wait for
    calls; only live ones, in a workspace that measures by itself; never one being measured, waiting in the queue, or
-   stopped by a person. Then every one already waiting whose calls are here is started (startWaiting). Run when the
+   stopped by a person. Then those whose last measurement was too small to switch anything wait for the calls one
+   that can needs (waitAfterSmall), and every one already waiting whose calls are here is started (startWaiting). Run when the
    server starts; running it again changes nothing. */
 export async function convertWaits({ plan = planFor } = {}) {
   const rows = await db.prepare(
@@ -854,8 +857,36 @@ export async function convertWaits({ plan = planFor } = {}) {
       waiting += 1;
     }
   }
+  waiting += await waitAfterSmall();
   started += await startWaiting();
   return { looked: rows.length, started, waiting };
+}
+
+/* Workloads whose last measurement was on too few calls for its own bar, measured before such a measurement went
+   back to waiting for the calls (see the end of runEvaluation), and booked a rhythm out instead: each is given
+   the count a measurement that can switch needs. Only live ones in a workspace that measures by itself, none
+   being measured or waiting in the queue, and none whose bar no sample could clear. Answers how many. */
+export async function waitAfterSmall() {
+  let waiting = 0;
+  const rows = await db.prepare(
+    `SELECT w.* FROM workloads w
+      WHERE w.state = 'live' AND w.merged_into IS NULL AND w.measure_at_calls IS NULL AND w.floor_pct > 0
+        AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.workload_id = w.id AND r.status = 'running')
+        AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'eval_run' AND j.status IN ('queued', 'claimed')
+                          AND (j.payload::jsonb ->> 'workloadId') = w.id)`).all();
+  for (const w of rows) {
+    const last = await db.prepare(
+      `SELECT sample_size, ${OUTCOME_OF()} AS outcome FROM eval_runs WHERE workload_id = ? AND status = 'done'
+        ORDER BY created_at DESC LIMIT 1`).get(w.id);
+    if (!last || last.outcome !== 'compared') continue;
+    const need = callsToClear(Number(w.floor_pct));
+    if (!(Number(last.sample_size) < need) || need > config.EVAL_SAMPLE_MAX) continue;
+    if (!(await cadenceOf(w.workspace_id))) continue;
+    const set = await db.prepare('UPDATE workloads SET measure_at_calls = ? WHERE id = ? AND measure_at_calls IS NULL')
+      .run(barNeed(w).calls, w.id);
+    if (set.changes) waiting += 1;
+  }
+  return waiting;
 }
 
 /** Once a workload has enough calls to be trusted, it measures itself without being asked. */

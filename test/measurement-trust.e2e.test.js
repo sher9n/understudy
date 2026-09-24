@@ -57,7 +57,7 @@ const { promote } = await import('../src/eval/promote.js');
 const { scheduleNext, deferAutomatic, nudgeForCatalog, dueForRecheck } = await import('../src/eval/schedule.js');
 const { calibrationFor, calibrated, forgetCalibration } = await import('../src/eval/calibrate.js');
 const { planFor, barNeed } = await import('../src/eval/plan.js');
-const { considerMeasuring, convertWaits, startWaiting } = await import('../src/proxy.js');
+const { considerMeasuring, convertWaits, startWaiting, waitAfterSmall } = await import('../src/proxy.js');
 const { valueOf } = await import('../src/eval/value.js');
 const { enqueue } = await import('../src/jobs.js');
 const { forgetFacts } = await import('../src/models/facts.js');
@@ -426,6 +426,75 @@ test('a measurement nobody asked for, queued while another of the workload ran, 
   // a person asking is never answered this way
   const asked = await runEvaluation(workload.id, { trigger: 'manual', jobId: queued.id });
   assert.doesNotMatch(String(asked?.reason ?? ''), /measured since this was queued/);
+});
+
+test('a measurement too small to switch anything waits for the calls one that could needs, not a whole rhythm', async () => {
+  // a person presses Measure now on a new workload with 54 calls: 27 in the sample, where a 3% bar takes 88
+  const { workspace, workload } = await seed({ n: 54, enabled: ['vendor/steady-small'] });
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  let w = await load(workload.id);
+  const need = barNeed(w);
+  const sample = Number((await db.prepare('SELECT sample_size FROM eval_runs WHERE id = ?').get(out.runId)).sample_size);
+  assert.ok(sample < need.need, `too few to clear its bar: ${sample} of ${need.need}`);
+  assert.equal(Number(w.measure_at_calls), need.calls, 'it waits for the calls a measurement that can switch needs');
+  const days = (Number(w.recheck_after) - now()) / DAY;
+  assert.ok(days > 29 && days < 31, `with the rhythm kept only as the fallback: ${days} days`);
+  // and the call that brings them starts it, as the automatic measurement it now is
+  await addCalls(workspace, workload, 60, 20);
+  await addCalls(workspace, workload, 60, 21);
+  await addCalls(workspace, workload, need.calls - 54 - 120 - 1, 22);
+  await considerMeasuring(workspace.id, await load(workload.id));
+  assert.equal(await queuedFor(workload.id), 0, 'one call short: nothing yet');
+  await addCalls(workspace, workload, 1, 22);
+  await considerMeasuring(workspace.id, await load(workload.id));
+  assert.equal(await queuedFor(workload.id), 1, 'the call that brings the count starts it');
+  const job = await db.prepare(`SELECT payload FROM jobs WHERE kind = 'eval_run' AND status = 'queued' AND (payload::jsonb ->> 'workloadId') = ?`).get(workload.id);
+  assert.equal(JSON.parse(job.payload).trigger, 'automatic');
+  await cancelFor(workload.id);
+
+  // one on enough calls to switch is booked on the rhythm as before
+  const big = await seed({ n: 200, enabled: ['vendor/steady-small'] });
+  assert.equal((await runEvaluation(big.workload.id)).ok, true);
+  assert.equal((await load(big.workload.id)).measure_at_calls, null, 'a measurement that could switch waits for no calls');
+
+  // and in a workspace that measures only when asked, nothing waits to start by itself
+  const asked = await seed({ n: 54, enabled: ['vendor/steady-small'] });
+  await db.prepare('UPDATE workspaces SET measure_every_days = 0 WHERE id = ?').run(asked.workspace.id);
+  assert.equal((await runEvaluation(asked.workload.id)).ok, true);
+  assert.equal((await load(asked.workload.id)).measure_at_calls, null, 'only when asked means only when asked');
+});
+
+test('a workload whose last measurement was too small to switch anything is set waiting for the calls when a server starts', async () => {
+  const made = [];
+  for (let k = 0; k < 5; k += 1) made.push(await seed({ n: 40, enabled: ['vendor/steady-small'] }));
+  const [small, enough, noisy, busy, asked] = made;
+  const addRun = (x, sample, outcome, status = 'done') => db.prepare(
+    `INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model, sample_size, floor_pct, created_at, finished_at)
+      VALUES (?, ?, ?, ?, ?, 'json', 'openai/gpt-5.4', ?, 3, ?, ?)`).run(`run_small_${x.workload.id}`, x.workspace.id, x.workload.id, status, outcome, sample,
+    now() - 3600000, status === 'done' ? now() - 60000 : null);
+  for (const x of made) {
+    await db.prepare("UPDATE workloads SET state = 'live', status = 'no_match', floor_pct = 3, measure_at_calls = NULL, recheck_after = ? WHERE id = ?")
+      .run(now() + 30 * DAY, x.workload.id);
+  }
+  await addRun(small, 27, 'compared');
+  await addRun(enough, 100, 'compared');
+  await addRun(noisy, 27, 'unmeasurable');
+  await addRun(busy, 27, 'compared');
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model, created_at)
+      VALUES (?, ?, ?, 'running', 'json', 'openai/gpt-5.4', ?)`).run(`run_busy_${busy.workload.id}`, busy.workspace.id, busy.workload.id, now());
+  await addRun(asked, 27, 'compared');
+  await db.prepare('UPDATE workspaces SET measure_every_days = 0 WHERE id = ?').run(asked.workspace.id);
+  assert.ok((await waitAfterSmall()) >= 1);
+  assert.equal(Number((await load(small.workload.id)).measure_at_calls), 176, 'too small for its 3% bar: it waits for the 176 calls one that can needs');
+  assert.equal((await load(enough.workload.id)).measure_at_calls, null, 'one measured on enough calls is left on its rhythm');
+  assert.equal((await load(noisy.workload.id)).measure_at_calls, null, 'more calls would not steady a model that disagrees with itself');
+  assert.equal((await load(busy.workload.id)).measure_at_calls, null, 'one being measured is left to that measurement');
+  assert.equal((await load(asked.workload.id)).measure_at_calls, null, 'only when asked means only when asked');
+  // running it again changes nothing
+  await waitAfterSmall();
+  assert.equal(Number((await load(small.workload.id)).measure_at_calls), 176);
+  await db.prepare(`UPDATE eval_runs SET status = 'done', outcome = 'compared', finished_at = ? WHERE id = ?`).run(now(), `run_busy_${busy.workload.id}`);
 });
 
 test('workloads left waiting on a guessed time are measured at once when they have the calls, and wait for them when not', async () => {
