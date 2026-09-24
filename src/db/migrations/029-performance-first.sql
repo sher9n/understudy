@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS control_checks (
   score          DOUBLE PRECISION,
   better         INTEGER NOT NULL DEFAULT 0,
   judged_by      TEXT,
+  -- the yardstick it was judged by (agreement or quality): a check is only counted against a pass mark set by the same one
+  yardstick      TEXT,
   detail_json    TEXT,
   cost_usd       DOUBLE PRECISION NOT NULL DEFAULT 0,
   latency_ms     INTEGER,
@@ -41,3 +43,5 @@ CREATE TABLE IF NOT EXISTS control_checks (
 );
 CREATE INDEX IF NOT EXISTS control_checks_workload ON control_checks (workload_id, created_at);
 CREATE INDEX IF NOT EXISTS control_checks_arm ON control_checks (arm_id, created_at);
+-- what a workspace spent on optimizing, over a window (optimizeSpent, the value history)
+CREATE INDEX IF NOT EXISTS control_checks_workspace ON control_checks (workspace_id, created_at);

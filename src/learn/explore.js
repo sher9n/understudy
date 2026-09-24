@@ -16,7 +16,7 @@ import { graderFor, gradedBy } from './grade.js';
 import { combineDays, fairRecord } from './fair.js';
 import { watchPins } from './pins.js';
 import { memo, forgetState } from './memo.js';
-import { account, optimizeLeft } from '../billing.js';
+import { account, backgroundLeft } from '../billing.js';
 import { maybeControl, controlRecord, controlBreach } from './control.js';
 
 /* Learning, from what live calls show, which way of serving a workload works best.
@@ -359,8 +359,9 @@ async function readState(workload) {
     .get(workload.id, dayStart);
   extra += Number(sh.cost);
   extra *= 1 + config.ROUTING_FEE_PCT / 100;
-  // the workspace's own ceiling on optimizing, if it set one: nothing is tried past it
-  const budgetLeft = await optimizeLeft(workload.workspace_id);
+  /* the workspace's own ceiling on optimizing, if it set one: nothing is tried past it, nor out of the share of it
+     kept for measurements (backgroundLeft) */
+  const budgetLeft = await backgroundLeft(workload.workspace_id);
   return { arms: recs, byId: recById, serving, baseline, prior, extraToday: extra, dayStart, at: t, grader,
     detection, detectionFrom: gradedDetection !== null ? 'graded' : 'signals', hasEvents, settleMs, perDay, budgetLeft,
     dailySaving: dailySavingOf() };
@@ -455,9 +456,12 @@ async function agreementOf(body, used, other, shape, scope) {
   const b = extract(other, shape);
   const d = disagreement(b, a, shape);
   if (d !== null) return { agreement: 1 - d, cost: 0, judgedBy: 'fields' };
-  // every deciding field matched and a written one is worded differently: read it for meaning
+  /* every deciding field matched and a written one is worded differently: read it for meaning. The side
+     judged is the runner-up's (the first here, 'a'), as it is for free text above: judged the other way, a
+     runner-up that left something out was asked whether the served answer was at least as good as its own,
+     and read as agreeing. */
   const c = structuredCompare(b.value, a.value, shape);
-  const j = await judgeBarPair(requestText(body), proseText(c.prose, 'a'), proseText(c.prose, 'b'), { scope });
+  const j = await judgeBarPair(requestText(body), proseText(c.prose, 'a'), proseText(c.prose, 'b'), { scope, subject: 'a' });
   if (j.transient || !j.judgedBy) return { agreement: 1, cost: j.cost || 0, judgedBy: 'fields' };
   return { agreement: 1 - j.score, cost: j.cost || 0, judgedBy: `fields+${j.judgedBy}` };
 }
@@ -1009,13 +1013,17 @@ export async function learningView(workload) {
   };
 }
 
-/* Whether the workspace's own optimization budget is used up. */
+/* Whether the workspace's own optimization budget is used up, all but the share kept for measurements. */
 const spentOut = (st) => st?.budgetLeft !== null && st?.budgetLeft !== undefined && st.budgetLeft <= 0;
 
 /* Why a workload is not experimenting right now, in words for its page, or null when it is. */
 function whyNot(workload, s, st) {
   if (s.mode === 'off') return 'Experiments are off for this workload.';
-  if (spentOut(st)) return 'Your optimization budget for the last thirty days is used up, so experiments pause until it is raised in Settings or earlier spending ages out.';
+  if (spentOut(st)) {
+    const kept = Math.round(config.OPTIMIZE_RESERVE_SHARE * 100);
+    return `Your optimization budget for the last thirty days is used up${kept > 0 ? `, apart from the ${kept}% kept for measuring` : ''}, `
+      + 'so experiments pause until it is raised in Settings or earlier spending ages out.';
+  }
   if (st.extraToday >= s.budgetUsd) return `Today's experiments have used the $${s.budgetUsd.toFixed(2)} budget, so they pause until midnight IST.`;
   if (s.live && !workload.routed_model) return 'Live experiments start once this workload is switched to something cheaper.';
   if (st.serving && st.serving.ratio === null) {

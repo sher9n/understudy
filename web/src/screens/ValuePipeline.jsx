@@ -1081,8 +1081,11 @@ function eventWords(e, c, next) {
       // the name last: a router's is a list of setups, and in the middle of a sentence it hid the rest of it
       const how = e.mode === 'savings' ? 'the cheapest that passed' : e.mode === 'cautious' ? 'the biggest saving among the ones we were surest of'
         : 'the biggest saving we were sure of';
-      text = `${plural(e.tried, 'setup was', 'setups were')} tested on your own requests, and ${num(e.passed)} passed. Chosen as ${how}`
-        + `${e.chosenKept ? ', and already serving' : ', after it passed again on requests it had never seen'}: ${e.chosen}.`;
+      /* What already serves and passed again stays, whatever the routing priority would pick afresh: a cautious
+         workload keeps a setup it would not switch to today, so "chosen as" would be untrue of it. */
+      text = `${plural(e.tried, 'setup was', 'setups were')} tested on your own requests, and ${num(e.passed)} passed. `
+        + (e.chosenKept ? `What already serves passed again, so it stays: ${e.chosen}.`
+          : `Chosen as ${how}, after it passed again on requests it had never seen: ${e.chosen}.`);
     } else if (e.passed) {
       text = `${plural(e.tried, 'setup was', 'setups were')} tested on your own requests, and ${num(e.passed)} passed. The cheapest that passed: ${e.best}.`;
     } else {

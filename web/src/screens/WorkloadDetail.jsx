@@ -19,7 +19,7 @@ const Tile = ({ k, v, s }) => (
 
 const VERDICT = {
   cleared: ['Cleared', 'ok'], review: ['Needs review', 'wait'],
-  missed: ['Missed the bar', 'q'], insufficient: ['Still running', 'wait'],
+  missed: ['Missed the bar', 'q'], insufficient: ['Too few calls', 'wait'],
   slower: ['Slower than yours', 'wait'], failed: ['Could not answer', 'q'],
 };
 
@@ -54,6 +54,11 @@ function whyOf(r, refSpeed, cert) {
     }
     const what = timedToFirstWord(cert) ? 'Starts answering in' : 'Typically';
     return mine && theirs ? `${what} ${secs(mine)}, against ${secs(theirs)} for yours` : 'Slower than your speed setting allows';
+  }
+  if (r.verdict === 'insufficient') {
+    // a router re-checked on the calls its setups could answer says how many could not be
+    if (r.name?.kind === 'router' && r.errorText) return `${r.errorText[0].toUpperCase()}${r.errorText.slice(1)}, so it was not judged either way`;
+    return 'Judged on too few calls to say either way';
   }
   if (r.stopped === 'bar') return `Stopped after ${r.runs} of ${cert.sampleSize} calls, once it could not reach your bar`;
   if (r.verdict === 'missed' && r.difference) return `Mostly ${r.difference}`;

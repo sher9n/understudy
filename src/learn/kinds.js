@@ -333,6 +333,23 @@ function together(counts, most) {
  * pass mark of 3% one worse answer in 120 calls fails a look, so a router that gave it the refunds
  * usually failed, where one that kept them on the customer's own model cleared and saved most of it.
  */
+/** How like a kind a request has to be to be taken for it, from how like the kind's own members are to its centre
+    (see learnRouter): the least like of them less a little, after setting aside the few least like (one in twenty,
+    rounded up) where a gap wider than ODD_GAP parts them from the rest, cut at the last such gap among them. Cut at
+    the widest instead, a joke at 0.10 and a stray at 0.60 among members at 0.90 kept the stray and a line of 0.58;
+    and with one in twenty rounded down, two jokes in a kind of 39 were one too many to set aside, and the line
+    fell to 0.08. A floor under the kind's middle was tried as well and sent 7 of every 100 ordinary requests on:
+    a kind of one phrasing has a close variant a good way below its middle, and that is a member. */
+const ODD_GAP = 0.1;
+export function familiarLine(sims) {
+  const s = [...sims].sort((a, b) => a - b);
+  if (!s.length) return 1;
+  const most = Math.max(1, Math.ceil(s.length * 0.05));
+  let cut = 0;
+  for (let j = 1; j <= most && j < s.length; j += 1) if (s[j] - s[j - 1] > ODD_GAP) cut = j;
+  return Math.max(0, s[cut] - 0.02);
+}
+
 export function learnRouter(calls, options, { floorPct, margin = 0.8, shrink = 2, kMax = 4, minSize = 8, minSilhouette = 0.1, seed = 7,
   feePct = 1, looks = null, prior = 0, sureShrink = 0, pick = 'best' } = {}) {
   const pull = sureShrink ?? 0;
@@ -441,24 +458,19 @@ export function learnRouter(calls, options, { floorPct, margin = 0.8, shrink = 2
      own already. And one that does no better than a single setup alone is not worth its moving part. */
   if (!best || !(best.value > 0) || new Set(best.table).size < 2 || !(best.value > alone + 1e-9)) return null;
   const readings = per.map((p, q) => ({ kind: p.kind, calls: p.calls, option: best.table[q], noise: p.noise, tried: p.tried }));
-  /* How like a kind a request has to be to be taken for it: as like as the least like of its members, less
-     a little, but never looser than most of them warrant. The least like alone let one odd request among a
-     kind's members (a joke asked of an order workload) lower the line so far that anything at all was
-     taken for that kind and sent to its cheaper setup. So the line is also held at the kind's middle, less
-     three spreads (the median absolute deviation, scaled to a standard deviation), and the higher of the
-     two is kept: a kind with no odd members keeps the line it always had. */
-  const quantile = (xs2, q) => {
-    const s = [...xs2].sort((a, b) => a - b);
-    const at = (s.length - 1) * q;
-    const lo = Math.floor(at);
-    return s[lo] + (s[Math.min(s.length - 1, lo + 1)] - s[lo]) * (at - lo);
-  };
-  const minSim = kinds.centres.map((c, k) => {
-    const sims = xs.filter((_, i) => kinds.assign[i] === k).map((x) => dot(x, c));
-    const middle = quantile(sims, 0.5);
-    const spread = quantile(sims.map((s) => Math.abs(s - middle)), 0.5) * 1.4826;
-    return Math.max(0, Math.min(...sims) - 0.02, middle - 3 * Math.max(spread, 0.02) - 0.02);
-  });
+  /* How like a kind a request has to be to be taken for it (familiarLine): as like as the least like of its
+     members, less a little. But not of every member: one odd request among a kind's (a joke asked of an order
+     workload) lowered the line so far that anything at all was taken for that kind and sent to its cheaper
+     setup. So the few least like members are set aside when a clear gap parts them from the rest. A kind with
+     no such gap keeps the line it always had, variants and all: a kind of one phrasing with a close variant now
+     and then is not made of odd requests. Tried on synthetic workloads of orders and refunds: an ordinary
+     request went to the customer's model as unfamiliar 1.2 times in a hundred, and 15 of 456 odd ones were
+     taken for a kind, where a rule that called a member odd only far under the middle in spread terms let one
+     member at 0.60 in a kind at 0.95 or more pull the line to 0.58 (24 of 456 taken), and the lowest twentieth
+     of the members (the other rule tried) sent 2.2 in a hundred and could not set aside a lone odd member of a
+     small kind at all. Held at the middle less a fixed margin instead, a kind of near-identical requests drew
+     its line so tight that one in five of its own requests went on. */
+  const minSim = kinds.centres.map((c, k) => familiarLine(xs.filter((_, i) => kinds.assign[i] === k).map((x) => dot(x, c))));
   const round = (x) => Math.round(x * 10000) / 10000;
   return {
     centroids: kinds.centres.map((c) => c.map(round)),

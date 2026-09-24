@@ -481,6 +481,8 @@ const statusLabel = (w, carries = true) => {
     return { label: 'Ready to optimize', tone: 'go' };
   }
   if (w.status === 'measuring') return { label: 'Measuring', tone: 'wait' };
+  // something did clear, and a cautious workload would not switch to it: "nothing cleared" would be untrue
+  if (w.status === 'no_match' && /cautious/i.test(String(w.status_note || ''))) return { label: 'Not sure enough to switch', tone: 'wait' };
   if (w.status === 'no_match') return { label: 'Nothing cleared yet', tone: 'q' };
   return { label: 'Not optimized yet', tone: 'q' };
 };
@@ -1299,6 +1301,8 @@ api.get('/settings', async (req, res) => {
     shareStats: Number(req.workspace.share_stats || 0) === 1,
     // the most optimizing may spend over thirty days, and what it has
     optimizeBudget: req.workspace.optimize_budget_usd ?? null,
+    // the share of it kept for measurements, which background work never spends (backgroundLeft)
+    optimizeReserve: config.OPTIMIZE_RESERVE_SHARE,
     optimizeSpent: await optimizeSpent(req.workspace.id),
     // marking long instructions for caching where that pays
     cacheHints: Number(req.workspace.cache_hints ?? 1) !== 0,

@@ -294,15 +294,20 @@ async function eventsOf(w, firstSeen, t, via) {
     /* The one the test chose, under the routing priority it ran under: the first in its order that passed its
        second look, or the one already serving that was kept. The cheapest that passed is not always it: a setup
        a hair dearer and much faster comes first under balanced. A test from before there was an order has none. */
-    let kept = null;
-    try { kept = JSON.parse(r.choice_json || 'null')?.servingKept ?? null; } catch { kept = null; }
-    const chosen = passed.filter((x) => Number(x.choice_rank) > 0).sort((a, b) => Number(a.choice_rank) - Number(b.choice_rank))
-      .find((x) => x.confirm_verdict === 'cleared' || x.model_id === kept) ?? null;
+    let record = null;
+    try { record = JSON.parse(r.choice_json || 'null'); } catch { record = null; }
+    const kept = record?.servingKept ?? null;
+    // what the test chose, as it wrote it down; worked out from the ranks only for a test from before it did
+    const written = !!record && Object.prototype.hasOwnProperty.call(record, 'chosen');
+    const chosen = written ? (record.chosen ? passed.find((x) => x.model_id === record.chosen) ?? null : null)
+      : passed.filter((x) => Number(x.choice_rank) > 0).sort((a, b) => Number(a.choice_rank) - Number(b.choice_rank))
+        .find((x) => x.confirm_verdict === 'cleared' || x.model_id === kept) ?? null;
     events.push({
       at: Number(r.at), kind: 'test', trigger: r.trigger, outcome: r.outcome,
       tried: results.length, passed: passed.length,
       best: best ? nameOf(best) : null,
-      chosen: chosen ? nameOf(chosen) : null, chosenKept: !!chosen && chosen.model_id === kept, mode: r.routing_mode ?? null,
+      chosen: chosen ? nameOf(chosen) : null,
+      chosenKept: !!chosen && (written ? !!record.chosenKept : chosen.model_id === kept), mode: r.routing_mode ?? null,
       spend: round8(withFeeOn(Number(r.spend_usd) || 0, config.ROUTING_FEE_PCT)),
       bar: r.floor_pct === null ? null : Number(r.floor_pct),
     });

@@ -209,8 +209,8 @@ const BETTER = {
  * A candidate's answer against one of the customer's model's, three ways, in both orders.
  * Answers { verdict: 'better' | 'equal' | 'kept', pRef: [..], pCand: [..], cost }; null when Jev is not
  * used at all; and { verdict: null, transient: true, cost } when a reading did not come back, with what the
- * one that did cost, so it is charged, and so whoever asked knows the difference was not settled and does
- * not keep it as a verdict for two weeks.
+ * one that did cost, so it is charged. Whoever asked then lets the difference stand, which is the safe
+ * side, and marks its own verdict unsettled so it is not kept for two weeks.
  */
 export async function judgeBetter(request, cand, ref, { scope = null, askFn = ask } = {}) {
   if (!config.EVAL_THREE_WAY || !(jevUsable() || askFn !== ask)) return null;
@@ -225,17 +225,31 @@ export async function judgeBetter(request, cand, ref, { scope = null, askFn = as
   const cost = settled.reduce((a, s) => a + (s.status === 'fulfilled' ? Number(s.value?.costUsd) || 0 : 0), 0);
   if (settled.some((s) => s.status === 'rejected')) return { verdict: null, transient: true, cost };
   const [one, two] = settled.map((s) => s.value);
-  const p = (r, k) => {
-    const x = Number(r?.answers?.better?.probabilities?.[k]);
-    if (!Number.isFinite(x)) throw new Error('Jev gave no probabilities');
-    return x;
+  /* The chance Jev gave an answer. Where it sent only its pick and how sure it was, an answer it did not
+     pick is read on the safe side: the customer's as likely as it could be (no more than what the pick
+     left over, and no more than the pick itself), the candidate's as nothing. */
+  const p = (r, k, side) => {
+    const a = r?.answers?.better;
+    const given = a?.probabilities?.[k];
+    if (given !== null && given !== undefined) {
+      const x = Number(given);
+      if (!Number.isFinite(x) || x < 0 || x > 1) throw new Error('Jev gave a chance that is not one');
+      return x;
+    }
+    /* a pick that is none of the three answers, or a confidence no pick of three can have (under a third, or over
+       one), is no reading: taken at its word, a pick of the customer's answer at a quarter read as forgiving it */
+    const c = Number(a?.confidence);
+    if (!Object.hasOwn(BETTER.criteria, String(a?.choice)) || a.confidence === null || a.confidence === undefined
+      || !Number.isFinite(c) || c < 1 / 3 || c > 1) throw new Error('Jev gave no probabilities');
+    if (a.choice === k) return c;
+    return side === 'ref' ? Math.min(c, 1 - c) : 0;
   };
   let pRef;
   let pCand;
   try {
     // the candidate is first in the first reading and second in the second
-    pCand = [p(one, 'first'), p(two, 'second')];
-    pRef = [p(one, 'second'), p(two, 'first')];
+    pCand = [p(one, 'first', 'cand'), p(two, 'second', 'cand')];
+    pRef = [p(one, 'second', 'ref'), p(two, 'first', 'ref')];
   } catch {
     return { verdict: null, transient: true, cost };
   }
@@ -257,20 +271,23 @@ const probability = (x) => {
   return p;
 };
 
-/* Whether a verdict is worth keeping. One that failed to come back is not a verdict. And one
-   the language model gave only because Jev was resting is not kept either, so the same pair is
-   put to Jev once it is back rather than answered from the fallback for weeks. */
-const lasting = (v) => !v.transient && !(canJev() && v.judgedBy === 'llm');
+/* Whether a verdict is worth keeping. One that failed to come back is not a verdict. One that
+   stands only because a later reading did not come back (unsettled: a difference that might have
+   been forgiven) counts this time and is asked again next time. And one the language model gave
+   only because Jev was resting is not kept either, so the same pair is put to Jev once it is back
+   rather than answered from the fallback for weeks. */
+const lasting = (v) => !v.transient && !v.unsettled && !(canJev() && v.judgedBy === 'llm');
 
 /**
  * Two answers to one request, one held against the other: the customer's own model against itself,
  * which is what sets the bar, or the written fields of a candidate's structured answer against the
  * customer's. `subject` is the side being judged ('b' by default, the second of the customer's two
  * answers; 'a' when the first is a candidate's): where the two differ only in wording or in what they
- * include, that side is forgiven when it is at least as good (see judgeBetter). Answers
- * { score: 0 or 1, judgedBy, detail, cost }.
+ * include, that side is forgiven when it is at least as good (see judgeBetter). `bar` marks a pair that
+ * sets the pass mark, or checks the judge itself, rather than one that judges an answer somebody is
+ * served. Answers { score: 0 or 1, judgedBy, detail, cost }.
  */
-export async function judgeBarPair(request, a, b, { scope = null, subject = 'b' } = {}) {
+export async function judgeBarPair(request, a, b, { scope = null, subject = 'b', bar = false } = {}) {
   if (String(a).trim() === String(b).trim()) return { score: 0, judgedBy: 'same text', detail: null, cost: 0 };
   const [ref, judged] = subject === 'a' ? [b, a] : [a, b];
   const threeWay = !!config.EVAL_THREE_WAY;
@@ -309,10 +326,15 @@ export async function judgeBarPair(request, a, b, { scope = null, subject = 'b' 
       // a difference only in wording or in what is included: is the judged side at least as good?
       if (threeWay && out.score === 1 && !out.transient && mayForgive(kind)) {
         const bt = await judgeBetter(request, judged, ref, { scope });
-        // a reading that did not come back: the difference stands this time, and is not kept as a verdict
+        /* A reading that did not come back is not kept as a verdict, so the pair is asked again next
+           time. Held against an answer somebody is served, the difference is counted, which is the safe
+           side: dropping the pair left out exactly the answers that differed, and flattered the side
+           being judged. Setting the pass mark, the pair is left out instead, because counting a
+           difference the customer's model might have been forgiven would loosen the mark. */
         if (bt?.transient) {
           out.cost += bt.cost;
-          out.transient = true;
+          if (bar) out.transient = true;
+          else out.unsettled = true;
         } else if (bt) {
           out.cost += bt.cost;
           out.detail = { ...out.detail, three: { verdict: bt.verdict, pRef: bt.pRef, pCand: bt.pCand } };
@@ -361,6 +383,13 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
   const hit = await cached(key);
   if (hit) return hit;
   let out = null;
+  // which of the customer's answers a difference stands against only because a reading did not come back
+  const open = new Set();
+  /* The safety net under everybody: different figures make a different answer, even when the prose reads the same,
+     held to each of the customer's answers on its own before anything is averaged. Floored over the average of both
+     instead, an answer that differed from one in wording and from the other in figures read as the same half the
+     time, and the reading of what serves could come out stricter than the one of what could be switched to. */
+  const numbered = refs.map((ref) => (numbersDiffer(cand, ref) ? 1 : 0));
   if (jevUsable()) {
     try {
       const roles = shuffled(['cand', ...refs.map((_, i) => `ref${i}`)]);
@@ -429,6 +458,7 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
       }
       /* Where it differs from one of the customer's answers only in wording or in what it includes, and
          says no different figure, refuses nothing and stops nowhere short: is it at least as good? */
+      let unsettled = false;
       if (config.EVAL_THREE_WAY && !transient) {
         let better = 0;
         const three = [];
@@ -438,8 +468,8 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
           const bt = await judgeBetter(request, cand, refs[i], { scope });
           if (!bt) continue;
           cost += bt.cost;
-          // a reading that did not come back: the difference stands this time, and is not kept as a verdict
-          if (bt.transient) { transient = true; continue; }
+          // a reading that did not come back: the difference stands and is counted, but is not kept as a verdict
+          if (bt.transient) { unsettled = true; open.add(i); continue; }
           three.push({ ref: i, verdict: bt.verdict, pRef: bt.pRef, pCand: bt.pCand });
           if (bt.verdict !== 'kept') {
             each[i] = 0;
@@ -453,7 +483,15 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
         // how many of the customer's answers it was better than, as a share
         detail.better = better / each.length;
       }
-      out = { score: each.reduce((x, y) => x + y, 0) / each.length, judgedBy, detail, cost, transient };
+      for (const [i, n] of numbered.entries()) {
+        if (n > each[i]) { each[i] = n; detail.kind = 'fact'; if (!judgedBy.endsWith('+numbers')) judgedBy = `${judgedBy}+numbers`; }
+      }
+      const mean = (xs) => xs.reduce((x, y) => x + y, 0) / xs.length;
+      out = { score: mean(each), judgedBy, detail, cost, transient, unsettled };
+      /* The reading without those differences, which is all that is said of what already serves (see readingOf in
+         src/eval/run.js): held to the customer's other answer where that one was settled, and no reading at all
+         where neither was. Dropped whole, a settled difference in figures went with an unsettled one in wording. */
+      if (unsettled) out.settled = each.length > open.size ? mean(each.filter((_, i) => !open.has(i))) : null;
       /* A refusal or an answer that stops short is a different answer, unless Jev is sure it
          serves as well as one of the customer's own: on a workload whose right answer is to
          decline, the customer's model declines too, and a candidate that does the same matches. */
@@ -469,20 +507,15 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
     let sum = 0;
     let cost = 0;
     let transient = false;
-    for (const ref of refs) {
+    let byNumbers = false;
+    for (const [i, ref] of refs.entries()) {
       const l = await judgePair(request, cand, ref);
       cost += l.cost;
       if (!l.judged) transient = true;
-      sum += l.score;
+      if (numbered[i] > l.score) byNumbers = true;
+      sum += Math.max(l.score, numbered[i]);
     }
-    out = { score: sum / refs.length, judgedBy: 'llm', detail: null, cost, transient };
-  }
-  /* The safety net under everybody: different figures make a different answer, even when the
-     prose reads the same, held to each of the customer's answers on its own. */
-  const numbered = refs.map((ref) => (numbersDiffer(cand, ref) ? 1 : 0));
-  if (numbered.some(Boolean)) {
-    const floor = numbered.reduce((x, y) => x + y, 0) / refs.length;
-    if (out.score < floor) out = { ...out, score: floor, judgedBy: `${out.judgedBy}+numbers`, detail: { ...(out.detail || {}), kind: 'fact' } };
+    out = { score: sum / refs.length, judgedBy: byNumbers ? 'llm+numbers' : 'llm', detail: byNumbers ? { kind: 'fact' } : null, cost, transient };
   }
   if (lasting(out)) await keep(key, out);
   return out;

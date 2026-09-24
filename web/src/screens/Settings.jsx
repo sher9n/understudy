@@ -478,7 +478,7 @@ function Optimizing({ data, busy, run }) {
             value={budget} onChange={(e) => setBudget(e.target.value.replace(/[^\d.]/g, ''))} />
           <span className="segnote">
             {budgetOk
-              ? <>The most measuring, background answers, answers read in the background and live experiments may spend over thirty days, together.{' '}{usd(data.optimizeSpent || 0)} spent in the last thirty days.</>
+              ? <>The most measuring, background answers, background checks against your own model, answers read in the background and live experiments may spend over thirty days, together.{data.optimizeReserve > 0 ? ` The last ${Math.round(data.optimizeReserve * 100)}% of it is kept for measuring.` : ''}{' '}{usd(data.optimizeSpent || 0)} spent in the last thirty days.</>
               : 'Write an amount in dollars, like 20 or 7.50, or leave it empty for no budget.'}
           </span>
         </span>

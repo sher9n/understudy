@@ -609,11 +609,25 @@ export async function optimizeSpent(workspaceId, days = 30) {
   return round8(Number(r?.spent || 0) * (1 + config.ROUTING_FEE_PCT / 100));
 }
 
-/** What is left of the workspace's own optimization budget, or null when it has not set one. */
-export async function optimizeLeft(workspaceId) {
+/** The workspace's own optimization budget and what is left of it, { budget, left }, or null when it has not set one. */
+export async function optimizeRoom(workspaceId) {
   const ws = await db.prepare('SELECT optimize_budget_usd FROM workspaces WHERE id = ?').get(workspaceId);
   if (ws?.optimize_budget_usd === null || ws?.optimize_budget_usd === undefined) return null;
-  return round8(Math.max(0, Number(ws.optimize_budget_usd) - await optimizeSpent(workspaceId)));
+  const budget = Number(ws.optimize_budget_usd);
+  return { budget, left: round8(Math.max(0, budget - await optimizeSpent(workspaceId))) };
+}
+
+/** What is left of the workspace's own optimization budget, or null when it has not set one. */
+export async function optimizeLeft(workspaceId) {
+  const room = await optimizeRoom(workspaceId);
+  return room ? room.left : null;
+}
+
+/** What work in the background may still spend of the optimization budget: what is left, less the share kept
+    for measurements (OPTIMIZE_RESERVE_SHARE); nothing or less once that is reached; null when there is no budget. */
+export async function backgroundLeft(workspaceId) {
+  const room = await optimizeRoom(workspaceId);
+  return room ? round8(room.left - room.budget * config.OPTIMIZE_RESERVE_SHARE) : null;
 }
 
 /** What a routed call costs the customer: what the provider charged, plus the fee. */

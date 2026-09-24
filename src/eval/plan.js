@@ -14,7 +14,8 @@ import { callsToClear } from './compare.js';
 import { calibrationFor } from './calibrate.js';
 import { FOUND, OUTCOME_OF } from './outcome.js';
 import { servingKey, heldBack } from './promote.js';
-import { armKey, referenceSpec } from '../learn/arms.js';
+import { armKey, referenceSpec, armById } from '../learn/arms.js';
+import { ROUTER_VERSION } from '../learn/kinds.js';
 
 const parseRecipe = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
 
@@ -237,6 +238,8 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
     judge: jevUsable() ? 'jev' : 'llm', jevResting: jevResting(), factsAt: {}, speed: null, profile: null, pendingJev: 0,
     difficulty: null, cachedBar: 0, refThinks: null, recordedShare, worth: null, notWorth: false,
     ceilingUsd: config.EVAL_MAX_USD_PER_RUN, optimizeBudget: null, unseenPool: pool, yardstick: null,
+    // how many setups of a router serving now are measured whatever the model count says (0 when none serves)
+    routerParts: 0,
   };
 
   if (!canRoute) {
@@ -336,11 +339,35 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const sel = selectCandidates({ ...base, fits, arena, difficulty });
   plan.funnel = sel.funnel;
   plan.excluded = sel.excluded;
-  plan.order = sel.order;
+  plan.order = [...sel.order];
   plan.waiting = sel.waiting;
   plan.refPrice = sel.refPrice;
   plan.refHealth = sel.refHealth;
-  plan.candidates = sel.order.map((r) => ({ model_id: r.model, per: r.price, recipe: r.recipe }));
+  /* A router by kind of request serving now has every one of its setups answer every call, first (see
+     servingParts in run.js), so the quote counts each of them among the models measured to the end, and
+     prices one the plan held back or left out like the rest. Quoted as the plan had them, a router of
+     three setups was quoted for one or two, and ran into the most a measurement may spend. */
+  const servingArm = workload.routed_arm_id ? await armById(workload.routed_arm_id) : null;
+  if (servingArm?.spec?.kind === 'router' && Number(servingArm.spec.version) === ROUTER_VERSION && Array.isArray(servingArm.spec.options)) {
+    const ref = workload.reference_model;
+    const partKey = (p) => (p.model === ref && p.recipe?.reasoning ? `${ref}#lighter`
+      : p.model === ref && p.recipe?.pinned ? `${ref}#cheapest` : p.model);
+    const pin = profile.promptAvg || 0;
+    const pout = profile.outAvg || 0;
+    const front = servingArm.spec.options.map((o) => {
+      const k = o.key || partKey(o);
+      const at = plan.order.findIndex((q) => (q.key || q.model) === k);
+      if (at >= 0) return plan.order.splice(at, 1)[0];
+      const m = facts.models.get(o.model);
+      const price = m ? (routedCallPrice(m, pin, pout, profile.hours) ?? callPrice(m, pin, pout, profile.hours) ?? 0) : 0;
+      return { model: o.model, key: k === o.model ? undefined : k, recipe: o.recipe ?? null, price, label: null, chance: null,
+        savingShare: null, parts: null, family: null, note: 'part of the router serving now' };
+    });
+    plan.order = [...front, ...plan.order];
+    plan.models = Math.max(plan.models, front.length);
+    plan.routerParts = front.length;
+  }
+  plan.candidates = plan.order.map((r) => ({ model_id: r.model, per: r.price, recipe: r.recipe }));
 
   if (!plan.order.length) {
     const top = mostCommon(sel.excluded);
@@ -358,9 +385,15 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   plan.ceilingUsd = ceilingFor(plan.worth);
   plan.worth.worthIt = plan.estimateUsd <= plan.worth.budgetUsd;
   if (plan.estimateUsd > plan.ceilingUsd) {
+    /* Testing fewer models brings it down only to the setups of the router serving now, which are always
+       checked: said as that where they are what the measurement tests, rather than advice that cannot help. */
+    const forced = plan.routerParts > 0 && plan.models <= plan.routerParts;
     plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)}, over the $`
       + `${plan.ceilingUsd.toFixed(2)} one measurement of this workload may spend. `
-      + 'Testing fewer models in Settings brings it down.';
+      + (forced
+        ? `It checks all ${plan.routerParts} setups of the router serving it now, however few models you test in Settings. `
+          + `Its live requests are still watched${config.CONTROL_ENABLED ? `, and, within your optimization budget, a few a day are checked against ${short(workload.reference_model)} in the background` : ''}.`
+        : 'Testing fewer models in Settings brings it down.');
     return plan;
   }
   /* A measurement nobody asked for runs only when it pays for itself. A person can always ask. */

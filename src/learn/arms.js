@@ -23,13 +23,14 @@ export function armKey(spec) {
   const recipeOf = (p) => {
     const r = p?.recipe || null;
     if (!r || !r.providers || r.pinned) return r;
-    const { providers, ...rest } = r;
+    // and whether other providers may answer when those cannot is how it is served too
+    const { providers, preferred, ...rest } = r;
     return Object.keys(rest).length ? rest : null;
   };
   const part = (p) => `${p?.model || ''}~${JSON.stringify(recipeOf(p))}`;
   if (spec.kind === 'cascade') return `cascade:${part(spec.first)}>${part(spec.fallback)}`;
-  // a router by kind of request: every setup it chooses between, and the customer's own
-  if (spec.kind === 'router' && Array.isArray(spec.options)) return `router:${spec.options.map(part).join('+')}|${part(spec.strong)}~kinds`;
+  // a router by kind of request: every setup it chooses between, in a fixed order, and the customer's own
+  if (spec.kind === 'router' && Array.isArray(spec.options)) return `router:${spec.options.map(part).sort().join('+')}|${part(spec.strong)}~kinds`;
   if (spec.kind === 'router') return `router:${part(spec.cheap)}|${part(spec.strong)}`;
   return `model:${part(spec)}`;
 }

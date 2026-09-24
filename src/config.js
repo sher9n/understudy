@@ -223,6 +223,10 @@ export const config = {
      CONTROL_MIN_CHECKS, a setup whose rate of worse or different answers is clearly past the pass mark, at
      every hourly look (a confidence sequence), is switched back. Paid for as optimizing. */
   CONTROL_ENABLED: bool('CONTROL_ENABLED', true),
+  /* The share of a workspace's optimization budget kept for measurements, which decide what serves: work in the
+     background (the control group's checks, background answers, live experiments, answers read in the
+     background) stops before it (backgroundLeft in src/billing.js), so it can never leave a re-check nothing. */
+  OPTIMIZE_RESERVE_SHARE: num('OPTIMIZE_RESERVE_SHARE', 0.25),
   CONTROL_PER_DAY: num('CONTROL_PER_DAY', 20),
   CONTROL_MAX_PER_DAY: num('CONTROL_MAX_PER_DAY', 40),
   CONTROL_MIN_CHECKS: num('CONTROL_MIN_CHECKS', 30),

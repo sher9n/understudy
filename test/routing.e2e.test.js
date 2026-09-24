@@ -61,9 +61,13 @@ const { move } = await import('../src/billing.js');
 const { default: v1 } = await import('../src/proxy.js');
 const { onServed } = await import('../src/learn/choose.js');
 const { afterServed, reviewWorkload, forgetState } = await import('../src/learn/explore.js');
-const { controlRecord, maybeControl, scoreServed } = await import('../src/learn/control.js');
+const { controlRecord, maybeControl, scoreServed, barOf, forgetBar } = await import('../src/learn/control.js');
 const { optimizeSpent } = await import('../src/billing.js');
-const { judgeBetter } = await import('../src/eval/judge.js');
+const { judgeBetter, judgeCandidate, judgeBarPair } = await import('../src/eval/judge.js');
+const { keyOfSpec } = await import('../src/eval/promote.js');
+const { armKey } = await import('../src/learn/arms.js');
+const { planFor } = await import('../src/eval/plan.js');
+const { buildUpstream } = await import('../src/openrouter.js');
 const { routeFor } = await import('../src/learn/serve.js');
 const { cheaperCleared } = await import('../src/eval/outcome.js');
 const { zdrFor } = await import('../src/workspace.js');
@@ -84,7 +88,8 @@ const WORSE = 'vendor/worse-writer';
 const MODELS = [REF, THIN, QUICK, CHEAP, STEADY, BETTER, WORSE];
 const COST = { [REF]: 0.002, [THIN]: 0.0002, [QUICK]: 0.000205, [CHEAP]: 0.0001, [STEADY]: 0.0006, [BETTER]: 0.0003, [WORSE]: 0.0002 };
 // how long each takes to answer, beyond the stand-in's own time
-const DELAY = { [THIN]: 40 };
+// slow enough that a busy test machine never hides it (GitHub's runners are far slower than a laptop)
+const DELAY = { [THIN]: 90 };
 const JEV_COST = 0.00001;
 
 /* The requests. A third of the order workload's requests are long complaints about a refund, the rest
@@ -103,6 +108,10 @@ let quickBroken = false;
 let cheapBroken = false;
 // models whose provider answers with this status instead, for the scenarios where one is too busy to answer
 const failing = new Map();
+// models whose provider refuses some requests: model to a rule on the request's text, giving the status or nothing
+const refusing = new Map();
+// Jev not answering "which serves better" at all, for the scenario where that reading does not come back
+let betterRefused = false;
 
 /* The written answers: the customer's own model says when it arrives; the better writer says the same and
    adds how to follow it; the worse writer leaves out when it arrives. */
@@ -174,6 +183,12 @@ const server = http.createServer((req, res) => {
     const payload = JSON.parse(body || '{}');
     if (req.url.endsWith('/systemone')) {
       jevAsked += 1;
+      // a refusal that passes by itself and is never retried: the one reading just does not come back
+      if (betterRefused && payload.questions?.better) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Jev could not read this one' } }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ model: 'typesafe/jev-1.13', answers: jevAnswers(payload.state, payload.questions),
         usage: { input_tokens: 240, cost: JEV_COST } }));
@@ -187,6 +202,12 @@ const server = http.createServer((req, res) => {
     }
     const sys = payload.messages?.find((m) => m.role === 'system')?.content || '';
     const user = String(payload.messages?.filter((m) => m.role === 'user').pop()?.content || '');
+    const refused = refusing.get(model)?.(user);
+    if (refused) {
+      res.writeHead(refused, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'This request is not allowed on this provider' } }));
+      return;
+    }
     let content;
     if (model === 'judge/small') {
       // only asked where Jev is unsure, which the stand-in never is; answered sensibly all the same
@@ -322,7 +343,7 @@ test('balanced switches to the biggest saving we are sure of, and of two that sa
   assert.equal(thin.verdict, 'cleared');
   assert.equal(quick.verdict, 'cleared');
   assert.ok(Number(thin.cost_ratio) < Number(quick.cost_ratio), `thin is the cheaper: ${thin.cost_ratio} against ${quick.cost_ratio}`);
-  assert.ok(Number(thin.latency_p50) > Number(quick.latency_p50) + 20, `and the slower: ${thin.latency_p50} against ${quick.latency_p50} ms`);
+  assert.ok(Number(thin.latency_p50) > Number(quick.latency_p50) + 45, `and the slower: ${thin.latency_p50} against ${quick.latency_p50} ms`);
   // how sure the measurement is, and what that makes the saving, on every setup that cleared
   for (const r of [thin, quick]) {
     assert.ok(Number(r.chance) > 0.99, `${r.model_id}: sure it keeps the bar, ${r.chance}`);
@@ -333,6 +354,8 @@ test('balanced switches to the biggest saving we are sure of, and of two that sa
   assert.equal(thin.choice_rank, 2);
   const choice = JSON.parse(run.choice_json);
   assert.deepEqual(choice.order.map((x) => x.model), [QUICK, THIN]);
+  assert.equal(choice.chosen, QUICK, 'what the test chose is written down as it was decided');
+  assert.equal(choice.chosenKept, false, 'a switch, not a setup kept');
   assert.equal(quick.confirm_verdict, 'cleared', 'it passed its second look');
   assert.equal(thin.confirm_verdict, 'not_reached', 'and the one after it never needed one');
   const w = await load(balanced.workload.id);
@@ -422,9 +445,22 @@ test('the router serves live calls by their kind, plain and streamed, and anythi
 test('a measurement re-checks a healthy router and keeps it, beside a router learned again over the same setups', async () => {
   const { workload } = kinds;
   const arm = await armOf(workload.id);
+  /* The quote counts every setup of the router serving now among the models measured to the end, as the run
+     measures them: with a workspace that measures one model to the end, a router of two was quoted for one. */
+  await db.prepare('UPDATE workspaces SET eval_models = 1 WHERE id = ?').run(workload.workspace_id);
+  try {
+    const plan = await planFor(await load(workload.id), { canRoute: true });
+    assert.equal(plan.models, 2, `both of its setups quoted to the end: ${plan.models}`);
+    assert.deepEqual(plan.order.slice(0, 2).map((o) => o.model), [CHEAP, STEADY], 'and first, as the run takes them');
+  } finally {
+    await db.prepare('UPDATE workspaces SET eval_models = NULL WHERE id = ?').run(workload.workspace_id);
+  }
   const out = await runEvaluation(workload.id, { trigger: 'automatic' });
   assert.equal(out.ok, true, `the run finishes: ${JSON.stringify(out)}`);
   const key = `router:${CHEAP}+${STEADY}~kinds`;
+  const choice = JSON.parse((await runOf(out.runId)).choice_json);
+  assert.equal(choice.chosen, key, 'the router serving is what this test chose');
+  assert.equal(choice.chosenKept, true, 'kept, not switched to');
   const rows = (await resultsOf(out.runId)).filter((r) => r.model_id === key);
   assert.equal(rows.length, 1, 'one result for the router serving, never a second under the same name');
   assert.equal(rows[0].verdict, 'cleared', `${rows[0].gap_pct}%`);
@@ -456,6 +492,30 @@ test('a setup too busy to answer during a re-check never switches a router back'
     assert.match(said.title, /could not be checked in full/);
   } finally {
     failing.delete(STEADY);
+  }
+});
+
+test('a setup refused on a request the router never sends it does not fail the router', async () => {
+  const { workload } = kinds;
+  const arm = await armOf(workload.id);
+  const before = Number((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(workload.id)).n);
+  // the steady setup is refused a question about where an order is, which the router sends to the cheap one
+  refusing.set(STEADY, (user) => (/refund/i.test(user) ? null : 400));
+  try {
+    const out = await runEvaluation(workload.id, { trigger: 'automatic' });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    assert.equal((await resultOf(out.runId, STEADY)).stopped, 'refused', 'on its own, the steady setup was refused');
+    const row = await resultOf(out.runId, `router:${CHEAP}+${STEADY}~kinds`);
+    assert.notEqual(row.verdict, 'failed', `a refusal on a request it never sends there says nothing about the router: ${row.verdict}`);
+    assert.notEqual(row.stopped, 'refused');
+    // it answered every request the router sends it before it met the one it was refused, so the router is judged in full
+    assert.equal(row.verdict, 'cleared', `${row.verdict}, on ${row.runs} calls`);
+    assert.equal(row.runs, 120, 'on every call');
+    assert.equal((await load(workload.id)).routed_arm_id, arm.id, 'still serving');
+    const after = Number((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(workload.id)).n);
+    assert.equal(after, before, 'nothing switched back');
+  } finally {
+    refusing.delete(STEADY);
   }
 });
 
@@ -558,6 +618,72 @@ test('a burst of calls never runs more than two background checks at once for on
   assert.equal(JSON.parse(sentOn.detail_json).escalated, true);
 });
 
+test('background checks never spend the last quarter of the optimization budget, which is kept for measurements', async () => {
+  const { workload, request } = writer;
+  const w = await load(workload.id);
+  const spent = await optimizeSpent(w.workspace_id);
+  assert.ok(spent > 0, 'the measurement above was optimizing spend');
+  const serve = async () => ({ json: { choices: [{ message: { content: refText(950) } }] }, cost: 0.002, latencyMs: 5 });
+  const decision = { armId: w.routed_arm_id, explored: false, escalated: false };
+  const response = { choices: [{ message: { content: writerText(BETTER, 950) } }] };
+  const check = (i) => maybeControl({ workload: w, body: request(i), response, decision }, { rng: () => 0, serve });
+  try {
+    // a fifth of the budget left: that is for measurements
+    await db.prepare('UPDATE workspaces SET optimize_budget_usd = ? WHERE id = ?').run(spent * 1.25, w.workspace_id);
+    assert.equal(await check(950), null, 'not checked');
+    // half of it left: checked
+    await db.prepare('UPDATE workspaces SET optimize_budget_usd = ? WHERE id = ?').run(spent * 2, w.workspace_id);
+    assert.ok(await check(951), 'checked');
+  } finally {
+    await db.prepare('UPDATE workspaces SET optimize_budget_usd = NULL WHERE id = ?').run(w.workspace_id);
+  }
+});
+
+test('the control group counts only the checks judged by the yardstick of the pass mark they are held to', async () => {
+  const w = await load(writer.workload.id);
+  const bar = await barOf(w);
+  const other = bar.yardstick === 'quality' ? 'agreement' : 'quality';
+  const before = await controlRecord(w);
+  let k = 0;
+  const add = async (yardstick, score, n) => {
+    for (let j = 0; j < n; j += 1) {
+      k += 1;
+      await db.prepare(`INSERT INTO control_checks (id, workspace_id, workload_id, arm_id, score, better, judged_by, yardstick, cost_usd, status, created_at)
+          VALUES (?, ?, ?, ?, ?, 0, 'test', ?, 0.001, 200, ?)`).run(`ctl_yard_${process.pid}_${k}`, w.workspace_id, w.id, w.routed_arm_id, score, yardstick, now());
+    }
+  };
+  try {
+    // forty worse answers, judged by the other yardstick: a mark set for this one says nothing of them
+    await add(other, 1, 40);
+    const mixed = await controlRecord(w);
+    assert.equal(mixed.n, before.n, 'not counted');
+    assert.equal(mixed.worse, before.worse);
+    assert.ok(mixed.costUsd > before.costUsd, 'though what they cost is');
+    await add(bar.yardstick, 0, 5);
+    assert.equal((await controlRecord(w)).n, before.n + 5, 'the ones judged by this yardstick are');
+  } finally {
+    await db.prepare(`DELETE FROM control_checks WHERE id LIKE 'ctl_yard_%'`).run();
+  }
+});
+
+test('a measurement that found the customer\'s model too unsteady to measure never sets the bar a switch is held to', async () => {
+  const w = await load(writer.workload.id);
+  forgetBar(w.id);
+  const before = await barOf(w);
+  const runId = `run_unsteady_${process.pid}`;
+  // such a measurement writes the mark it worked out before it gives up: here 60%, which nothing could ever pass
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model, floor_pct, noise_pct,
+      yardstick, created_at, finished_at) VALUES (?, ?, ?, 'done', 'unmeasurable', ?, ?, 60, 48, 'agreement', ?, ?)`)
+    .run(runId, w.workspace_id, w.id, w.shape_kind, w.reference_model, now(), now());
+  try {
+    forgetBar(w.id);
+    assert.deepEqual(await barOf(w), before, 'the bar stays the one the last measurement that could set it set');
+  } finally {
+    await db.prepare('DELETE FROM eval_runs WHERE id = ?').run(runId);
+    forgetBar(w.id);
+  }
+});
+
 test('the control group judges by the yardstick the switch was measured by, and leaves out calls nobody finished', async () => {
   const body = writer.request(902);
   const served = { choices: [{ message: { content: writerText(WORSE, 902) } }] };
@@ -571,6 +697,36 @@ test('the control group judges by the yardstick the switch was measured by, and 
   const cut = { choices: [{ message: { content: 'Order 902 ship' }, finish_reason: 'length' }] };
   assert.equal((await scoreServed(body, cut, ref, 'free_text')).score, 1);
   assert.equal((await scoreServed(body, cut, cut, 'free_text')).score, null, 'both cut short: the call says nothing');
+});
+
+test('a reading of which answer serves better that did not come back never counts against what already serves', async () => {
+  const w = await load(writer.workload.id);
+  assert.equal(w.routed_model, BETTER, 'the better writer serves');
+  const before = Number((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(w.id)).n);
+  betterRefused = true;
+  try {
+    // the control group says nothing on such a check
+    const body = writer.request(7202);
+    const s = await scoreServed(body, { choices: [{ message: { content: writerText(BETTER, 7202) } }] },
+      { choices: [{ message: { content: refText(7202) } }] }, 'free_text', { yardstick: 'agreement', scope: 'unsettled-control' });
+    assert.equal(s.score, null, 'no reading');
+    // and a re-check does not find what serves wanting on readings that never came back
+    const out = await runEvaluation(w.id, { trigger: 'automatic' });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const better = await resultOf(out.runId, BETTER);
+    /* Its row counts every difference, as every row does, so it ranks against the rest on the same terms: read
+       as it serves instead, it came first where it should not have, and a cheaper setup was never looked at again.
+       Whether it keeps serving is decided on the reading as it serves, which leaves those differences out. */
+    assert.ok(Number(better.gap_pct) > 0, `the row counts the differences a reading left unsettled: ${better.verdict}, ${better.gap_pct}%`);
+    // while a setup that would be switched to still has every such difference counted against it
+    const worse = await resultOf(out.runId, WORSE);
+    assert.ok(['missed', 'review'].includes(worse.verdict), `${worse.verdict}, ${worse.gap_pct}%`);
+    assert.equal((await load(w.id)).routed_model, BETTER, 'still serving');
+    const after = Number((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(w.id)).n);
+    assert.equal(after, before, 'nothing switched back');
+  } finally {
+    betterRefused = false;
+  }
 });
 
 /* 5. A serving router, re-checked as it serves --------------------------------------------------------- */
@@ -621,6 +777,108 @@ test('a difference is forgiven only when both readings leave the customer\'s ans
   assert.ok(Math.abs(busy.cost - 0.001) < 1e-12, `the reading that did come back is paid for: ${busy.cost}`);
 });
 
+test('a reading that sends only its pick and how sure it was is read on the safe side', async () => {
+  // Jev's pick in each order, with no chances beside it
+  const picked = (candFirstPick, refFirstPick, confidence) => async (state) => {
+    const candFirst = String(state.answers.first).startsWith('cand');
+    return { answers: { better: { type: 'choice', choice: candFirst ? candFirstPick : refFirstPick, confidence } }, costUsd: 0.001 };
+  };
+  const ask3 = (tag, a, b, c) => judgeBetter(`request pick ${tag}`, `cand ${tag}`, `ref ${tag}`, { askFn: picked(a, b, c) });
+  assert.equal((await ask3('a', 'first', 'second', 0.9)).verdict, 'better', 'the candidate\'s answer picked, surely, both times');
+  assert.equal((await ask3('b', 'equal', 'equal', 0.9)).verdict, 'equal', 'about equal, surely: forgiven, and no better');
+  assert.equal((await ask3('c', 'equal', 'equal', 0.55)).verdict, 'kept', 'about equal only just: the customer\'s answer could have had nearly half');
+  assert.equal((await ask3('d', 'first', 'first', 0.9)).verdict, 'kept', 'the customer\'s answer picked once');
+  const none = await judgeBetter('request pick e', 'cand e', 'ref e', { askFn: async () => ({ answers: { better: { type: 'choice' } }, costUsd: 0.001 }) });
+  assert.equal(none.transient, true, 'no pick and no chances is no reading');
+  const odd = (tag, better) => judgeBetter(`request odd ${tag}`, `cand ${tag}`, `ref ${tag}`, { askFn: async () => ({ answers: { better }, costUsd: 0.001 }) });
+  assert.equal((await odd('f', { choice: 'neither', confidence: 0.9 })).transient, true, 'a pick that is none of the three is no reading');
+  assert.equal((await odd('g', { choice: 'first', confidence: 1.4 })).transient, true, 'nor is a confidence that is not a chance');
+  assert.equal((await odd('h', { probabilities: { first: 2, second: 0, equal: 0 } })).transient, true, 'nor a chance above one');
+  assert.equal((await odd('i', { choice: 'second', confidence: 0.25 })).transient, true, 'nor a pick of three at under a third, which no pick can be');
+});
+
+test('a cascade\'s cheap model is served by the providers it was measured on first, and by others when they cannot', () => {
+  const body = { messages: [{ role: 'user', content: 'Where is my order #5?' }] };
+  const pinned = buildUpstream(body, CHEAP, { providers: ['deepinfra/fp8'] });
+  assert.deepEqual(pinned.provider.only, ['deepinfra/fp8'], 'a model switched to on its own is held to them');
+  assert.equal(pinned.provider.order, undefined);
+  const preferred = buildUpstream(body, CHEAP, { providers: ['deepinfra/fp8'], preferred: true });
+  assert.deepEqual(preferred.provider.order, ['deepinfra/fp8'], 'a cascade\'s cheap model asks them first');
+  assert.equal(preferred.provider.allow_fallbacks, true, 'and others when they cannot answer');
+  assert.equal(preferred.provider.only, undefined);
+  const cascade = (recipe) => ({ kind: 'cascade', first: { model: CHEAP, recipe }, fallback: { model: REF, recipe: null } });
+  assert.equal(armKey(cascade({ providers: ['deepinfra/fp8'], preferred: true })), armKey(cascade(null)), 'the same cascade, however its providers are held');
+});
+
+test('a reading of which answer serves better that did not come back counts the difference against what is served, never loosens the pass mark, and is asked again', async () => {
+  const request = 'Where is my order #7101?';
+  const ref = refText(7101);
+  const cand = writerText(BETTER, 7101);
+  betterRefused = true;
+  try {
+    const c = await judgeCandidate(request, cand, ref, null, { scope: 'unsettled' });
+    assert.equal(c.score, 1, 'the difference stands');
+    assert.ok(!c.transient, 'and the call is counted, not dropped, which flattered the candidate');
+    assert.equal(c.unsettled, true);
+    const served = await judgeBarPair(request, ref, cand, { scope: 'unsettled' });
+    assert.equal(served.score, 1, 'the same for an answer held against the customer\'s');
+    assert.equal(served.unsettled, true);
+    const bar = await judgeBarPair(request, ref, cand, { scope: 'unsettled', bar: true });
+    assert.equal(bar.transient, true, 'setting the pass mark, the pair is left out: counted, it would loosen the mark');
+  } finally {
+    betterRefused = false;
+  }
+  const again = await judgeCandidate(request, cand, ref, null, { scope: 'unsettled' });
+  assert.equal(again.score, 0, 'never kept, so asked again once Jev reads it: forgiven');
+  assert.equal(again.detail.better, 1, 'and the better one');
+});
+
+test('what serves is read without only the differences a reading left unsettled, never without a settled one beside them', async () => {
+  const request = 'Where is my order #7301?';
+  const cand = writerText(BETTER, 7301);
+  betterRefused = true;
+  try {
+    // against one of the customer\'s answers the difference is in wording and unsettled; against the other, in the order number
+    const figures = await judgeCandidate(request, cand, refText(7301), refText(7302), { scope: 'settled-a' });
+    assert.equal(figures.score, 1, 'held against both, as anything that could be switched to is');
+    assert.equal(figures.unsettled, true);
+    assert.equal(figures.settled, 1, 'and for what serves, the difference in figures still stands');
+    // against the other, the same answer with a word changed: for what serves, it agrees
+    const alike = await judgeCandidate(request, cand, refText(7301), cand.replace('email.', 'email!'), { scope: 'settled-b' });
+    assert.equal(alike.score, 0.5);
+    assert.equal(alike.settled, 0, 'the unsettled one is left out, the settled one kept');
+  } finally {
+    betterRefused = false;
+  }
+});
+
+test('different figures make a different answer against each of the customer\'s answers on its own', async () => {
+  const request = 'Where is my order #7401?';
+  // leaves out when it arrives, which one of the customer's answers says; and reads like the other, but with a different figure
+  const cand = 'Order 7401 (3 boxes) shipped today.';
+  const says = refText(7401);
+  const figures = 'Order 7401 (4 boxes) shipped today.';
+  const both = await judgeCandidate(request, cand, says, figures, { scope: 'figures-each' });
+  assert.equal(both.score, 1, 'different from each of them, so different: floored over their average, it read as half');
+  betterRefused = true;
+  try {
+    const open = await judgeCandidate(request, cand, says, figures, { scope: 'figures-open' });
+    assert.equal(open.unsettled, true);
+    assert.equal(open.score, 1);
+    assert.equal(open.settled, 1, 'and the reading of what serves is never stricter than the one of what could be switched to');
+  } finally {
+    betterRefused = false;
+  }
+});
+
+test('a router is known by the setups it chooses between, in whatever order they are listed', () => {
+  const spec = (options) => ({ kind: 'router', version: 2, options, strong: { model: REF } });
+  const two = [{ model: STEADY }, { model: CHEAP }];
+  assert.equal(keyOfSpec(spec(two), REF), keyOfSpec(spec([...two].reverse()), REF));
+  assert.equal(keyOfSpec(spec(two), REF), `router:${CHEAP}+${STEADY}~kinds`);
+  assert.equal(armKey(spec(two)), armKey(spec([...two].reverse())));
+});
+
 test('a router whose spec names a setup it does not have, or none at all, sends the call to the customer\'s own model', () => {
   const body = { messages: [{ role: 'user', content: 'Where is my order #5?' }] };
   const kindsSpec = (extra) => ({ kind: 'router', version: 2, options: [{ model: CHEAP }], strong: { model: REF },
@@ -667,5 +925,33 @@ test('what a cautious workload is not sure enough of is never looked at again, o
     assert.equal(Number(trying.n), 0, 'and not tried on live calls, where an experiment could switch to it');
   } finally {
     config.CAUTIOUS_MIN_CHANCE = sure;
+  }
+});
+
+/* 8. A router whose setup is refused outright ------------------------------------------------------------- */
+
+test('a setup refused on every request fails the router it is part of, whatever kind of request comes first', async () => {
+  const shop = await seed({ enabled: [CHEAP, STEADY] });
+  const first = await runEvaluation(shop.workload.id);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal((await armOf(shop.workload.id))?.kind, 'router', 'switched to a router by kind of request');
+  // no provider will take the steady setup any more, whatever it is asked
+  refusing.set(STEADY, () => 404);
+  try {
+    const out = await runEvaluation(shop.workload.id, { trigger: 'automatic' });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    /* It answers the requests the router sends it first, so the refusal lands on one of them. Asked in the order
+       the calls were drawn, it met a question about an order first two times in three and stopped there; the
+       router then read as judged on too few calls, and went on serving with a setup that could answer nothing. */
+    const row = await resultOf(out.runId, `router:${CHEAP}+${STEADY}~kinds`);
+    assert.equal(row.verdict, 'failed', `${row.verdict} on ${row.runs} calls`);
+    assert.equal(row.stopped, 'refused');
+    const asked = await db.prepare(`SELECT c.request_json FROM eval_replays r JOIN calls c ON c.id = r.call_id
+        WHERE r.run_id = ? AND r.model_id = ?`).all(out.runId, STEADY);
+    assert.equal(asked.length, 1, 'refused once, and stopped there');
+    assert.match(asked[0].request_json, /refund/i, 'on a refund complaint, a request the router sends it');
+    assert.equal((await load(shop.workload.id)).routed_model, null, 'switched back to the customer\'s own model');
+  } finally {
+    refusing.delete(STEADY);
   }
 });

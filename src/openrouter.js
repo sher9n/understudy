@@ -96,7 +96,8 @@ export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHin
     if (Object.keys(meta).length) out.metadata = meta; else delete out.metadata;
   }
   if (recipe?.reasoning) out.reasoning = { ...recipe.reasoning };
-  // served only by the providers it was measured on, where a switch says so
+  /* served only by the providers it was measured on, where a switch says so; or by them first and by others
+     when they cannot, where it says they are preferred (a cascade's cheap model, whose answers are checked) */
   const pinnedTo = Array.isArray(recipe?.providers) && recipe.providers.length ? recipe.providers : null;
   /* A workspace keeps zero data retention unless it chose otherwise on Settings, and nobody's calls
      ever go to a provider that trains on them. Turning retention off lets a workspace reach the models
@@ -106,7 +107,7 @@ export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHin
      sent, against what the customer's own code asked for. */
   const keepNothing = zdr ?? config.ZDR_ONLY;
   out.provider = { ...(out.provider || {}), data_collection: 'deny', ...(keepNothing ? { zdr: true } : {}),
-    ...(pinnedTo ? { only: pinnedTo } : {}) };
+    ...(pinnedTo ? (recipe.preferred ? { order: pinnedTo, allow_fallbacks: true } : { only: pinnedTo }) : {}) };
   /* The most any provider may charge on this call, per million tokens and per request: the prices the
      call's hold was worked out at (see callBound). OpenRouter never sends the call to a provider dearer
      than this, which keeps the hold a bound when a provider is added or reprices after we read the list.

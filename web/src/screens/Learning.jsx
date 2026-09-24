@@ -273,12 +273,15 @@ function ControlGroup({ c, yours }) {
         measurement.{' '}
         {c.n > 0 ? (
           <>
-            Since the switch, {num(c.n)} of its answers have been checked: {worse} {was(c.worse)} worse or different ({p1(c.rate)})
-            {c.better > 0 ? `, and ${num(c.better)} ${was(c.better)} better` : ''}.{verdict}
+            Since the switch, {num(c.n)} of its answers have been checked the way your pass mark asks: {worse} {was(c.worse)} worse
+            or different ({p1(c.rate)}){c.better > 0 ? `, and ${num(c.better)} ${was(c.better)} better` : ''}.{verdict}
+            {c.otherWay > 0 ? ` ${num(c.otherWay)} checked before your pass mark changed ${was(c.otherWay)} compared another way, so ${Number(c.otherWay) === 1 ? 'it does' : 'they do'} not count.` : ''}
             {!c.enough ? ` Once ${num(c.minChecks)} have been checked, it is switched back by itself if the whole range of its true rate is past your ${bar} bar.` : ''}
-            {c.costUsd > 0 ? ` These checks have cost ${usd(c.costUsd)}.` : ''}
           </>
-        ) : 'None have been checked since the switch yet.'}
+        ) : c.otherWay > 0
+          ? `Since the switch, ${num(c.otherWay)} of its answers ${was(c.otherWay)} checked, but compared another way than your pass mark now asks, so none count yet.`
+          : 'None have been checked since the switch yet.'}
+        {c.costUsd > 0 ? ` Checking it has cost ${usd(c.costUsd)} since the switch.` : ''}
       </p>
     </div>
   );

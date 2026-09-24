@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { betaCdf, chanceWithin, safeSaving, rankCleared, routingModeOf } from '../src/eval/confidence.js';
-import { askedText, featuresRaw, idfOf, weigh, chooseKinds, learnRouter, routeOf, simulateRoutes, crossFitRouter } from '../src/learn/kinds.js';
+import { askedText, featuresRaw, idfOf, weigh, chooseKinds, learnRouter, routeOf, simulateRoutes, crossFitRouter, familiarLine } from '../src/learn/kinds.js';
 
 /* Performance first: how sure a measurement is that a setup keeps the promise, which of the setups
    that cleared is switched to, and the router that sends each kind of request to the setup that does
@@ -174,6 +174,24 @@ test('an odd request or two among a kind never makes every request look like tha
   }
   // and the requests it was learned from are still taken for their kinds
   assert.equal(routeOf(spec, featuresRaw(easy(900))).option, 0);
+});
+
+test('a member far from the rest of its kind never drags the familiarity line down, and a close variant is a member', () => {
+  const kind = (lo, n, step, every) => Array.from({ length: n }, (_, i) => lo + (i % every) * step);
+  // one request like the rest at only 0.60 among ones at 0.95 or more: the line stays with the rest
+  close(familiarLine([0.6, ...kind(0.95, 39, 0.01, 5)]), 0.93);
+  // two odd ones together are set aside together, in a kind of 40 and in one of 39
+  close(familiarLine([0.1, 0.12, ...kind(0.88, 38, 0.01, 5)]), 0.86);
+  close(familiarLine([0.1, 0.12, ...kind(0.88, 37, 0.01, 5)]), 0.86);
+  // a joke and a stray: both set aside, not only the one below the widest gap
+  close(familiarLine([0.1, 0.6, ...kind(0.9, 38, 0.01, 5)]), 0.88);
+  // a lone odd request in a kind of eight is set aside too
+  close(familiarLine([0.1, ...kind(0.9, 7, 0, 1)]), 0.88);
+  // three of a close variant in one phrasing are members, not odd
+  close(familiarLine([0.75, 0.75, 0.76, ...kind(0.97, 37, 0.01, 3)]), 0.73);
+  // a kind spread evenly keeps the line it always had: its least like member, less a little
+  close(familiarLine(Array.from({ length: 40 }, (_, i) => 0.3 + (0.6 * i) / 39)), 0.28);
+  close(familiarLine([0.5]), 0.48);
 });
 
 test('a router that would send every kind the same way is no router', () => {
