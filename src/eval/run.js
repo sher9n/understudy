@@ -404,6 +404,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      the total comes down to what will actually be made, so the count reaches its end exactly when
      the last call does. */
   let remaining = null;
+  // the second looks still to come, allowed for in what is left once the race starts (see there)
+  let looksAhead = 0;
   const ended = (row) => !row || row.status !== 'running' || !!row.stop_requested_at;
   /* Every model call is counted the moment it comes back, so what the page says ran is exactly
      what was sent and paid for, however many models are running at once. */
@@ -492,9 +494,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const endStopped = async () => {
     await settle(`Measuring ${workload.slug}, stopped`);
     await keepSavings();
+    /* Its count says what it had still to do when it stopped ("stopped at 120 of 300"), which never includes the
+       second looks it was only allowing for (see looksAhead): stopped on its very last call, it made them all. */
+    looksAhead = 0;
+    const planned = Math.max(done, remaining ? done + remaining() : total);
     const closed = await db.prepare(`UPDATE eval_runs SET status = 'stopped', outcome = 'stopped',
                   finished_at = ?, phase = NULL, steps_done = ?, steps_total = ? WHERE id = ? AND status = 'running' RETURNING id`)
-      .run(now(), done, done, run.id);
+      .run(now(), done, planned, run.id);
     await db.prepare('UPDATE eval_runs SET phase = NULL WHERE id = ?').run(run.id);
     await deferAfterStop(workloadId);
     if (!closed.rows.length) return { ok: true, runId: run.id, stopped: true };
@@ -531,7 +537,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await settle(`Measuring ${workload.slug}, interrupted`);
     await keepSavings();
     const closed = await db.prepare(`UPDATE eval_runs SET status = 'failed', outcome = 'interrupted', error = ?,
-                  finished_at = ?, phase = NULL, steps_total = steps_done WHERE id = ? AND status = 'running' RETURNING id`)
+                  finished_at = ?, phase = NULL WHERE id = ? AND status = 'running' RETURNING id`)
       .run(why, now(), run.id);
     if (!closed.rows.length) return await endStopped();
     await deferAfterFailure(workloadId);
@@ -1603,7 +1609,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const unseenCalls = pool.filter((c) => !sampledIds.has(c.id) && !seenBefore.has(c.id)).length;
   const lookSize = Math.min(unseenCalls, Math.max(callsToClear(floor, confirmZ), config.EVAL_CONFIRM_MIN,
     Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(floor)), samples.length));
-  let looksAhead = unseenCalls >= callsToClear(floor, confirmZ) ? lookSize * (1 + Math.max(1, config.EVAL_CONFIRM_TRIES)) : 0;
+  looksAhead = unseenCalls >= callsToClear(floor, confirmZ) ? lookSize * (1 + Math.max(1, config.EVAL_CONFIRM_TRIES)) : 0;
   remaining = () => {
     let left = 0;
     for (const n of answered.values()) left += Math.max(0, kept.length - n) * perCall;
@@ -2495,7 +2501,7 @@ export async function rest(workloadId) {
    job that is itself closing its own earlier run, which it still holds. */
 async function closeRun(run, how, { release = true } = {}) {
   const closed = await db.prepare(
-    `UPDATE eval_runs SET status = ?, outcome = ?, finished_at = ?, phase = NULL, steps_total = steps_done,
+    `UPDATE eval_runs SET status = ?, outcome = ?, finished_at = ?, phase = NULL,
             error = COALESCE(error, ?) WHERE id = ? AND status = 'running' RETURNING id`)
     .run(how === 'stopped' ? 'stopped' : 'failed', how, now(),
          how === 'stopped' ? null : 'interrupted', run.id);
