@@ -58,6 +58,20 @@ async function eligible(workload) {
   return { n, recordedShare: n && config.EVAL_USE_RECORDED ? Math.min(1, Number(r.own || 0) / n) : 0 };
 }
 
+/** How many calls a measurement of this workload could draw on now, counted exactly as a run counts them
+    (see eligible): what a workload waiting for calls is waiting to reach (measureWhenReady in src/proxy.js). */
+export const usableCalls = async (workload) => (await eligible(workload)).n;
+
+/** The bar a measurement nobody asked for is sized for (the workload's own, or before it has one, the first bar
+    for its kind of answer), how many calls a sample needs to clear it even with every answer matching, and how
+    many usable calls give a sample that size. */
+export function barNeed(workload) {
+  const barPct = Number(workload?.floor_pct) > 0 ? Number(workload.floor_pct)
+    : workload?.shape_kind === 'free_text' ? config.EVAL_FIRST_FLOOR_TEXT_PCT : config.EVAL_FLOOR_MIN_PCT;
+  const need = callsToClear(barPct);
+  return { barPct, need, calls: Math.max(config.EVAL_MIN_CALLS, Math.ceil(need / config.EVAL_SAMPLE_SHARE)) };
+}
+
 /* What a month of this workload is: how many calls it makes, and what they cost on the customer's
    own model. From its real traffic over the last thirty days, never from replays or tests. */
 async function monthOf(workloadId) {
@@ -253,6 +267,8 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   if (pool < config.EVAL_MIN_CALLS) {
     plan.reason = `${pool} of the ${config.EVAL_MIN_CALLS} calls we need. `
       + 'Keep sending traffic and this turns on by itself.';
+    // the calls it waits for: the one that brings the count to them starts it (see waitForCalls)
+    plan.needCalls = config.EVAL_MIN_CALLS;
     return plan;
   }
 
@@ -302,18 +318,18 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   /* A measurement nobody asked for waits until it has enough calls to show anything: on too few, even a
      model that matched every answer could not clear the bar, and all it would buy is a bar. */
   if (automatic) {
-    const barPct = Number(workload.floor_pct) > 0 ? Number(workload.floor_pct)
-      : workload.shape_kind === 'free_text' ? config.EVAL_FIRST_FLOOR_TEXT_PCT : config.EVAL_FLOOR_MIN_PCT;
-    const need = callsToClear(barPct);
+    const { barPct, need, calls: poolNeed } = barNeed(workload);
     if (sample < need) {
-      const poolNeed = Math.ceil(need / config.EVAL_SAMPLE_SHARE);
-      const perDay = month.calls / 30;
       plan.notWorth = true;
-      plan.waitMs = perDay > 0 ? ((poolNeed - pool) / perDay) * DAY : null;
+      /* The calls it waits for, counted as a run counts them: the call that brings the count to them starts it
+         (see waitForCalls). It used to be booked for when they were guessed to arrive, from the pace so far and
+         never sooner than six hours, and a new workload that had them within the hour waited the six. A sample
+         bigger than the most a measurement takes waits for no call, since none could bring it. */
+      plan.needCalls = need <= config.EVAL_SAMPLE_MAX ? poolNeed : null;
       plan.reason = `Waiting for more calls: a measurement on ${sample} of them could not show a cheaper model is as good as yours `
         + `at a ${barPct.toFixed(barPct < 10 ? 1 : 0)}% bar, even one that matched every answer. It takes about ${need}, which `
-        + `${poolNeed} calls in thirty days gives${perDay > 0 ? `, about ${Math.max(1, Math.ceil((poolNeed - pool) / perDay))} days away at your pace` : ''}. `
-        + 'It starts by itself then, and you can measure now whenever you like.';
+        + `${poolNeed} calls from the last thirty days give (at most ${config.EVAL_POOL_PER_DAY} of them from any one day). `
+        + 'It starts by itself as soon as they are here, and you can measure now whenever you like.';
       return plan;
     }
   }

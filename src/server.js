@@ -12,7 +12,7 @@ import { planFor, onMissingFits } from './eval/plan.js';
 import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './alerts.js';
 
 import { slug, shapeSignals } from './classify.js';
-import { routeOnce } from './proxy.js';
+import { routeOnce, convertWaits } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
 import { trueUp } from './trueup.js';
 import { parse as parseRoute } from '../web/src/router.js';
@@ -414,6 +414,10 @@ handle('purge', async () => {
  * catalogue has moved. A workspace that chose "only when I ask" is skipped entirely: zero
  * days means never, and it is the one setting that must not be quietly overridden by a
  * default somewhere. */
+/* Workloads the rule before measureWhenReady left waiting on a guessed time: each given the count of calls it waits
+   for, and one that has it already measured now (see convertWaits). Queued when the server starts. */
+handle('measure_waits', async () => ({ ok: true, ...(await convertWaits()) }));
+
 handle('recheck', async () => {
   // the next one is booked first, so one that fails still leaves the next one coming
   await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
@@ -569,6 +573,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 
   await enqueue('backfill_shapes', {}, { unique: true });
+  await enqueue('measure_waits', {}, { unique: true });
   await enqueue('catalog_sync', {}, { unique: true });
   await enqueue('model_health', {}, { unique: true });
   await enqueue('arena_sync', {}, { unique: true });

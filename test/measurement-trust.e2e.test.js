@@ -43,6 +43,7 @@ process.env.REQUEST_LOGS = 'false';
 process.env.EVAL_JUDGE_MODEL = 'judge/small';
 process.env.ROLLOUT_ENABLED = 'false';
 process.env.RESEND_API_KEY = '';
+process.env.MEASURE_READY_CHECK_MS = '0';
 
 const { db, now } = await import('../src/db/index.js');
 const { default: migrate } = await import('../src/db/migrate.js');
@@ -55,7 +56,10 @@ const { move } = await import('../src/billing.js');
 const { promote } = await import('../src/eval/promote.js');
 const { scheduleNext, deferAutomatic, nudgeForCatalog } = await import('../src/eval/schedule.js');
 const { calibrationFor, calibrated, forgetCalibration } = await import('../src/eval/calibrate.js');
-const { planFor } = await import('../src/eval/plan.js');
+const { planFor, barNeed } = await import('../src/eval/plan.js');
+const { considerMeasuring, convertWaits } = await import('../src/proxy.js');
+const { valueOf } = await import('../src/eval/value.js');
+const { enqueue } = await import('../src/jobs.js');
 const { forgetFacts } = await import('../src/models/facts.js');
 
 await migrate({ quiet: true });
@@ -224,6 +228,120 @@ test('a measurement nobody asked for waits until it could show anything, and cos
   // a person can always ask
   const plan = await planFor(w, { canRoute: true });
   assert.equal(plan.notWorth, false);
+});
+
+
+/* More calls for a workload, recorded as its own are, then moved to one day, so the count a measurement draws on
+   (at most EVAL_POOL_PER_DAY from any one day) is known exactly. */
+async function addCalls(workspace, workload, count, daysAgo) {
+  for (let i = 0; i < count; i += 1) {
+    const request = { model: 'openai/gpt-5.4', messages: [{ role: 'user', content: `document #${daysAgo}-${i}-${Math.random()}` }],
+      response_format: { type: 'json_object' } };
+    await recordCall({
+      workspaceId: workspace.id, workloadId: workload.id, source: 'trace', requestedModel: 'openai/gpt-5.4', servedModel: 'openai/gpt-5.4',
+      statusCode: 200, promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0,
+      request, response: { choices: [{ message: { content: JSON.stringify(right(i)) } }], usage: { cost: 0.002 } },
+    });
+  }
+  await db.prepare(`UPDATE calls SET created_at = ? WHERE id IN (SELECT id FROM calls WHERE workload_id = ? AND created_at > ?
+      ORDER BY created_at DESC LIMIT ?)`).run(now() - daysAgo * DAY, workload.id, now() - 5 * 60000, count);
+}
+const queuedFor = async (workloadId) => Number((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND status = 'queued'
+    AND (payload::jsonb ->> 'workloadId') = ?`).get(workloadId)).n);
+const cancelFor = (workloadId) => db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE kind = 'eval_run' AND status = 'queued'
+    AND (payload::jsonb ->> 'workloadId') = ?`).run(workloadId);
+
+test('a measurement waiting for calls starts on the call that brings them, never at a guess of when that will be', async () => {
+  const { workspace, workload } = await seed({ n: 40, enabled: ['vendor/steady-small'] });
+  const out = await runEvaluation(workload.id, { trigger: 'first' });
+  assert.equal(out.ok, false);
+  assert.match(out.reason, /Waiting for more calls/);
+  let w = await load(workload.id);
+  // structured answers are first held to a 3% bar: 88 in a sample clear it, which 176 usable calls give
+  const need = barNeed(w).calls;
+  assert.equal(need, 176);
+  assert.equal(Number(w.measure_at_calls), need, 'it keeps the count it waits for');
+  assert.ok(Number(w.recheck_after) > now() + 6 * DAY, `and a far booking, only in case its calls stop coming: ${(w.recheck_after - now()) / DAY} days`);
+  const v = await valueOf(w);
+  assert.equal(v.tests.need, 176, 'the page says how many');
+  assert.equal(v.tests.have, 40, 'and how many there are');
+
+  // the calls arrive: one day at a time, since at most 60 from any one day count
+  await addCalls(workspace, workload, 60, 20);
+  await addCalls(workspace, workload, 60, 21);
+  await addCalls(workspace, workload, 15, 22);
+  await considerMeasuring(workspace.id, await load(workload.id));
+  assert.equal(await queuedFor(workload.id), 0, 'one call short: nothing yet');
+  // more calls on a day that already gave its 60 bring nothing
+  await addCalls(workspace, workload, 10, 20);
+  await considerMeasuring(workspace.id, await load(workload.id));
+  assert.equal(await queuedFor(workload.id), 0, 'past the day\'s 60: still one short');
+  // the call that brings the count
+  await addCalls(workspace, workload, 1, 22);
+  await considerMeasuring(workspace.id, await load(workload.id));
+  assert.equal(await queuedFor(workload.id), 1, 'started by that call');
+  w = await load(workload.id);
+  assert.equal(w.measure_at_calls, null, 'and waits for nothing more');
+  assert.ok(Math.abs(Number(w.recheck_after) - (now() + 3600000)) < 60000, 'held for the hour it takes to start');
+  const job = await db.prepare(`SELECT payload FROM jobs WHERE kind = 'eval_run' AND status = 'queued' AND (payload::jsonb ->> 'workloadId') = ?`).get(workload.id);
+  assert.equal(JSON.parse(job.payload).trigger, 'first', 'as the first measurement of a new workload');
+  await cancelFor(workload.id);
+
+  // calls arriving together, or on two servers, start it once
+  await db.prepare('UPDATE workloads SET measure_at_calls = ? WHERE id = ?').run(need, workload.id);
+  const fresh = await load(workload.id);
+  await Promise.all([considerMeasuring(workspace.id, fresh), considerMeasuring(workspace.id, fresh), considerMeasuring(workspace.id, fresh)]);
+  assert.equal(await queuedFor(workload.id), 1, 'once');
+  await cancelFor(workload.id);
+});
+
+test('a workspace that measures only when asked never starts a waiting workload by itself', async () => {
+  const { workspace, workload } = await seed({ n: 40, enabled: ['vendor/steady-small'] });
+  await db.prepare('UPDATE workloads SET measure_at_calls = 30, recheck_after = ? WHERE id = ?').run(now() + 30 * DAY, workload.id);
+  await db.prepare('UPDATE workspaces SET measure_every_days = 0 WHERE id = ?').run(workspace.id);
+  await considerMeasuring(workspace.id, await load(workload.id));
+  assert.equal(await queuedFor(workload.id), 0, 'only when asked means only when asked');
+  await db.prepare('UPDATE workspaces SET measure_every_days = 7 WHERE id = ?').run(workspace.id);
+  await considerMeasuring(workspace.id, await load(workload.id));
+  assert.equal(await queuedFor(workload.id), 1, 'measuring by itself again, it starts');
+  await cancelFor(workload.id);
+});
+
+test('workloads left waiting on a guessed time are measured at once when they have the calls, and wait for them when not', async () => {
+  const made = [];
+  for (let k = 0; k < 5; k += 1) made.push(await seed({ n: 30, enabled: ['vendor/steady-small'] }));
+  const [ready, short, measured, counted, queued] = made.map((x) => x.workload);
+  // every one live, as thirty calls make it, and booked for a guessed time, as the rule before this one left them
+  for (const w of [ready, short, measured, counted, queued]) {
+    await db.prepare("UPDATE workloads SET state = 'live', recheck_after = ? WHERE id = ?").run(now() + 6 * 3600000, w.id);
+  }
+  // one measured before, one already waiting for its count, and one already in the queue: none of them is touched
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model, created_at, finished_at)
+      VALUES (?, ?, ?, 'done', 'compared', 'json', 'openai/gpt-5.4', ?, ?)`).run(`run_waits_${process.pid}`, measured.workspace_id, measured.id, now(), now());
+  await db.prepare('UPDATE workloads SET measure_at_calls = 176 WHERE id = ?').run(counted.id);
+  await enqueue('eval_run', { workloadId: queued.id, trigger: 'first' }, { unique: true });
+  // the plan's answer for each, so this is about which workloads are looked at and what is done with the answer
+  const asked = [];
+  const plan = async (w) => {
+    asked.push(w.id);
+    if (w.id === ready.id) return { canRun: true };
+    if (w.id === short.id) return { canRun: false, needCalls: 50 };
+    return { canRun: false };
+  };
+  const first = await convertWaits({ plan });
+  assert.ok(first.started >= 1 && first.waiting >= 1, JSON.stringify(first));
+  for (const w of [measured, counted, queued]) assert.ok(!asked.includes(w.id), 'never looked at: it was measured, counted or queued already');
+  assert.equal(await queuedFor(ready.id), 1, 'the one with its calls is measured now');
+  assert.ok(Math.abs(Number((await load(ready.id)).recheck_after) - (now() + 3600000)) < 60000);
+  assert.equal(Number((await load(short.id)).measure_at_calls), 50, 'the one without waits for its count');
+  assert.equal(await queuedFor(short.id), 0);
+  assert.equal(await queuedFor(queued.id), 1, 'the one in the queue stays there once');
+  // running it again changes nothing
+  asked.length = 0;
+  await convertWaits({ plan });
+  assert.ok(!asked.includes(ready.id) && !asked.includes(short.id), 'both are in the new rule now');
+  assert.equal(await queuedFor(ready.id), 1);
+  for (const w of [ready, queued]) await cancelFor(w.id);
 });
 
 test('a measurement nobody asked for runs only when what it can find pays for it', async () => {
