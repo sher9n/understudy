@@ -5,8 +5,9 @@
 .pubpage { display: flex; flex-direction: column; flex: 1; min-height: 100vh; }
 .pubpage > .docpage, .pubpage > .lifted { flex: 1 0 auto; }
 
-/* The header. Same weight and rhythm as the design board's, with the pages people look for
-   before they sign up (what it costs, what happens to their data, whether it is up) in it. */
+/* The header. Same weight and rhythm as the design board's, and the same two pages in it: how it works
+   and how models are routed. What it costs, what happens to somebody's data and whether it is up are
+   in the footer, with the rest of the small print. */
 .pubhead { display: flex; align-items: center; gap: 26px; padding: 18px 44px;
   border-bottom: 1px solid var(--line); background: var(--bg); }
 .pubwm { font-weight: 700; font-size: 16px; letter-spacing: -0.03em; color: var(--ink); white-space: nowrap; }
@@ -39,22 +40,21 @@ a.pubwm:hover { text-decoration: none; }
 @media (max-width: 1020px) {
   .pubfootin { grid-template-columns: minmax(0, 1fr); gap: 28px; }
 }
-/* Below this width the pages no longer fit beside the actions in one row (five links and three
-   buttons take about 920 pixels), so they go under them, as a row of their own, and wrap onto a
-   second line rather than run off the edge: a row that scrolled sideways hid the last link on a phone. */
-@media (max-width: 960px) {
-  .pubhead { flex-wrap: wrap; row-gap: 8px; }
-  .pubnav { order: 3; flex-basis: 100%; flex-wrap: wrap; gap: 6px 22px; padding: 2px 0; }
-}
-/* On a phone the header keeps its one row of actions and puts the pages under it: four links and
-   three buttons across 390 pixels is a line nobody can read. */
+/* On a phone the header has less room around it, and its two pages and three buttons still fit in one
+   row (about 545 pixels of it). */
 @media (max-width: 720px) {
   .pubhead { gap: 6px 12px; padding: 12px 16px 10px; }
-  .pubnav { gap: 6px 18px; padding: 4px 0 2px; }
+  .pubnav { gap: 6px 18px; }
   .pubacts { gap: 8px; }
   .pubhead .btn { padding: 8px 12px; font-size: 13px; }
   .pubfoot { padding: 28px 16px 34px; }
   .pubcols { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 16px; }
+}
+/* Narrower than that they no longer do, so the pages go under the actions, as a row of their own, and
+   wrap rather than run off the edge: a row that scrolled sideways hid the last link on a phone. */
+@media (max-width: 600px) {
+  .pubhead { flex-wrap: wrap; row-gap: 6px; }
+  .pubnav { order: 3; flex-basis: 100%; flex-wrap: wrap; padding: 4px 0 2px; }
 }
 
 /* The links the home page gives beside what it says about data and money. */

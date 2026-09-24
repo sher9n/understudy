@@ -45,12 +45,11 @@ export function PublicHeader({ me, go, dark, setDark, here }) {
   return (
     <header className="pubhead">
       <To to="home" go={go} className="pubwm" aria-label="Understudy, home">Understudy</To>
+      {/* The same two pages the home page's own header offers. Pricing, what happens to somebody's traffic
+          and whether the service is up are in the footer, with the rest of the small print. */}
       <nav className="pubnav" aria-label="Understudy">
         <To to="how" go={go} aria-current={cur('how')}>How it works</To>
         <To to="routing" go={go} aria-current={cur('routing')}>Model routing</To>
-        <To to="pricing" go={go} aria-current={cur('pricing')}>Pricing</To>
-        <To to="traffic" go={go} aria-current={cur('traffic')}>Your traffic</To>
-        <To to="status" go={go} aria-current={cur('status')}>Status</To>
       </nav>
       <span className="pubgrow" />
       <div className="pubacts">
