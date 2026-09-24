@@ -14,6 +14,10 @@
 .hwpt { font-size: 13.5px; font-weight: 600; color: var(--ink); }
 .hwpsteps p { margin: 5px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--mut-read); max-width: 78ch; }
 .hwpsteps b { color: var(--ink); font-weight: 600; }
+/* the three routing priorities, one to a line */
+.hwplist { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; max-width: 78ch; }
+.hwplist li { font-size: 12.5px; line-height: 1.55; color: var(--mut-read); }
+.hwpsn .plainb { font-size: 12px; text-decoration: underline; text-underline-offset: 2px; padding: 0; border: 0; background: none; }
 
 /* The checks, as a funnel: how many models are left after each one. */
 .hwpfun { display: grid; gap: 5px; margin-top: 10px; max-width: 560px; }

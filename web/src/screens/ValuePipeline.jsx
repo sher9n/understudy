@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { api, usd, num, dateIST, timeIST } from '../api.js';
 import { useWidth } from '../Charts.jsx';
 import { inHundred } from '../LearnCharts.jsx';
+import { routerName, isKindsRouter, kindsOf, kindsWord } from '../setupNames.js';
 
 /* What Understudy is doing for one workload: the first thing its page says, drawn more than written.
  *
@@ -66,7 +67,7 @@ function servedKind(w, v) {
 function servedLabel(kind, v, w, ref) {
   const s = v.spec;
   if (kind === 'cascade') return `${short(s.first.model)}, checked`;
-  if (kind === 'router') return `${short(s.cheap.model)} or ${short(s.strong.model)}`;
+  if (kind === 'router') return routerName(s, v.reference);
   if (kind === 'lighter') return `${ref}, thinking less`;
   if (kind === 'cheapest') return `${ref}, from its cheapest provider`;
   if (kind === 'model') return short(w.model);
@@ -397,6 +398,70 @@ function flowModel(c) {
     bottomTo = fbOwn ? 'fallback' : 'sent';
     first = 'check';
     intro = `${soloFailed ? 'No single cheaper model was good enough on its own, so Understudy' : 'Understudy'} built a small pipeline out of two models and a check. The thicker the line, the more requests take that path.`;
+  } else if (kind === 'router' && isKindsRouter(v.spec)) {
+    /* A router by kind of request: each kind it learned goes to one setup, and everything else to the
+       customer's own model. The shares are this week's requests once there are enough of them, and the
+       test's until then. */
+    const s = v.spec;
+    const kinds = kindsOf(s, v.reference);
+    // this week's requests, by the setup that answered them, told apart by their place in the router's table
+    const liveBy = p.byOption;
+    const partsIn = kinds.parts.filter((x) => x.kinds > 0);
+    const measuredSum = partsIn.reduce((a, x) => a + (x.share ?? 0), 0);
+    const shareOf = (x) => {
+      if (liveBy) return liveBy.find((b) => b.option === x.option)?.share ?? 0;
+      // the test's shares of the kinds, scaled so the part sent to the customer's own model is what the test sent there
+      if (!known(x.share)) return null;
+      return known(sentOn) && measuredSum > 0 ? (x.share / measuredSum) * (1 - sentOn) : x.share;
+    };
+    const perCallOf = (x) => (liveBy ? liveBy.find((b) => b.option === x.option)?.perCall ?? null : null);
+    add({
+      id: 'sorter', eyebrow: 'Sorts first', title: 'What kind of request?', note: `${kindsWord(kinds.count)}, learned from your requests`,
+      detail: {
+        title: 'Each request is matched to a kind',
+        text: `When this setup was tested, Understudy grouped your own requests into ${kindsWord(kinds.count)} by what they ask, `
+          + `and tested every setup on every kind. Now each request is matched to the kind it is most like before it is sent, `
+          + `and goes to a setup that answered that kind as well as ${ref}, the table picked for the biggest saving we are sure of. A request unlike any it learned from goes to ${ref}. `
+          + 'Nothing is checked afterwards, so no request waits for two answers.',
+        big: num(kinds.count), small: kinds.count === 1 ? 'kind of request' : 'kinds of request',
+      },
+    });
+    const branches = [];
+    partsIn.forEach((x, i) => {
+      const id = `part${i}`;
+      const share = shareOf(x);
+      const each = perCallOf(x);
+      add({
+        id, eyebrow: kindsWord(x.kinds), title: x.label, note: known(share) ? `${inHundred(share)} requests` : 'some requests', tone: 'ok',
+        detail: {
+          title: `${x.label} answers ${x.kinds === 1 ? 'one kind' : `${x.kinds} kinds`} of request`,
+          text: `In the test, ${x.label} answered ${x.kinds === 1 ? 'this kind' : 'these kinds'} of request as well as ${ref}, and for less. That is where the saving comes from.`,
+          big: known(each) ? usd(each) : known(share) ? whole(share) : '',
+          small: known(each) ? 'per request, our fee included' : known(share) ? 'of requests' : '',
+        },
+      });
+      branches.push({ id, share, tone: 'ok', label: known(share) ? `${inHundred(share)} requests: ${kindsWord(x.kinds)}` : kindsWord(x.kinds) });
+    });
+    const yoursKinds = kinds.yours.kinds;
+    add({
+      id: 'strong', eyebrow: yoursKinds ? `${kindsWord(yoursKinds)}, and anything new` : 'Anything new', title: ref,
+      note: known(sentOn) ? `${inHundred(sentOn)} requests` : 'the rest', tone: 'brand',
+      detail: {
+        title: `${ref} answers the rest`,
+        text: `${ref}, your own model, answers ${yoursKinds ? `the ${yoursKinds === 1 ? 'kind' : 'kinds'} of request no cheaper setup answered as well, and ` : ''}`
+          + 'any request unlike the ones it learned from, so those get the answer they would have got before.',
+        big: known(p.longPerCall) ? usd(p.longPerCall) : '', small: known(p.longPerCall) ? 'per request' : '',
+      },
+    });
+    branches.push({ id: 'strong', share: known(sentOn) ? sentOn : null, tone: 'brand',
+      label: known(sentOn) ? `${inHundred(sentOn)} requests: ${yoursKinds ? 'the rest' : 'anything new'}` : 'The rest' });
+    sent('Every request', 'from whichever answered', 'Whichever setup answered, its answer goes straight back to your app.');
+    cols = ['app', 'sorter'];
+    fork = branches;
+    end = 'sent';
+    bottomTo = 'strong';
+    first = 'sorter';
+    intro = `Understudy learned the kinds of request this workload gets, and sends each kind to a setup that answers it as well as ${ref}, picked for the biggest saving we are sure of. The thicker the line, the more requests take that path.`;
   } else if (kind === 'router') {
     const s = v.spec;
     const cheap = short(s.cheap.model);
@@ -571,7 +636,7 @@ function nextStep(c) {
 const thick = (share) => (known(share) ? Math.max(2.5, Math.min(10, 10 * share)) : 5);
 const TONE_LINE = { ok: 'var(--ok)', brand: 'var(--brand)', warn: 'var(--warn)', mut: 'var(--mut)' };
 
-/* Where each box goes on a wide screen: the row across the middle, the fork's two boxes one above the
+/* Where each box goes on a wide screen: the row across the middle, the fork's boxes one above the
    other, what runs in the background in a lane above, and the safety net in a lane below. */
 function layoutWide(model, W) {
   const P = 16;
@@ -585,15 +650,18 @@ function layoutWide(model, W) {
   // room for a label, a name over two lines and a note over two, which a long model name needs
   const TOP_H = 92;
   const MAIN_H = 120;
+  /* a router by kind of request can fork into as many as five, each box as tall as ever, so a model's name
+     over two lines still has room; more than two sit a little closer together */
+  const branches = model.fork ? model.fork.length : 0;
   const FORK_H = 104;
-  const FORK_GAP = 20;
+  const FORK_GAP = branches > 2 ? 14 : 20;
   const BOTTOM_H = 92;
   const LANE = 36;
   let y = 16;
   const topY = model.top ? y : null;
   if (model.top) y += TOP_H + LANE;
   const mainTop = y;
-  const mainH = model.fork ? FORK_H * 2 + FORK_GAP : MAIN_H;
+  const mainH = model.fork ? FORK_H * branches + FORK_GAP * (branches - 1) : MAIN_H;
   const mid = mainTop + mainH / 2;
   y += mainH;
   const bottomY = model.bottom ? y + LANE : null;
@@ -745,7 +813,9 @@ const RANK = { serving: 0, passed: 1, trial: 2, unsure: 3, dearer: 4, failed: 5 
 
 function familyWords(f, ref) {
   if (f === 'cascade') return { name: 'Check first', what: `A cheaper model answers, a quick check decides, and ${ref} answers when the check is unsure.` };
-  if (f === 'router') return { name: 'A sorter', what: `A small rule, learned from your requests, sends easy ones to a cheaper model and hard ones to ${ref}.` };
+  if (f === 'router') {
+    return { name: 'Sorted by kind of request', what: `Understudy learns the kinds of request you send and sends each kind to a setup that answered it as well as ${ref} in the test, picked for the biggest saving we are sure of. Everything else goes to ${ref}.` };
+  }
   if (f === 'lighter') return { name: `${ref}, thinking less`, what: 'The same model, set to think less before it answers. Thinking is billed, so it costs less.' };
   if (f === 'cheapest') return { name: `${ref} from its cheapest provider`, what: 'Exactly the same model, bought from whichever company runs it most cheaply.' };
   return { name: 'One cheaper model on its own', what: 'Every request goes to a single cheaper model, with no check.' };
@@ -928,9 +998,12 @@ function emptySetups(c) {
       : 'No test has finished yet. Press Measure now below to try again.';
   }
   if (!t.auto) return 'No setups have been tested yet. This workspace only tests when asked, so press Measure now below when you are ready.';
-  if (t.seen >= t.firstAfter) return 'No setups have been tested yet. The first test starts soon.';
-  return `No setups have been tested yet. The first test starts by itself once Understudy has seen ${num(t.firstAfter)} of your requests. `
-    + `It has seen ${num(t.seen)} so far.`;
+  /* 40 requests only books the first test (considerMeasuring in src/proxy.js): it runs once there are enough
+     of them for a setup to be able to pass, and when testing would pay for itself within two months. */
+  const when = 'It runs as soon as there are enough of your requests for a setup to be able to pass, and testing would pay for itself within two months.';
+  if (t.seen >= t.firstAfter) return `No setups have been tested yet. The first test is booked. ${when}`;
+  return `No setups have been tested yet. The first test is booked once Understudy has seen ${num(t.firstAfter)} of your requests; `
+    + `it has seen ${num(t.seen)} so far. ${when}`;
 }
 
 function Setups({ c }) {
@@ -1004,8 +1077,20 @@ function eventWords(e, c, next) {
     else if (e.outcome === 'refused') text = `${ref} could not answer these requests when they were replayed, so there was nothing to compare against.`;
     else if (e.outcome === 'no_balance') text = 'The balance ran out part way, so the test stopped before it had compared everything.';
     else if (!e.tried) text = 'No setups were tried in this test.';
-    else if (e.passed) text = `${plural(e.tried, 'setup was', 'setups were')} tested on your own requests, and ${num(e.passed)} passed. The cheapest that passed: ${e.best}.`;
-    else text = `${plural(e.tried, 'setup was', 'setups were')} tested on your own requests. None passed, so nothing changed.`;
+    else if (e.passed && e.chosen) {
+      // the name last: a router's is a list of setups, and in the middle of a sentence it hid the rest of it
+      const how = e.mode === 'savings' ? 'the cheapest that passed' : e.mode === 'cautious' ? 'the biggest saving among the ones we were surest of'
+        : 'the biggest saving we were sure of';
+      /* What already serves and passed again stays, whatever the routing priority would pick afresh: a cautious
+         workload keeps a setup it would not switch to today, so "chosen as" would be untrue of it. */
+      text = `${plural(e.tried, 'setup was', 'setups were')} tested on your own requests, and ${num(e.passed)} passed. `
+        + (e.chosenKept ? `What already serves passed again, so it stays: ${e.chosen}.`
+          : `Chosen as ${how}, after it passed again on requests it had never seen: ${e.chosen}.`);
+    } else if (e.passed) {
+      text = `${plural(e.tried, 'setup was', 'setups were')} tested on your own requests, and ${num(e.passed)} passed. The cheapest that passed: ${e.best}.`;
+    } else {
+      text = `${plural(e.tried, 'setup was', 'setups were')} tested on your own requests. None passed, so nothing changed.`;
+    }
     if (e.spend > 0) text += ` The test cost ${usd(e.spend)}.`;
     return { title, text };
   }

@@ -122,6 +122,9 @@ export const api = {
   callText: (id, callId, field) => send('GET', `/workloads/${id}/calls/${callId}/text?field=${field}`),
   setMode: (id, mode) => send('POST', `/workloads/${id}/mode`, { mode }),
   setSpeed: (id, pref) => send('POST', `/workloads/${id}/speed`, { pref }),
+  // which of the setups that clear a workload it switches to: cautious, balanced, savings, or 'default' for the workspace's
+  setRouting: (id, mode) => send('POST', `/workloads/${id}/routing`, { mode }),
+  setDefaultRouting: (mode, applyToExisting = false) => send('POST', '/settings/default-routing', { mode, applyToExisting }),
   promote: (id, model) => send('POST', `/workloads/${id}/promote`, { model }),
   revert: (id) => send('POST', `/workloads/${id}/revert`),
   measure: (id) => send('POST', `/workloads/${id}/measure`),

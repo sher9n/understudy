@@ -1,6 +1,7 @@
 import React from 'react';
 import { usd, num, timeIST, dateIST } from '../api.js';
 import { inHundred } from '../LearnCharts.jsx';
+import { routerName } from '../setupNames.js';
 
 /* A workload we moved to a cheaper model: which model it was on, which one it is on now, what
  * that saves, and how much it comes to over time.
@@ -37,7 +38,7 @@ const kindOf = (s) => {
 const nameOf = (s) => {
   const k = kindOf(s);
   if (k === 'cascade') return `${short(s.spec.first.model)}, checked`;
-  if (k === 'router') return `${short(s.spec.cheap.model)} or ${short(s.spec.strong.model)}`;
+  if (k === 'router') return routerName(s.spec, s.from);
   if (k === 'lighter') return `${short(s.from)}, thinking less`;
   if (k === 'cheapest') return `${short(s.from)}, from its cheapest provider`;
   return short(s.to);
@@ -63,7 +64,7 @@ function whyLine(s) {
    whole of what measuring cost; what is left is that share of it, not all of it again. */
 function leftDays(s, so) {
   const m = s.measuring || {};
-  const total = (m.spent || 0) + (m.background || 0) + (m.graded || 0);
+  const total = (m.spent || 0) + (m.background || 0) + (m.graded || 0) + (m.checked || 0);
   if (!(m.paybackDays > 0) || !(total > 0) || !(so?.net < 0)) return null;
   const perDay = total / m.paybackDays;
   return Math.max(1, Math.ceil(-so.net / perDay));
@@ -157,7 +158,9 @@ export default function SwitchedCard({ s }) {
             {p.toPerCall == null ? unpriced(p.toListed)
               : (kind === 'cascade' || kind === 'router') && p.toPricedBy === 'measured'
                 ? `${usd(p.toPerCall)} a call on average, counting every check and every call sent on, our ${p.feePct}% fee included`
-                : kind === 'cascade' || kind === 'router'
+                : kind === 'router'
+                  ? `${usd(p.toPerCall)} a call at the list price of ${short(s.spec?.cheap?.model)}, which answers the most calls, before any sent to ${from}, our ${p.feePct}% fee included`
+                  : kind === 'cascade'
                   ? `${usd(p.toPerCall)} a call at the cheaper model's list price, before any check or call sent on, our ${p.feePct}% fee included`
                   : `${usd(p.toPerCall)} a call, our ${p.feePct}% fee included`}
           </div>
@@ -230,13 +233,14 @@ export default function SwitchedCard({ s }) {
               ? ` What the actual calls would have cost on ${from} is their cost divided by what the measurement found ${to} costs against it on the same calls.`
               : ''}
           </p>
-          {(s.measuring.spent > 0 || s.measuring.background > 0 || s.measuring.graded > 0) && (
+          {(s.measuring.spent > 0 || s.measuring.background > 0 || s.measuring.graded > 0 || s.measuring.checked > 0) && (
             <p className="swnote">
-              Finding and checking this switch has cost {usd((s.measuring.spent || 0) + (s.measuring.background || 0) + (s.measuring.graded || 0))}
-              {s.measuring.background > 0 || s.measuring.graded > 0
+              Finding and checking this switch has cost {usd((s.measuring.spent || 0) + (s.measuring.background || 0) + (s.measuring.graded || 0) + (s.measuring.checked || 0))}
+              {s.measuring.background > 0 || s.measuring.graded > 0 || s.measuring.checked > 0
                 ? ` (${[`${usd(s.measuring.spent || 0)} measuring`,
                   s.measuring.background > 0 ? `${usd(s.measuring.background)} background answers` : null,
-                  s.measuring.graded > 0 ? `${usd(s.measuring.graded)} answers read in the background` : null].filter(Boolean).join(', ')})`
+                  s.measuring.graded > 0 ? `${usd(s.measuring.graded)} answers read in the background` : null,
+                  s.measuring.checked > 0 ? `${usd(s.measuring.checked)} answers checked against ${from} in the background` : null].filter(Boolean).join(', ')})`
                 : ' in measuring'}.
               {so.net != null && so.calls > 0
                 ? (so.net >= 0

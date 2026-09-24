@@ -16,7 +16,8 @@ import { graderFor, gradedBy } from './grade.js';
 import { combineDays, fairRecord } from './fair.js';
 import { watchPins } from './pins.js';
 import { memo, forgetState } from './memo.js';
-import { account, optimizeLeft } from '../billing.js';
+import { account, backgroundLeft } from '../billing.js';
+import { maybeControl, controlRecord, controlBreach } from './control.js';
 
 /* Learning, from what live calls show, which way of serving a workload works best.
  *
@@ -118,7 +119,8 @@ const IST = 5.5 * 3600000;
 const istDayStart = (t) => Math.floor((t + IST) / DAY) * DAY - IST;
 const modelsOf = (spec) => (!spec ? []
   : spec.kind === 'cascade' ? [spec.first.model, spec.fallback.model]
-    : spec.kind === 'router' ? [spec.cheap.model, spec.strong.model] : [spec.model]);
+    : spec.kind === 'router' ? [...new Set([spec.cheap.model, spec.strong.model, ...(Array.isArray(spec.options) ? spec.options.map((o) => o.model) : [])])]
+      : [spec.model]);
 
 async function readState(workload) {
   const t = now();
@@ -357,8 +359,9 @@ async function readState(workload) {
     .get(workload.id, dayStart);
   extra += Number(sh.cost);
   extra *= 1 + config.ROUTING_FEE_PCT / 100;
-  // the workspace's own ceiling on optimizing, if it set one: nothing is tried past it
-  const budgetLeft = await optimizeLeft(workload.workspace_id);
+  /* the workspace's own ceiling on optimizing, if it set one: nothing is tried past it, nor out of the share of it
+     kept for measurements (backgroundLeft) */
+  const budgetLeft = await backgroundLeft(workload.workspace_id);
   return { arms: recs, byId: recById, serving, baseline, prior, extraToday: extra, dayStart, at: t, grader,
     detection, detectionFrom: gradedDetection !== null ? 'graded' : 'signals', hasEvents, settleMs, perDay, budgetLeft,
     dailySaving: dailySavingOf() };
@@ -453,9 +456,12 @@ async function agreementOf(body, used, other, shape, scope) {
   const b = extract(other, shape);
   const d = disagreement(b, a, shape);
   if (d !== null) return { agreement: 1 - d, cost: 0, judgedBy: 'fields' };
-  // every deciding field matched and a written one is worded differently: read it for meaning
+  /* every deciding field matched and a written one is worded differently: read it for meaning. The side
+     judged is the runner-up's (the first here, 'a'), as it is for free text above: judged the other way, a
+     runner-up that left something out was asked whether the served answer was at least as good as its own,
+     and read as agreeing. */
   const c = structuredCompare(b.value, a.value, shape);
-  const j = await judgeBarPair(requestText(body), proseText(c.prose, 'a'), proseText(c.prose, 'b'), { scope });
+  const j = await judgeBarPair(requestText(body), proseText(c.prose, 'a'), proseText(c.prose, 'b'), { scope, subject: 'a' });
   if (j.transient || !j.judgedBy) return { agreement: 1, cost: j.cost || 0, judgedBy: 'fields' };
   return { agreement: 1 - j.score, cost: j.cost || 0, judgedBy: `fields+${j.judgedBy}` };
 }
@@ -537,9 +543,16 @@ function countSpend(workload, armId, costUsd) {
   st.extraToday += extra * (1 + config.ROUTING_FEE_PCT / 100);
 }
 
-/** Told about every answered call: counts an experiment's spend, and maybe answers it again in the background. */
+/** Told about every answered call: counts an experiment's spend, maybe answers it again in the background,
+    and maybe asks the customer's own model for the control group (src/learn/control.js). */
 export async function afterServed(info, opts = {}) {
   if (info.decision?.explored) countSpend(info.workload, info.decision.armId, Number(info.costUsd) || 0);
+  try {
+    await maybeControl(info, opts.control || {});
+  } catch (err) {
+    // a check that went wrong on our side says nothing about what serves, and never holds up anything else
+    console.error(`checking ${info.workload?.slug} against its own model failed: ${err?.message || err}`);
+  }
   return await maybeShadow(info, opts);
 }
 
@@ -742,6 +755,18 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
     await db.prepare('UPDATE arms SET stats_json = ? WHERE id = ?')
       .run(JSON.stringify({ ...prev, ...reading, liveRatio: reading.liveRatio ?? prev.liveRatio ?? null }), a.id);
   }
+  /* The control group first: what serves, checked against the customer's own model in the background,
+     clearly past the pass mark at every hourly look. Whatever else is going on, a rollout included. */
+  if (workload.routed_arm_id) {
+    const breach = controlBreach(await controlRecord(workload), workload.reference_model);
+    if (breach) {
+      const r = await revertFn(workload, { auto: true, soft: true, reason: `${breach} Switched back to ${workload.reference_model}.` });
+      if (r?.ok) {
+        forgetState(workload.id);
+        return [{ kind: 'revert', armId: workload.routed_arm_id, by: 'control' }];
+      }
+    }
+  }
   // a switch still taking over is only ever grown or rolled back: one change at a time
   if (workload.rollout_share !== null && workload.rollout_share !== undefined) {
     const r = await reviewRollout(workload, st);
@@ -895,6 +920,11 @@ export async function markTrying(workload, { runId, results, refMonthly, floor }
   for (const r of results) {
     // only what cleared the bar is tried on live calls; one that came close has not earned them
     if (r.verdict === 'reference' || r.stopped || r.verdict !== 'cleared') continue;
+    /* Nor one that cleared once and then did not hold up on calls it had never seen: its first reading was
+       the lucky one, and live calls are not where to find that out again. One the second look never
+       reached, or had too few unseen calls for, has not been found wanting, and stays in. One a cautious
+       workload left out as not sure enough is not tried either: live experiments could switch to it. */
+    if (['missed', 'review', 'slower', 'failed', 'left_out'].includes(r.confirm_verdict)) continue;
     if (refMonthly !== null && (r.cost_month_usd === null || r.cost_month_usd >= refMonthly)) continue;
     if (await everReverted(workload.id, r.model_id)) continue;
     const ratio = r.cost_ratio ?? (refMonthly ? r.cost_month_usd / refMonthly : null);
@@ -976,17 +1006,24 @@ export async function learningView(workload) {
     graded: config.GRADE_ENABLED ? { perDay: config.GRADE_PER_ARM_PER_DAY } : null,
     halfLifeDays: config.LEARN_HALF_LIFE_DAYS, weekCalls, weekSince, weekFromSwitch: weekSince > now() - 7 * DAY + 60000,
     serving, baseline, others,
+    // what serves, checked against the customer's own model in the background since the switch
+    control: workload.routed_arm_id ? { ...(await controlRecord(workload)), perDay: config.CONTROL_PER_DAY, enabled: config.CONTROL_ENABLED,
+      minChecks: config.CONTROL_MIN_CHECKS } : null,
     shadow: { recent: shadows.map((r) => ({ ...r, agreement: r.agreement === null ? null : Number(r.agreement) })), spentUsd: Number(spent.c) },
   };
 }
 
-/* Whether the workspace's own optimization budget is used up. */
+/* Whether the workspace's own optimization budget is used up, all but the share kept for measurements. */
 const spentOut = (st) => st?.budgetLeft !== null && st?.budgetLeft !== undefined && st.budgetLeft <= 0;
 
 /* Why a workload is not experimenting right now, in words for its page, or null when it is. */
 function whyNot(workload, s, st) {
   if (s.mode === 'off') return 'Experiments are off for this workload.';
-  if (spentOut(st)) return 'Your optimization budget for the last thirty days is used up, so experiments pause until it is raised in Settings or earlier spending ages out.';
+  if (spentOut(st)) {
+    const kept = Math.round(config.OPTIMIZE_RESERVE_SHARE * 100);
+    return `Your optimization budget for the last thirty days is used up${kept > 0 ? `, apart from the ${kept}% kept for measuring` : ''}, `
+      + 'so experiments pause until it is raised in Settings or earlier spending ages out.';
+  }
   if (st.extraToday >= s.budgetUsd) return `Today's experiments have used the $${s.budgetUsd.toFixed(2)} budget, so they pause until midnight IST.`;
   if (s.live && !workload.routed_model) return 'Live experiments start once this workload is switched to something cheaper.';
   if (st.serving && st.serving.ratio === null) {

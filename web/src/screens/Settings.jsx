@@ -387,10 +387,23 @@ function Limits({ data, busy, run }) {
   );
 }
 
+/* Which of the setups that clear a workload it switches to (src/eval/confidence.js), for every workload
+   that has not chosen for itself. */
+const ROUTING = [
+  { mode: 'cautious', label: 'Cautious',
+    note: 'Only switch to a setup we are at least 99% sure keeps your answers as good as your own model’s, and hold its second look to a stricter standard. It saves a little less, and switches a little less often.' },
+  { mode: 'balanced', label: 'Balanced',
+    note: 'Switch to the biggest saving we are sure of: what a setup saves, times how sure we are that it keeps your answers as good. Where two save about the same, the faster one.' },
+  { mode: 'savings', label: 'Most savings',
+    note: 'Switch to the cheapest setup that clears your bar and passes its second look, as long as it is fast enough for your speed setting.' },
+];
+
 function Optimizing({ data, busy, run }) {
   const [apply, setApply] = useState(false);
+  const [applyRouting, setApplyRouting] = useState(false);
   const [budget, setBudget] = useState(money(data.optimizeBudget));
   const mode = MODES.find((m) => m.mode === data.defaultOptimizeMode) || MODES[0];
+  const routing = ROUTING.find((r) => r.mode === data.defaultRoutingMode) || ROUTING[1];
   const budgetOk = typedOk(budget);
   const budgetNum = typedNum(budget);
   return (
@@ -409,6 +422,22 @@ function Optimizing({ data, busy, run }) {
           <label className="segnote" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input type="checkbox" checked={apply} onChange={(e) => setApply(e.target.checked)} />
             Apply it to the workloads you have now too, the next time you choose
+          </label>
+        </span>
+      </div>
+      <div className="kvrow">
+        <span className="kvk">Routing priority</span>
+        <span className="kvv">
+          <span className="seg" role="group" aria-label="Which of the setups that clear a workload it switches to">
+            {ROUTING.map((r) => (
+              <button type="button" key={r.mode} disabled={busy} className={r.mode === routing.mode ? 'segb on' : 'segb'} aria-pressed={r.mode === routing.mode}
+                onClick={run(() => api.setDefaultRouting(r.mode, applyRouting))}>{r.label}</button>
+            ))}
+          </span>
+          <span className="segnote">{routing.note} A workload can choose its own on its page.</span>
+          <label className="segnote" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input type="checkbox" checked={applyRouting} onChange={(e) => setApplyRouting(e.target.checked)} />
+            Make the workloads that chose their own follow it too, the next time you choose
           </label>
         </span>
       </div>
@@ -449,7 +478,7 @@ function Optimizing({ data, busy, run }) {
             value={budget} onChange={(e) => setBudget(e.target.value.replace(/[^\d.]/g, ''))} />
           <span className="segnote">
             {budgetOk
-              ? <>The most measuring, background answers, answers read in the background and live experiments may spend over thirty days, together.{' '}{usd(data.optimizeSpent || 0)} spent in the last thirty days.</>
+              ? <>The most measuring, background answers, background checks against your own model, answers read in the background and live experiments may spend over thirty days, together.{data.optimizeReserve > 0 ? ` The last ${Math.round(data.optimizeReserve * 100)}% of it is kept for measuring.` : ''}{' '}{usd(data.optimizeSpent || 0)} spent in the last thirty days.</>
               : 'Write an amount in dollars, like 20 or 7.50, or leave it empty for no budget.'}
           </span>
         </span>

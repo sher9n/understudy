@@ -15,6 +15,7 @@ export const ROUTES = [
   { screen: 'settings', path: '/settings', title: 'Settings' },
   // the pages anybody can read, signed in or not
   { screen: 'how', path: '/how-it-works', title: 'How it works' },
+  { screen: 'routing', path: '/how-models-are-routed', title: 'How models are routed' },
   { screen: 'traffic', path: '/traffic', title: 'What happens to your traffic' },
   { screen: 'pricing', path: '/pricing', title: 'Pricing' },
   { screen: 'terms', path: '/terms', title: 'Terms of service' },
@@ -29,7 +30,7 @@ export const ROUTES = [
 /* The pages that read the same to everybody. They need no account and never send anybody to
    sign in: a person checking how it works, what we keep, what it costs or whether the service
    is up should be able to do that before they have an account, and after they have left one. */
-export const PUBLIC = new Set(['how', 'traffic', 'pricing', 'terms', 'privacy', 'dpa', 'subprocessors',
+export const PUBLIC = new Set(['how', 'routing', 'traffic', 'pricing', 'terms', 'privacy', 'dpa', 'subprocessors',
   'security', 'contact', 'status']);
 
 /** What a URL means. A workload's own page carries its id. An address that means nothing is

@@ -26,7 +26,7 @@ import { zdrFor } from '../workspace.js';
  *   rescued    tries that failed (a provider down, busy or too slow) whose call was then answered another
  *              way, the next in line or the customer's own model, so the app saw no error;
  *   paths      calls a day, and for a strategy that sends some calls on, what share it sends and what
- *              each path costs;
+ *              each path costs; for a router by kind of request, the share each of its setups answered;
  *   history    what was saved each day since the workload was first seen, net of testing, and the events
  *              along the way: the first call, each measurement, each switch and switch-back, each step of
  *              a rollout, each background trial, and each hour a provider failed and calls were rescued.
@@ -38,8 +38,9 @@ const short = (m) => String(m || '').split('/').pop();
 // a try that failed and was answered another way: not a call of the customer's, but the evidence of a rescue
 const TRY = `COALESCE(check_json LIKE '%"by":"fell back"%' OR check_json LIKE '%"by":"experiment failed"%', FALSE)`;
 
-/* What testing this workload cost from a moment on, our fee included: measurements, background answers
-   and answers read in the background, the three things that are charged as optimizing. */
+/* What testing this workload cost from a moment on, our fee included: measurements, background answers,
+   answers read in the background and answers checked against the customer's own model after a switch,
+   the four things that are charged as optimizing. */
 async function optimizingSince(workloadId, since) {
   const spent = Number((await db.prepare(
     'SELECT COALESCE(SUM(spend_usd), 0) AS s FROM eval_runs WHERE workload_id = ? AND created_at >= ?').get(workloadId, since)).s);
@@ -47,7 +48,9 @@ async function optimizingSince(workloadId, since) {
     'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM shadow_runs WHERE workload_id = ? AND created_at >= ?').get(workloadId, since)).s);
   const graded = Number((await db.prepare(
     'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM graded_calls WHERE workload_id = ? AND created_at >= ?').get(workloadId, since)).s);
-  return round8(withFeeOn(spent + background + graded, config.ROUTING_FEE_PCT));
+  const checked = Number((await db.prepare(
+    'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM control_checks WHERE workload_id = ? AND created_at >= ?').get(workloadId, since)).s);
+  return round8(withFeeOn(spent + background + graded + checked, config.ROUTING_FEE_PCT));
 }
 
 /* The same, a day at a time, for the history's line: each day labelled by the moment it ends, as
@@ -66,6 +69,8 @@ async function optimizingByDay(workloadId, first, days) {
   add(await db.prepare(`SELECT ${bucket} AS b, SUM(cost_usd) AS s FROM shadow_runs WHERE workload_id = ? AND created_at >= ? GROUP BY 1`)
     .all(first, workloadId, first - DAY));
   add(await db.prepare(`SELECT ${bucket} AS b, SUM(cost_usd) AS s FROM graded_calls WHERE workload_id = ? AND created_at >= ? GROUP BY 1`)
+    .all(first, workloadId, first - DAY));
+  add(await db.prepare(`SELECT ${bucket} AS b, SUM(cost_usd) AS s FROM control_checks WHERE workload_id = ? AND created_at >= ? GROUP BY 1`)
     .all(first, workloadId, first - DAY));
   return out.map((v) => withFeeOn(v, config.ROUTING_FEE_PCT));
 }
@@ -182,6 +187,25 @@ export async function valueOf(w) {
   const n = Number(week.n);
   const sentOn = Number(week.sent_on);
   const kind = arm?.spec?.kind ?? (switched ? 'model' : 'reference');
+  /* For a router by kind of request, which of its setups answered the week's requests it did not send to
+     the customer's own model, and what each of those cost: it can send them to several. Read from the kind
+     each call was taken for (its check says) through the router's own table, so two setups of one model
+     (the customer's own thinking less, and from its cheapest provider) are told apart; read by the model
+     that answered, they were one. */
+  let byOption = null;
+  if (kind === 'router' && Array.isArray(arm?.spec?.options) && n >= 20) {
+    const rows = await db.prepare(`SELECT substring(check_json from '"kind":([0-9]+)') AS k, COUNT(*) AS n,
+          COALESCE(SUM(charged_usd), 0) AS paid FROM calls
+        WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND status_code = 200 AND COALESCE(escalated, 0) = 0
+          AND ${serving.sql} GROUP BY 1`).all(w.id, weekFrom, ...serving.args);
+    const table = Array.isArray(arm.spec.table) ? arm.spec.table : [];
+    const sums = arm.spec.options.map(() => ({ n: 0, paid: 0 }));
+    for (const r of rows) {
+      const j = r.k === null || r.k === undefined ? -1 : table[Number(r.k)];
+      if (Number.isInteger(j) && j >= 0 && sums[j]) { sums[j].n += Number(r.n); sums[j].paid += Number(r.paid); }
+    }
+    byOption = sums.map((x, j) => ({ option: j, share: round8(x.n / n), perCall: x.n > 0 ? round8(x.paid / x.n) : null }));
+  }
   const paths = {
     kind,
     perDay: Number(allWeek.n) > 0 ? round8(Number(allWeek.n) / weekDays) : 0,
@@ -195,6 +219,7 @@ export async function valueOf(w) {
     perCall: n > 0 ? round8(Number(week.paid) / n) : null,
     shortPerCall: n - sentOn > 0 ? round8(Number(week.short_paid) / (n - sentOn)) : null,
     longPerCall: sentOn > 0 ? round8(Number(week.long_paid) / sentOn) : null,
+    byOption,
     // what one of these calls would cost on the customer's own model alone, from the last thirty days
     ownPerCall: s30.calls > 0 && s30.would > 0 ? round8(s30.would / s30.calls) : null,
   };
@@ -257,18 +282,32 @@ async function eventsOf(w, firstSeen, t, via) {
   const events = [{ at: firstSeen, kind: 'connected', via }];
 
   const runs = await db.prepare(`SELECT r.id, r.trigger, COALESCE(r.finished_at, r.created_at) AS at, r.spend_usd,
-        ${OUTCOME_OF('r.')} AS outcome, r.floor_pct
+        ${OUTCOME_OF('r.')} AS outcome, r.floor_pct, r.routing_mode, r.choice_json
       FROM eval_runs r WHERE r.workload_id = ? AND r.status = 'done' ORDER BY r.created_at`).all(w.id);
   for (const r of runs) {
-    const results = await db.prepare(`SELECT model_id, verdict, cost_month_usd, arm_json FROM eval_results
+    const results = await db.prepare(`SELECT model_id, verdict, cost_month_usd, arm_json, choice_rank, confirm_verdict FROM eval_results
         WHERE run_id = ? AND verdict <> 'reference'`).all(r.id);
     const passed = results.filter((x) => x.verdict === 'cleared');
+    const nameOf = (x) => (x.arm_json ? nameOfResult(x).label : short(x.model_id));
     const best = passed.filter((x) => x.cost_month_usd !== null)
       .sort((a, b) => Number(a.cost_month_usd) - Number(b.cost_month_usd))[0] ?? passed[0] ?? null;
+    /* The one the test chose, under the routing priority it ran under: the first in its order that passed its
+       second look, or the one already serving that was kept. The cheapest that passed is not always it: a setup
+       a hair dearer and much faster comes first under balanced. A test from before there was an order has none. */
+    let record = null;
+    try { record = JSON.parse(r.choice_json || 'null'); } catch { record = null; }
+    const kept = record?.servingKept ?? null;
+    // what the test chose, as it wrote it down; worked out from the ranks only for a test from before it did
+    const written = !!record && Object.prototype.hasOwnProperty.call(record, 'chosen');
+    const chosen = written ? (record.chosen ? passed.find((x) => x.model_id === record.chosen) ?? null : null)
+      : passed.filter((x) => Number(x.choice_rank) > 0).sort((a, b) => Number(a.choice_rank) - Number(b.choice_rank))
+        .find((x) => x.confirm_verdict === 'cleared' || x.model_id === kept) ?? null;
     events.push({
       at: Number(r.at), kind: 'test', trigger: r.trigger, outcome: r.outcome,
       tried: results.length, passed: passed.length,
-      best: best ? (best.arm_json ? nameOfResult(best).label : short(best.model_id)) : null,
+      best: best ? nameOf(best) : null,
+      chosen: chosen ? nameOf(chosen) : null,
+      chosenKept: !!chosen && (written ? !!record.chosenKept : chosen.model_id === kept), mode: r.routing_mode ?? null,
       spend: round8(withFeeOn(Number(r.spend_usd) || 0, config.ROUTING_FEE_PCT)),
       bar: r.floor_pct === null ? null : Number(r.floor_pct),
     });

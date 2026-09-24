@@ -182,7 +182,10 @@ export async function switchStory(w) {
      charged as optimizing like the rest, and left out of the net saving until now */
   const graded = (await db.prepare(
     'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM graded_calls WHERE workload_id = ? AND created_at >= ?').get(w.id, at)).s;
-  const optimizing = withFeeOn(Number(spent) + Number(background) + Number(graded), fee);
+  // and checking its answers against the customer's own model in the background (src/learn/control.js)
+  const checked = (await db.prepare(
+    'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM control_checks WHERE workload_id = ? AND created_at >= ?').get(w.id, at)).s;
+  const optimizing = withFeeOn(Number(spent) + Number(background) + Number(graded) + Number(checked), fee);
   const savedSoFar = wouldHave == null ? null : wouldHave - served.paid;
   // how long the switch takes to pay back what finding it cost, at the pace it saves now
   const perDay = projection[0] ? projection[0].saved / 30 : null;
@@ -235,6 +238,7 @@ export async function switchStory(w) {
       spent: round8(withFeeOn(spent, fee)),
       background: round8(withFeeOn(background, fee)),
       graded: round8(withFeeOn(graded, fee)),
+      checked: round8(withFeeOn(Number(checked), fee)),
       paybackDays: perDay && perDay > 0 ? Math.ceil(optimizing / perDay) : null,
     },
     projection,

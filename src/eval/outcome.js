@@ -38,16 +38,22 @@ export function outcomeOf(r) {
    customer's model with no known price used to wave the price check through, so a model ten
    times dearer could be switched to; with nothing to compare against, nothing is a candidate.
 
-   Cheapest first, and one the second look did not confirm after one that it did: a person may
-   still approve it, but it is never what is offered first. */
+   One the second look confirmed before one it did not: a person may still approve that one, but it is
+   never what is offered first. Then in the order the run itself chose from (choice_rank, by the
+   workload's routing priority: see src/eval/confidence.js), and cheapest first where a run kept no order
+   (every run before routing priorities). */
 export function cheaperCleared(results, feePct = config.ROUTING_FEE_PCT) {
   const ref = results.find((r) => r.verdict === 'reference');
   const refCost = ref?.cost_month_usd ?? null;
   const ceiling = 1 / (1 + (Number(feePct) || 0) / 100);
+  const rank = (r) => (r.choice_rank === null || r.choice_rank === undefined ? Infinity : Number(r.choice_rank));
+  /* One a cautious workload left out as not sure enough is never offered: offered, approving with no
+     model named switched to exactly what the workload's own priority had turned down. */
   return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null && refCost != null
     && Number(r.cost_month_usd) < Number(refCost)
-    && (r.cost_ratio == null || Number(r.cost_ratio) < ceiling))
-    .sort((a, b) => (confirmed(b) - confirmed(a)) || (a.cost_month_usd - b.cost_month_usd));
+    && (r.cost_ratio == null || Number(r.cost_ratio) < ceiling)
+    && r.confirm_verdict !== 'left_out')
+    .sort((a, b) => (confirmed(b) - confirmed(a)) || (rank(a) - rank(b)) || (a.cost_month_usd - b.cost_month_usd));
 }
 
 /* Whether the second look stood behind a result: it cleared again on calls it had never seen

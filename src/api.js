@@ -24,6 +24,7 @@ import { learningView, exploreOf, forgetState, EXPLORE_MODES } from './learn/exp
 import { certificate, promote, revert, trafficOf, servingKey, heldBack } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
 import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
+import { routingModeOf, ROUTING_MODES } from './eval/confidence.js';
 import { switchStory } from './eval/switch-story.js';
 import { valueOf } from './eval/value.js';
 import { enqueue } from './jobs.js';
@@ -408,8 +409,15 @@ const resultRow = (r, runs = r.runs) => ({
   // the second look, on calls it had never seen, when it had one
   confirm: r.confirm_verdict ? {
     verdict: r.confirm_verdict, runs: r.confirm_runs ?? 0, gap: r.confirm_gap ?? null, hi: r.confirm_hi ?? null,
-    floor: r.confirm_floor ?? null,
+    floor: r.confirm_floor ?? null, note: r.confirm_note ?? null,
   } : null,
+  /* how sure the measurement is that it keeps the promise (its true rate of worse or different answers is
+     inside the pass mark), what it saves times that, how often its answer was the better one where the two
+     differed, and where it came in the order the run looked at setups again (src/eval/confidence.js) */
+  chance: r.chance ?? null,
+  safeSaving: r.safe_saving ?? null,
+  betterPct: r.better_pct ?? null,
+  choiceRank: r.choice_rank ?? null,
 });
 
 /* The customer's own model's speed on a measurement's calls, which every model is held to. */
@@ -473,6 +481,8 @@ const statusLabel = (w, carries = true) => {
     return { label: 'Ready to optimize', tone: 'go' };
   }
   if (w.status === 'measuring') return { label: 'Measuring', tone: 'wait' };
+  // something did clear, and a cautious workload would not switch to it: "nothing cleared" would be untrue
+  if (w.status === 'no_match' && /cautious/i.test(String(w.status_note || ''))) return { label: 'Not sure enough to switch', tone: 'wait' };
   if (w.status === 'no_match') return { label: 'Nothing cleared yet', tone: 'q' };
   return { label: 'Not optimized yet', tone: 'q' };
 };
@@ -788,6 +798,10 @@ api.get('/workloads/:id', async (req, res) => {
     model: w.routed_model || w.reference_model, reference: w.reference_model,
     servingKey: servingAs,
     optimizeMode: w.optimize_mode, floor: w.floor_pct,
+    /* which of the setups that clear it is switched to: its own choice (null when it follows the workspace),
+       and the one that applies */
+    routingMode: ROUTING_MODES.includes(w.routing_mode) ? w.routing_mode : null,
+    routingModeUsed: routingModeOf(w, req.workspace, config.ROUTING_MODE_DEFAULT),
     // savings the customer can make in their own code, with what each would save (src/eval/advice.js)
     advice: await adviceFor(w),
     speedPref: w.speed_pref || null,
@@ -810,6 +824,9 @@ api.get('/workloads/:id', async (req, res) => {
       plan: parseJson(cert.run.plan_json),
       // held to the same answer as the customer's own model, or to one at least as good
       yardstick: cert.run.yardstick ?? 'agreement',
+      // the routing priority that chose among the setups that cleared, and the order it chose from
+      routingMode: cert.run.routing_mode ?? null,
+      choice: parseJson(cert.run.choice_json),
       // how many of the bar's answers were the customer's own, read rather than bought
       recordedRefs: cert.run.recorded_refs ?? null,
       // this measurement's calls, like the reference row beside them and the note above them
@@ -832,6 +849,7 @@ api.get('/workloads/:id', async (req, res) => {
         hi: best.confirm_hi ?? null, floor: best.confirm_floor ?? null } : null,
       // switched back from before, so switching never picks it again by itself; a person still can
       heldBack: (await heldBack(w.id)).has(best.model_id),
+      chance: best.chance ?? null, safeSaving: best.safe_saving ?? null, betterPct: best.better_pct ?? null,
     },
     /* A switch still taking over: the share of calls it answers now, the steps it passes through, and
        what it has to show at this one before it takes the next. */
@@ -960,6 +978,18 @@ api.post('/workloads/:id/mode', async (req, res) => {
     .run(mode, now(), req.params.id, req.workspace.id)).changes;
   if (!changed) return fail(res, 404, 'No such workload.');
   return res.json({ ok: true, mode });
+});
+
+/* Which of the setups that clear this workload it switches to (src/eval/confidence.js): the biggest saving
+   we can be sure of ('balanced'), only setups we are very sure of ('cautious'), or the cheapest that clears
+   ('savings'). 'default' follows the workspace's choice. */
+api.post('/workloads/:id/routing', async (req, res) => {
+  const mode = String(req.body?.mode || '');
+  if (![...ROUTING_MODES, 'default'].includes(mode)) return fail(res, 400, 'Choose cautious, balanced, savings or default.');
+  const changed = (await db.prepare('UPDATE workloads SET routing_mode = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
+    .run(mode === 'default' ? null : mode, now(), req.params.id, req.workspace.id)).changes;
+  if (!changed) return fail(res, 404, 'No such workload.');
+  return res.json({ ok: true, mode: mode === 'default' ? null : mode });
 });
 
 api.post('/workloads/:id/promote', async (req, res) => {
@@ -1158,6 +1188,9 @@ api.get('/workloads/:id/runs/:runId', async (req, res) => {
     referenceCostMonth: ref?.cost_month_usd ?? null,
     refSpeed: refSpeedOf(run),
     plan: parseJson(run.plan_json),
+    // the routing priority that chose among the setups that cleared, and the order it chose from
+    routingMode: run.routing_mode ?? null,
+    choice: parseJson(run.choice_json),
     results: compared.map((r) => resultRow(r)),
     nothing: compared.length ? null : nothingCompared(run),
   });
@@ -1262,10 +1295,14 @@ api.get('/settings', async (req, res) => {
     zdrForced: config.ZDR_FORCED,
     // how a new workload is switched: ask first, on its own, or not at all
     defaultOptimizeMode: req.workspace.default_optimize_mode || config.DEFAULT_OPTIMIZE_MODE,
+    // which of the setups that clear a workload it switches to, for workloads that have not chosen
+    defaultRoutingMode: ROUTING_MODES.includes(req.workspace.default_routing_mode) ? req.workspace.default_routing_mode : config.ROUTING_MODE_DEFAULT,
     // whether this workspace's results (never content) may help other workspaces choose models
     shareStats: Number(req.workspace.share_stats || 0) === 1,
     // the most optimizing may spend over thirty days, and what it has
     optimizeBudget: req.workspace.optimize_budget_usd ?? null,
+    // the share of it kept for measurements, which background work never spends (backgroundLeft)
+    optimizeReserve: config.OPTIMIZE_RESERVE_SHARE,
     optimizeSpent: await optimizeSpent(req.workspace.id),
     // marking long instructions for caching where that pays
     cacheHints: Number(req.workspace.cache_hints ?? 1) !== 0,
@@ -1318,6 +1355,27 @@ api.post('/settings/default-mode', async (req, res) => {
   await addActivity(req.workspace.id, {
     kind: 'connect', title: `New workloads will ${words[mode]}`,
     detail: moved ? `And the ${moved} workloads you have now do the same.` : 'Workloads you have now keep their own setting.',
+  });
+  return res.json({ ok: true, mode, moved });
+});
+
+/* Which of the setups that clear a workload it switches to, for every workload that has not chosen its own.
+   With applyToExisting, every workload's own choice is let go of, so all of them follow this one. */
+api.post('/settings/default-routing', async (req, res) => {
+  const mode = String(req.body?.mode || '');
+  if (!ROUTING_MODES.includes(mode)) return fail(res, 400, 'Choose cautious, balanced or savings.');
+  await db.prepare('UPDATE workspaces SET default_routing_mode = ? WHERE id = ?').run(mode, req.workspace.id);
+  forgetWorkspace(req.workspace.id);
+  let moved = 0;
+  if (req.body?.applyToExisting === true) {
+    moved = (await db.prepare(`UPDATE workloads SET routing_mode = NULL, updated_at = ? WHERE workspace_id = ? AND merged_into IS NULL
+        AND routing_mode IS NOT NULL`).run(now(), req.workspace.id)).changes;
+  }
+  const words = { cautious: 'only switch to a setup we are very sure keeps your answers as good',
+    balanced: 'switch to the biggest saving we can be sure of', savings: 'switch to the cheapest setup that clears your bar' };
+  await addActivity(req.workspace.id, {
+    kind: 'connect', title: `Workloads will ${words[mode]}`,
+    detail: moved ? `And the ${moved} workloads that had their own choice now follow this one.` : 'A workload that chose for itself keeps its own choice.',
   });
   return res.json({ ok: true, mode, moved });
 });

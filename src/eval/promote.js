@@ -69,6 +69,9 @@ export function keyOfSpec(spec, reference) {
   const part = (p) => (p.model === reference && p.recipe?.reasoning ? `${p.model}#lighter`
     : p.model === reference && p.recipe?.pinned ? `${p.model}#cheapest` : p.model);
   if (spec.kind === 'cascade') return `cascade:${part(spec.first)}`;
+  /* a router by kind of request is named by every setup it chooses between, in a fixed order: learned again
+     when their prices had moved, the same setups came in another order and read as a different router */
+  if (spec.kind === 'router' && Array.isArray(spec.options)) return `router:${spec.options.map(part).sort().join('+')}~kinds`;
   if (spec.kind === 'router') return `router:${part(spec.cheap)}`;
   return part(spec);
 }
@@ -319,7 +322,7 @@ export function failingClearly(k, n, before) {
 function modelsServing(workload, spec) {
   if (!spec) return [workload.routed_model].filter(Boolean);
   if (spec.kind === 'cascade') return [spec.first?.model].filter(Boolean);
-  if (spec.kind === 'router') return [spec.cheap?.model].filter(Boolean);
+  if (spec.kind === 'router') return [...new Set([spec.cheap?.model, ...(Array.isArray(spec.options) ? spec.options.map((o) => o?.model) : [])])].filter(Boolean);
   return [spec.model].filter(Boolean);
 }
 
@@ -355,7 +358,10 @@ export async function watchCatalogue() {
   return reverted;
 }
 
-// a call the serving strategy failed and the customer's own model answered instead, for a reason of the strategy's
+/* a call the serving strategy failed and the customer's own model answered instead, for a reason of the strategy's. Not a
+   cascade's cheap model that could not be reached ("first failed"): that is tried once, with no retry, so held against
+   what the customer's own model failed with its retries it would switch back a healthy cascade, and the call it sends
+   on costs what the customer's own model does, answered by that model. */
 const fellBack = (c) => /"by":"fell back"/.test(String(c.check_json || ''));
 
 export async function watchLive({ minCalls = 20, speedFactor = null } = {}) {

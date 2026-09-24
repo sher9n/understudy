@@ -1,7 +1,7 @@
 import config from '../config.js';
 import { db, now } from '../db/index.js';
 import { chat } from '../openrouter.js';
-import { chargeEval, optimizeLeft } from '../billing.js';
+import { chargeEval, backgroundLeft } from '../billing.js';
 import { jevUsable } from '../jev.js';
 import { structureOf, jevCheck, requestText, answerText } from './check.js';
 import { armsFor } from './arms.js';
@@ -97,7 +97,8 @@ export async function gradeWorkload(workload, opts = {}) {
   const perArm = opts.perArm ?? config.GRADE_PER_ARM_PER_DAY;
   const budget = opts.budgetUsd ?? config.GRADE_BUDGET_USD_PER_DAY;
   if (!(perArm > 0)) return { graded: 0 };
-  const left = await optimizeLeft(workload.workspace_id);
+  // never out of the share of the optimization budget kept for measurements (backgroundLeft)
+  const left = await backgroundLeft(workload.workspace_id);
   if (left !== null && left <= 0) return { graded: 0, reason: 'optimization budget used' };
   // a workload with a cascade among its strategies is read only by the model grader (see graderFor)
   const grader = graderFor(await armsFor(workload.id));

@@ -31,9 +31,9 @@ const short = (m) => String(m || '').split('/').pop();
 function pinsOf(spec) {
   if (!spec) return [];
   const parts = spec.kind === 'cascade' ? [spec.first, spec.fallback]
-    : spec.kind === 'router' ? [spec.cheap, spec.strong] : [spec];
+    : spec.kind === 'router' ? [spec.cheap, spec.strong, ...(Array.isArray(spec.options) ? spec.options : [])] : [spec];
   return parts.filter((p) => p?.model && Array.isArray(p?.recipe?.providers) && p.recipe.providers.length)
-    .map((p) => ({ model: p.model, providers: p.recipe.providers.map(String) }));
+    .map((p) => ({ model: p.model, providers: p.recipe.providers.map(String), preferred: !!p.recipe.preferred }));
 }
 
 export async function watchPins() {
@@ -58,7 +58,8 @@ export async function watchPins() {
     }
     if (!gone) continue;
     const others = Number((await db.prepare('SELECT COUNT(*) AS n FROM model_endpoints WHERE model_id = ?').get(gone.model))?.n || 0);
-    const what = `${arm.label} is served only by the providers ${short(gone.model)} was measured on (${gone.providers.join(', ')}), `
+    // a cascade's cheap model asks them first and others after, and is switched back all the same: a switch serves what was measured
+    const what = `${arm.label} is served ${gone.preferred ? 'first' : 'only'} by the providers ${short(gone.model)} was measured on (${gone.providers.join(', ')}), `
       + `and none of them serves it without keeping what it is sent any more`
       + (others ? `. ${others === 1 ? 'Another provider does' : `${others} other providers do`}, but it was never measured there` : '');
     if (workload.routed_arm_id === arm.id) {

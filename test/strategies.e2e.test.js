@@ -2,8 +2,9 @@
 
    A cheap model that is wrong on one call in eight misses the bar on its own. Two strategies
    keep most of its saving anyway: a cascade (it answers, Jev checks the answer, and a doubtful
-   one is sent on to the customer's own model) and a router (a small model of the workload's
-   calls sends the ones it gets wrong straight to the customer's own model). These tests run a
+   one is sent on to the customer's own model) and a router (the workload's calls are grouped by
+   the kind of request they are, and the kind it gets wrong goes straight to the customer's own
+   model). These tests run a
    real measurement that finds them, switch to what cleared, and then send live calls through the
    real proxy, ordinary and streamed, to see each strategy serve, send on, charge and record. */
 
@@ -395,13 +396,20 @@ test('a router is found when the calls a cheap model gets wrong can be told apar
   const out = await runEvaluation(shop.workload.id);
   assert.equal(out.ok, true, JSON.stringify(out));
   const rows = await db.prepare('SELECT * FROM eval_results WHERE run_id = ?').all(out.runId);
-  const router = rows.find((r) => r.model_id === `router:${CHEAP}`);
+  const router = rows.find((r) => r.model_id === `router:${CHEAP}~kinds`);
   assert.ok(router, `a router was worked out: ${rows.map((r) => `${r.model_id} ${r.verdict}`).join(', ')}`);
   assert.equal(router.verdict, 'cleared', `${router.gap_pct}% against ${out.floor}%`);
   assert.ok(router.cost_ratio < 0.4, `it keeps most of the saving: ${router.cost_ratio}`);
   const spec = JSON.parse(router.arm_json);
   assert.equal(spec.kind, 'router');
-  assert.equal(spec.weights.length, 6);
+  // routed by the kind of request: the short ones and the long ones fall apart, and each kind has its setup
+  assert.equal(spec.version, 2);
+  assert.deepEqual(spec.options.map((o) => o.model), [CHEAP]);
+  assert.equal(spec.table.length, spec.centroids.length);
+  assert.ok(spec.table.includes(0) && spec.table.includes(-1), `one kind to the cheap model, one to the customer's: ${spec.table}`);
+  // and its kinds mattered: the calls it gave the cheap model had far fewer mistakes than any calls would have
+  const rank = JSON.parse(router.rank_json);
+  assert.ok(rank.kindsZ >= 1.645, `the kinds mattered: ${rank.kindsZ} spreads, ${rank.worseKept} against ${rank.worseAtRandom}`);
 
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(shop.workload.id);
   const arm = await db.prepare('SELECT * FROM arms WHERE id = ?').get(w.routed_arm_id);
@@ -413,7 +421,9 @@ test('a router is found when the calls a cheap model gets wrong can be told apar
   const shortRow = await callRow(short.callId);
   assert.equal(shortRow.served_model, CHEAP);
   assert.equal(Number(shortRow.escalated), 0);
-  assert.equal(JSON.parse(shortRow.check_json).by, 'router');
+  const shortCheck = JSON.parse(shortRow.check_json);
+  assert.equal(shortCheck.by, 'router');
+  assert.equal(shortCheck.why, 'kind', 'taken for a kind it learned');
 
   const long = await send(shop.secret, request(603, { long: true, stream: true }));
   assert.deepEqual(JSON.parse(long.content), right(603), 'the long call was sent to the customer model');

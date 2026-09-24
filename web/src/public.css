@@ -39,11 +39,18 @@ a.pubwm:hover { text-decoration: none; }
 @media (max-width: 1020px) {
   .pubfootin { grid-template-columns: minmax(0, 1fr); gap: 28px; }
 }
-/* On a phone the header keeps its one row of actions and puts the pages under it, as a row of
-   their own: four links and three buttons across 390 pixels is a line nobody can read. */
+/* Below this width the pages no longer fit beside the actions in one row (five links and three
+   buttons take about 920 pixels), so they go under them, as a row of their own, and wrap onto a
+   second line rather than run off the edge: a row that scrolled sideways hid the last link on a phone. */
+@media (max-width: 960px) {
+  .pubhead { flex-wrap: wrap; row-gap: 8px; }
+  .pubnav { order: 3; flex-basis: 100%; flex-wrap: wrap; gap: 6px 22px; padding: 2px 0; }
+}
+/* On a phone the header keeps its one row of actions and puts the pages under it: four links and
+   three buttons across 390 pixels is a line nobody can read. */
 @media (max-width: 720px) {
-  .pubhead { flex-wrap: wrap; gap: 6px 12px; padding: 12px 16px 10px; }
-  .pubnav { order: 3; flex-basis: 100%; gap: 20px; overflow-x: auto; padding: 4px 0 2px; }
+  .pubhead { gap: 6px 12px; padding: 12px 16px 10px; }
+  .pubnav { gap: 6px 18px; padding: 4px 0 2px; }
   .pubacts { gap: 8px; }
   .pubhead .btn { padding: 8px 12px; font-size: 13px; }
   .pubfoot { padding: 28px 16px 34px; }

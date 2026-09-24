@@ -13,10 +13,9 @@ import { refOf } from './learn/threads.js';
 import { workloadNameOf, pinnedOf } from './classify.js';
 import { report } from './learn/outcomes.js';
 import { chooseStrategy, served as noteServed } from './learn/choose.js';
-import { serveWith, writeAsStream } from './learn/serve.js';
+import { serveWith, writeAsStream, routeFor } from './learn/serve.js';
 import { leadModel } from './learn/arms.js';
 import { zdrFor, cacheHintFor } from './workspace.js';
-import { featuresOf, predict } from './learn/router.js';
 import { estimateCost } from './trueup.js';
 import { cadenceOf } from './eval/schedule.js';
 
@@ -167,7 +166,12 @@ const chainModels = (strategy) => {
     const spec = s.spec;
     if (!spec) continue;
     if (spec.kind === 'cascade') { out.add(spec.first?.model); out.add(spec.fallback?.model); }
-    else if (spec.kind === 'router') { out.add(spec.cheap?.model); out.add(spec.strong?.model); }
+    else if (spec.kind === 'router') {
+      out.add(spec.cheap?.model);
+      out.add(spec.strong?.model);
+      // a router by kind of request can send a call to any of its setups
+      for (const o of Array.isArray(spec.options) ? spec.options : []) out.add(o?.model);
+    }
     else out.add(spec.model);
   }
   out.delete(undefined);
@@ -480,13 +484,14 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
       }
     } catch (err) {
       if (next && (!next.isFallback || worthFallback(err))) {
-        await keepFailedTry({ wsId, workload, requested, served, started, body, ref, source, strategy, err, fellBack: !!next.isFallback });
+        // a router says which of its models it sent the call to, and that one is what failed
+        await keepFailedTry({ wsId, workload, requested, served: err?.model || served, started, body, ref, source, strategy, err, fellBack: !!next.isFallback });
         continue;
       }
       const f = failureOf(err);
       reportCallFailure({
         kind: source === 'test' ? 'test call' : 'routed call',
-        model: served, status: f.status, workspaceId: wsId,
+        model: err?.model || served, status: f.status, workspaceId: wsId,
         message: f.json?.error?.message || err.message,
       });
       await recordCall({
@@ -601,11 +606,11 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
   }
   if (strategy && strategy.spec.kind === 'router') {
     // picked before anything is sent, from what can be seen of the call, so it streams as ever
-    const p = predict(strategy.spec, featuresOf(body));
-    const use = p >= strategy.spec.threshold ? strategy.spec.cheap : strategy.spec.strong;
-    served = use.model;
-    recipe = use.recipe ?? null;
-    decision = { ...decision, escalated: use === strategy.spec.strong, check: { by: 'router', p: Math.round(p * 1000) / 1000 } };
+    const pick = routeFor(strategy.spec, body, { fallback: { model: workload.reference_model } });
+    // a router that names nothing to answer sends the call to the customer's own model, never to an error
+    served = pick.use?.model ?? workload.reference_model;
+    recipe = pick.use ? pick.use.recipe ?? null : null;
+    decision = { ...decision, escalated: pick.escalated, check: pick.check };
   }
   let upstream;
   // marked for caching only where this model answers the workload often enough (see hintFor)

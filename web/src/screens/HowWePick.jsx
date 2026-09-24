@@ -114,7 +114,8 @@ export default function HowWePick({ w, m, onChanged }) {
       <div className="mpickh">How we pick the {num(want)} models to test</div>
       <p className="mpickp">
         Out of the {num(first)} models switched on in Models, we look for the ones most likely to
-        save you money without changing your answers. Four steps, in this order.
+        save you money without changing your answers, and then choose which one to switch to. Five
+        steps, in this order.
       </p>
 
       <ol className="hwpsteps">
@@ -191,9 +192,9 @@ export default function HowWePick({ w, m, onChanged }) {
           {tested.length > 0 && (
             <div className="hwprank">
               <div className="hwprh">Tested first</div>
-              {tested.map((r, i) => <RankRow key={r.model} r={r} i={i} />)}
+              {tested.map((r, i) => <RankRow key={r.key || r.model} r={r} i={i} />)}
               {next.length > 0 && <div className="hwprh">Next in line, if one is dropped</div>}
-              {next.map((r, i) => <RankRow key={r.model} r={r} i={tested.length + i} dim />)}
+              {next.map((r, i) => <RankRow key={r.key || r.model} r={r} i={tested.length + i} dim />)}
             </div>
           )}
         </li>
@@ -231,6 +232,33 @@ export default function HowWePick({ w, m, onChanged }) {
         </li>
 
         <li>
+          <div className="hwpt">Choose which one to switch to</div>
+          <p>
+            Often more than one setup clears your bar. Besides single models, two combinations are worked
+            out from the answers already paid for: a cheaper model whose every answer Jev checks, with{' '}
+            {short(w.reference)} answering whenever Jev is unsure; and sorting by kind of request, where
+            each kind of request you send goes to a setup that answered that kind as well as{' '}
+            {short(w.reference)}, picked for the biggest saving we are sure of, and anything else goes
+            to {short(w.reference)}.
+          </p>
+          <p>
+            For every setup that cleared, we work out from its own answers how sure we are that it keeps
+            your bar, and multiply what it saves by that. That is the saving we are sure of, and your
+            routing priority decides how it is used:
+          </p>
+          <ul className="hwplist">
+            <li><b>Cautious.</b> Only setups we are at least 99% sure of, and the second look below is held to a stricter standard.</li>
+            <li><b>Balanced.</b> The biggest saving we are sure of. Where two save about the same, within a point, the faster one.</li>
+            <li><b>Most savings.</b> The cheapest setup that cleared, as long as it passes the second look.</li>
+          </ul>
+          <p>
+            The one that comes first is then measured again on calls it has never seen, and only a setup
+            that clears both times is switched to. If it does not, the next in line gets its own second look.
+          </p>
+          <RoutingChooser w={w} m={m} onChanged={onChanged} />
+        </li>
+
+        <li>
           <div className="hwpt">Remember, but not for ever</div>
           <p>
             Answers you have already paid for are used again for up to 14 days, so measuring again on
@@ -263,11 +291,59 @@ export default function HowWePick({ w, m, onChanged }) {
   );
 }
 
+const ROUTING = [
+  ['cautious', 'Cautious'],
+  ['balanced', 'Balanced'],
+  ['savings', 'Most savings'],
+];
+const ROUTING_WORDS = { cautious: 'Cautious', balanced: 'Balanced', savings: 'Most savings' };
+
+/* The workload's routing priority: its own choice, or the workspace's when it has none. */
+function RoutingChooser({ w, m, onChanged }) {
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+  const own = w.routingMode || null;
+  const used = w.routingModeUsed || own || 'balanced';
+  const set = async (mode) => {
+    setSaving(true);
+    setErr(null);
+    try {
+      await api.setRouting(w.id, mode);
+      if (onChanged) await onChanged();
+    } catch (e) {
+      setErr(`That did not save: ${e.message || 'the server did not answer'}. Try again.`);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="hwpspeed" role="group" aria-label="Routing priority">
+      <span className="hwpsl">Routing priority for this workload</span>
+      <div className="hwpseg">
+        {ROUTING.map(([k, label]) => (
+          <button key={k} className={`hwpsb${used === k ? ' on' : ''}`} disabled={saving}
+            aria-pressed={used === k} onClick={() => set(k)}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <span className="hwpsn">
+        {own
+          ? <>This workload has its own setting. <button type="button" className="plainb" disabled={saving} onClick={() => set('default')}>Follow the workspace setting instead</button></>
+          : `It follows your workspace's setting, ${ROUTING_WORDS[used]}, which you can change in Settings.`}
+        {m.running ? ' A measurement already running keeps the setting it started with.' : ''}
+      </span>
+      {err && <span className="hwpserr" role="alert">{err}</span>}
+    </div>
+  );
+}
+
 function RankRow({ r, i, dim = false }) {
   return (
     <div className={`hwprr${dim ? ' dim' : ''}`}>
       <span className="mpickn">{i + 1}</span>
-      <span className="hwprm m">{short(r.model)}</span>
+      {/* the customer's own model thinking less, or from its cheapest provider, is the same model: its label says which */}
+      <span className="hwprm m">{r.label || short(r.model)}</span>
       <span className="hwprs">saves about {pct(r.savingShare)}</span>
       <span className="hwprc">chance {inTen(r.chance)}</span>
       <span className="hwptags">
