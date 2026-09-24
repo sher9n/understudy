@@ -16,7 +16,7 @@ import { routeOnce, convertWaits, startWaiting } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
 import { trueUp } from './trueup.js';
 import { parse as parseRoute } from '../web/src/router.js';
-import { nudgeForCatalog } from './eval/schedule.js';
+import { nudgeForCatalog, dueForRecheck } from './eval/schedule.js';
 import { runTopUp, giveUpTopUp, reconcileLimitTotals, sweepHolds, sweepTopUps } from './billing.js';
 import { pruneLimits } from './limits.js';
 import { revert, watchLive, watchCatalogue } from './eval/promote.js';
@@ -449,15 +449,9 @@ handle('recheck', async () => {
   for (const ws of spaces) {
     const days = ws.measure_every_days == null ? config.MEASURE_EVERY_DAYS : ws.measure_every_days;
     if (!days || days <= 0) continue;
-    /* Due by the workload's own schedule where it has one (spaced out while re-checks keep confirming,
-       brought forward by a change that could matter), otherwise by the workspace's rhythm. */
-    const due = await db.prepare(
-      `SELECT w.id FROM workloads w
-        WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
-          AND ((w.recheck_after IS NOT NULL AND w.recheck_after <= ?)
-            OR (w.recheck_after IS NULL
-                AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?))`)
-      .all(ws.id, now(), now() - days * 86400000);
+    /* Due by the workload's own schedule where it has one, otherwise by the workspace's rhythm, and never one
+       being measured or already queued (see dueForRecheck). */
+    const due = await dueForRecheck(ws.id, days);
     for (const w of due) {
       await enqueue('eval_run', { workloadId: w.id, trigger: 'automatic' }, { unique: true });
       queued += 1;
