@@ -24,7 +24,7 @@ import { labelOf, armById, leadModel, nameOfResult } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
 import { markTrying } from '../learn/explore.js';
 import { forgetBar } from '../learn/control.js';
-import { scheduleNext, deferAutomatic, deferAfterStop, deferAfterFailure, cadenceOf } from './schedule.js';
+import { scheduleNext, deferAutomatic, deferAfterStop, deferAfterFailure, cadenceOf, waitForCalls } from './schedule.js';
 import { notify } from '../notify.js';
 
 /* A measurement, run as a race.
@@ -234,7 +234,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   if (!plan.canRun) {
     /* Looked at again when it is due rather than on every hourly pass, which would work the plan out
        over and over to reach the same answer. */
-    if (automatic) await deferAutomatic(workloadId, { waitMs: plan.waitMs ?? (plan.notWorth ? null : 6 * 3600000) });
+    if (automatic) {
+      /* Turned down for want of calls: started by the call that brings them (waitForCalls), never at a guess of
+         when that will be. For anything else, looked at again in its time. */
+      // and only for a count it has not reached, so what could start it again never turns it down again
+      if (plan.needCalls > plan.pool) await waitForCalls(workloadId, plan.needCalls);
+      else await deferAutomatic(workloadId, { waitMs: plan.notWorth ? null : 6 * 3600000 });
+    }
     /* Back to what its last measurement found, not to "new": a workload that has been measured
        before still has that result, and forgetting it here would put "Not optimized yet" over a
        page that shows a candidate. */
@@ -366,8 +372,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return true;
   });
   if (!began) return measuringAlready(trigger);
-  /* Whatever started it, a workload being measured says so from the moment the run exists. */
-  await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), workloadId);
+  /* Whatever started it, a workload being measured says so from the moment the run exists, and waits for no
+     more calls: this measurement is what it was waiting for. */
+  await db.prepare(`UPDATE workloads SET status = 'measuring', measure_at_calls = NULL, updated_at = ? WHERE id = ?`).run(now(), workloadId);
   if (trigger === 'first') {
     await addActivity(workload.workspace_id, {
       kind: 'run', title: `Measuring ${workload.slug}`,

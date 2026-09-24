@@ -43,13 +43,30 @@ export async function scheduleNext(workloadId, { changed }) {
   const streak = changed ? 0 : Math.min(config.EVAL_BACKOFF_MAX_DOUBLINGS, Number(w.recheck_streak || 0) + 1);
   // whole milliseconds: the column is a bigint, and a fraction of one is refused
   const at = cadence ? Math.round(now() + cadence * DAY * 2 ** streak) : null;
-  await db.prepare('UPDATE workloads SET recheck_after = ?, recheck_streak = ? WHERE id = ?').run(at, streak, workloadId);
+  // and whatever it was waiting for, it has had: a measurement books its own next one
+  await db.prepare('UPDATE workloads SET recheck_after = ?, recheck_streak = ?, measure_at_calls = NULL WHERE id = ?')
+    .run(at, streak, workloadId);
   return at;
 }
 
-/* A measurement nobody asked for that the plan turned down: looked at again later, rather than at
-   every hourly pass. When it waits for more calls, about when they will have arrived; otherwise after
-   one of the workspace's own periods (a week when it measures only when asked, for the page's sake). */
+/* A measurement nobody asked for that the plan turned down only because the workload had too few calls to show
+   anything waits for the calls, not for a time. It keeps how many usable calls it needs, and every call that
+   arrives looks at that count (measureWhenReady in src/proxy.js): the one that reaches it starts the measurement.
+   It used to be booked for when they were guessed to arrive, from the pace so far and never sooner than six
+   hours, and a new workload that had them within the hour waited the six. It is booked a whole rhythm out as
+   well, so the hourly pass still looks at one whose calls stop coming. */
+export async function waitForCalls(workloadId, calls) {
+  const w = await db.prepare('SELECT workspace_id FROM workloads WHERE id = ?').get(workloadId);
+  if (!w) return null;
+  const cadence = (await cadenceOf(w.workspace_id)) || 7;
+  const at = Math.round(now() + cadence * DAY);
+  await db.prepare('UPDATE workloads SET measure_at_calls = ?, recheck_after = ? WHERE id = ?').run(Math.round(calls), at, workloadId);
+  return at;
+}
+
+/* A measurement nobody asked for that the plan turned down for any other reason: looked at again later,
+   rather than at every hourly pass. After one of the workspace's own periods when it would not pay for itself
+   (a week when it measures only when asked, for the page's sake), or after `waitMs`. */
 export async function deferAutomatic(workloadId, { waitMs = null } = {}) {
   const w = await db.prepare('SELECT workspace_id FROM workloads WHERE id = ?').get(workloadId);
   if (!w) return null;

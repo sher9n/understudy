@@ -998,8 +998,15 @@ function emptySetups(c) {
       : 'No test has finished yet. Press Measure now below to try again.';
   }
   if (!t.auto) return 'No setups have been tested yet. This workspace only tests when asked, so press Measure now below when you are ready.';
-  /* 40 requests only books the first test (considerMeasuring in src/proxy.js): it runs once there are enough
-     of them for a setup to be able to pass, and when testing would pay for itself within two months. */
+  /* The first test starts by itself as soon as there are enough of the workload's requests for a setup to be able
+     to pass (measureWhenReady in src/proxy.js), said with how many, counted as the test counts them. */
+  const pays = 'It also has to be worth it: a test runs by itself only when it would pay for itself within two months.';
+  if (t.need && t.have >= t.need) return `No setups have been tested yet. There are enough of your requests for the first test, so it starts by itself. ${pays}`;
+  if (t.need) {
+    return `No setups have been tested yet. The first test starts by itself as soon as there are ${num(t.need)} of your requests to test on, and there are ${num(t.have)} so far. `
+      + `It counts your requests from the last thirty days, and no more than ${num(t.perDay)} from any one day. ${pays}`;
+  }
+  // a reply from before the count was sent
   const when = 'It runs as soon as there are enough of your requests for a setup to be able to pass, and testing would pay for itself within two months.';
   if (t.seen >= t.firstAfter) return `No setups have been tested yet. The first test is booked. ${when}`;
   return `No setups have been tested yet. The first test is booked once Understudy has seen ${num(t.firstAfter)} of your requests; `

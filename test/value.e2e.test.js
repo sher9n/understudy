@@ -54,6 +54,7 @@ const { saveCatalog } = await import('../src/openrouter.js');
 const { learningSettled } = await import('../src/traffic.js');
 const { promote, keyOfSpec } = await import('../src/eval/promote.js');
 const { valueOf } = await import('../src/eval/value.js');
+const { barNeed } = await import('../src/eval/plan.js');
 const { withFeeOn } = await import('../src/eval/savings.js');
 const { routedSavings } = await import('../src/eval/actual.js');
 const { armKey, labelOf } = await import('../src/learn/arms.js');
@@ -466,8 +467,15 @@ test('a workload never tested says when its first test starts, counted the way t
   const wid = await workload(ws, 'untested');
   for (let i = 0; i < 3; i += 1) await call(ws, wid, { at: now() - HOUR + i * MIN });
   await call(ws, wid, { at: now() - HOUR, source: 'trace' });
-  const v = await valueOf(await load(wid));
-  assert.deepEqual(v.tests, { runs: 0, auto: config.MEASURE_EVERY_DAYS > 0, seen: 4, firstAfter: config.EVAL_FIRST_RUN_MIN_CALLS });
+  const row = await load(wid);
+  const v = await valueOf(row);
+  /* and how many of its requests the first test waits for (the count its first bar takes), counted exactly as the
+     test counts them, the call that brings them starting it */
+  assert.deepEqual(v.tests, { runs: 0, auto: config.MEASURE_EVERY_DAYS > 0, seen: 4, firstAfter: config.EVAL_FIRST_RUN_MIN_CALLS,
+    need: barNeed(row).calls, have: 4, perDay: config.EVAL_POOL_PER_DAY });
+  // one turned down already says the count it was left waiting for
+  await db.prepare('UPDATE workloads SET measure_at_calls = 90 WHERE id = ?').run(wid);
+  assert.equal((await valueOf(await load(wid))).tests.need, 90);
   // a workspace that tests only when asked starts nothing by itself
   await db.prepare('UPDATE workspaces SET measure_every_days = 0 WHERE id = ?').run(ws.id);
   assert.equal((await valueOf(await load(wid))).tests.auto, false);
