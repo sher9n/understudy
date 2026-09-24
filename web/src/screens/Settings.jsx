@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api, usd, usdHeld, dateIST, ago } from '../api.js';
 import { more } from '../moreApi.js';
+import { I, ChoicePic } from '../WorkloadCharts.jsx';
+import '../workload-page.css';
 
 /* Everything a workspace chooses, in one place, each with what it does in plain words. Every change is
    saved on its own and read back from the server, so what the page shows is what is in force. */
@@ -15,9 +17,9 @@ const TOPUPS = [10, 25, 50, 100, 250];
 // a few round numbers up to the ceiling, rather than every integer to twenty
 const modelChoices = (max) => [3, 5, 10, 15, 20].filter((n) => n <= max);
 const MODES = [
-  { mode: 'ask', label: 'Ask me first', note: 'A model that clears is shown to you, and nothing is switched until you approve it.' },
-  { mode: 'auto', label: 'Switch on its own', note: 'A model that clears twice is switched to by itself, on a small share of calls first, growing while its calls hold up.' },
-  { mode: 'off', label: 'Never switch', note: 'Workloads are measured and what is found is shown, with no email asking you to approve it. Nothing is switched unless you approve it yourself.' },
+  { mode: 'auto', label: 'Automatic', note: 'Switch to it. Watched every day, switched back the moment it slips.' },
+  { mode: 'ask', label: 'Ask me first', note: 'Tell me what passed, and wait for my yes.' },
+  { mode: 'off', label: 'Never switch', note: 'Only measure and report. Nothing changes.' },
 ];
 const money = (v) => (v === null || v === undefined || v === '' ? '' : String(v));
 /* An amount as typed: empty for none, or dollars with at most two places. Anything else is refused
@@ -57,6 +59,7 @@ export default function Settings({ data, reload }) {
       <Keys data={data} busy={busy} run={run} />
       <Money data={data} busy={busy} run={run} setErr={setErr} />
       <Limits data={data} busy={busy} run={run} />
+      <SwitchChoice data={data} busy={busy} run={run} />
       <Optimizing data={data} busy={busy} run={run} />
       <Privacy data={data} busy={busy} run={run} />
       <Emails data={data} busy={busy} run={run} />
@@ -398,33 +401,58 @@ const ROUTING = [
     note: 'Switch to the cheapest setup that clears your bar and passes its second look, as long as it is fast enough for your speed setting.' },
 ];
 
+/* What happens when a cheaper setup passes: one choice for the whole workspace, Automatic unless it is changed, and
+   every workload follows it (each workload's page shows it as a chip that links here). Three cards, each with a
+   small picture of what happens, as a radio group: arrow keys move between them. */
+function SwitchChoice({ data, busy, run }) {
+  const chosen = MODES.some((m) => m.mode === data.defaultOptimizeMode) ? data.defaultOptimizeMode : 'auto';
+  const refs = useRef({});
+  // the chip on a workload's page links to #optimize: brought into view once the page is drawn
+  useEffect(() => {
+    if (window.location.hash === '#optimize') document.getElementById('optimize')?.scrollIntoView({ block: 'start' });
+  }, []);
+  const choose = (mode) => { if (mode !== chosen) run(() => more.setDefaultMode(mode, true), `Every workload now follows: ${MODES.find((m) => m.mode === mode).label}.`)(); };
+  const onKey = (e) => {
+    const i = MODES.findIndex((m) => m.mode === chosen);
+    const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const next = MODES[(i + step + MODES.length) % MODES.length].mode;
+    refs.current[next]?.focus();
+    choose(next);
+  };
+  return (
+    <section className="opt" id="optimize" aria-labelledby="s-switch">
+      <div className="opthead"><h2 id="s-switch">When a cheaper setup passes</h2></div>
+      <div className="wp wp-setbody">
+        <div className="wp-opts" role="radiogroup" aria-labelledby="s-switch" onKeyDown={onKey}>
+          {MODES.map((m) => (
+            <button type="button" key={m.mode} ref={(el) => { refs.current[m.mode] = el; }} className="wp-opt" role="radio"
+              aria-checked={m.mode === chosen} tabIndex={m.mode === chosen ? 0 : -1} disabled={busy} onClick={() => choose(m.mode)}>
+              <div className="wp-optop">
+                <span className="wp-optnm"><span className="wp-radio" aria-hidden="true" />{m.label}</span>
+                {m.mode === 'auto' && <span className="wp-def">Default</span>}
+              </div>
+              <div className="wp-optpic"><ChoicePic kind={m.mode} /></div>
+              <div className="wp-optd">{m.note}</div>
+            </button>
+          ))}
+        </div>
+        <div className="wp-applies">{I.info}Applies to every workload in this workspace. Each workload page shows it as a small chip.</div>
+      </div>
+    </section>
+  );
+}
+
 function Optimizing({ data, busy, run }) {
-  const [apply, setApply] = useState(false);
   const [applyRouting, setApplyRouting] = useState(false);
   const [budget, setBudget] = useState(money(data.optimizeBudget));
-  const mode = MODES.find((m) => m.mode === data.defaultOptimizeMode) || MODES[0];
   const routing = ROUTING.find((r) => r.mode === data.defaultRoutingMode) || ROUTING[1];
   const budgetOk = typedOk(budget);
   const budgetNum = typedNum(budget);
   return (
     <section className="opt" aria-labelledby="s-opt">
       <div className="opthead"><h2 id="s-opt">Optimizing</h2></div>
-      <div className="kvrow">
-        <span className="kvk">New workloads</span>
-        <span className="kvv">
-          <span className="seg" role="group" aria-label="How new workloads are switched">
-            {MODES.map((m) => (
-              <button type="button" key={m.mode} disabled={busy} className={m.mode === mode.mode ? 'segb on' : 'segb'} aria-pressed={m.mode === mode.mode}
-                onClick={run(() => more.setDefaultMode(m.mode, apply))}>{m.label}</button>
-            ))}
-          </span>
-          <span className="segnote">{mode.note}</span>
-          <label className="segnote" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input type="checkbox" checked={apply} onChange={(e) => setApply(e.target.checked)} />
-            Apply it to the workloads you have now too, the next time you choose
-          </label>
-        </span>
-      </div>
       <div className="kvrow">
         <span className="kvk">Routing priority</span>
         <span className="kvv">

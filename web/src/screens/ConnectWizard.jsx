@@ -55,7 +55,7 @@ export default function ConnectWizard({ go, freshKey, onFreshKey, signedIn, onDo
   const [step, setStep] = useState(1);
   const [way, setWay] = useState('route');
   const [lang, setLang] = useState('python');
-  // how new workloads are switched: read from the workspace, chosen here once
+  // what happens when a cheaper setup passes, for every workload: read from the workspace, chosen here once
   const [mode, setMode] = useState(null);
   const timer = useRef(null);
 

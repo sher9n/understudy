@@ -75,11 +75,11 @@
           <div class="inhead"><svg width="26" height="26" viewBox="0 0 16 16" fill="none" aria-hidden="true" style="flex: 0 0 auto;"><circle cx="8" cy="8" r="8" fill="var(--okq)"></circle><path d="M4.7 8.2 L6.9 10.4 L11.3 5.7" stroke="var(--ok)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"></path></svg><div><div class="t">You are connected</div><div class="b">17 calls in, grouped into 2 workloads by the job they do. Nothing here was labelled by you.</div></div></div>
           <div class="wrow"><span class="nm">invoice-extract</span><span class="md">openai/gpt-5.4</span><span class="ct">12 calls</span></div>
           <div class="wrow"><span class="nm">support-reply</span><span class="md">openai/gpt-5.4</span><span class="ct">5 calls</span></div>
-          <div class="wizmode" role="group" aria-label="When a cheaper model clears your bar">
-            <div class="t">When a cheaper model clears your bar</div>
-            <button type="button" data-go="mode_ask" data-cls="askCls" data-pressed="askOn"><b>Ask me first</b><span>Nothing is switched until you approve it. A good start while you get to know it.</span></button>
-            <button type="button" data-go="mode_auto" data-cls="autoCls" data-pressed="autoOn"><b>Switch on its own</b><span>A model that clears twice starts on a small share of calls and takes more while they hold up.</span></button>
-            <div class="wizmodenote">You can change this for any workload, or for all of them in Settings.</div>
+          <div class="wizmode" role="group" aria-label="When a cheaper setup passes">
+            <div class="t">When a cheaper setup passes</div>
+            <button type="button" data-go="mode_auto" data-cls="autoCls" data-pressed="autoOn"><b>Automatic</b><span>Switch to it. Watched every day, switched back the moment it slips.</span></button>
+            <button type="button" data-go="mode_ask" data-cls="askCls" data-pressed="askOn"><b>Ask me first</b><span>Tell me what passed, and wait for my yes.</span></button>
+            <div class="wizmodenote">One choice for every workload in this workspace. You can change it, or choose never to switch, in Settings.</div>
           </div>
           <div class="inft"><a data-go="finish" class="btn big">Go to your dashboard</a><span style="font-size: 13px; color: var(--mut);">Measuring starts on its own once there are enough calls.</span></div>
         </div>

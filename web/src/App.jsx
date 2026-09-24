@@ -529,7 +529,7 @@ export default function App() {
   const body = () => {
     if (openId) {
       return <WorkloadDetail id={openId} onBack={() => go('work')}
-        onChanged={() => load('work')} />;
+        onChanged={() => load('work')} go={go} />;
     }
     if (err) {
       /* A screen that could not be read says why, and offers the one thing that will help: to
