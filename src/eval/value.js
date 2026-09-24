@@ -5,6 +5,7 @@ import { withFeeOn } from './savings.js';
 import { armById, nameOfResult } from '../learn/arms.js';
 import { trafficOf } from './promote.js';
 import { cadenceOf } from './schedule.js';
+import { barNeed, usableCalls } from './plan.js';
 import { OUTCOME_OF } from './outcome.js';
 import { COUNTED, GROUPS, grouped, settledAt } from '../learn/views.js';
 import { zdrFor } from '../workspace.js';
@@ -265,15 +266,18 @@ export async function valueOf(w) {
   };
 }
 
-/* Whether this workload has been tested, and if not, when the first test starts: by itself once it has
-   seen EVAL_FIRST_RUN_MIN_CALLS requests (src/proxy.js considerMeasuring), in a workspace that tests on a
-   schedule; only when asked in one that does not. Counted the way that decision counts them. */
+/* Whether this workload has been tested, and if not, when the first test starts: by itself in a workspace that
+   tests on a schedule, only when asked in one that does not. By itself as soon as there are enough of its requests
+   for a setup to be able to pass (measureWhenReady in src/proxy.js): `need` of them, the count it was left waiting
+   for where it was turned down already and otherwise the one its first bar takes, and `have`, counted exactly as
+   the test counts them. */
 async function testsOf(w) {
   const runs = Number((await db.prepare('SELECT COUNT(*) AS n FROM eval_runs WHERE workload_id = ?').get(w.id)).n);
   const auto = (await cadenceOf(w.workspace_id)) > 0;
   if (runs > 0) return { runs, auto };
   const seen = Number((await db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workload_id = ?').get(w.id)).n);
-  return { runs, auto, seen, firstAfter: config.EVAL_FIRST_RUN_MIN_CALLS };
+  const need = Number(w.measure_at_calls) > 0 ? Number(w.measure_at_calls) : barNeed(w).calls;
+  return { runs, auto, seen, firstAfter: config.EVAL_FIRST_RUN_MIN_CALLS, need, have: await usableCalls(w), perDay: config.EVAL_POOL_PER_DAY };
 }
 
 /* What happened to a workload, oldest first, as facts for its page to put into words. */

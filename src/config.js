@@ -140,6 +140,9 @@ export const config = {
   EVAL_MODELS_MAX: num('EVAL_MODELS_MAX', 20),
   EVAL_MIN_RUNS: num('EVAL_MIN_RUNS', 100),
   EVAL_FIRST_RUN_MIN_CALLS: num('EVAL_FIRST_RUN_MIN_CALLS', 40),
+  /* A workload waiting for calls is measured by the call that brings it enough (measureWhenReady in src/proxy.js);
+     how often one server counts one waiting workload's calls again, at most, so a busy one's calls do not each do it. */
+  MEASURE_READY_CHECK_MS: num('MEASURE_READY_CHECK_MS', 30000),
   EVAL_FLOOR_MULTIPLE: num('EVAL_FLOOR_MULTIPLE', 1.25),
   EVAL_FLOOR_MIN_PCT: num('EVAL_FLOOR_MIN_PCT', 3),
   /* Above this, the customer's own model is not answering consistently enough for a bar to

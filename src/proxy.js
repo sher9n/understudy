@@ -18,6 +18,7 @@ import { leadModel } from './learn/arms.js';
 import { zdrFor, cacheHintFor } from './workspace.js';
 import { estimateCost } from './trueup.js';
 import { cadenceOf } from './eval/schedule.js';
+import { planFor, usableCalls } from './eval/plan.js';
 
 /* Roughly how many tokens an answer ran to, from what it wrote: three characters a token, which
    overcounts ordinary text, for charging a call whose provider did not say. */
@@ -753,8 +754,114 @@ async function finish({ wsId, workload, requested, served, usage, started, body,
   return { cost, charged, estimated };
 }
 
+/* A workload waiting for calls (see waitForCalls in src/eval/schedule.js) is measured by the call that brings its
+   count to what it needs, as soon as that call is recorded: counted exactly as the measurement counts them
+   (usableCalls), so the call that starts it is one the measurement can use. Counted no more often than every
+   MEASURE_READY_CHECK_MS for one workload on one server, so a busy one's calls do not each count its calls again,
+   and a call inside that wait has them counted again the moment it is up: the last call of a burst still starts
+   it when no call comes after. Answers whether it was started. */
+const readyLooked = new Map();
+// the workloads this server will count again when their wait is up, one timer each however many calls came
+const readyAgain = new Set();
+export async function measureWhenReady(wsId, workload) {
+  const need = Number(workload?.measure_at_calls);
+  if (!(need > 0) || workload.merged_into) return false;
+  const wait = config.MEASURE_READY_CHECK_MS - (Date.now() - (readyLooked.get(workload.id) || 0));
+  if (wait > 0) {
+    if (!readyAgain.has(workload.id)) {
+      readyAgain.add(workload.id);
+      setTimeout(() => {
+        readyAgain.delete(workload.id);
+        // read again, since what it waits for may have changed in the meantime
+        db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id)
+          .then((fresh) => (fresh ? measureWhenReady(wsId, fresh) : false))
+          .catch((err) => console.error(`counting the calls of ${workload.id} again failed: ${err?.message || err}`));
+      }, wait).unref();
+    }
+    return false;
+  }
+  readyLooked.set(workload.id, Date.now());
+  if (readyLooked.size > 10000) readyLooked.clear();
+  return startIfReady(workload);
+}
+
+/* One waiting for calls, started if its calls are here. Never in a workspace that measures only when asked,
+   whatever it waited for, and once however many calls, and servers, reach it together: the one that clears the
+   count in one statement queues it. */
+async function startIfReady(workload) {
+  const need = Number(workload.measure_at_calls);
+  if (!(need > 0) || workload.merged_into) return false;
+  if (!(await cadenceOf(workload.workspace_id))) return false;
+  if ((await usableCalls(workload)) < need) return false;
+  const claimed = await db.prepare(
+    `UPDATE workloads SET measure_at_calls = NULL, recheck_after = ? WHERE id = ? AND measure_at_calls IS NOT NULL RETURNING id`)
+    .run(now() + 3600000, workload.id);
+  if (!claimed.rows?.length) return false;
+  await enqueue('eval_run', { workloadId: workload.id, trigger: workload.status === 'new' ? 'first' : 'automatic' }, { unique: true });
+  return true;
+}
+
+/* Every workload waiting for calls whose calls are here, started: the ones whose last call came as a server stopped,
+   before it could count them again. When a server starts, and on the hourly pass. Answers how many it started. */
+export async function startWaiting() {
+  let started = 0;
+  for (const w of await db.prepare(
+    'SELECT * FROM workloads WHERE measure_at_calls IS NOT NULL AND merged_into IS NULL').all()) {
+    try {
+      if (await startIfReady(w)) started += 1;
+    } catch (err) {
+      console.error(`starting ${w.id}, waiting for calls, failed: ${err?.message || err}`);
+    }
+  }
+  return started;
+}
+
+/* Workloads the rule before measureWhenReady left waiting: turned down for want of calls and booked for when the
+   calls were guessed to arrive. Each is given the count it waits for, and one that has it already is measured now.
+   Only workloads never measured, because the booking of one that was is its workspace's rhythm and never a wait for
+   calls; only live ones, in a workspace that measures by itself; never one being measured, waiting in the queue, or
+   stopped by a person. Then every one already waiting whose calls are here is started (startWaiting). Run when the
+   server starts; running it again changes nothing. */
+export async function convertWaits({ plan = planFor } = {}) {
+  const rows = await db.prepare(
+    `SELECT w.* FROM workloads w
+      WHERE w.state = 'live' AND w.merged_into IS NULL AND w.status = 'new' AND w.measure_at_calls IS NULL
+        AND w.recheck_after IS NOT NULL AND w.recheck_after > ?
+        AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.workload_id = w.id)
+        AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'eval_run' AND j.status IN ('queued', 'claimed')
+                          AND j.payload LIKE '%' || w.id || '%')`).all(now());
+  let started = 0;
+  let waiting = 0;
+  for (const w of rows) {
+    if (!(await cadenceOf(w.workspace_id))) continue;
+    let p;
+    try {
+      p = await plan(w, { canRoute: canRoute(), automatic: true, forRun: false });
+    } catch (err) {
+      console.error(`looking again at ${w.id}, left waiting for calls, failed: ${err?.message || err}`);
+      continue;
+    }
+    if (p.canRun) {
+      // claimed in one statement, so two servers starting together measure it once
+      const claimed = await db.prepare(
+        `UPDATE workloads SET recheck_after = ? WHERE id = ? AND status = 'new' AND measure_at_calls IS NULL AND recheck_after = ?
+          RETURNING id`).run(now() + 3600000, w.id, w.recheck_after);
+      if (!claimed.rows?.length) continue;
+      await enqueue('eval_run', { workloadId: w.id, trigger: 'first' }, { unique: true });
+      started += 1;
+    } else if (p.needCalls) {
+      await db.prepare('UPDATE workloads SET measure_at_calls = ? WHERE id = ? AND measure_at_calls IS NULL').run(p.needCalls, w.id);
+      waiting += 1;
+    }
+  }
+  started += await startWaiting();
+  return { looked: rows.length, started, waiting };
+}
+
 /** Once a workload has enough calls to be trusted, it measures itself without being asked. */
 export async function considerMeasuring(wsId, workload) {
+  // one waiting for calls starts the moment it has them
+  if (await measureWhenReady(wsId, workload)) return;
   if (workload.status !== 'new') return;
   /* A workspace that measures only when asked is never measured by itself, and that includes a new
      workload's first measurement: "only when I ask" is the promise that nothing is spent unasked. */

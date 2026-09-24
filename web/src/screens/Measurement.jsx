@@ -277,7 +277,13 @@ function WorthLine({ m }) {
       : ` It would not pay for itself within ${w.paybackMonths} months, so it runs only when you ask; the schedule leaves it until it would.`;
   const budget = m.optimizeBudget
     ? ` ${usd(m.optimizeBudget.leftUsd)} of your ${usd(m.optimizeBudget.budgetUsd)} optimizing budget is left for the last thirty days.` : '';
-  const next = scheduled && m.nextAt && m.nextAt > Date.now() ? ` Next looked at by itself around ${timeIST(m.nextAt)} IST.` : '';
+  /* waiting for requests rather than for a time: said as how many, counted as a measurement counts them, since the
+     request that brings them starts it (see waitForCalls) */
+  const wait = m.waitingFor;
+  const next = !scheduled ? ''
+    : wait ? ` It starts by itself as soon as there are ${num(wait.calls)} of your requests to test on, and there are ${num(wait.have)} so far.`
+      + ` It counts your requests from the last thirty days, and no more than ${num(wait.perDay)} from any one day.`
+      : m.nextAt && m.nextAt > Date.now() ? ` Next looked at by itself around ${timeIST(m.nextAt)} IST.` : '';
   return <span className="mworth">{said}{when}{budget}{next}</span>;
 }
 
