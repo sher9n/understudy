@@ -16,6 +16,7 @@ import Settings from './screens/Settings.jsx';
 import ConnectWizard from './screens/ConnectWizard.jsx';
 import ConnectPage from './screens/ConnectPage.jsx';
 import { PublicPage } from './screens/legal/Public.jsx';
+import HowItWorks from './screens/legal/HowItWorks.jsx';
 import Traffic from './screens/legal/Traffic.jsx';
 import Pricing from './screens/legal/Pricing.jsx';
 import Terms from './screens/legal/Terms.jsx';
@@ -34,7 +35,7 @@ const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
 const AUTH = new Set(['signin', 'signup', 'signincode', 'signinlink']);
 
 /* The pages anybody can read. Each is drawn inside the same public frame as the home page. */
-const PAGES = { traffic: Traffic, pricing: Pricing, terms: Terms, privacy: Privacy, dpa: Dpa,
+const PAGES = { how: HowItWorks, traffic: Traffic, pricing: Pricing, terms: Terms, privacy: Privacy, dpa: Dpa,
   subprocessors: Subprocessors, security: Security, contact: Contact, status: Status };
 
 /* Every one of these screens is built out of the customer's own traffic, so before the guide
