@@ -237,7 +237,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     if (automatic) {
       /* Turned down for want of calls: started by the call that brings them (waitForCalls), never at a guess of
          when that will be. For anything else, looked at again in its time. */
-      if (plan.needCalls) await waitForCalls(workloadId, plan.needCalls);
+      // and only for a count it has not reached, so what could start it again never turns it down again
+      if (plan.needCalls > plan.pool) await waitForCalls(workloadId, plan.needCalls);
       else await deferAutomatic(workloadId, { waitMs: plan.notWorth ? null : 6 * 3600000 });
     }
     /* Back to what its last measurement found, not to "new": a workload that has been measured

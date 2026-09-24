@@ -57,7 +57,7 @@ const { promote } = await import('../src/eval/promote.js');
 const { scheduleNext, deferAutomatic, nudgeForCatalog } = await import('../src/eval/schedule.js');
 const { calibrationFor, calibrated, forgetCalibration } = await import('../src/eval/calibrate.js');
 const { planFor, barNeed } = await import('../src/eval/plan.js');
-const { considerMeasuring, convertWaits } = await import('../src/proxy.js');
+const { considerMeasuring, convertWaits, startWaiting } = await import('../src/proxy.js');
 const { valueOf } = await import('../src/eval/value.js');
 const { enqueue } = await import('../src/jobs.js');
 const { forgetFacts } = await import('../src/models/facts.js');
@@ -305,6 +305,62 @@ test('a workspace that measures only when asked never starts a waiting workload 
   await considerMeasuring(workspace.id, await load(workload.id));
   assert.equal(await queuedFor(workload.id), 1, 'measuring by itself again, it starts');
   await cancelFor(workload.id);
+});
+
+test('the last call of a burst starts a waiting workload, even when no call comes after it', async () => {
+  const { workspace, workload } = await seed({ n: 40, enabled: ['vendor/steady-small'] });
+  await db.prepare('UPDATE workloads SET measure_at_calls = 45, recheck_after = ? WHERE id = ?').run(now() + 30 * DAY, workload.id);
+  const was = config.MEASURE_READY_CHECK_MS;
+  // a wait long enough that the whole burst lands inside it however slow this machine is
+  config.MEASURE_READY_CHECK_MS = 2500;
+  try {
+    // the first call of the burst has them counted: 41 of the 45
+    await addCalls(workspace, workload, 1, 0);
+    const began = Date.now();
+    await considerMeasuring(workspace.id, await load(workload.id));
+    assert.equal(await queuedFor(workload.id), 0, 'four short');
+    // the other four arrive inside the wait, which does not count them again call by call
+    for (let i = 0; i < 4; i += 1) {
+      await addCalls(workspace, workload, 1, 0);
+      await considerMeasuring(workspace.id, await load(workload.id));
+    }
+    assert.ok(Date.now() - began < 2500, 'the burst landed inside the wait');
+    assert.equal(await queuedFor(workload.id), 0, 'not counted again yet');
+    // and no call comes after them: they are counted again the moment the wait is up, and that starts it
+    let n = 0;
+    for (let k = 0; k < 100 && n === 0; k += 1) {
+      await new Promise((r) => { setTimeout(r, 100); });
+      n = await queuedFor(workload.id);
+    }
+    assert.equal(n, 1, 'started with no call after the last one');
+    assert.ok(Date.now() - began >= 2400, 'when the wait was up, not before');
+    assert.equal((await load(workload.id)).measure_at_calls, null);
+  } finally {
+    config.MEASURE_READY_CHECK_MS = was;
+  }
+  await cancelFor(workload.id);
+});
+
+test('a workload whose calls came as a server stopped is started when a server starts, and by the hourly pass', async () => {
+  const made = [];
+  for (let k = 0; k < 3; k += 1) made.push(await seed({ n: 40, enabled: ['vendor/steady-small'] }));
+  const [ready, short, asked] = made;
+  // all three waiting: one whose count its calls reached with no server there to count them, one still short, and
+  // one in a workspace that measures only when asked
+  await db.prepare('UPDATE workloads SET measure_at_calls = 40, recheck_after = ? WHERE id = ?').run(now() + 30 * DAY, ready.workload.id);
+  await db.prepare('UPDATE workloads SET measure_at_calls = 176, recheck_after = ? WHERE id = ?').run(now() + 30 * DAY, short.workload.id);
+  await db.prepare('UPDATE workloads SET measure_at_calls = 40, recheck_after = ? WHERE id = ?').run(now() + 30 * DAY, asked.workload.id);
+  await db.prepare('UPDATE workspaces SET measure_every_days = 0 WHERE id = ?').run(asked.workspace.id);
+  assert.ok((await startWaiting()) >= 1);
+  assert.equal(await queuedFor(ready.workload.id), 1, 'the one whose calls are here is started');
+  assert.equal((await load(ready.workload.id)).measure_at_calls, null, 'and waits for nothing more');
+  assert.equal(await queuedFor(short.workload.id), 0, 'the one still short keeps waiting');
+  assert.equal(Number((await load(short.workload.id)).measure_at_calls), 176);
+  assert.equal(await queuedFor(asked.workload.id), 0, 'only when asked means only when asked');
+  // looking again changes nothing
+  await startWaiting();
+  assert.equal(await queuedFor(ready.workload.id), 1);
+  await cancelFor(ready.workload.id);
 });
 
 test('workloads left waiting on a guessed time are measured at once when they have the calls, and wait for them when not', async () => {

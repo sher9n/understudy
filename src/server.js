@@ -12,7 +12,7 @@ import { planFor, onMissingFits } from './eval/plan.js';
 import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './alerts.js';
 
 import { slug, shapeSignals } from './classify.js';
-import { routeOnce, convertWaits } from './proxy.js';
+import { routeOnce, convertWaits, startWaiting } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
 import { trueUp } from './trueup.js';
 import { parse as parseRoute } from '../web/src/router.js';
@@ -407,6 +407,10 @@ handle('purge', async () => {
   return { ok: true, calls: a, samples: b, other: c, judgements: judged, jobs: jobsGone };
 });
 
+/* Workloads the rule before measureWhenReady left waiting on a guessed time: each given the count of calls it waits
+   for, and one that has it already measured now (see convertWaits). Queued when the server starts. */
+handle('measure_waits', async () => ({ ok: true, ...(await convertWaits()) }));
+
 /* Measuring again, on the workspace's own schedule.
  *
  * Two jobs in one, because they are the same act: a promoted model is re-tested so it can be
@@ -414,10 +418,6 @@ handle('purge', async () => {
  * catalogue has moved. A workspace that chose "only when I ask" is skipped entirely: zero
  * days means never, and it is the one setting that must not be quietly overridden by a
  * default somewhere. */
-/* Workloads the rule before measureWhenReady left waiting on a guessed time: each given the count of calls it waits
-   for, and one that has it already measured now (see convertWaits). Queued when the server starts. */
-handle('measure_waits', async () => ({ ok: true, ...(await convertWaits()) }));
-
 handle('recheck', async () => {
   // the next one is booked first, so one that fails still leaves the next one coming
   await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
@@ -441,6 +441,9 @@ handle('recheck', async () => {
   await watchLive();
   // and one that can no longer be served at all goes back before its calls start failing
   await watchCatalogue();
+  /* A workload waiting for calls is started by the call that brings them (measureWhenReady); one whose last call
+     came as a server stopped, before it counted them again, is started here instead of at its fallback booking. */
+  await startWaiting().catch((err) => console.error(`starting workloads waiting for calls failed: ${err?.message || err}`));
   const spaces = await db.prepare('SELECT id, measure_every_days FROM workspaces').all();
   let queued = 0;
   for (const ws of spaces) {
