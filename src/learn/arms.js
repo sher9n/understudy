@@ -28,6 +28,8 @@ export function armKey(spec) {
   };
   const part = (p) => `${p?.model || ''}~${JSON.stringify(recipeOf(p))}`;
   if (spec.kind === 'cascade') return `cascade:${part(spec.first)}>${part(spec.fallback)}`;
+  // a router by kind of request: every setup it chooses between, and the customer's own
+  if (spec.kind === 'router' && Array.isArray(spec.options)) return `router:${spec.options.map(part).join('+')}|${part(spec.strong)}~kinds`;
   if (spec.kind === 'router') return `router:${part(spec.cheap)}|${part(spec.strong)}`;
   return `model:${part(spec)}`;
 }
@@ -39,6 +41,10 @@ export function labelOf(spec, reference = null) {
   if (spec.kind === 'cascade') {
     if (same(spec.first, spec.fallback)) return `${short(spec.first.model)} thinking less, checked, thinking fully when unsure`;
     return `${short(spec.first.model)}, checked, ${short(spec.fallback.model)} when unsure`;
+  }
+  if (spec.kind === 'router' && Array.isArray(spec.options)) {
+    const names = spec.options.map((o) => (o.model === spec.strong?.model && lighter(o.recipe) ? `${short(o.model)} thinking less` : short(o.model)));
+    return `${[...names, `${short(spec.strong?.model)} (yours)`].join(', ').replace(/, ([^,]*)$/, ' or $1')}, picked by kind of request`;
   }
   if (spec.kind === 'router') {
     if (same(spec.cheap, spec.strong)) return `${short(spec.cheap.model)} thinking less or fully, picked call by call`;
@@ -110,6 +116,22 @@ export function nameOfResult(row) {
     const same = spec.first.model === spec.fallback.model;
     return { kind: 'cascade', label: labelOf(spec), short: same ? `${short(spec.first.model)} thinking less, checked` : `${short(spec.first.model)}, checked`,
       first: spec.first.model, fallback: spec.fallback.model, threshold: spec.threshold ?? null };
+  }
+  if (spec.kind === 'router' && Array.isArray(spec.options)) {
+    /* Each setup it sends requests to, with how many of the kinds it learned go to it and what share of the
+       measured calls those kinds were; and the same for the customer's own model. */
+    const table = Array.isArray(spec.table) ? spec.table : [];
+    const sizes = Array.isArray(spec.sizes) ? spec.sizes : [];
+    const total = sizes.reduce((a, b) => a + (Number(b) || 0), 0);
+    const shareOf = (pick) => (total > 0 ? Math.round((table.reduce((a, t, k) => a + (pick(t) ? Number(sizes[k]) || 0 : 0), 0) / total) * 10000) / 10000 : null);
+    const partLabel = (o) => (o.model === spec.strong?.model && lighter(o.recipe) ? `${short(o.model)} thinking less` : short(o.model));
+    const names = spec.options.map(partLabel);
+    return { kind: 'router', version: 2, label: labelOf(spec),
+      short: names.length === 1 ? `${names[0]} or ${short(spec.strong?.model)}, by kind of request` : `${names[0]} and ${names.length - 1} more, by kind of request`,
+      first: spec.cheap.model, fallback: spec.strong.model, threshold: null, options: spec.options.map((o) => o.model),
+      kinds: table.length || null,
+      parts: spec.options.map((o, j) => ({ model: o.model, label: names[j], kinds: table.filter((t) => t === j).length, share: shareOf((t) => t === j) })),
+      yours: { kinds: table.filter((t) => t < 0).length, share: shareOf((t) => t < 0) } };
   }
   if (spec.kind === 'router') {
     return { kind: 'router', label: labelOf(spec), short: `${short(spec.cheap.model)}, picked per call`,

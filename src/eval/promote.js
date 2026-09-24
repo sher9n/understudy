@@ -69,6 +69,8 @@ export function keyOfSpec(spec, reference) {
   const part = (p) => (p.model === reference && p.recipe?.reasoning ? `${p.model}#lighter`
     : p.model === reference && p.recipe?.pinned ? `${p.model}#cheapest` : p.model);
   if (spec.kind === 'cascade') return `cascade:${part(spec.first)}`;
+  // a router by kind of request is named by every setup it chooses between, cheapest first
+  if (spec.kind === 'router' && Array.isArray(spec.options)) return `router:${spec.options.map(part).join('+')}~kinds`;
   if (spec.kind === 'router') return `router:${part(spec.cheap)}`;
   return part(spec);
 }
@@ -319,7 +321,7 @@ export function failingClearly(k, n, before) {
 function modelsServing(workload, spec) {
   if (!spec) return [workload.routed_model].filter(Boolean);
   if (spec.kind === 'cascade') return [spec.first?.model].filter(Boolean);
-  if (spec.kind === 'router') return [spec.cheap?.model].filter(Boolean);
+  if (spec.kind === 'router') return [...new Set([spec.cheap?.model, ...(Array.isArray(spec.options) ? spec.options.map((o) => o?.model) : [])])].filter(Boolean);
   return [spec.model].filter(Boolean);
 }
 

@@ -125,6 +125,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
     referenceCostMonth: runData.referenceCostMonth, results: runData.results,
     refSpeed: runData.refSpeed, reused: runData.reused, saved: runData.saved, plan: runData.plan,
     yardstick: runData.yardstick ?? 'agreement', recordedRefs: runData.recordedRefs ?? null,
+    routingMode: runData.routingMode ?? null, choice: runData.choice ?? null,
   } : w.certificate;
   /* Whether the measurement shown tried any model. One that could not set a bar, ran out of
      balance or was stopped early tried none, and the sections below say why instead of
@@ -186,6 +187,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
             <p>{blurb(w, cand, switched)}</p>
             {hot && cand.name && cand.name.kind !== 'model' && (
               <ServingFlow kind={cand.name.kind} first={cand.name.first} fallback={cand.name.fallback} reference={w.reference}
+                parts={cand.name.parts || null} yours={cand.name.yours || null}
                 sentOn={cand.escalated === null || cand.escalated === undefined ? null : cand.escalated / 100} sentOnFrom="measured" />
             )}
 
@@ -302,8 +304,8 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                   <p><b>That is where your {(cert.floor ?? 0).toFixed(2)}% bar comes from</b> (never below 3%). A candidate is measured
                     the same way on the same calls, and has to stay inside it, with room for chance: a model is only
                     said to clear when even the high end of what it could be is inside the bar.</p>
-                  <p>The cheapest model that clears is then measured again on calls it has never seen, and only one that
-                    clears both times is switched to.{cert.yardstick === 'quality'
+                  <p>Of the models that clear, the one your routing priority puts first is then measured again on calls it
+                    has never seen, and only one that clears both times is switched to.{cert.yardstick === 'quality'
                     ? ' This workload\u2019s answers have no one right answer, so it is held to answers at least as good as yours rather than the same.' : ''}</p>
                 </div>
               )}
@@ -407,6 +409,8 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                   <div>
                     <span className={`pill ${serving ? 'ok' : tone}`}>{serving ? 'Serving now' : label}</span>
                     {why && <span className="cdwhy">{why}</span>}
+                    {sureWords(r, cert) && <span className="cdwhy">{sureWords(r, cert)}</span>}
+                    {choiceWords(r, cert) && <span className="cdwhy">{choiceWords(r, cert)}</span>}
                     {r.confirm && <span className="cdwhy">{confirmWords(r.confirm)}</span>}
                   </div>
                 </div>
@@ -416,8 +420,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                 clears, fails calls or is too slow switches back, and so does the live watch. */}
             <div className="barnote">
               Every model was tried on the same {num(cert.sampleSize)} calls, and dropped as soon as it
-              could not win, so a model that stopped early was not paid for on every call. The cheapest that
-              cleared was measured again on calls it had never seen before anything was switched. A model we
+              could not win, so a model that stopped early was not paid for on every call. {priorityLine(cert)} A model we
               switch to is watched on your live traffic: if it stops clearing, fails calls, or slows down, it goes back.
               {cert.reused ? ` ${num(cert.reused)} answers were reused from earlier measurements${cert.saved ? `, saving ${usd(cert.saved)}` : ''}.` : ''}
               {cert.finishedAt ? ` Last run ${dateIST(cert.finishedAt)} IST.` : ''}
@@ -452,6 +455,71 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
       <WorkloadCalls workloadId={w.id} />
     </>
   );
+}
+
+/* How sure the measurement is that a setup that cleared keeps your bar, and how often its answer was the
+   better one, in a few words under its verdict. Only said of one that cleared: of one that did not, "how
+   sure it keeps the bar" is a small number that says less than its verdict already does. */
+function sureWords(r) {
+  if (r.verdict !== 'cleared' || r.chance === null || r.chance === undefined) return null;
+  const sure = r.chance >= 0.999 ? 'more than 99.9%' : `${(Math.floor(r.chance * 1000) / 10).toFixed(1)}%`;
+  const better = r.betterPct > 0 ? ` Where its answer differed from yours, it was the better one on ${Number(r.betterPct).toFixed(1)}% of calls.` : '';
+  return `How sure we are it keeps your bar: ${sure}.${better}`;
+}
+
+const MODE_WORDS = { cautious: 'Cautious', balanced: 'Balanced', savings: 'Most savings' };
+
+/* Which of the ones that cleared was looked at again first, as the routing priority it ran under chose. */
+function priorityLine(cert) {
+  const mode = cert?.choice?.mode || cert?.routingMode;
+  if (mode === 'savings') {
+    return 'Of the ones that cleared, the cheapest was measured again on calls it had never seen before anything was switched, as your routing priority, Most savings, asks.';
+  }
+  if (mode === 'cautious') {
+    return `Of the ones that cleared and that we are at least ${Math.round((cert.choice?.cautiousChance ?? 0.99) * 100)}% sure keep your bar, the one with the biggest saving was measured again on calls it had never seen, held to a stricter standard, before anything was switched, as your routing priority, Cautious, asks.`;
+  }
+  if (mode === 'balanced') {
+    return 'Of the ones that cleared, the one with the biggest saving we are sure of was measured again on calls it had never seen before anything was switched, and where two save about the same, the faster one, as your routing priority, Balanced, asks.';
+  }
+  return 'The cheapest that cleared was measured again on calls it had never seen before anything was switched.';
+}
+const ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+const ordinal = (k) => ORDINALS[k - 1] || `number ${k}`;
+
+/* Where a setup that cleared came in the order the measurement looked at them again, and why, from the
+   routing priority it was chosen under (the run's own record of the order). */
+function choiceWords(r, cert) {
+  const choice = cert?.choice;
+  if (!choice || r.verdict !== 'cleared') return null;
+  const mode = MODE_WORDS[choice.mode] || MODE_WORDS.balanced;
+  const left = (choice.left || []).find((x) => x.model === r.model);
+  if (left) return `Left out under ${mode}: we are not sure enough it keeps your bar for a cautious workload.`;
+  const order = choice.order || [];
+  const k = r.choiceRank;
+  if (!k || order.length < 2) return null;
+  const top = order[0];
+  const me = order.find((x) => x.model === r.model) || null;
+  const pctOf = (x) => (x === null || x === undefined ? null : `${Math.round(x * 100)}%`);
+  // a setup named in a sentence: a strategy by its short name, a model without its company
+  const nameIn = (key) => {
+    const hit = (cert.results || []).find((x) => x.model === key);
+    return hit?.name && hit.name.kind !== 'model' ? hit.name.short : short(key);
+  };
+  if (choice.mode === 'savings') return `Came ${ordinal(k)} under ${mode}, which looks at the cheapest first.`;
+  if (k === 1) {
+    // the one with the biggest raw saving, if that is not this one: why this came first anyway
+    const richest = order.reduce((a, x) => ((x.saving ?? -1) > (a.saving ?? -1) ? x : a), order[0]);
+    if (richest.model !== r.model && me) {
+      const faster = me.p50 !== null && richest.p50 !== null && me.p50 < richest.p50;
+      return `Came first under ${mode}: ${nameIn(richest.model)} saves a little more, but `
+        + `${faster && Math.abs((richest.safeSaving ?? 0) - (me.safeSaving ?? 0)) <= 0.01 ? 'this one is faster for about the same saving' : 'this one’s saving is surer'}.`;
+    }
+    return `Came first under ${mode}: the biggest saving we are sure of${me?.safeSaving !== null && me?.safeSaving !== undefined ? `, ${pctOf(me.safeSaving)} after our fee` : ''}.`;
+  }
+  const why = me && top && me.safeSaving !== null && top.safeSaving !== null && Math.abs(me.safeSaving - top.safeSaving) <= 0.01
+    ? `about the same saving as ${nameIn(top.model)}, which is faster`
+    : `a smaller saving we are sure of than ${nameIn(top.model)}`;
+  return `Came ${ordinal(k)} under ${mode}: ${why}.`;
 }
 
 /* The second look, in a few words under a verdict. */
@@ -502,6 +570,9 @@ function candBg(cand, learn) {
 function kindWords(r) {
   const on = r.escalated === null || r.escalated === undefined ? null : inHundred(r.escalated / 100);
   if (r.name.kind === 'cascade') return `A cheaper model, checked${on ? `: ${on} calls sent on` : ''}`;
+  if (r.name.kind === 'router' && r.name.version === 2) {
+    return `Sorted by kind of request${r.name.kinds ? `, ${r.name.kinds} kinds` : ''}${on ? `: ${on} calls to ${String(r.name.fallback).split('/').pop()}` : ''}`;
+  }
   if (r.name.kind === 'router') return `Picked call by call${on ? `: ${on} calls to ${String(r.name.fallback).split('/').pop()}` : ''}`;
   if (r.name.kind === 'cheapest') return 'Your own model, from the provider that sells it most cheaply';
   return 'Your own model, asked to think less';
@@ -523,6 +594,7 @@ const accuracy = (w, cand, switched) => {
 const headline = (w, cand, switched) => {
   if (switched) return `${short(w.model)} is serving ${w.name}`;
   if (cand && cand.name?.kind === 'cascade') return `A checked cheaper model cleared your bar`;
+  if (cand && cand.name?.kind === 'router' && cand.name.version === 2) return 'Sending each kind of request to the setup that does it well cleared your bar';
   if (cand && cand.name?.kind === 'router') return `Picking a model call by call cleared your bar`;
   if (cand && cand.name?.kind === 'lighter') return `${short(w.reference)} thinking less cleared your bar`;
   if (cand && cand.name?.kind === 'cheapest') return `${short(w.reference)} from its cheapest provider cleared your bar`;
@@ -552,6 +624,10 @@ const blurb = (w, cand, switched) => {
   if (cand && cand.name && cand.name.kind !== 'model') {
     const lead = cand.name.kind === 'cascade'
       ? `${short(cand.name.first)} answers each call and a quick check reads the answer; when the check is unsure, ${short(cand.name.fallback)} answers instead.`
+      : cand.name.kind === 'router' && cand.name.version === 2
+        ? `Understudy grouped your own calls into ${cand.name.kinds || 'a few'} kinds of request and tested every setup on each kind. `
+          + `Each call is now matched to its kind before it is sent: ${(cand.name.parts || []).filter((x) => x.kinds > 0).map((x) => x.label).join(', ')} `
+          + `${(cand.name.parts || []).filter((x) => x.kinds > 0).length === 1 ? 'answers the kinds it did' : 'answer the kinds they did'} as well as ${short(cand.name.fallback)}, and ${short(cand.name.fallback)} answers the rest.`
       : cand.name.kind === 'router'
         ? `A small model learned from your own calls sends each one either to ${short(cand.name.first)} or to ${short(cand.name.fallback)}.`
         : cand.name.kind === 'cheapest'

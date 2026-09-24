@@ -72,6 +72,20 @@
 .hwdg .hwbar.o { fill: var(--ok); }
 .hwdg .hwbar.x { fill: var(--bad); }
 .hwdg .hwpmk { stroke: var(--brand); stroke-width: 2; stroke-dasharray: 4 4; }
+/* How models are routed (screens/legal/HowRouting.jsx): setups as dots that pass or fail, a cross for a
+   failed second look, the range a background check narrows, and red arrows for the ways back. */
+.hwdg .hwar.x { stroke: var(--bad); stroke-width: 1.8; }
+.hwdg .hwdot { fill: var(--raise); stroke: var(--line-strong); stroke-width: 1.5; }
+.hwdg .hwdot.o { fill: var(--ok); stroke: var(--ok); }
+.hwdg .hwdot.x { fill: var(--raise); stroke: var(--bad); stroke-width: 2; }
+.hwdg .hwdot.w { fill: var(--warn); stroke: var(--warn); }
+.hwdg .hwxs { stroke: var(--bad); stroke-width: 2.6; stroke-linecap: round; }
+.hwdg .hwband { fill: var(--brand); opacity: 0.2; }
+.hwlist { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+.hwlist li { font-size: 16px; line-height: 1.6; color: var(--ink); }
+.hwlist b { color: var(--ink); font-weight: 600; }
+/* a model's name, kept on one line: a break after the hyphen in gpt-5.4 read as two words */
+.hwnw { white-space: nowrap; }
 .hwdg a { cursor: pointer; }
 .hwdg a:hover .hwbx, .hwdg a:focus-visible .hwbx { stroke: var(--brand); stroke-width: 2.4; }
 

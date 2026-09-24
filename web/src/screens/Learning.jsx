@@ -170,6 +170,8 @@ export default function Learning({ w, d, err: loadErr, onReload, onSwitched }) {
           <div className="optempty">No calls have come through Understudy on this workload yet. Records start with the first one.</div>
         )}
 
+        {d.serving && d.control?.enabled && <ControlGroup c={d.control} yours={ref} />}
+
         <div className="lnext">
           <div className="kk">What happens next</div>
           <ul>{nextSteps(d, w, runners).map((t, i) => <li key={i}>{t}</li>)}</ul>
@@ -241,6 +243,44 @@ export default function Learning({ w, d, err: loadErr, onReload, onSwitched }) {
         {err && <div className="errbox">{err}</div>}
       </div>
     </section>
+  );
+}
+
+/* The control group (src/learn/control.js): a few of what serves' answers a day, also asked of the customer's
+   own model in the background and compared the way a measurement compares them. Said with its numbers: how
+   many were checked, how many were worse or different and how many better, where the true rate most likely
+   is against the bar, and what happens when it is clearly past it. */
+function ControlGroup({ c, yours }) {
+  const p1 = (x) => `${(x * 100).toFixed(1)}%`;
+  const ref = short(yours);
+  const bar = `${c.floorPct.toFixed(1)}%`;
+  const worse = Number.isInteger(c.worse) ? num(c.worse) : Number(c.worse).toFixed(1);
+  const was = (n) => (Number(n) === 1 ? 'was' : 'were');
+  let verdict = '';
+  if (c.enough) {
+    verdict = c.lo * 100 > c.floorPct
+      ? ` That is clearly past your ${bar} bar, so it is switched back to ${ref} at the next hourly look.`
+      : c.hi * 100 <= c.floorPct
+        ? ` Its true rate is most likely between ${p1(c.lo)} and ${p1(c.hi)}, inside your ${bar} bar.`
+        : ` Its true rate is most likely between ${p1(c.lo)} and ${p1(c.hi)}. It is switched back only if the whole of that range goes past your ${bar} bar, so chance alone almost never does it.`;
+  }
+  return (
+    <div className="lnext">
+      <div className="kk">Checked against {ref} in the background</div>
+      <p className="lsmall">
+        About {num(c.perDay)} of this workload&rsquo;s answers a day are also asked of {ref} in the background, and the two
+        answers are compared the way a measurement compares them. Nobody sees the background answer, and it is paid for like a
+        measurement.{' '}
+        {c.n > 0 ? (
+          <>
+            Since the switch, {num(c.n)} of its answers have been checked: {worse} {was(c.worse)} worse or different ({p1(c.rate)})
+            {c.better > 0 ? `, and ${num(c.better)} ${was(c.better)} better` : ''}.{verdict}
+            {!c.enough ? ` Once ${num(c.minChecks)} have been checked, it is switched back by itself if the whole range of its true rate is past your ${bar} bar.` : ''}
+            {c.costUsd > 0 ? ` These checks have cost ${usd(c.costUsd)}.` : ''}
+          </>
+        ) : 'None have been checked since the switch yet.'}
+      </p>
+    </div>
   );
 }
 

@@ -165,9 +165,68 @@ export const config = {
   /* The second look before anything is switched: the cheapest models that cleared (at most this many)
      are measured again on calls they have never seen, on at least EVAL_CONFIRM_MIN calls and on
      EVAL_CONFIRM_MULTIPLE times the fewest a perfect run needs to clear the bar. */
-  EVAL_CONFIRM_TRIES: num('EVAL_CONFIRM_TRIES', 2),
+  EVAL_CONFIRM_TRIES: num('EVAL_CONFIRM_TRIES', 3),
   EVAL_CONFIRM_MIN: num('EVAL_CONFIRM_MIN', 30),
   EVAL_CONFIRM_MULTIPLE: num('EVAL_CONFIRM_MULTIPLE', 2),
+  /* Which of the setups that cleared a workload switches to (src/eval/confidence.js): 'balanced', the
+     biggest saving we can be sure of, with near ties going to the faster; 'cautious', the same among the
+     setups we are at least CAUTIOUS_MIN_CHANCE sure of, with the second look held to a one-sided bound of
+     CAUTIOUS_Z (1.96 is 97.5%) rather than 95%; or 'savings', the cheapest that cleared. A workload and a
+     workspace choose for themselves; this is what they have until they do. */
+  ROUTING_MODE_DEFAULT: ['cautious', 'balanced', 'savings'].includes(str('ROUTING_MODE_DEFAULT', 'balanced'))
+    ? str('ROUTING_MODE_DEFAULT', 'balanced') : 'balanced',
+  CAUTIOUS_MIN_CHANCE: num('CAUTIOUS_MIN_CHANCE', 0.99),
+  CAUTIOUS_Z: num('CAUTIOUS_Z', 1.96),
+  /* Judging a difference three ways (src/eval/judge.js): where a candidate's written answer differs from
+     the customer's model's only in wording or in what it includes, Jev is asked, in both orders, whether it
+     serves the person worse, as well or better. It is forgiven only when both readings put the chance the
+     customer's answer is better under THREE_WAY_FORGIVE_MAX, and counted better when both put the chance
+     it is better at THREE_WAY_BETTER_MIN or more. Facts, figures and decisions are never forgiven. */
+  EVAL_THREE_WAY: bool('EVAL_THREE_WAY', true),
+  THREE_WAY_FORGIVE_MAX: num('THREE_WAY_FORGIVE_MAX', 0.3),
+  THREE_WAY_BETTER_MIN: num('THREE_WAY_BETTER_MIN', 0.6),
+  /* Routing call by call by the kind of request (src/learn/kinds.js): the workload's calls are grouped
+     into at most ROUTER_KINDS_MAX kinds of at least ROUTER_KIND_MIN_CALLS calls each, told apart well
+     enough (a silhouette of at least ROUTER_KINDS_MIN_SILHOUETTE), and each kind goes to the cheapest
+     setup that does it well enough, or to the customer's own model. The router as a whole has to clear
+     the pass mark on calls it did not learn from, and save at least ROUTER_MIN_EXTRA_SAVING more than the
+     best single setup that cleared, or it is not worth the extra moving part. And the kinds have to matter:
+     the calls it sends to cheaper setups must have had clearly fewer worse answers than those setups give on
+     calls taken at random, at least ROUTER_KIND_LIFT_Z spreads fewer (one-sided, 1.645 is 95% sure), or it
+     only mixes a worse model into part of the traffic and passes by diluting its mistakes. */
+  ROUTER_V2: bool('ROUTER_V2', true),
+  ROUTER_KIND_LIFT_Z: num('ROUTER_KIND_LIFT_Z', 1.645),
+  ROUTER_KINDS_MAX: num('ROUTER_KINDS_MAX', 4),
+  ROUTER_KIND_MIN_CALLS: num('ROUTER_KIND_MIN_CALLS', 8),
+  ROUTER_KINDS_MIN_SILHOUETTE: num('ROUTER_KINDS_MIN_SILHOUETTE', 0.1),
+  ROUTER_KIND_MARGIN: num('ROUTER_KIND_MARGIN', 0.8),
+  ROUTER_KIND_SHRINK: num('ROUTER_KIND_SHRINK', 2),
+  /* How the router's table is chosen among the ways of giving kinds to setups (src/learn/kinds.js): the
+     chance each clears the looks it has left is read from each setup's own record over the kinds it is given,
+     pulled towards how that setup does overall with the weight of ROUTER_KIND_PULL calls, plus
+     ROUTER_KIND_PRIOR of a worse answer and of an as-good one. Both are 0: in the simulations in
+     src/eval/harness.js (routerSim, scripts/harness.mjs), any pull or allowance made every setup a table uses
+     look riskier, so tables that split the work were passed over for ones that saved less, and nothing it
+     guarded against got through without them, because the looks themselves turn a lucky table down. */
+  ROUTER_KIND_PULL: num('ROUTER_KIND_PULL', 0),
+  ROUTER_KIND_PRIOR: num('ROUTER_KIND_PRIOR', 0),
+  ROUTER_MIN_EXTRA_SAVING: num('ROUTER_MIN_EXTRA_SAVING', 0.05),
+  // the most setups a router chooses between, cheapest first, besides the customer's own model
+  ROUTER_OPTIONS_MAX: num('ROUTER_OPTIONS_MAX', 4),
+  /* A cascade is only as good as its check: one whose check lets through more than this share of the cheap
+     model's wrong answers it was shown (with at least five to judge by) does not clear, whatever the
+     average says. */
+  CASCADE_MIN_CATCH: num('CASCADE_MIN_CATCH', 0.8),
+  /* The control group (src/learn/control.js): after a switch, about CONTROL_PER_DAY answers a day (never
+     more than CONTROL_MAX_PER_DAY) are also asked of the customer's own model in the background, and the
+     served answer is scored against it the way a measurement scores a candidate. Once there are at least
+     CONTROL_MIN_CHECKS, a setup whose rate of worse or different answers is clearly past the pass mark, at
+     every hourly look (a confidence sequence), is switched back. Paid for as optimizing. */
+  CONTROL_ENABLED: bool('CONTROL_ENABLED', true),
+  CONTROL_PER_DAY: num('CONTROL_PER_DAY', 20),
+  CONTROL_MAX_PER_DAY: num('CONTROL_MAX_PER_DAY', 40),
+  CONTROL_MIN_CHECKS: num('CONTROL_MIN_CHECKS', 30),
+  CONTROL_WINDOW_DAYS: num('CONTROL_WINDOW_DAYS', 30),
   /* Written work with no one right answer is held to "at least as good" when it cannot be held to
      "the same answer". */
   EVAL_QUALITY_YARDSTICK: bool('EVAL_QUALITY_YARDSTICK', true),

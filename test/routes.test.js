@@ -16,6 +16,15 @@ test('how it works has an address of its own, readable without an account', () =
   assert.equal(titleFor('how'), 'How it works, Understudy');
 });
 
+test('how models are routed has an address of its own, readable without an account', () => {
+  assert.deepEqual(parse('/how-models-are-routed'), { screen: 'routing', openId: null });
+  assert.deepEqual(parse('/how-models-are-routed/'), { screen: 'routing', openId: null }, 'a trailing slash is the same page');
+  assert.equal(href('routing'), '/how-models-are-routed');
+  assert.equal(href('routing', null, 'second-look'), '/how-models-are-routed#second-look', 'a part of it can be linked to');
+  assert.ok(PUBLIC.has('routing'), 'it needs no account, so it never sends anybody to sign in');
+  assert.equal(titleFor('routing'), 'How models are routed, Understudy');
+});
+
 test('every address leads back to its own screen, and every public page has one', () => {
   for (const r of ROUTES) assert.equal(parse(r.path).screen, r.screen, r.path);
   for (const s of PUBLIC) assert.ok(ROUTES.some((r) => r.screen === s), `${s} has an address`);

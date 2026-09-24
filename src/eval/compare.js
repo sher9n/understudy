@@ -205,18 +205,21 @@ export function callsToClear(floorPct, z = Z95) {
  * small margin. Bounding the mean as if every score were a yes or no read a candidate that only
  * ever differs slightly (one JSON field wrong on a few calls) as far more uncertain than it is.
  */
-export function verdictWith(scores, floorPct, { reviewBand = 1.25 } = {}) {
+export function verdictWith(scores, floorPct, { reviewBand = 1.25, z = Z95 } = {}) {
+  /* `z` is how sure the bound is: 1.6449 is one-sided 95%, the default; a cautious workload's second
+     look is held to 1.96, one-sided 97.5%, the convention for showing a new treatment is not worse. */
+  const zz = Number.isFinite(Number(z)) && Number(z) > 0 ? Number(z) : Z95;
   const n = scores.length;
   const gap = n ? (scores.reduce((a, b) => a + b, 0) / n) * 100 : 100;
   const differed = scores.filter((x) => x > 0);
   const k = differed.length;
-  const share = wilson(n ? k / n : 0, n);
+  const share = wilson(n ? k / n : 0, n, zz);
   let sevLo = 1;
   let sevHi = 1;
   if (k) {
     const mean = differed.reduce((a, b) => a + b, 0) / k;
     const sd = Math.sqrt(differed.reduce((a, b) => a + (b - mean) ** 2, 0) / k);
-    const margin = (Z95 * Math.max(sd, 0.1)) / Math.sqrt(k);
+    const margin = (zz * Math.max(sd, 0.1)) / Math.sqrt(k);
     sevLo = Math.max(0, mean - margin);
     sevHi = Math.min(1, mean + margin);
   }
@@ -224,8 +227,8 @@ export function verdictWith(scores, floorPct, { reviewBand = 1.25 } = {}) {
   const hi = share.hi * sevHi;
   const loPct = lo * 100;
   const hiPct = hi * 100;
-  if (n === 0 || wilson(0, n).hi * 100 > floorPct) {
-    return { verdict: 'insufficient', gap, lo: loPct, hi: hiPct, need: callsToClear(floorPct) };
+  if (n === 0 || wilson(0, n, zz).hi * 100 > floorPct) {
+    return { verdict: 'insufficient', gap, lo: loPct, hi: hiPct, need: callsToClear(floorPct, zz) };
   }
   if (hiPct <= floorPct) return { verdict: 'cleared', gap, lo: loPct, hi: hiPct };
   if (loPct > floorPct * reviewBand) return { verdict: 'missed', gap, lo: loPct, hi: hiPct };

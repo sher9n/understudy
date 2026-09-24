@@ -40,7 +40,7 @@ const Arrow = ({ label }) => (
  * `sentOn` is the share of calls that went the long way, from live calls when there are any and
  * from the measurement otherwise; `sentOnFrom` says which.
  */
-export function ServingFlow({ kind, first, fallback, reference, sentOn = null, sentOnFrom = null, experiments = null }) {
+export function ServingFlow({ kind, first, fallback, reference, sentOn = null, sentOnFrom = null, experiments = null, parts = null, yours = null }) {
   const long = sentOn === null ? null : Math.max(0, Math.min(1, sentOn));
   const from = sentOnFrom === 'live' ? 'of this week’s calls' : sentOnFrom === 'switch' ? 'of the calls since the switch'
     : sentOnFrom === 'measured' ? 'from the measurement' : '';
@@ -63,6 +63,35 @@ export function ServingFlow({ kind, first, fallback, reference, sentOn = null, s
           <div className="fbranch">
             <Arrow label={long === null ? 'unsure' : `${inHundred(long)} unsure`} />
             <Node eyebrow="Answers instead" title={short(fallback)} sub={fallback === reference ? 'your own model' : null} />
+            <Arrow />
+            {answer}
+          </div>
+        </div>
+      </>
+    );
+  } else if (kind === 'router' && Array.isArray(parts) && parts.length) {
+    /* A router by kind of request: each kind it learned goes to one setup, and anything else to the
+       customer's own model. The shares are the kinds' shares of the measured calls. */
+    const used = parts.filter((x) => x.kinds > 0);
+    const kinds = used.reduce((a, x) => a + x.kinds, 0) + (yours?.kinds || 0);
+    words = `Each call is matched, before it is sent, to one of ${kinds} kinds of request learned from your own calls. `
+      + `${used.map((x) => `${x.label} answers ${x.kinds === 1 ? 'one kind' : `${x.kinds} kinds`}`).join(', ')}, `
+      + `and ${short(fallback)} answers ${yours?.kinds ? `${yours.kinds === 1 ? 'one kind' : `${yours.kinds} kinds`} and ` : ''}anything unlike what it learned from. Nothing is checked afterwards, so no call waits twice.`;
+    body = (
+      <>
+        <Node eyebrow="Reads the call first" title="What kind is it?" sub={`${kinds} kinds, learned from your calls`} tone="fn-check" />
+        <div className="ffork">
+          {used.map((x) => (
+            <div className="fbranch" key={x.model}>
+              <Arrow label={x.share === null || x.share === undefined ? `${x.kinds} ${x.kinds === 1 ? 'kind' : 'kinds'}` : `${inHundred(x.share)} calls`} />
+              <Node eyebrow="Answers" title={x.label} sub={`${x.kinds} ${x.kinds === 1 ? 'kind' : 'kinds'} of request`} tone="fn-brand" />
+              <Arrow />
+              {answer}
+            </div>
+          ))}
+          <div className="fbranch">
+            <Arrow label={long === null ? 'the rest' : `${inHundred(long)} calls`} />
+            <Node eyebrow="Answers" title={short(fallback)} sub={fallback === reference ? 'your own model, for the rest' : 'the rest'} />
             <Arrow />
             {answer}
           </div>

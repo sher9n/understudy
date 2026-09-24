@@ -411,6 +411,9 @@ test('answers the customer\'s own model gave, or gave as the control of a switch
 
 test('a model the second look never reached is not read as confirmed', async () => {
   luckyAfter = 120;
+  // two second looks, so the third model that cleared is one they never reach
+  const tries = config.EVAL_CONFIRM_TRIES;
+  config.EVAL_CONFIRM_TRIES = 2;
   try {
     const { workload } = await seed({ n: 400, enabled: ['vendor/lucky-a', 'vendor/lucky-b', 'vendor/steady-small'] });
     asks.set('vendor/lucky-a', 0);
@@ -438,6 +441,7 @@ test('a model the second look never reached is not read as confirmed', async () 
     assert.equal(kept, run.sample_size + a.confirm_runs, `${kept} calls kept for ${run.sample_size} + ${a.confirm_runs}`);
   } finally {
     luckyAfter = 100;
+    config.EVAL_CONFIRM_TRIES = tries;
   }
 });
 

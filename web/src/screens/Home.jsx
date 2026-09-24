@@ -9,9 +9,10 @@ import html from './home.html?raw';
    are reading it. */
 const SAMPLE_BASE = 'https://api.understudy.dev/v1';
 
-/* The pages the header's "How it works" and the footer's small row of links lead to. How it works
-   is a page of its own: the four steps on this page are the summary, and that page tells it in full. */
-const LINKS = ['how', 'pricing', 'terms', 'privacy', 'contact'];
+/* The pages the header's "How it works" and "Model routing" and the footer's small row of links lead
+   to. How it works is a page of its own: the four steps on this page are the summary, and that page tells
+   it in full; how the setup that answers is chosen, and made sure of, is told on a page of its own too. */
+const LINKS = ['how', 'routing', 'pricing', 'terms', 'privacy', 'contact'];
 
 /* Straight from the design board, with its own header and footer. The live parts are the calls
    to action, the theme switch, and the links to how it works, pricing and the small print. */

@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { verdictWith, wilson, callsToClear } = await import('../src/eval/compare.js');
-const { verdictSim, learnRates } = await import('../src/eval/harness.js');
+const { verdictSim, learnRates, choiceSim, routerSim, REQUEST_KINDS } = await import('../src/eval/harness.js');
 const { decide, zSeq, diffRange } = await import('../src/learn/decide.js');
 const { posterior, expectedLoss, zDiff } = await import('../src/learn/bandit.js');
 const { crossFit, simulateCascade, bestOf } = await import('../src/learn/simulate.js');
@@ -124,4 +124,66 @@ test('cross-fitting reports a held-out gap, not the one the threshold was tuned 
   assert.equal(cf.heldOut.scores.length, 40, 'every call scored once, by a threshold chosen without it');
   assert.ok(cf.heldOut.gap >= cf.inSample.gap - 1e-9, `held-out ${cf.heldOut.gap} is never rosier than in-sample ${cf.inSample.gap}`);
   assert.ok([0.5, 0.6, 0.7, 0.8, 0.9].includes(cf.threshold));
+});
+
+/* Which setup is switched to (src/eval/confidence.js), and the second look that stands behind it. The
+   numbers the How models are routed page quotes come from these, with more workloads. */
+const between = (rng, a, b) => a + (b - a) * rng();
+
+test('of two setups that save about the same, balanced switches to the faster, for under a point of saving', () => {
+  const setups = () => [
+    { id: 'slow', rate: 0.001, ratio: 0.2, p50: 1.8 }, { id: 'fast', rate: 0.001, ratio: 0.206, p50: 0.5 },
+    { id: 'bad', rate: 0.06, ratio: 0.05, p50: 0.6 }, { id: 'dear', rate: 0.005, ratio: 0.4, p50: 0.9 },
+  ];
+  const old = choiceSim({ setups, mode: 'savings', tries: 2, trials: 1500, seed: 11, best: () => 'fast' });
+  const bal = choiceSim({ setups, mode: 'balanced', tries: 3, trials: 1500, seed: 11, best: () => 'fast' });
+  assert.ok(bal.right >= 0.75, `balanced picked the faster ${bal.right}`);
+  assert.ok(old.right <= 0.2, `cheapest first picked it ${old.right}`);
+  assert.ok(old.saving - bal.saving < 0.01, `and gave up ${((old.saving - bal.saving) * 100).toFixed(2)} points of saving`);
+  assert.ok(bal.speed < old.speed / 2, `for answers ${old.speed / bal.speed}x as fast`);
+});
+
+test('the second look stops the setup that passed by luck, in every routing priority', () => {
+  // ten setups each a quarter past the pass mark, and one that is well inside it but dearer
+  const setups = (rng) => [
+    ...Array.from({ length: 10 }, (_, i) => ({ id: `edge${i}`, rate: 0.0375, ratio: between(rng, 0.03, 0.15), p50: 1 })),
+    { id: 'good', rate: 0.002, ratio: 0.3, p50: 1 },
+  ];
+  const once = choiceSim({ setups, mode: 'savings', secondLook: false, trials: 1500, seed: 11 });
+  assert.ok(once.broken >= 0.05, `tested once, a lucky one was switched to ${once.broken}`);
+  for (const mode of ['savings', 'balanced', 'cautious']) {
+    const r = choiceSim({ setups, mode, tries: 3, trials: 1500, seed: 11 });
+    assert.ok(r.broken <= 0.002, `${mode}: switched past the mark ${r.broken}`);
+  }
+});
+
+test('cautious switches less often than balanced, and never to more that break the promise', () => {
+  const setups = (rng) => Array.from({ length: 8 }, (_, i) => ({ id: `m${i}`, rate: between(rng, 0, 0.06), ratio: between(rng, 0.03, 0.6), p50: between(rng, 0.3, 2) }));
+  const bal = choiceSim({ setups, mode: 'balanced', trials: 1500, seed: 11 });
+  const cau = choiceSim({ setups, mode: 'cautious', trials: 1500, seed: 11 });
+  assert.ok(cau.switched < bal.switched, `cautious ${cau.switched} against balanced ${bal.switched}`);
+  assert.ok(cau.broken <= bal.broken, `and breaks the promise no more often: ${cau.broken} against ${bal.broken}`);
+});
+
+/* Routing by kind of request (src/learn/kinds.js): learned, cross-fitted, looked at twice, and judged on the
+   truth. A router whose kinds matter is found; one that would only hide a worse model's mistakes is not. */
+test('a router by kind of request is found where the kinds matter, and saves most of the cost without breaking the promise', () => {
+  const K = REQUEST_KINDS;
+  const r = routerSim({ kinds: [{ make: K.order, share: 0.6 }, { make: K.refund, share: 0.4 }],
+    options: [{ ratio: 0.05, rates: [0, 0.35] }, { ratio: 0.3, rates: [0, 0] }], trials: 16, seed: 31 });
+  assert.ok(r.withCheck.switched >= 0.7, `switched to ${r.withCheck.switched}`);
+  assert.equal(r.withCheck.broken, 0);
+  assert.ok(r.withCheck.saving > 0.75, `saving ${r.withCheck.saving}`);
+  assert.ok(r.kindsZ > 3, `its kinds mattered by ${r.kindsZ} spreads`);
+});
+
+test('a router whose kinds mean nothing is never switched to, and requests that all read alike make no router', () => {
+  const K = REQUEST_KINDS;
+  // a cheap model a little worse than the mark on every kind alike: routing would only dilute its mistakes
+  const spurious = routerSim({ floorPct: 5, refNoise: 0.03, kinds: [{ make: K.order, share: 0.5 }, { make: K.refund, share: 0.5 }],
+    options: [{ ratio: 0.05, rates: [0.07, 0.07] }], trials: 16, seed: 31 });
+  assert.equal(spurious.withCheck.broken, 0, 'no router past the mark');
+  assert.equal(spurious.withCheck.diluted, 0, 'and none that hides a worse model among good answers');
+  const alike = routerSim({ kinds: [{ make: K.document, share: 1 }], options: [{ ratio: 0.05, rates: [0.02] }], trials: 8, seed: 31 });
+  assert.equal(alike.formed, 0, 'every request is "document #N": one kind, so no router');
 });

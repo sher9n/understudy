@@ -2,7 +2,27 @@ import { chat, UpstreamError } from '../openrouter.js';
 import { jevUsable } from '../jev.js';
 import { checkAnswer, liveCheckUsable } from './check.js';
 import { featuresOf, predict } from './router.js';
+import { featuresRaw, routeOf, ROUTER_VERSION } from './kinds.js';
 import { costOf } from './cost.js';
+
+/**
+ * Which part of a router answers one call, decided before anything is sent: { use: { model, recipe },
+ * escalated, check }. A router by kind of request (version 2) sends each kind to the setup it was
+ * measured to do well enough, and a request unlike any it learned from to the customer's own model; the
+ * older kind picks between one cheap model and the customer's own by a small model of the call.
+ * `escalated` is whether the call went to the customer's own model.
+ */
+export function routeFor(spec, body) {
+  if (Number(spec?.version) === ROUTER_VERSION) {
+    const r = routeOf(spec, featuresRaw(body));
+    const use = r.option < 0 ? spec.strong : spec.options[r.option];
+    return { use: { model: use.model, recipe: use.recipe ?? null }, escalated: r.option < 0,
+      check: { by: 'router', kind: r.kind, sim: Math.round((Number(r.sim) || 0) * 1000) / 1000, why: r.why } };
+  }
+  const p = predict(spec, featuresOf(body));
+  const use = p >= spec.threshold ? spec.cheap : spec.strong;
+  return { use, escalated: use === spec.strong, check: { by: 'router', p: Math.round(p * 1000) / 1000 } };
+}
 
 /* Serving one call with a strategy.
  *
@@ -51,12 +71,12 @@ export async function serveWith(spec, given, { shape, scope = null, check = chec
   delete body.stream;
   delete body.stream_options;
   if (spec.kind === 'router') {
-    const p = predict(spec, featuresOf(body));
-    const use = p >= spec.threshold ? spec.cheap : spec.strong;
+    const pick = routeFor(spec, body);
+    const { use } = pick;
     const r = await chat(body, use.model, { ...policy, recipe: use.recipe ?? null, zdr });
     const c = await costOf(r.json, use.model, body);
     return { json: r.json, served: use.model, recipe: use.recipe ?? null, cost: c.cost, costEstimated: c.estimated,
-      latencyMs: Date.now() - started, escalated: use === spec.strong, check: { by: 'router', p: Math.round(p * 1000) / 1000 } };
+      latencyMs: Date.now() - started, escalated: pick.escalated, check: pick.check };
   }
   if (spec.kind === 'cascade') {
     // what the call has cost so far, and whether any of it was estimated

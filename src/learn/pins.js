@@ -31,7 +31,7 @@ const short = (m) => String(m || '').split('/').pop();
 function pinsOf(spec) {
   if (!spec) return [];
   const parts = spec.kind === 'cascade' ? [spec.first, spec.fallback]
-    : spec.kind === 'router' ? [spec.cheap, spec.strong] : [spec];
+    : spec.kind === 'router' ? [spec.cheap, spec.strong, ...(Array.isArray(spec.options) ? spec.options : [])] : [spec];
   return parts.filter((p) => p?.model && Array.isArray(p?.recipe?.providers) && p.recipe.providers.length)
     .map((p) => ({ model: p.model, providers: p.recipe.providers.map(String) }));
 }

@@ -16,8 +16,11 @@ import { reportCallFailure } from '../alerts.js';
 import { jevUsable } from '../jev.js';
 import { structureOf, jevCheck, requestText, answerText as checkedText } from '../learn/check.js';
 import { simulateCascade, simulateRouter, bestOf, crossFit } from '../learn/simulate.js';
-import { featuresOf, train, predict, leaveOneOutGently } from '../learn/router.js';
-import { labelOf, armById, leadModel } from '../learn/arms.js';
+import { featuresOf, predict } from '../learn/router.js';
+import { featuresRaw, crossFitRouter, simulateRoutes, routeOf, ROUTER_VERSION } from '../learn/kinds.js';
+import { chanceWithin, safeSaving, rankCleared, routingModeOf } from './confidence.js';
+import { askOf } from './ask.js';
+import { labelOf, armById, leadModel, nameOfResult } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
 import { markTrying } from '../learn/explore.js';
 import { scheduleNext, deferAutomatic, deferAfterStop, deferAfterFailure, cadenceOf } from './schedule.js';
@@ -66,8 +69,6 @@ const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0)
 // a candidate's own name in a run: the model, or the customer's model thinking less
 const keyOf = (cand) => cand.key || cand.model;
 const short = (m) => String(m || '').split('/').pop();
-// strategies are only worked out with enough calls to learn from, and a router needs more than a cascade
-const ROUTER_MIN_CALLS = 40;
 
 /* The fewest of n calls past the slow end that chance would give less than one time in twenty,
    when one call in ten runs past it anyway. Never fewer than two: one slow call is never enough. */
@@ -667,7 +668,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     } else {
       const d = disagreement(p.a, p.b, shape);
       if (d === null) {
-        const r = await proseScore(p.body, p.a, p.b, shape, workload.workspace_id);
+        const r = await proseScore(p.body, p.a, p.b, shape, workload.workspace_id, { subject: 'b' });
         addJudge(r.cost);
         if (r.transient) { judgeMisses += 1; return; }
         if (r.judgedBy) judgedWith.add(r.judgedBy);
@@ -827,9 +828,16 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const servingArmNow = workload.routed_arm_id ? await armById(workload.routed_arm_id) : null;
   const servingKind = ['cascade', 'router'].includes(servingArmNow?.spec?.kind) ? servingArmNow.spec.kind : null;
   const leadPart = servingKind ? leadModel(servingArmNow.spec) : null;
-  const leadKey = leadPart ? (leadPart.model === reference && leadPart.recipe?.reasoning ? `${reference}#lighter`
-    : leadPart.model === reference && leadPart.recipe?.pinned ? `${reference}#cheapest` : leadPart.model) : null;
-  const serves = (cand) => !!servingNow && (keyOf(cand) === servingNow || (leadKey !== null && keyOf(cand) === leadKey));
+  // a part of a strategy by the name its own result carries: the model, or the customer's own asked another way
+  const partKey = (part) => (part.model === reference && part.recipe?.reasoning ? `${reference}#lighter`
+    : part.model === reference && part.recipe?.pinned ? `${reference}#cheapest` : part.model);
+  const leadKey = leadPart ? partKey(leadPart) : null;
+  /* A router by kinds of request serving now is re-checked as it is (see frozenKindsRouter), so every
+     setup it sends calls to answers every call afresh, the way what serves always is. */
+  const servingKinds = servingKind === 'router' && Number(servingArmNow?.spec?.version) === ROUTER_VERSION ? servingArmNow.spec : null;
+  const servingParts = new Map(servingKinds ? servingKinds.options.map((o) => [o.key || partKey(o), o]) : []);
+  const serves = (cand) => !!servingNow && (keyOf(cand) === servingNow || (leadKey !== null && keyOf(cand) === leadKey)
+    || servingParts.has(keyOf(cand)));
   const isLighter = (cand) => String(cand.key || '').endsWith('#lighter');
   let reasked = false;
   let droppedLighter = false;
@@ -851,7 +859,14 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     }
   }
   for (const cand of queue) {
-    if (serves(cand)) cand.recipe = served;
+    // each part of a router is asked the way the router asks it; anything else serving, the way it is served
+    if (servingParts.has(keyOf(cand))) cand.recipe = servingParts.get(keyOf(cand)).recipe ?? null;
+    else if (serves(cand)) cand.recipe = served;
+  }
+  for (const [k, o] of servingParts) {
+    if (queue.some((q) => keyOf(q) === k)) continue;
+    queue.unshift({ model: o.model, key: k === o.model ? undefined : k, recipe: o.recipe ?? null, label: null,
+      chance: null, savingShare: null, parts: null, family: null, note: 'part of the router serving now' });
   }
   if (reasked || droppedLighter) {
     planRecord.refThinks = { planned: plan.refThinks, measured: refThinks };
@@ -894,6 +909,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
 
   const refMonthly = await monthlyOn(workloadId, reference);
   const reviewBand = config.EVAL_REVIEW_BAND;
+  /* The workload's routing priority (see src/eval/confidence.js): which of the setups that clear it
+     switches to, and how strict the second look is. A cautious workload's second look is held to a
+     one-sided 97.5% bound rather than 95%. */
+  const workspaceRow = await db.prepare('SELECT default_routing_mode FROM workspaces WHERE id = ?').get(workload.workspace_id);
+  const routingMode = routingModeOf(workload, workspaceRow, config.ROUTING_MODE_DEFAULT);
+  const confirmZ = routingMode === 'cautious' ? config.CAUTIOUS_Z : undefined;
   const results = [];
   let halt = null;
 
@@ -906,6 +927,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const st = resume || {
       runs: 0, counted: 0, sum: 0, failures: 0, errors: 0, errorText: null, lat: [], ttft: [], reused: 0,
       candCost: 0, refCost: 0, kinds: new Map(), pairs: [], stopped: null, calls: [],
+      // on how many of the calls it was scored on its answer was the better one (see judgeBetter)
+      better: 0,
       // which providers answered it, by name, and how often
       providers: new Map(),
       // the next of the calls to put to it
@@ -936,6 +959,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       if (r.reused) st.reused += 1;
       st.runs += 1;
       let score = 1;
+      // how much of this call's answer was the better one: 1, a share against two answers, or 0
+      let better = 0;
       let judged = null;
       let failure = null;
       let counted = false;
@@ -989,6 +1014,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
               { scope: workload.workspace_id });
           addJudge(judged.cost);
           score = judged.score;
+          better = yardstick === 'quality' ? (judged.detail?.candBetter ? 1 : 0)
+            : Math.max(0, Math.min(1, Number(judged.detail?.better) || 0));
           if (judged.judgedBy) judgedWith.add(judged.judgedBy);
           // a judgement that did not come back says nothing about this model's answer either
           if (judged.transient) { scored = false; judgeMisses += 1; }
@@ -999,29 +1026,32 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
           /* A deciding field that differs makes the call different; written fields that differ only in
              wording are read for meaning, never counted as a difference on their own. */
           const both = [];
+          const betters = [];
           let missed = false;
           for (const ref of [p.a, p.b].filter((x) => x.ok)) {
             const d = disagreement(got, ref, shape);
-            if (d !== null) { both.push(d); continue; }
+            if (d !== null) { both.push(d); betters.push(0); continue; }
             const r = await proseScore(p.body, got, ref, shape, workload.workspace_id);
             addJudge(r.cost);
             if (r.transient) { missed = true; continue; }
             if (r.judgedBy) judgedWith.add(r.judgedBy);
             both.push(r.score);
+            betters.push(r.better || 0);
           }
           // a written field nobody could read says nothing either way, unless a deciding one already differed
           if (!both.length && missed) { scored = false; judgeMisses += 1; score = 0; } else {
             score = both.length ? both.reduce((x, y) => x + y, 0) / both.length : 1;
+            better = betters.length ? betters.reduce((x, y) => x + y, 0) / betters.length : 0;
           }
         }
         st.pairs.push({ cand: got, ref: p.a.ok ? p.a : p.b, score, i });
       }
       const kind = score > 0 && scored ? (judged?.detail?.kind || failure || null) : null;
       if (kind) st.kinds.set(kind, (st.kinds.get(kind) || 0) + 1);
-      if (scored) { st.sum += score; st.counted += 1; }
+      if (scored) { st.sum += score; st.counted += 1; st.better += better; }
       // everything about this call a strategy built on this model would need to be worked out later
       st.calls.push({
-        i, ok: !!r.ok && !failure, answered: !!r.ok, transient: !r.ok && !!r.transient, scored, score,
+        i, ok: !!r.ok && !failure, answered: !!r.ok, transient: !r.ok && !!r.transient, scored, score, better,
         json: r.ok ? r.json : null, cost: r.ok ? paid(r) : 0, latency: r.latencyMs ?? null, ttft: r.ttftMs ?? r.latencyMs ?? null,
       });
       await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure });
@@ -1055,7 +1085,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     /* The verdict carries how sure the sample can make anybody (see verdictWith): cleared only when
        even the top of its range is inside the bar, and "not enough calls" when this many calls could
        never show it, whatever the answers. */
-    const read = verdictWith(st.calls.filter((c) => c.scored).map((c) => c.score), floor, { reviewBand });
+    const scoredScores = st.calls.filter((c) => c.scored).map((c) => c.score);
+    const read = verdictWith(scoredScores, floor, { reviewBand });
+    // how sure these calls make us that its true rate of worse or different answers is inside the bar
+    const chance = scoredScores.length ? chanceWithin(scoredScores, floor) : null;
     let verdict;
     if (st.stopped === 'refused' || st.stopped === 'errors') verdict = 'failed';
     else if (st.stopped === 'speed') verdict = 'slower';
@@ -1105,6 +1138,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       escalated_pct: null,
       // where the true gap most likely is, and how many calls it would take to clear this bar
       gap_lo: round8(read.lo), gap_hi: round8(read.hi), calls_needed: read.need ?? null,
+      // how sure we are it keeps the promise, what it saves times that, and how often its answer was the better one
+      chance: chance === null ? null : round8(chance),
+      safe_saving: ratio === null || chance === null ? null : round8(safeSaving(ratio, chance, config.ROUTING_FEE_PCT)),
+      better_pct: st.counted ? round8((st.better / st.counted) * 100) : null,
     };
     await insertResult(row);
     return finished;
@@ -1138,27 +1175,114 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
            ra.json ? JSON.stringify(ra.json) : null, rb.json ? JSON.stringify(rb.json) : null);
   };
   let lookCalls = null;
-  // each looked-at call's two answers from the customer's model, and how far they were from each other
+  // each looked-at call's two answers from the customer's model, how far they were from each other, and how long it took
   const lookRefs = new Map();
-  const confirmOn = async (r, freshCalls) => {
-    const { cand } = stats.get(r.model_id) || {};
-    if (!cand) return { verdict: 'unconfirmed', runs: 0, note: 'there was nothing to look again with' };
-    const least = callsToClear(floor);
+
+  /* One answer scored against the customer's model's answers to the same call, exactly as the first look
+     scores a candidate's. Answers { score: null when it says nothing, judged: paid judgements }. */
+  const scoreReply = async (body, got, refs) => {
+    if (!refs.length || !got) return { score: null, judged: 0 };
+    if (!got.ok) return { score: got.transient ? null : 1, judged: 0 };
+    const g = extract(got.json, shape);
+    if (!g.ok) return { score: 1, judged: 0 };
+    let judged = 0;
+    if (shape === 'free_text') {
+      const j = yardstick === 'quality'
+        ? await judgeQuality(askOf(body), g.value, refs[0].value, { scope: workload.workspace_id })
+        : await judgeCandidate(askOf(body), g.value, refs[0].value, refs[1]?.value ?? null, { scope: workload.workspace_id });
+      addJudge(j.cost);
+      if (j.cost > 0) judged += 1;
+      return { score: j.transient || j.score === null ? null : j.score, judged };
+    }
+    const each = [];
+    for (const ref of refs) {
+      const d = disagreement(g, ref, shape);
+      if (d !== null) { each.push(d); continue; }
+      const pr = await proseScore(body, g, ref, shape, workload.workspace_id);
+      addJudge(pr.cost);
+      if (pr.cost > 0) judged += 1;
+      if (!pr.transient) each.push(pr.score);
+    }
+    return { score: each.length ? each.reduce((a, b) => a + b, 0) / each.length : null, judged };
+  };
+
+  /* The customer's model on one fresh call, asked once whatever looks at it: its two answers, how far they
+     were from each other, and how long it took (a recorded answer carries no time, so the replay's, or the
+     bar's typical time). Answers { seen, sent } or { account }. */
+  const refsFor = async (c, body) => {
+    const hit = lookRefs.get(c.id);
+    if (hit) return { seen: hit, sent: 0 };
+    let sent = 0;
+    const had = recorded(c);
+    const [ra, rb] = had ? [had, await replayOnce({ body, callId: c.id, model: reference, slot: 1, workload })]
+      : await Promise.all([
+        replayOnce({ body, callId: c.id, model: reference, slot: 0, workload }),
+        replayOnce({ body, callId: c.id, model: reference, slot: 1, workload }),
+      ]);
+    if (had) recordedRefs += 1;
+    note(ra);
+    note(rb);
+    const refHit = [ra, rb].find((x) => x.account);
+    if (refHit) return { account: { ...refHit, model: reference } };
+    await keepLook(c, ra, rb);
+    sent += had ? 1 : 2;
+    const refs = [extract(ra.json, shape), extract(rb.json, shape)].filter((x, k) => [ra, rb][k].ok && x.ok);
+    let noise = null;
+    if (refs.length === 2) {
+      if (shape === 'free_text') {
+        const j = yardstick === 'quality'
+          ? await judgeQuality(askOf(body), refs[1].value, refs[0].value, { scope: workload.workspace_id })
+          : await judgeBarPair(askOf(body), refs[0].value, refs[1].value, { scope: workload.workspace_id });
+        addJudge(j.cost);
+        if (j.cost > 0) sent += 1;
+        if (!j.transient && j.score !== null && j.score !== undefined) noise = j.score;
+      } else {
+        const d = disagreement(refs[0], refs[1], shape);
+        if (d !== null) noise = d;
+        else {
+          const pr = await proseScore(body, refs[0], refs[1], shape, workload.workspace_id, { subject: 'b' });
+          addJudge(pr.cost);
+          if (pr.cost > 0) sent += 1;
+          if (!pr.transient) noise = pr.score;
+        }
+      }
+    }
+    const timed = [ra, rb].find((x) => x.ok && !x.recorded && Number.isFinite(x.latencyMs));
+    const refLatency = timed?.latencyMs ?? refSpeed.latencyP50 ?? null;
+    const seen = { refs, noise, refLatency, refTtft: timed ? (timed.ttftMs ?? timed.latencyMs) : (refSpeed.ttftP50 ?? refLatency) };
+    lookRefs.set(c.id, seen);
+    return { seen, sent };
+  };
+
+  /* The second look, for anything that can be switched to: a model, or a strategy. `answer(c, body, seen)`
+     puts one fresh call to it and answers { score, sent, latency, ttft } or { account }. Held to the bar read
+     from both samples, at the workload's strictness (a cautious workload's is 97.5% rather than 95%), and to
+     the speed rule on these calls too: a second look used to check answers only, so a model that was quick
+     on the first sample and slow on the second went through. */
+  const lookAgain = async (r, freshCalls, { label, answer }) => {
+    const least = callsToClear(floor, confirmZ);
     const from = freshCalls.filter((c) => !seenBefore.has(c.id));
     if (from.length < least) {
       await db.prepare('UPDATE eval_results SET confirm_runs = 0, confirm_verdict = ? WHERE id = ?').run('insufficient', r.id);
+      Object.assign(r, { confirm_runs: 0, confirm_verdict: 'insufficient' });
       return { verdict: 'insufficient', runs: 0,
         note: `there are not yet enough calls it has not seen to look again (${from.length} of the ${least} needed)` };
     }
-    // never thinner than the first look: a second look on fewer calls is a noisier one, not a stricter one
-    const n = Math.min(from.length, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * least), samples.length));
+    /* Never thinner than the first look: a second look on fewer calls is a noisier one, not a stricter one.
+       And sized at the usual strictness whatever this one is held to: a cautious look is stricter by its
+       bound, not by reading more calls. Sized by its own bound it read about 250 calls at a 3% bar rather
+       than 176, which let it clear with two worse answers where the usual look allows one, so a cautious
+       workload switched more often, and in simulation to a setup past its bar more often, than a balanced one. */
+    const n = Math.min(from.length, Math.max(least, config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(floor)), samples.length));
     lookCalls = lookCalls || sampleCalls(from, n, (now() % 99991) + 13);
     const picks = lookCalls;
-    // the calls it will send: the candidate's one, and one or two of the customer's model where they are not in hand
+    // the calls it will send: its own one, and one or two of the customer's model where they are not in hand
     const sends = (c) => (lookRefs.has(c.id) ? 1 : recorded(c) ? 2 : 3);
     confirmLeft = picks.reduce((a, c) => a + sends(c), 0);
     remaining = () => confirmLeft;
     const scores = [];
+    const lat = [];
+    const ttft = [];
     // the customer's own model against itself on these calls too, so the bar is read from both samples
     const freshNoise = [];
     for (const c of picks) {
@@ -1166,81 +1290,16 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       if (await halted()) { halt = 'stopped'; break; }
       confirmLeft = Math.max(0, confirmLeft - sends(c));
       const body = JSON.parse(c.request_json);
-      let judged = 0;
-      let refSent = 0;
-      let seen = lookRefs.get(c.id);
-      if (!seen) {
-        const had = recorded(c);
-        const [ra, rb] = had ? [had, await replayOnce({ body, callId: c.id, model: reference, slot: 1, workload })]
-          : await Promise.all([
-            replayOnce({ body, callId: c.id, model: reference, slot: 0, workload }),
-            replayOnce({ body, callId: c.id, model: reference, slot: 1, workload }),
-          ]);
-        if (had) recordedRefs += 1;
-        note(ra);
-        note(rb);
-        const refHit = [ra, rb].find((x) => x.account);
-        if (refHit) { halt = 'account'; accountHit = { ...refHit, model: reference }; break; }
-        await keepLook(c, ra, rb);
-        refSent = had ? 1 : 2;
-        const refs = [extract(ra.json, shape), extract(rb.json, shape)].filter((x, k) => [ra, rb][k].ok && x.ok);
-        let noise = null;
-        if (refs.length === 2) {
-          if (shape === 'free_text') {
-            const j = yardstick === 'quality'
-              ? await judgeQuality(askOf(body), refs[1].value, refs[0].value, { scope: workload.workspace_id })
-              : await judgeBarPair(askOf(body), refs[0].value, refs[1].value, { scope: workload.workspace_id });
-            addJudge(j.cost);
-            if (j.cost > 0) judged += 1;
-            if (!j.transient && j.score !== null && j.score !== undefined) noise = j.score;
-          } else {
-            const d = disagreement(refs[0], refs[1], shape);
-            if (d !== null) noise = d;
-            else {
-              const pr = await proseScore(body, refs[0], refs[1], shape, workload.workspace_id);
-              addJudge(pr.cost);
-              if (pr.cost > 0) judged += 1;
-              if (!pr.transient) noise = pr.score;
-            }
-          }
-        }
-        seen = { refs, noise };
-        lookRefs.set(c.id, seen);
-      }
-      const { refs } = seen;
+      const got = await refsFor(c, body);
+      if (got.account) { halt = 'account'; accountHit = got.account; break; }
+      const { seen } = got;
       if (seen.noise !== null) freshNoise.push(seen.noise);
-      const got = refs.length ? await replayOnce({ body, callId: c.id, model: cand.model, recipe: cand.recipe, slot: 0, workload }) : null;
-      if (got) note(got);
-      if (got?.account) { halt = 'account'; accountHit = { ...got, model: cand.model }; break; }
-      let score = null;
-      if (!refs.length) score = null;
-      else if (!got.ok) score = got.transient ? null : 1;
-      else {
-        const g = extract(got.json, shape);
-        if (!g.ok) score = 1;
-        else if (shape === 'free_text') {
-          const j = yardstick === 'quality'
-            ? await judgeQuality(askOf(body), g.value, refs[0].value, { scope: workload.workspace_id })
-            : await judgeCandidate(askOf(body), g.value, refs[0].value, refs[1]?.value ?? null, { scope: workload.workspace_id });
-          addJudge(j.cost);
-          if (j.cost > 0) judged += 1;
-          score = j.transient || j.score === null ? null : j.score;
-        } else {
-          const each = [];
-          for (const ref of refs) {
-            const d = disagreement(g, ref, shape);
-            if (d !== null) { each.push(d); continue; }
-            const pr = await proseScore(body, g, ref, shape, workload.workspace_id);
-            addJudge(pr.cost);
-            if (pr.cost > 0) judged += 1;
-            if (!pr.transient) each.push(pr.score);
-          }
-          score = each.length ? each.reduce((a, b) => a + b, 0) / each.length : null;
-        }
-      }
-      if (score !== null) scores.push(score);
-      const sent = refSent + (got ? 1 : 0) + judged;
-      if (await step(sent, `Looking again at ${cand.label || cand.model} on calls it has not seen, ${scores.length} of ${picks.length}`)) {
+      const a = seen.refs.length ? await answer(c, body, seen) : { score: null, sent: 0 };
+      if (a.account) { halt = 'account'; accountHit = a.account; break; }
+      if (a.score !== null && a.score !== undefined) scores.push(a.score);
+      if (Number.isFinite(a.latency)) lat.push(a.latency);
+      if (Number.isFinite(a.ttft)) ttft.push(a.ttft);
+      if (await step(got.sent + (a.sent || 0), `Looking again at ${label} on calls it has not seen, ${scores.length} of ${picks.length}`)) {
         halt = 'stopped';
         break;
       }
@@ -1256,11 +1315,89 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const bar = pooled.length ? floorFrom(mean(pooled) * 100, {
       multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT,
     }) : floor;
-    const v = verdictWith(scores, bar, { reviewBand });
-    const verdict = judgeUnsure && v.verdict === 'cleared' ? 'review' : v.verdict;
-    await db.prepare(`UPDATE eval_results SET confirm_runs = ?, confirm_gap = ?, confirm_hi = ?, confirm_verdict = ?, confirm_floor = ? WHERE id = ?`)
-      .run(scores.length, round8(v.gap), round8(v.hi), verdict, round8(bar), r.id);
-    return { verdict, runs: scores.length, gap: v.gap, hi: v.hi, floor: bar };
+    const v = verdictWith(scores, bar, { reviewBand, z: confirmZ });
+    let verdict = judgeUnsure && v.verdict === 'cleared' ? 'review' : v.verdict;
+    let note = null;
+    if (verdict === 'cleared' && limit && tooSlow({ lat, ttft }, { final: true })) {
+      verdict = 'slower';
+      const xs = metric === 'ttft' ? ttft : lat;
+      note = `on the calls it had not seen it took ${((pct(xs, 0.5) ?? 0) / 1000).toFixed(1)} s typically, more than your speed setting allows`;
+    }
+    await db.prepare(`UPDATE eval_results SET confirm_runs = ?, confirm_gap = ?, confirm_hi = ?, confirm_verdict = ?, confirm_floor = ?,
+                confirm_note = ? WHERE id = ?`)
+      .run(scores.length, round8(v.gap), round8(v.hi), verdict, round8(bar), note, r.id);
+    // kept on the row this run holds too, so what it does next (markTrying, the page) reads the same
+    Object.assign(r, { confirm_runs: scores.length, confirm_gap: round8(v.gap), confirm_hi: round8(v.hi), confirm_verdict: verdict,
+      confirm_floor: round8(bar), confirm_note: note });
+    return { verdict, runs: scores.length, gap: v.gap, hi: v.hi, floor: bar, note };
+  };
+
+  const confirmOn = async (r, freshCalls) => {
+    const { cand } = stats.get(r.model_id) || {};
+    if (!cand) return { verdict: 'unconfirmed', runs: 0, note: 'there was nothing to look again with' };
+    return lookAgain(r, freshCalls, {
+      label: cand.label || cand.model,
+      answer: async (c, body, seen) => {
+        const got = await replayOnce({ body, callId: c.id, model: cand.model, recipe: cand.recipe, slot: 0, workload });
+        note(got);
+        if (got.account) return { account: { ...got, model: cand.model } };
+        const s = await scoreReply(body, got, seen.refs);
+        return { score: s.score, sent: 1 + s.judged, latency: got.ok ? got.latencyMs : null, ttft: got.ok ? (got.ttftMs ?? got.latencyMs) : null };
+      },
+    });
+  };
+
+  /* A strategy's second look, on the same fresh calls as any other: a cascade answers with its cheap model,
+     its check reads the answer, and a doubtful one is sent on to the customer's model; a router picks
+     before anything is sent. It used to have no second look before a switch at all, only its live rollout,
+     so a strategy that was lucky on one sample was switched to on that sample alone. */
+  const confirmStrategyOn = async (r, freshCalls) => {
+    let spec = null;
+    try { spec = JSON.parse(r.arm_json); } catch { spec = null; }
+    if (!spec || !['cascade', 'router'].includes(spec.kind)) return { verdict: 'unconfirmed', runs: 0, note: 'there was nothing to look again with' };
+    const ask = async (part, c, body) => {
+      const got = await replayOnce({ body, callId: c.id, model: part.model, recipe: part.recipe ?? null, slot: 0, workload });
+      note(got);
+      return got;
+    };
+    // what the customer's own model gives the call: as far from its other answer as it is here, as long as it took
+    const own = (seen, before = 0, sent = 0) => ({
+      score: seen.noise ?? noiseMean, sent,
+      latency: before + (seen.refLatency ?? 0), ttft: before + (seen.refTtft ?? seen.refLatency ?? 0),
+    });
+    return lookAgain(r, freshCalls, {
+      label: labelOf(spec, reference),
+      answer: async (c, body, seen) => {
+        if (spec.kind === 'cascade') {
+          const first = await ask(spec.first, c, body);
+          if (first.account) return { account: { ...first, model: spec.first.model } };
+          let pass = false;
+          let ms = 0;
+          let sent = 1;
+          if (first.ok && structureOf(body, first.json, shape).ok) {
+            try {
+              const j = await jevCheck(body, first.json, shape, { scope: workload.workspace_id });
+              addJudge(j.cost);
+              if (j.cost > 0) sent += 1;
+              ms = j.ms || 0;
+              pass = Number(j.p) >= Number(spec.threshold);
+            } catch { pass = false; }
+          }
+          const before = (first.latencyMs ?? 0) + ms;
+          if (!pass) return own(seen, before, sent);
+          const s = await scoreReply(body, first, seen.refs);
+          return { score: s.score, sent: sent + s.judged, latency: before, ttft: before };
+        }
+        const part = Number(spec.version) === ROUTER_VERSION
+          ? (() => { const rt = routeOf(spec, featuresRaw(body)); return rt.option < 0 ? null : spec.options[rt.option]; })()
+          : (predict(spec, featuresOf(body)) >= spec.threshold ? spec.cheap : null);
+        if (!part || (part.model === reference && !part.recipe)) return own(seen);
+        const got = await ask(part, c, body);
+        if (got.account) return { account: { ...got, model: part.model } };
+        const s = await scoreReply(body, got, seen.refs);
+        return { score: s.score, sent: 1 + s.judged, latency: got.ok ? got.latencyMs : null, ttft: got.ok ? (got.ttftMs ?? got.latencyMs) : null };
+      },
+    });
   };
   let confirmLeft = 0;
 
@@ -1268,12 +1405,14 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict,
                 gate_structure, gate_accuracy, gate_coverage, gate_complete, failures, created_at,
                 latency_p50, latency_p90, ttft_p50, ttft_p90, errors, stopped, error_text, difference, reused,
-                rank_json, recipe_json, cost_ratio, arm_json, escalated_pct, gap_lo, gap_hi, calls_needed, providers_json)
+                rank_json, recipe_json, cost_ratio, arm_json, escalated_pct, gap_lo, gap_hi, calls_needed, providers_json,
+                chance, safe_saving, better_pct)
                 VALUES (@id, @run_id, @model_id, @runs, @gap_pct, @cost_month_usd, @verdict,
                 @gate_structure, @gate_accuracy, @gate_coverage, @gate_complete, @failures, @created_at,
                 @latency_p50, @latency_p90, @ttft_p50, @ttft_p90, @errors, @stopped, @error_text, @difference, @reused,
-                @rank_json, @recipe_json, @cost_ratio, @arm_json, @escalated_pct, @gap_lo, @gap_hi, @calls_needed, @providers_json)`)
-      .run({ gap_lo: null, gap_hi: null, calls_needed: null, providers_json: null, ...row });
+                @rank_json, @recipe_json, @cost_ratio, @arm_json, @escalated_pct, @gap_lo, @gap_hi, @calls_needed, @providers_json,
+                @chance, @safe_saving, @better_pct)`)
+      .run({ gap_lo: null, gap_hi: null, calls_needed: null, providers_json: null, chance: null, safe_saving: null, better_pct: null, ...row });
     results.push(row);
   };
 
@@ -1363,19 +1502,26 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   }
   if (halt === 'account') return await accountHalt();
 
-  /* Strategies, for the cheaper models that could not manage alone.
+  /* Strategies, for the cheaper models that could not manage alone, and for routing by kind of request.
    *
    * A model wrong on a small share of calls misses the bar, and most of what it would save is
    * lost with it. A cascade keeps that saving on the calls it gets right: it answers first, a
    * quick check reads the answer, and a doubtful one is sent on to the customer's own model. A
-   * router does the same without the check, by picking the model before the call is sent, from a
-   * small model of which calls it got right. Both are worked out here from answers already paid
-   * for, plus one check per answer, and only what clears the bar can be switched to. */
+   * router picks before the call is sent: the workload's calls are grouped into the kinds of request
+   * they are, and each kind goes to the cheapest setup that does it well enough, or to the
+   * customer's own model (src/learn/kinds.js). Both are worked out here from answers already paid
+   * for, plus one check per answer for a cascade, and only what clears the bar on calls it did not
+   * learn from, and then again on calls nobody has looked at (see lookAgain), can be switched to. */
   const noiseMean = mean(barScores);
+  /* The customer's model on one call: what it cost, how long it took, and how far its answer was from
+     its own other one. A recorded answer carries no timing of its own (its latency is not ours to
+     measure), so the replay beside it is timed instead, and failing that the bar's typical time; read
+     as nothing, a recorded answer made every call a strategy sent on look instant. */
   const refOfPair = (p) => {
-    const r = p.ra?.ok ? p.ra : p.rb;
-    return { cost: p.refCost, latency: r?.latencyMs ?? null, ttft: r?.ttftMs ?? r?.latencyMs ?? null,
-      noise: p.noise ?? noiseMean };
+    const timed = [p.ra, p.rb].find((r) => r?.ok && !r.recorded && Number.isFinite(r.latencyMs));
+    const latency = timed?.latencyMs ?? refSpeed.latencyP50 ?? null;
+    const ttft = timed ? (timed.ttftMs ?? timed.latencyMs) : (refSpeed.ttftP50 ?? latency);
+    return { cost: p.refCost, latency, ttft, noise: p.noise ?? noiseMean };
   };
   const quickEnough = (xs) => {
     if (!limit) return true;
@@ -1386,6 +1532,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     * (config.JEV_PRICE_PER_MTOK / 1e6);
   const strategyRow = (cand, spec, reading, verdict, extra = {}) => {
     const costMonth = refMonthly !== null && reading.ratio !== null ? round8(refMonthly * reading.ratio) : null;
+    const chance = reading.scores?.length ? chanceWithin(reading.scores, floor) : null;
     return {
       id: id('res'), run_id: run.id, model_id: keyOfSpec(spec, reference), runs: kept.length,
       gap_pct: round8(reading.gap), cost_month_usd: costMonth, verdict,
@@ -1394,12 +1541,16 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       latency_p50: pct(reading.latency, 0.5), latency_p90: pct(reading.latency, 0.9),
       ttft_p50: pct(reading.ttft, 0.5), ttft_p90: pct(reading.ttft, 0.9),
       errors: 0, stopped: null, error_text: null, difference: extra.difference ?? null, reused: 0,
-      rank_json: JSON.stringify({ chance: cand.chance, savingShare: cand.savingShare, parts: cand.parts, family: cand.family }),
+      rank_json: JSON.stringify({ chance: cand.chance, savingShare: cand.savingShare, parts: cand.parts, family: cand.family,
+        ...(extra.rank || {}) }),
       recipe_json: cand.recipe ? JSON.stringify(cand.recipe) : null,
       cost_ratio: reading.ratio === null ? null : round8(reading.ratio),
       arm_json: JSON.stringify(spec), escalated_pct: round8(reading.escalated * 100),
       gap_lo: reading.read ? round8(reading.read.lo) : null, gap_hi: reading.read ? round8(reading.read.hi) : null,
       calls_needed: reading.read?.need ?? null,
+      chance: chance === null ? null : round8(chance),
+      safe_saving: reading.ratio === null || chance === null ? null : round8(safeSaving(reading.ratio, chance, config.ROUTING_FEE_PCT)),
+      better_pct: null,
     };
   };
   /* A strategy's verdict comes from its held-out per-call scores (see crossFit), through the same
@@ -1413,6 +1564,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return v;
   };
   const fastEnough = (r) => quickEnough(metric === 'ttft' ? r.ttft : r.latency);
+  const plainResult = (r) => !r.arm_json || String(r.model_id).endsWith('#lighter') || String(r.model_id).endsWith('#cheapest');
+  // what a result is called in the activity feed and in email: a strategy by its words, a model by its name
+  const shown = (r) => (r && !plainResult(r) ? nameOfResult(r).label : r?.model_id);
 
   const cascadeFor = async (cand, st) => {
     const spec = { kind: 'cascade', first: { model: cand.model, recipe: cand.recipe ?? null }, fallback: { model: reference, recipe: null } };
@@ -1442,35 +1596,136 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const cf = crossFit(calls.map((c, k) => ({ ...c, liveCost: checks[k].liveCost, ms: checks[k].ms })), readingsOf,
       (rs) => bestOf(rs, { floor, reviewBand, fast: fastEnough }));
     const best = { ...cf.heldOut, threshold: cf.threshold, inside: cf.inSample.inside, near: cf.inSample.near, slow: cf.inSample.slow };
-    await insertResult(strategyRow(cand, { ...spec, threshold: best.threshold }, best, verdictOf(best), { difference: label }));
+    /* How much of the cheap model's wrong answers the check catches, at the strictness served. A cascade
+       is only as good as its check: one that clears the bar because the cheap model is rarely wrong, with
+       a check that lets most of its mistakes through, fails the day the cheap model slips. Studies of
+       cascades find they only pay while the check is wrong on under about one answer in ten, so a check
+       that misses more than CASCADE_MIN_CATCH of the wrong answers it was shown does not clear, whatever
+       the average says. Judged only on enough wrong answers to say. */
+    const wrong = calls.filter((c, k) => c.ok && c.score > 0 && checks[k]?.structureOk);
+    const caught = wrong.filter((c) => !(Number(c.check.p) >= best.threshold)).length;
+    const catchRate = wrong.length ? caught / wrong.length : null;
+    let verdict = verdictOf(best);
+    if (verdict === 'cleared' && catchRate !== null && wrong.length >= 5 && catchRate < config.CASCADE_MIN_CATCH) verdict = 'review';
+    await insertResult(strategyRow(cand, { ...spec, threshold: best.threshold }, best, verdict, {
+      difference: label, rank: { checkCaught: catchRate === null ? null : round8(catchRate), checkWrong: wrong.length },
+    }));
     return true;
   };
 
-  const routerFor = async (cand, st, { always = false } = {}) => {
-    const usable = st.calls.filter((c) => c.ok && c.scored);
-    const matched = usable.filter((c) => c.score === 0).length;
-    // something to tell apart: some calls it gets right and some it does not
-    if (usable.length < ROUTER_MIN_CALLS || matched < 5 || usable.length - matched < 5) return false;
-    const samples = usable.map((c) => ({ x: featuresOf(kept[c.i].body), y: c.score === 0 ? 1 : 0, c }));
-    const loo = await leaveOneOutGently(samples);
-    const byCall = new Map(samples.map((s, k) => [s.c.i, loo[k]]));
-    /* Every call is predicted, the ones the cheap model failed included: the router picks before it
-       sends, so it meets those calls too, and one it sends to the cheap model gets the failure. Left
-       out, they were always sent on in the sums and never charged, which is not what the router does. */
-    const model = train(samples);
+  /* A router of the older kind (one cheap model or the customer's own, picked by a small model of the call)
+     serving this workload, re-checked exactly as it serves: its own weights and threshold on these calls.
+     Worked out afresh, as it used to be, a re-check scored some other router than the one serving. No new
+     one of this kind is made: routing by kind of request replaced it. */
+  const frozenRouterFor = async (cand, st, spec) => {
     const calls = st.calls.map((c) => ({ ok: c.ok, score: c.scored ? c.score : (kept[c.i].noise ?? noiseMean), cost: c.cost,
-      latency: c.latency, ttft: c.ttft, p: byCall.get(c.i) ?? predict(model, featuresOf(kept[c.i].body)), ref: refOfPair(kept[c.i]) }));
-    const cf = crossFit(calls, (cs) => simulateRouter(cs), (rs) => bestOf(rs, { floor, reviewBand, fast: fastEnough }));
-    const best = { ...cf.heldOut, threshold: cf.threshold, inside: cf.inSample.inside, near: cf.inSample.near, slow: cf.inSample.slow };
-    const v = verdictOf(best);
-    /* A router is only worth keeping when it clears the bar on calls it did not learn from, and
-       saves something doing it: one that sends every call to the customer's own model clears
-       the bar at no saving, and is the customer's own model with extra steps. The router serving
-       the workload is always written down, whatever it found, so a measurement can switch it back. */
-    if (!always && (v !== 'cleared' || best.ratio === null || best.ratio > 0.95)) return false;
-    const spec = { kind: 'router', cheap: { model: cand.model, recipe: cand.recipe ?? null }, strong: { model: reference, recipe: null },
-      threshold: best.threshold, ...model };
-    await insertResult(strategyRow(cand, spec, best, v));
+      latency: c.latency, ttft: c.ttft, p: predict(spec, featuresOf(kept[c.i].body)), ref: refOfPair(kept[c.i]) }));
+    const reading = simulateRouter(calls, { thresholds: [spec.threshold] })[0];
+    const v = verdictOf(reading);
+    await insertResult(strategyRow(cand, spec, reading, v));
+    return true;
+  };
+
+  /* The calls a router by kind of request learns from, as kinds.js reads them: each call's request, and
+     each option's answer to it, scored, priced and timed. An answer that was not scored because its
+     judgement never came back reads as the customer's model's own noise on that call, as it does for a
+     cascade. */
+  const routedCalls = (options) => kept.map((p, i) => ({
+    raw: featuresRaw(p.body),
+    results: options.map((o) => {
+      const c = o.st.calls.find((x) => x.i === i);
+      if (!c) return { ok: false, score: 1, cost: 0, latency: null, ttft: null };
+      return { ok: c.ok, score: c.scored ? c.score : (p.noise ?? noiseMean), cost: c.cost, latency: c.latency, ttft: c.ttft };
+    }),
+    ref: refOfPair(p),
+  }));
+  const routerOptions = () => {
+    const feeCeiling = 1 / (1 + config.ROUTING_FEE_PCT / 100);
+    const out = [];
+    for (const r of results.filter((x) => x.verdict !== 'reference' && plainResult(x) && stats.has(x.model_id))) {
+      if (['failed', 'slower'].includes(r.verdict)) continue;
+      const { cand, st } = stats.get(r.model_id);
+      // it answered every call: finished, or finished afterwards for a strategy
+      if (st.runs < kept.length) continue;
+      const ratio = st.refCost > 0 && st.candCost > 0 ? st.candCost / st.refCost : null;
+      if (ratio === null || ratio >= feeCeiling) continue;
+      out.push({ cand, st, ratio, key: keyOf(cand) });
+    }
+    return out.sort((a, b) => a.ratio - b.ratio).slice(0, config.ROUTER_OPTIONS_MAX);
+  };
+  const specOfRouter = (options, learned, reference) => {
+    /* Only the setups its table gives a kind to, numbered afresh: one it never uses would be in its name,
+       measured again at every re-check and paid for, for nothing. */
+    const used = [...new Set(learned.table.filter((t) => t >= 0))].sort((a, b) => a - b);
+    const renumber = new Map(used.map((j, i) => [j, i]));
+    const table = learned.table.map((t) => (t < 0 ? -1 : renumber.get(t)));
+    const kept = used.map((j) => options[j]);
+    // the setup that answers most of the calls leads it, which is what the rest of the app calls serving
+    const shares = kept.map((_, i) => table.reduce((a, t, k) => a + (t === i ? learned.sizes[k] : 0), 0));
+    const lead = kept[shares.indexOf(Math.max(...shares))];
+    return {
+      kind: 'router', version: ROUTER_VERSION,
+      options: kept.map((o) => ({ model: o.cand.model, recipe: o.cand.recipe ?? null, key: o.key })),
+      cheap: { model: lead.cand.model, recipe: lead.cand.recipe ?? null },
+      strong: { model: reference, recipe: null },
+      centroids: learned.centroids, minSim: learned.minSim, idf: learned.idf, table,
+      sizes: learned.sizes, silhouette: learned.silhouette,
+    };
+  };
+  /* The router by kind of request: over every setup that answered every call and costs less than the
+     customer's own model. Kept only when its kinds matter (the calls it sends to cheaper setups had clearly
+     fewer worse answers than those setups give at random, see crossFitRouter), it clears the bar on calls
+     it did not learn from, costs no more than 95% of the customer's model, and saves at least
+     ROUTER_MIN_EXTRA_SAVING more than the best single setup that cleared: a router that does no better
+     than one model is one more moving part for nothing. */
+  /* How many calls the second look will read, worked out as lookAgain does, so a router's table is chosen
+     for the two looks it still has to pass: these calls, held out, and then that many it has never seen. */
+  const secondLookSize = () => {
+    const sampled = new Set(samples.map((x) => x.id));
+    const from = pool.filter((c) => !sampled.has(c.id) && !seenBefore.has(c.id)).length;
+    const least = callsToClear(floor, confirmZ);
+    return Math.max(least, Math.min(from, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(floor)), samples.length)));
+  };
+  const kindsRouter = async () => {
+    const options = routerOptions();
+    if (!options.length || kept.length < 2 * config.ROUTER_KIND_MIN_CALLS) return false;
+    const cf = crossFitRouter(routedCalls(options), options, {
+      floorPct: floor, margin: config.ROUTER_KIND_MARGIN, shrink: config.ROUTER_KIND_SHRINK, kMax: config.ROUTER_KINDS_MAX,
+      minSize: config.ROUTER_KIND_MIN_CALLS, minSilhouette: config.ROUTER_KINDS_MIN_SILHOUETTE, seed: 7,
+      feePct: config.ROUTING_FEE_PCT, prior: config.ROUTER_KIND_PRIOR, sureShrink: config.ROUTER_KIND_PULL,
+      looks: [{ n: kept.length }, { n: secondLookSize(), z: confirmZ ?? 1.6449 }],
+    });
+    if (!cf) return false;
+    if (!(cf.heldOut.kindsZ >= config.ROUTER_KIND_LIFT_Z)) return false;
+    const reading = { ...cf.heldOut };
+    const v = verdictOf(reading);
+    const singles = results.filter((r) => plainResult(r) && r.verdict === 'cleared' && r.cost_ratio !== null).map((r) => Number(r.cost_ratio));
+    const bestSingle = singles.length ? Math.min(...singles) : null;
+    if (v !== 'cleared' || reading.ratio === null || reading.ratio > 0.95) return false;
+    if (bestSingle !== null && reading.ratio > bestSingle * (1 - config.ROUTER_MIN_EXTRA_SAVING)) return false;
+    const spec = specOfRouter(options, cf.spec, reference);
+    const lead = options.find((o) => o.cand.model === spec.cheap.model && (o.cand.recipe ?? null) === (spec.cheap.recipe ?? null)) || options[0];
+    await insertResult(strategyRow(lead.cand, spec, reading, v, {
+      difference: labelOf(spec, reference),
+      rank: { kinds: cf.spec.sizes.length, silhouette: cf.spec.silhouette, toYours: round8(reading.escalated),
+        kindsZ: round8(reading.kindsZ), worseKept: round8(reading.worseKept), worseAtRandom: round8(reading.worseAtRandom) },
+    }));
+    return true;
+  };
+  /* A router by kind of request serving now, re-checked exactly as it serves: its kinds and its table on
+     these calls, with each of its setups answering them afresh (see servingParts). Never learned again
+     here: a re-check that learned a new router scored something other than what serves. A setup of it
+     that could not be measured this time counts as wrong on every call routed to it, which is the side
+     that switches back. Always written down, so a measurement can switch it back. */
+  const frozenKindsRouter = async (spec) => {
+    const options = spec.options.map((o) => {
+      const k = o.key || partKey(o);
+      const got = stats.get(k);
+      return got ? { cand: got.cand, st: got.st, key: k } : { cand: { model: o.model, recipe: o.recipe ?? null }, st: { calls: [] }, key: k };
+    });
+    const reading = simulateRoutes(spec, routedCalls(options));
+    const lead = options.find((o) => o.cand.model === spec.cheap?.model) || options[0];
+    await insertResult(strategyRow(lead.cand, spec, reading, verdictOf(reading), { difference: labelOf(spec, reference) }));
     return true;
   };
 
@@ -1481,22 +1736,23 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   if (!halt) {
     const cheaper = (r) => r.cost_month_usd !== null && (refMonthly === null || r.cost_month_usd < refMonthly);
     // one model, or the customer's own thinking less; never a strategy built on a strategy
-    const plain = results.filter((r) => r.verdict !== 'reference' && stats.has(r.model_id)
-      && (!r.arm_json || String(r.model_id).endsWith('#lighter') || String(r.model_id).endsWith('#cheapest')));
+    const plain = results.filter((r) => r.verdict !== 'reference' && stats.has(r.model_id) && plainResult(r));
     // answered every call, and could not manage alone
     const pool = plain.filter((r) => ['missed', 'review'].includes(r.verdict) && !r.stopped && cheaper(r));
     /* Dropped part way for its answers, but it could still save something with the calls it gets
        wrong sent on: its own price, plus the customer's model on the share it got wrong, has to
        leave room under the customer's price. Judged on the saving rather than on how far it
        missed, because a model dropped after a few calls has a rough reading of how often it is
-       wrong, and a cheap model wrong one time in eight is exactly what a cascade is for. */
+       wrong, and a cheap model wrong one time in eight is exactly what a cascade is for. It is
+       finished for a router too: a model wrong on one kind of request can be right on the others. */
     const roomLeft = (r) => (r.cost_ratio === null ? 0 : 1 - (Number(r.cost_ratio) + Math.min(1, Number(r.gap_pct) / 100)));
     const close = plain.filter((r) => r.stopped === 'bar' && cheaper(r) && roomLeft(r) >= 0.25)
       .sort((a, b) => a.cost_month_usd - b.cost_month_usd).slice(0, 2);
-    const forced = leadKey ? plain.find((r) => r.model_id === leadKey) : null;
+    const forced = leadKey && !servingKinds ? plain.find((r) => r.model_id === leadKey) : null;
     const worth = [...(forced ? [forced] : []),
       ...[...pool, ...close].filter((r) => r !== forced).sort((a, b) => a.cost_month_usd - b.cost_month_usd).slice(0, 3)];
-    if (worth.length && (jevUsable() || kept.length >= ROUTER_MIN_CALLS)) {
+    const routing = config.ROUTER_V2 && kept.length >= 2 * config.ROUTER_KIND_MIN_CALLS;
+    if (worth.length && (jevUsable() || routing || forced)) {
       strategyLeft = worth.length * kept.length;
       remaining = () => strategyLeft;
       try {
@@ -1510,16 +1766,23 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
             if (more.runs < kept.length || more.stopped) continue;
             st = more;
           }
-          // the serving strategy's own kind for its lead model; both kinds for everything else
+          // the serving strategy's own kind for its lead model; a cascade for everything else
           const isServing = r === forced;
           if (jevUsable() && (!isServing || servingKind === 'cascade')) await cascadeFor(cand, st);
-          if (!halt && (!isServing || servingKind === 'router')) await routerFor(cand, st, { always: isServing });
+          if (!halt && isServing && servingKind === 'router') await frozenRouterFor(cand, st, servingArmNow.spec);
         }
       } catch (err) {
         await interrupt(`Something went wrong here while trying strategies: ${String(err?.message || err).slice(0, 160)}.`, { retryMs: 0 });
         throw err;
       }
       strategyLeft = 0;
+    }
+    try {
+      if (!halt && servingKinds) await frozenKindsRouter(servingKinds);
+      if (!halt && routing) await kindsRouter();
+    } catch (err) {
+      await interrupt(`Something went wrong here while working out a router: ${String(err?.message || err).slice(0, 160)}.`, { retryMs: 0 });
+      throw err;
     }
   }
   if (halt === 'stopped') return await endStopped();
@@ -1531,41 +1794,61 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const feeCeiling = 1 / (1 + config.ROUTING_FEE_PCT / 100);
   const priced = (r) => r.cost_month_usd !== null && refMonthly !== null && r.cost_month_usd < refMonthly
     && r.cost_ratio !== null && Number(r.cost_ratio) < feeCeiling;
-  const clearedAll = results.filter((r) => r.verdict === 'cleared' && priced(r))
-    .sort((a, b) => a.cost_month_usd - b.cost_month_usd);
+  const clearedAll = results.filter((r) => r.verdict === 'cleared' && priced(r));
   const unpriced = results.filter((r) => r.verdict === 'cleared' && !priced(r));
   const cleared = [];
   for (const r of clearedAll) if (!await everReverted(workloadId, r.model_id)) cleared.push(r);
 
-  /* A second look before anything is switched. Up to ten models race and the cheapest that cleared
-     wins, which is ten chances to be lucky: in simulation, ten models each half as bad again as the
-     bar allowed switched to a bad one nearly every time, and the certificate showed about half the
-     true gap. The winner is measured again on calls it has never seen, held to the same rule, and only
-     a model that clears both times can be switched to. That brought false switches to about one in a
-     thousand. A strategy (a checked cheap model, a pick made call by call) has its second look on live
-     calls instead, a small share at a time. */
+  /* In what order the setups that cleared are looked at again and switched to: the workload's routing
+     priority (src/eval/confidence.js). Balanced, where nobody chose, is the biggest saving we can be
+     sure of, and within a point of each other the faster; savings is the cheapest; cautious leaves out
+     what we are not sure enough of. The order, and why, is kept with the run, so the page can say why
+     the one switched to was chosen. */
+  const ranked = rankCleared(cleared, { mode: routingMode, metric, cautiousChance: config.CAUTIOUS_MIN_CHANCE });
+  /* What serves now is only ever replaced by something cheaper: a setup ranked above it on a slightly
+     surer reading of one sample, and dearer, would switch a workload back and forth for nothing. */
+  const servingCleared = cleared.find((r) => r.model_id === servingNow) || null;
+  const order = servingCleared
+    ? ranked.order.filter((r) => r === servingCleared || Number(r.cost_month_usd) < Number(servingCleared.cost_month_usd))
+    : ranked.order;
+  for (const [k, r] of ranked.order.entries()) {
+    r.choice_rank = k + 1;
+    await db.prepare('UPDATE eval_results SET choice_rank = ? WHERE id = ?').run(k + 1, r.id);
+  }
+  const choiceOf = (r) => ({
+    model: r.model_id, label: r.arm_json ? nameOfResult(r).label : r.model_id,
+    saving: r.cost_ratio === null ? null : round8(Math.max(0, 1 - Number(r.cost_ratio) * (1 + config.ROUTING_FEE_PCT / 100))),
+    chance: r.chance ?? null, safeSaving: r.safe_saving ?? null,
+    p50: metric === 'ttft' ? (r.ttft_p50 ?? r.latency_p50 ?? null) : (r.latency_p50 ?? null), better: r.better_pct ?? null,
+  });
+  await db.prepare('UPDATE eval_runs SET routing_mode = ?, choice_json = ? WHERE id = ?').run(routingMode, JSON.stringify({
+    mode: routingMode, metric, cautiousChance: config.CAUTIOUS_MIN_CHANCE,
+    order: ranked.order.map(choiceOf), left: ranked.left.map((x) => ({ ...choiceOf(x.row), why: x.why })),
+    servingKept: servingCleared ? servingCleared.model_id : null,
+  }), run.id);
+
+  /* A second look before anything is switched. Up to ten models race and the first in line that cleared
+     wins, which is ten chances to be lucky: in simulation, ten models each half as bad again as the bar
+     allowed switched to a bad one nearly every time, and the certificate showed about half the true gap.
+     So the first in line is measured again on calls it has never seen, held to the same rule and the
+     speed rule, and only one that clears both times can be switched to; if it does not, the next in line
+     is, up to EVAL_CONFIRM_TRIES of them. That brought false switches to about one in a thousand.
+     A strategy (a checked cheap model, a router) has a second look of its own too, on the same calls. */
   let best = null;
   const confirmations = [];
   const sampled = new Set(samples.map((x) => x.id));
   const fresh = pool.filter((c) => !sampled.has(c.id));
   /* What serves the workload now is not looked at twice: its live calls are watched every hour, and a
-     second look would pay again to learn what they already show. Cheaper ones are tried first, at most
-     EVAL_CONFIRM_TRIES of them, and the one serving ends the search when it is reached. */
+     second look would pay again to learn what they already show. The ones in line before it are tried
+     first, and the one serving ends the search when it is reached. */
   let tries = 0;
   try {
-    for (const r of cleared) {
+    for (const r of order) {
       if (halt) break;
       if (r.model_id === servingNow) { best = r; confirmations.push({ r, c: { verdict: 'cleared', runs: 0, serving: true } }); break; }
       if (tries >= config.EVAL_CONFIRM_TRIES) continue;
       tries += 1;
-      const plainModel = !r.arm_json || String(r.model_id).endsWith('#lighter') || String(r.model_id).endsWith('#cheapest');
-      let c;
-      if (plainModel) c = await confirmOn(r, fresh);
-      else {
-        // a strategy's second look is its live rollout, and it says so rather than nothing
-        c = { verdict: 'cleared', runs: 0, live: true };
-        await db.prepare('UPDATE eval_results SET confirm_runs = 0, confirm_verdict = ? WHERE id = ?').run('live', r.id);
-      }
+      const c = plainResult(r) ? await confirmOn(r, fresh) : await confirmStrategyOn(r, fresh);
       confirmations.push({ r, c });
       if (c.verdict === 'cleared') { best = r; break; }
     }
@@ -1665,7 +1948,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   if (unpriced.length) {
     await addActivity(workload.workspace_id, {
       kind: 'floor',
-      title: `${unpriced.length === 1 ? unpriced[0].model_id : `${unpriced.length} models`} cleared your bar on ${workload.slug}, but cannot be switched to`,
+      title: `${unpriced.length === 1 ? shown(unpriced[0]) : `${unpriced.length} models`} cleared your bar on ${workload.slug}, but cannot be switched to`,
       detail: refMonthly === null
         ? `We could not price ${reference} on your calls, so nothing can be shown to be cheaper. Nothing was switched.`
         : 'Once our fee is added it would not cost less than your own model on your calls. Nothing was switched.',
@@ -1703,7 +1986,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       .run(now(), workloadId);
     await addActivity(workload.workspace_id, {
       kind: 'ok',
-      title: `${best.model_id} still clears your bar on ${workload.slug}`,
+      title: `${shown(best)} still clears your bar on ${workload.slug}`,
       detail: `${best.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar, on calls it had not answered before`
         + (failedLooks.length ? `. ${failedLooks.length === 1 ? failedLooks[0].r.model_id : `${failedLooks.length} cheaper models`} cleared once and did not hold up on a second look, so nothing changed` : ''),
       workloadId,
@@ -1716,7 +1999,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const conf = confirmations.find((x) => x.r === best)?.c;
     await addActivity(workload.workspace_id, {
       kind: 'ok',
-      title: `${best.model_id} cleared your bar on ${workload.slug}`,
+      title: `${shown(best)} cleared your bar on ${workload.slug}`,
       detail: `${best.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar`
         + (conf?.runs ? `, and again on ${conf.runs} calls it had never seen (${conf.gap.toFixed(2)}%, at most ${conf.hi.toFixed(2)}%, against a ${conf.floor.toFixed(2)}% bar read from both)` : '')
         + (saving ? `, about $${saving.toFixed(2)} a month less` : '')
@@ -1729,9 +2012,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     if (mode === 'ask') {
       // waiting for somebody's say: worth an email, once for this measurement; never for a workload set never to switch
       await notify(workload.workspace_id, 'waiting', `${workloadId}:${run.id}`, {
-        title: `${best.model_id} cleared your bar on ${workload.slug}`,
+        title: `${shown(best)} cleared your bar on ${workload.slug}`,
         lines: [
-          `It gave the same answers as ${reference} on your own calls, measured twice`
+          `Its answers to your own calls were as good as ${reference}'s, checked twice`
             + (saving ? `, and would cost about $${saving.toFixed(2)} a month less.` : '.'),
           'Nothing changes until you approve it on the workload page.',
         ],
@@ -1756,7 +2039,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await settleStatus('certified', 'A candidate cleared once and needs a second look');
     await addActivity(workload.workspace_id, {
       kind: 'floor',
-      title: `${r.model_id} cleared your bar on ${workload.slug} once`,
+      title: `${shown(r)} cleared your bar on ${workload.slug} once`,
       detail: `${r.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar, but ${why}. Nothing was switched. ${nextStep}`,
       workloadId,
     });
@@ -1835,7 +2118,7 @@ export async function restingStatus(workloadId) {
   if (last.outcome === 'unmeasurable') return { status: 'no_match', note: 'We could not measure this workload', routed };
   if (last.outcome === 'refused') return { status: 'no_match', note: 'Your own model could not answer these calls', routed };
   const results = await db.prepare(
-    `SELECT verdict, cost_month_usd, stopped, cost_ratio, confirm_verdict FROM eval_results WHERE run_id = ?`).all(last.id);
+    `SELECT verdict, cost_month_usd, stopped, cost_ratio, confirm_verdict, choice_rank FROM eval_results WHERE run_id = ?`).all(last.id);
   // the run's own rule, so a status read again always says what the run said at its end
   const ready = cheaperCleared(results);
   if (ready.length) {
@@ -1990,15 +2273,18 @@ export async function stopMeasuring(workload, { actorUserId = null } = {}) {
 /* A structured answer whose deciding fields match and whose written fields differ in wording: the
    written fields are read for meaning, the way free text is. With nobody able to read them, the call
    counts as the same, because every field that decides something matched. */
-async function proseScore(body, x, y, shape, scope) {
+async function proseScore(body, x, y, shape, scope, { subject = 'a' } = {}) {
   const c = structuredCompare(x.value, y.value, shape);
   if (c.decision) return { score: 1, cost: 0 };
   if (!c.prose.length) return { score: 0, cost: 0 };
-  const j = await judgeBarPair(askOf(body), proseText(c.prose, 'a'), proseText(c.prose, 'b'), { scope });
+  /* `subject` is the side being judged: 'a' (x) when x is a candidate's answer held against the
+     customer's, 'b' (y) when the customer's model is held against itself for the bar. A difference only
+     in wording or in what is included is forgiven when that side is at least as good (see judgeBetter). */
+  const j = await judgeBarPair(askOf(body), proseText(c.prose, 'a'), proseText(c.prose, 'b'), { scope, subject });
   /* A judgement that did not come back is no reading at all. It used to count as "the same", which is
      the direction that lets a candidate through. */
   if (j.transient || !j.judgedBy) return { score: null, cost: j.cost || 0, judgedBy: null, transient: true };
-  return { score: j.score, cost: j.cost || 0, judgedBy: j.judgedBy };
+  return { score: j.score, cost: j.cost || 0, judgedBy: j.judgedBy, better: j.detail?.better ? 1 : 0 };
 }
 
 /* The judge on pairs whose answer is known (see where it is called). An answer against itself with
@@ -2061,12 +2347,3 @@ async function qualityChecks(kept, scope, addJudge) {
   return out;
 }
 
-/* What the call asked, for the judge to weigh answers against. */
-function askOf(body) {
-  const msgs = Array.isArray(body?.messages) ? body.messages : [];
-  return msgs.map((m) => {
-    const c = typeof m.content === 'string' ? m.content
-      : (Array.isArray(m.content) ? m.content.map((x) => x?.text || '').join(' ') : '');
-    return `${m.role}: ${c}`;
-  }).join('\n').slice(0, 4000);
-}

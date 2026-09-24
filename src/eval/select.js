@@ -391,6 +391,12 @@ export function selectCandidates(input) {
       excluded.push({ model: k.m.id, step: 'price', reason: `costs ${pctMore(price, refPrice)} what ${short(reference)} does on your calls, so it cannot save you anything` });
       continue;
     }
+    /* Cheaper, but by less than our fee: a switch to it could never be made (the run only switches to a
+       setup cheaper once the fee is added), so a place in the race spent on it is spent on nothing. */
+    if (refPrice !== null && price * (1 + (Number(config.ROUTING_FEE_PCT) || 0) / 100) >= refPrice) {
+      excluded.push({ model: k.m.id, step: 'price', reason: `would save less than our ${config.ROUTING_FEE_PCT}% fee on your calls, so a switch to it could not save you anything` });
+      continue;
+    }
     priced.push({ ...k, price });
   }
   count('price', 'cheaper than your model on your calls', priced.length);

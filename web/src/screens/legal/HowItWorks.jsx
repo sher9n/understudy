@@ -51,7 +51,7 @@ function pen(id) {
 }
 
 /** One drawing. A drawing with links in it is a group of them; any other is a single picture. */
-function Drawing({ w, h, label, links = false, children }) {
+export function Drawing({ w, h, label, links = false, children }) {
   const id = `hw${useId().replace(/[^A-Za-z0-9]/g, '')}`;
   return (
     <svg className="hwdg" viewBox={`0 0 ${w} ${h}`} role={links ? 'group' : 'img'} aria-label={label}>
@@ -268,7 +268,7 @@ function Rollout() {
 }
 
 /** One step: its number, its title and the one line that says what it is, then the rest of it. */
-function Step({ n, id, title, intro, children }) {
+export function Step({ n, id, title, intro, children }) {
   return (
     <section className="hwstep" id={id} aria-labelledby={`${id}-h`}>
       <div className="hwstephead">
@@ -385,6 +385,10 @@ export default function HowItWorks({ me, go }) {
               your own model. A setup passes only if Understudy is confident it disagrees with gpt-5.4 no more
               often than the pass mark. Setups that can&rsquo;t pass are stopped early to save money, and the
               winner is tested again on new requests before it counts.
+            </p>
+            <p>
+              Which of the setups that pass is switched to, and how Understudy makes sure before and after, is
+              explained in <To to="routing" go={go}>How models are routed</To>.
             </p>
           </div>
           <figure>

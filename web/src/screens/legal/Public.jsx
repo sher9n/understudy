@@ -47,6 +47,7 @@ export function PublicHeader({ me, go, dark, setDark, here }) {
       <To to="home" go={go} className="pubwm" aria-label="Understudy, home">Understudy</To>
       <nav className="pubnav" aria-label="Understudy">
         <To to="how" go={go} aria-current={cur('how')}>How it works</To>
+        <To to="routing" go={go} aria-current={cur('routing')}>Model routing</To>
         <To to="pricing" go={go} aria-current={cur('pricing')}>Pricing</To>
         <To to="traffic" go={go} aria-current={cur('traffic')}>Your traffic</To>
         <To to="status" go={go} aria-current={cur('status')}>Status</To>
@@ -75,7 +76,7 @@ export function PublicHeader({ me, go, dark, setDark, here }) {
 /* The footer is where somebody looks for the small print, so every page of it is here, in
    four short groups, beside the one line about data that matters most. */
 const FOOT = [
-  ['Product', [['how', 'How it works'], ['pricing', 'Pricing'], ['status', 'Status']]],
+  ['Product', [['how', 'How it works'], ['routing', 'How models are routed'], ['pricing', 'Pricing'], ['status', 'Status']]],
   ['Your data', [['traffic', 'What happens to your traffic'], ['security', 'Security'],
     ['subprocessors', 'Subprocessors']]],
   ['Legal', [['terms', 'Terms of service'], ['privacy', 'Privacy'], ['dpa', 'Data processing terms']]],
