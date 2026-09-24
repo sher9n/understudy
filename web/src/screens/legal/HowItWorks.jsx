@@ -283,7 +283,9 @@ export function Step({ n, id, title, intro, children }) {
   );
 }
 
-export default function HowItWorks({ me, go }) {
+export default function HowItWorks({ me, go, inApp = false }) {
+  // inside the app, whose frame already holds the page's <main>, a plain container (see App.jsx)
+  const Root = inApp ? 'div' : 'main';
   // arriving from a link to one step (/how-it-works#testing) lands on that step
   useEffect(() => {
     const id = window.location.hash.slice(1);
@@ -291,7 +293,7 @@ export default function HowItWorks({ me, go }) {
   }, []);
 
   return (
-    <main className="hw" id="main">
+    <Root className="hw" id={inApp ? undefined : 'main'}>
       <header className="hwopen">
         <div>
           <div className="eyeb doceyeb">How it works</div>
@@ -446,6 +448,6 @@ export default function HowItWorks({ me, go }) {
           </div>
         )}
       </section>
-    </main>
+    </Root>
   );
 }

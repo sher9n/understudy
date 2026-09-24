@@ -64,10 +64,11 @@ export default function Account({ me, dark, setDark, onSignOut, go, down = false
             <span className={dark ? 'sw swon' : 'sw'} aria-hidden="true"><i /></span>
           </button>
           <div className="acctsep" />
-          {/* The pages anybody can read, reachable from inside the app too: what it costs,
-              whether it is up, and how to reach us. */}
+          {/* The pages anybody can read, reachable from inside the app too: how it works and how models are
+              routed (the only way to them on a phone, whose five places leave no room), what it costs, whether it
+              is up, and how to reach us. */}
           <div className="acctlinks">
-            {[['pricing', 'Pricing'], ['status', 'Status'], ['contact', 'Contact us']].map(([k, label]) => (
+            {[['how', 'How it works'], ['routing', 'Model routing'], ['pricing', 'Pricing'], ['status', 'Status'], ['contact', 'Contact us']].map(([k, label]) => (
               <a key={k} href={href(k)} onClick={plainClick(() => { setOpen(false); if (go) go(k); })}>{label}</a>
             ))}
           </div>

@@ -83,6 +83,12 @@ const AGAIN_MS = [3000, 6000, 12000, 30000];
 const ARRIVED_CREDIT = takeCredit();
 const ARRIVED_LINK_EXPIRED = takeParam('link') === 'expired';
 
+/* The two guides, read by somebody signed in inside their own frame with the menu beside them, so a newcomer
+   can look up how it works without signing out. */
+const GUIDES = new Set(['how', 'routing']);
+// whether this browser was signed in last time, so a guide opened by address does not flash the public frame first
+const WAS_IN = (() => { try { return localStorage.getItem('us_in') === '1'; } catch { return false; } })();
+
 export default function App() {
   const [me, setMe] = useState(null);
   const [{ screen, openId }, setWhere] = useState(() => parse());
@@ -114,6 +120,12 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('us_dark', dark ? '1' : '0'); } catch { /* private window */ }
   }, [dark]);
+
+  // remembered for the next visit, like the theme, so a guide opened by address knows how to wait (see WAS_IN)
+  useEffect(() => {
+    if (!me) return;
+    try { localStorage.setItem('us_in', me.signedIn ? '1' : '0'); } catch { /* private window */ }
+  }, [me]);
 
   /* Who is looking. A failure to ask is not the same as being signed out: telling somebody who
      is signed in to sign in, because the server could not be reached for a moment, sends them
@@ -322,7 +334,13 @@ export default function App() {
      opens it when something is wrong, and it must not sit on "Loading" because the thing it
      reports on is slow to answer. The header simply leaves out the sign-in buttons until it
      knows whether they apply. */
-  if (PUBLIC.has(screen)) {
+  /* A guide opened by somebody signed in is read inside the app (below); while the account check is still out in
+     a browser that was signed in last time, a moment of loading rather than the public frame and then the app. */
+  const inAppGuide = GUIDES.has(screen) && !!me?.signedIn;
+  if (GUIDES.has(screen) && !me && WAS_IN) {
+    return <div className="u" data-mode={mode}><div className="loading">Loading…</div></div>;
+  }
+  if (PUBLIC.has(screen) && !inAppGuide) {
     const Page = PAGES[screen];
     return (
       <div className="u" data-mode={mode}>
@@ -418,6 +436,20 @@ export default function App() {
             <NotFound me={me} go={go} />
           </PublicPage>
         )}
+      </div>
+    );
+  }
+
+  /* A guide read by somebody signed in: inside their own frame, with the menu beside them to leave by, the way a
+     page that leads nowhere is. Locked like the rest of the menu while the setup guide is unfinished, except for
+     the guides themselves. */
+  if (inAppGuide) {
+    const Page = PAGES[screen];
+    return (
+      <div className="u" data-mode={mode}>
+        <Shell here={screen} me={me} go={go} dark={dark} setDark={setDark} onSignOut={signOut} locked={!me.onboarded}>
+          <Page me={me} go={go} inApp />
+        </Shell>
       </div>
     );
   }

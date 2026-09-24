@@ -22,6 +22,15 @@ const NAV = [
     <svg {...S}><path d="M2.6 4.6 h10.8 M2.6 11.4 h10.8" /><circle cx="6" cy="4.6" r="1.9" /><circle cx="10" cy="11.4" r="1.9" /></svg>) },
 ];
 
+/* The two guides a newcomer is pointed to, in the menu so they can be read without signing out: how Understudy
+   works, and how the setup that answers a workload is chosen. */
+const LEARN = [
+  { key: 'how', label: 'How it works', icon: (
+    <svg {...S}><path d="M2 3.4 C3.9 2.7 6 2.8 8 4 C10 2.8 12.1 2.7 14 3.4 V12.6 C12.1 11.9 10 12 8 13.2 C6 12 3.9 11.9 2 12.6 Z" /><path d="M8 4 V13.2" /></svg>) },
+  { key: 'routing', label: 'Model routing', icon: (
+    <svg {...S}><circle cx="3.4" cy="8" r="1.5" /><path d="M4.9 8 H7 C8.6 8 8.8 4.4 10.6 4.4 H11.9" /><path d="M7 8 C8.6 8 8.8 11.6 10.6 11.6 H11.9" /><circle cx="13" cy="4.4" r="1.1" /><circle cx="13" cy="11.6" r="1.1" /></svg>) },
+];
+
 /* The app's frame: the menu, the page, and on a phone a bar at the top and the five places
  * along the bottom.
  *
@@ -73,6 +82,18 @@ export default function Shell({ here, me, go, onSignOut, dark, setDark, locked =
               onClick={plainClick(open(n.key))}>
               {n.icon}<span className="lbl">{n.label}</span>
             </a>)
+          ))}
+        </nav>
+        {/* The guides, under the places, with a quiet heading (a line when the menu is narrow). Never locked: a
+            newcomer still setting up is who they are for. They open inside the app, with this menu beside them. */}
+        <nav className="sidenav sidelearn" aria-label="Learn how Understudy works">
+          <span className="sidehead" aria-hidden="true">Learn</span>
+          {LEARN.map((n) => (
+            <a key={n.key} className={at(n.key)} href={href(n.key)} aria-label={n.label}
+              title={navOpen ? undefined : n.label} aria-current={n.key === here ? 'page' : undefined}
+              onClick={plainClick(open(n.key))}>
+              {n.icon}<span className="lbl">{n.label}</span>
+            </a>
           ))}
         </nav>
         <div className="sidefoot">
