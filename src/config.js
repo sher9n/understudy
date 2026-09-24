@@ -74,7 +74,15 @@ export const config = {
      every workspace on this deployment. */
   ZDR_ONLY: bool('ZDR_ONLY', true),
   ZDR_FORCED: bool('ZDR_FORCED', false),
-  MODEL_MIN_GAP_MS: num('MODEL_MIN_GAP_MS', 3200),
+  /* How measurement calls to one model are paced (see takeSlot in src/openrouter.js): at most MODEL_MAX_IN_FLIGHT out
+     at once, at least MODEL_MIN_GAP_MS apart (none by default; it was a fixed 3.2 s), and a model that turns calls
+     away for coming too fast slowed from MODEL_BACKOFF_START_MS up to MODEL_BACKOFF_MAX_MS, easing off again after
+     every MODEL_BACKOFF_EASE_AFTER calls in a row it takes. */
+  MODEL_MIN_GAP_MS: num('MODEL_MIN_GAP_MS', 0),
+  MODEL_MAX_IN_FLIGHT: num('MODEL_MAX_IN_FLIGHT', 4),
+  MODEL_BACKOFF_START_MS: num('MODEL_BACKOFF_START_MS', 1000),
+  MODEL_BACKOFF_MAX_MS: num('MODEL_BACKOFF_MAX_MS', 30000),
+  MODEL_BACKOFF_EASE_AFTER: num('MODEL_BACKOFF_EASE_AFTER', 20),
   UPSTREAM_TIMEOUT_MS: num('UPSTREAM_TIMEOUT_MS', 120000),
   /* Which header names the address a request came from, for the per-address limits (see clientIp in
      limits.js): 'x-real-ip' straight from Railway's edge, or 'xff-first' once its CDN sits in front. */
@@ -294,6 +302,10 @@ export const config = {
      in Settings have answered every call, trying at most this many times that number. */
   EVAL_TRY_MULTIPLE: num('EVAL_TRY_MULTIPLE', 3),
   EVAL_PARALLEL_MODELS: num('EVAL_PARALLEL_MODELS', 5),
+  /* How many of one model's calls a measurement has out at once, in its first look and its second (see tryModel):
+     every decision is still taken as each comes back, so a model that cannot win answers at most this many less
+     one more calls than it would have one at a time. */
+  EVAL_CALLS_PER_MODEL: num('EVAL_CALLS_PER_MODEL', 3),
   /* The first few calls every model answers before anything is decided about it. */
   EVAL_SCREEN_CALLS: num('EVAL_SCREEN_CALLS', 3),
   /* A model is only tried when at least one provider that keeps nothing answered this share
@@ -492,6 +504,12 @@ export const config = {
      limit, all on the connections live calls use. Background work now has its own connections too. */
   JOBS_CONCURRENCY: num('JOBS_CONCURRENCY', 3),
   EVAL_CONCURRENCY: num('EVAL_CONCURRENCY', 2),
+  // places of their own for measurements somebody asked for (Measure now), beside the ones above (see src/jobs.js)
+  EVAL_MANUAL_CONCURRENCY: num('EVAL_MANUAL_CONCURRENCY', 2),
+  /* How long a measurement taken up by the job runner may spend choosing its models (Jev is asked which fit)
+     before its run starts, and still count as starting rather than abandoned. It took 41 s on 25 Sep 2026, and
+     the minute this used to be would have hidden a slower one from its page as though nothing were happening. */
+  EVAL_PLANNING_MAX_MS: num('EVAL_PLANNING_MAX_MS', 300000),
   PG_BG_POOL_MAX: num('PG_BG_POOL_MAX', 6),
   /* One line per customer call, per change made from a screen, and per failure, in the deploy log. */
   REQUEST_LOGS: bool('REQUEST_LOGS', true),

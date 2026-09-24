@@ -77,7 +77,21 @@ const BEHAVIOUR = {
   // right on its first hundred calls, then wrong on one call in five: a lucky first look
   'vendor/lucky-small': (i, n) => (n > 100 && i % 5 === 0 ? { ...right(i), total: 0 } : right(i)),
   'acme/unlisted': (i) => right(i),
+  // wrong on every call: it cannot win, and is dropped once it shows it
+  'vendor/wrong-small': (i) => ({ ...right(i), total: -1 }),
+  // right on every call, and listed far cheaper than it charges: a measurement quoted low that spends more
+  'vendor/pricey-small': (i) => right(i),
 };
+// a delay before a model answers, so its calls can be seen out at once, and how many of each model's are out
+const delayFor = new Map();
+const inflight = new Map();
+const mostOut = new Map();
+/* The two looks counted apart for a model that answers every call: its first look asks exactly the sample's calls,
+   so the ones after that many are its second look (the two never overlap). */
+const firstLook = new Map();
+const nthOf = new Map();
+const mostOutFirst = new Map();
+const mostOutSecond = new Map();
 const fenced = (text, label) => (text.match(new RegExp(`<<<${label}\\n([\\s\\S]*?)\\n${label}>>>`)) || [])[1] || '';
 const server = http.createServer((req, res) => {
   let body = '';
@@ -87,11 +101,23 @@ const server = http.createServer((req, res) => {
     const model = p.model;
     const sys = p.messages?.find((m) => m.role === 'system')?.content || '';
     const user = p.messages?.find((m) => m.role === 'user')?.content || '';
+    inflight.set(model, (inflight.get(model) || 0) + 1);
+    mostOut.set(model, Math.max(mostOut.get(model) || 0, inflight.get(model)));
+    if (firstLook.has(model)) {
+      const nth = (nthOf.get(model) || 0) + 1;
+      nthOf.set(model, nth);
+      const most = nth > firstLook.get(model) ? mostOutSecond : mostOutFirst;
+      most.set(model, Math.max(most.get(model) || 0, inflight.get(model)));
+    }
     const send = (content, cost = 0.0001) => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ id: `gen-${Math.random().toString(36).slice(2)}`, model,
-        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }],
-        usage: { prompt_tokens: 800, completion_tokens: 60, cost } }));
+      const go = () => {
+        inflight.set(model, inflight.get(model) - 1);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: `gen-${Math.random().toString(36).slice(2)}`, model,
+          choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }],
+          usage: { prompt_tokens: 800, completion_tokens: 60, cost: model === 'vendor/pricey-small' ? 0.01 : cost } }));
+      };
+      if (delayFor.get(model)) setTimeout(go, delayFor.get(model)); else go();
     };
     if (model === 'judge/small') {
       // the quality judge: a clearly shorter answer is worse, otherwise a tie
@@ -127,6 +153,8 @@ test.before(async () => {
     { model_id: 'vendor/lucky-small', name: 'lucky', context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 1, zdr: 1 },
     { model_id: 'vendor/poet-small', name: 'poet', context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 1, zdr: 1 },
     { model_id: 'judge/small', name: 'judge', context_len: 128000, price_in: 0.05e-6, price_out: 0.1e-6, open_weights: 0, zdr: 1 },
+    { model_id: 'vendor/wrong-small', name: 'wrong', context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 1, zdr: 1 },
+    { model_id: 'vendor/pricey-small', name: 'pricey', context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 1, zdr: 1 },
   ]);
 });
 
@@ -163,7 +191,7 @@ async function seed({ n = 200, model = 'openai/gpt-5.4', days = 14, enabled = nu
   await db.prepare('UPDATE calls SET created_at = ?::bigint - (abs(hashtext(id)) % ?::int)::bigint * 86400000 WHERE workload_id = ?')
     .run(now() - DAY, days, workload.id);
   if (enabled) {
-    for (const m of ['vendor/steady-small', 'vendor/lucky-small', 'vendor/poet-small', 'judge/small']) {
+    for (const m of ['vendor/steady-small', 'vendor/lucky-small', 'vendor/poet-small', 'judge/small', 'vendor/wrong-small', 'vendor/pricey-small']) {
       await db.prepare(`INSERT INTO workspace_models (workspace_id, model_id, enabled, updated_at) VALUES (?, ?, ?, ?)
           ON CONFLICT (workspace_id, model_id) DO UPDATE SET enabled = excluded.enabled`).run(workspace.id, m, enabled.includes(m) ? 1 : 0, now());
     }
@@ -172,6 +200,7 @@ async function seed({ n = 200, model = 'openai/gpt-5.4', days = 14, enabled = nu
 }
 const load = (id) => db.prepare('SELECT * FROM workloads WHERE id = ?').get(id);
 const results = (runId) => db.prepare('SELECT * FROM eval_results WHERE run_id = ?').all(runId);
+const resultOf = async (runId, model) => (await results(runId)).find((r) => r.model_id === model);
 
 test('the customer\'s own recorded answer is one of the bar\'s two, and only one is paid for', async () => {
   const { workload } = await seed({ enabled: ['vendor/steady-small'] });
@@ -495,6 +524,99 @@ test('a workload whose last measurement was too small to switch anything is set 
   await waitAfterSmall();
   assert.equal(Number((await load(small.workload.id)).measure_at_calls), 176);
   await db.prepare(`UPDATE eval_runs SET status = 'done', outcome = 'compared', finished_at = ? WHERE id = ?`).run(now(), `run_busy_${busy.workload.id}`);
+});
+
+test('a model\'s calls go a few at a time once it has answered one, and it finds just what one at a time found', async () => {
+  const was = config.EVAL_CALLS_PER_MODEL;
+  delayFor.set('vendor/steady-small', 25);
+  delayFor.set('openai/gpt-5.4', 25);
+  try {
+    const measure = async (width) => {
+      config.EVAL_CALLS_PER_MODEL = width;
+      const { workload } = await seed({ n: 200, enabled: ['vendor/steady-small'] });
+      mostOut.clear();
+      mostOutFirst.clear();
+      mostOutSecond.clear();
+      nthOf.delete('vendor/steady-small');
+      firstLook.set('vendor/steady-small', 100);
+      const out = await runEvaluation(workload.id);
+      assert.equal(out.ok, true, JSON.stringify(out));
+      return { r: await resultOf(out.runId, 'vendor/steady-small'), cand: mostOut.get('vendor/steady-small'), ref: mostOut.get('openai/gpt-5.4'),
+        first: mostOutFirst.get('vendor/steady-small'), second: mostOutSecond.get('vendor/steady-small') };
+    };
+    const one = await measure(1);
+    const few = await measure(3);
+    assert.equal(one.cand, 1, 'one at a time');
+    assert.ok(few.cand >= 2 && few.cand <= 3, `a few at a time, never more than three: ${few.cand}`);
+    // in its first look and in its second, each on its own
+    assert.ok(few.first >= 2 && few.first <= 3, `its first look a few at a time: ${few.first}`);
+    assert.ok(few.second >= 2 && few.second <= 3, `its second look a few at a time: ${few.second}`);
+    assert.equal(one.first, 1);
+    assert.equal(one.second, 1);
+    // the customer's own model is asked by the bar and the second look side by side, and never past the cap
+    assert.ok(few.ref <= config.MODEL_MAX_IN_FLIGHT, `your own model never more than ${config.MODEL_MAX_IN_FLIGHT} at once: ${few.ref}`);
+    // and what it finds is the same
+    assert.equal(few.r.verdict, one.r.verdict);
+    assert.equal(few.r.runs, one.r.runs);
+    assert.equal(Number(few.r.gap_pct), Number(one.r.gap_pct));
+    assert.equal(few.r.confirm_verdict, one.r.confirm_verdict, 'the second look too');
+    assert.equal(few.r.confirm_runs, one.r.confirm_runs);
+  } finally {
+    config.EVAL_CALLS_PER_MODEL = was;
+    delayFor.clear();
+    firstLook.clear();
+  }
+});
+
+test('a model that cannot win answers at most two calls more than it did one at a time', async () => {
+  const was = config.EVAL_CALLS_PER_MODEL;
+  delayFor.set('vendor/wrong-small', 20);
+  try {
+    const measure = async (width) => {
+      config.EVAL_CALLS_PER_MODEL = width;
+      const { workload } = await seed({ n: 200, enabled: ['vendor/wrong-small'] });
+      mostOut.clear();
+      const out = await runEvaluation(workload.id);
+      assert.equal(out.ok, true, JSON.stringify(out));
+      return { ...(await resultOf(out.runId, 'vendor/wrong-small')), out: mostOut.get('vendor/wrong-small') };
+    };
+    const one = await measure(1);
+    const few = await measure(3);
+    // dropped in its first look, so these are that look's calls: one at a time, then a few once it answered one
+    assert.equal(one.out, 1);
+    assert.ok(few.out >= 2 && few.out <= 3, `a few of its calls at once: ${few.out}`);
+    assert.equal(one.verdict, 'missed', 'it cannot win, and is dropped');
+    assert.equal(few.verdict, 'missed');
+    assert.ok(few.runs >= one.runs && few.runs <= one.runs + 2, `${few.runs} calls a few at a time against ${one.runs} one at a time`);
+  } finally {
+    config.EVAL_CALLS_PER_MODEL = was;
+    delayFor.clear();
+  }
+});
+
+test('with calls out at once, a measurement still never spends past its limit', async () => {
+  // a model listed far cheaper than it charges, and a budget that just covers the quote: the limit is reached part way
+  const { workspace, workload } = await seed({ n: 200, enabled: ['vendor/pricey-small'] });
+  delayFor.set('vendor/pricey-small', 20);
+  try {
+    const quote = (await planFor(await load(workload.id), { canRoute: true })).estimateUsd;
+    const budget = Math.ceil(quote * 100 + 3) / 100;
+    await db.prepare('UPDATE workspaces SET optimize_budget_usd = ? WHERE id = ?').run(budget, workspace.id);
+    const limit = budget / (1 + config.ROUTING_FEE_PCT / 100);
+    const out = await runEvaluation(workload.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const run = await db.prepare('SELECT spend_usd, sample_size FROM eval_runs WHERE id = ?').get(out.runId);
+    // a model the limit stops part way has no result of its own (nothing can be said of it), only the calls it answered
+    const asked = Number((await db.prepare('SELECT COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND model_id = ?')
+      .get(out.runId, 'vendor/pricey-small')).n);
+    assert.ok(asked > 0 && asked < Number(run.sample_size), `stopped by the limit part way: ${asked} of its ${run.sample_size} calls`);
+    assert.equal(await resultOf(out.runId, 'vendor/pricey-small'), undefined);
+    // never more than one call past it, however many were out: counted with what the ones out were likely to cost
+    assert.ok(Number(run.spend_usd) <= limit + 0.01 + 1e-9, `spent ${run.spend_usd} against a limit of ${limit}`);
+  } finally {
+    delayFor.clear();
+    await db.prepare('UPDATE workspaces SET optimize_budget_usd = NULL WHERE id = ?').run(workspace.id);
+  }
 });
 
 test('workloads left waiting on a guessed time are measured at once when they have the calls, and wait for them when not', async () => {

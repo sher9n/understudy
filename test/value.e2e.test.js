@@ -59,6 +59,7 @@ const { withFeeOn } = await import('../src/eval/savings.js');
 const { routedSavings } = await import('../src/eval/actual.js');
 const { armKey, labelOf } = await import('../src/learn/arms.js');
 const { app } = await import('../src/server.js');
+const { leftOf } = await import('../src/api.js');
 
 await migrate({ quiet: true });
 
@@ -482,6 +483,41 @@ test('a workload never tested says when its first test starts, counted the way t
   // once tested, it says only that
   await run(ws, wid, { at: now() - MIN, trigger: 'manual' });
   assert.deepEqual((await valueOf(await load(wid))).tests, { runs: 1, auto: false });
+});
+
+test('the time a measurement has left is worked out from its pace so far, and only once it has one', () => {
+  const t = 10_000_000;
+  assert.equal(leftOf({ steps_done: 4, steps_total: 100, started_at: t - 60000 }, t), null, 'too few calls yet to have a pace');
+  assert.equal(leftOf({ steps_done: 40, steps_total: 100, started_at: t - 15000 }, t), null, 'too soon');
+  assert.equal(leftOf({ steps_done: 50, steps_total: 100, started_at: t - 60000 }, t), 60000, 'half done in a minute: about a minute left');
+  assert.equal(leftOf({ steps_done: 30, steps_total: 90, started_at: t - 30000 }, t), 60000, 'a second a call, sixty to go');
+  assert.equal(leftOf({ steps_done: 100, steps_total: 100, started_at: t - 60000 }, t), null, 'nothing left to wait for');
+});
+
+test('a measurement the job runner has taken up says it is choosing its models, for as long as choosing can take', async () => {
+  const mine = await account();
+  const wid = await workload(mine.ws, 'choosing');
+  const r = await fetch(`${base}/api/auth/sign-in`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-real-ip': '203.0.113.72' },
+    body: JSON.stringify({ email: mine.email, password: 'correct-horse-battery' }) });
+  assert.equal(r.status, 200);
+  const cookie = (r.headers.get('set-cookie') || '').split(';')[0];
+  const live = async () => (await (await fetch(`${base}/api/workloads/${wid}`, { headers: { cookie } })).json()).measure.running;
+  const job = `job_choosing_${process.pid}`;
+  // taken up a minute and a half ago, with no run yet: still choosing (41 s on 25 Sep; the minute this was hid slower ones)
+  await db.prepare(`INSERT INTO jobs (id, kind, payload, status, attempts, run_after, claimed_at, created_at) VALUES (?, 'eval_run', ?, 'claimed', 1, ?, ?, ?)`)
+    .run(job, JSON.stringify({ workloadId: wid, trigger: 'manual' }), now() - 100000, now() - 90000, now() - 100000);
+  let l = await live();
+  assert.equal(l?.queued, true, 'shown as not started');
+  assert.equal(l?.planning, true, 'and as choosing its models');
+  // waiting for a place, not taken up yet: not choosing
+  await db.prepare("UPDATE jobs SET status = 'queued', claimed_at = NULL WHERE id = ?").run(job);
+  l = await live();
+  assert.equal(l?.queued, true);
+  assert.equal(l?.planning, false, 'waiting its turn');
+  // taken up longer ago than choosing could take, with no run behind it: abandoned, and not shown
+  await db.prepare("UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE id = ?").run(now() - config.EVAL_PLANNING_MAX_MS - 5000, job);
+  assert.equal(await live(), null, 'not shown as starting');
+  await db.prepare("UPDATE jobs SET status = 'cancelled' WHERE id = ?").run(job);
 });
 
 test('the page reads a workload\'s figures only for the workspace that owns it', async () => {

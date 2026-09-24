@@ -480,10 +480,11 @@ test('a stop that lands while the last charge is being settled switches nothing'
   await lock.query('BEGIN');
   await lock.query('SELECT 1 FROM billing_accounts WHERE workspace_id = $1 FOR UPDATE', [workspace.id]);
   releaseAt();
+  // every one of the steady model's calls answered: its lane is now at its last settle, held by the lock
   await until(async () => {
-    const r = await db.prepare(`SELECT steps_done, steps_total FROM eval_runs WHERE workload_id = ? AND status = 'running'`)
-      .get(workload.id);
-    return r && r.steps_done === r.steps_total;
+    const r = await db.prepare(`SELECT e.sample_size, (SELECT COUNT(*) FROM eval_replays x WHERE x.run_id = e.id AND x.model_id = 'vendor/steady-small') AS n
+        FROM eval_runs e WHERE e.workload_id = ? AND e.status = 'running'`).get(workload.id);
+    return r && Number(r.n) >= Number(r.sample_size);
   }, 60000);
   const asked = await stopMeasuring(await load(workload.id), { actorUserId: 'usr_settle' });
   assert.equal(asked.state, 'stopping');

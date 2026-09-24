@@ -236,6 +236,74 @@ test('background work runs a few at a time, and measurements fewer still', async
   assert.ok(most >= 2, 'and more than one at a time when there is work');
 });
 
+test('a measurement somebody asked for starts at once, while measurements nobody asked for fill their places', async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const started = [];
+  let evals = 0;
+  let mostEvals = 0;
+  let others = 0;
+  let mostAll = 0;
+  jobs.handle('test_slow', async () => { others += 1; mostAll = Math.max(mostAll, evals + others); await sleep(600); others -= 1; return { ok: true }; });
+  jobs.handle('eval_run', async (payload) => {
+    started.push({ trigger: payload.trigger, at: Date.now() });
+    evals += 1;
+    mostEvals = Math.max(mostEvals, evals);
+    mostAll = Math.max(mostAll, evals + others);
+    await sleep(payload.trigger === 'manual' ? 50 : 600);
+    evals -= 1;
+    return { ok: true };
+  });
+  // two measurements nobody asked for take their two places, and other work takes what is left of the rest
+  for (let i = 0; i < 2; i += 1) await jobs.enqueue('eval_run', { workloadId: `wl_auto_${i}`, trigger: 'automatic' });
+  for (let i = 0; i < 3; i += 1) await jobs.enqueue('test_slow', { i });
+  const was = { tick: config.JOBS_TICK_MS };
+  config.JOBS_ENABLED = true;
+  // a tick far longer than the test, so only waking the runner can start the one asked for in time
+  config.JOBS_TICK_MS = 60000;
+  jobs.startJobs();
+  try {
+    for (let t = 0; t < 40 && started.filter((s) => s.trigger === 'automatic').length < 2; t += 1) await sleep(10);
+    assert.equal(started.filter((s) => s.trigger === 'automatic').length, 2, 'the two nobody asked for are running');
+    const asked = Date.now();
+    await jobs.enqueue('eval_run', { workloadId: 'wl_asked', trigger: 'manual' });
+    jobs.wakeJobs();
+    for (let t = 0; t < 40 && !started.some((s) => s.trigger === 'manual'); t += 1) await sleep(10);
+    const mine = started.find((s) => s.trigger === 'manual');
+    assert.ok(mine, 'the one asked for started');
+    assert.ok(mine.at - asked < 300, `at once, not at the next tick: ${mine.at - asked} ms`);
+    assert.equal(mostEvals, 3, 'beside the two nobody asked for, in a place of its own');
+    // and never more of them than their own places: three asked for at once, two side by side
+    let asked2 = 0;
+    let mostAsked = 0;
+    jobs.handle('eval_run', async (payload) => {
+      if (payload.trigger === 'manual') { asked2 += 1; mostAsked = Math.max(mostAsked, asked2); }
+      await sleep(payload.trigger === 'manual' ? 150 : 600);
+      if (payload.trigger === 'manual') asked2 -= 1;
+      return { ok: true };
+    });
+    for (let i = 0; i < 3; i += 1) await jobs.enqueue('eval_run', { workloadId: `wl_asked_${i}`, trigger: 'manual' });
+    jobs.wakeJobs();
+    for (let t = 0; t < 100; t += 1) {
+      const left = Number((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind = 'eval_run' AND (payload::jsonb ->> 'trigger') = 'manual'
+          AND status IN ('queued', 'claimed')`).get()).n);
+      if (!left && asked2 === 0) break;
+      await sleep(20);
+    }
+    assert.equal(mostAsked, config.EVAL_MANUAL_CONCURRENCY, `at most ${config.EVAL_MANUAL_CONCURRENCY} asked for side by side: ${mostAsked}`);
+    // the places every other job shares were never exceeded to make room for it
+    assert.ok(mostAll - 1 <= config.JOBS_CONCURRENCY, `the shared places held: ${mostAll - 1} of ${config.JOBS_CONCURRENCY}`);
+    for (let t = 0; t < 200; t += 1) {
+      const left = Number((await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE kind IN ('test_slow', 'eval_run') AND status IN ('queued', 'claimed')`).get()).n);
+      if (!left && evals === 0 && others === 0) break;
+      await sleep(25);
+    }
+  } finally {
+    await jobs.stopJobs();
+    config.JOBS_ENABLED = false;
+    config.JOBS_TICK_MS = was.tick;
+  }
+});
+
 test('a restart does not start again a measurement a person stopped, nor one something is still running', async () => {
   const t = now();
   await db.prepare(`INSERT INTO workloads (id, workspace_id, slug, fingerprint, shape_kind, reference_model, sample_prompt, created_at, updated_at)

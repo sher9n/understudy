@@ -52,15 +52,20 @@ export async function enqueue(kind, payload = {}, { runAfter = now(), unique = n
 
 /** One row at a time, claimed atomically so a restart cannot run it twice. Kinds that are already
  *  running as many at once as they may are stepped over, so one kind cannot hold up the rest. */
-async function claim(skipKinds = []) {
+/* `onlyAsked`: only a measurement somebody asked for (its own places are free and every other is taken);
+   `skipUnasked` and `skipAsked`: not a measurement of that kind, its places being full. */
+async function claim(skipKinds = [], { onlyAsked = false, skipUnasked = false, skipAsked = false } = {}) {
   /* SKIP LOCKED is why this is safe with more than one worker: a row another worker has
      already taken is stepped over rather than waited for, so two runners never collide on
      the same job and neither of them blocks. */
   const r = await db.prepare(
     `UPDATE jobs SET status = 'claimed', claimed_at = ?, attempts = attempts + 1
       WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND run_after <= ? AND NOT (kind = ANY(?))
+                   AND (NOT ?::boolean OR (kind = 'eval_run' AND (payload::jsonb ->> 'trigger') = 'manual'))
+                   AND NOT (?::boolean AND kind = 'eval_run' AND (payload::jsonb ->> 'trigger') IS DISTINCT FROM 'manual')
+                   AND NOT (?::boolean AND kind = 'eval_run' AND (payload::jsonb ->> 'trigger') = 'manual')
                    ORDER BY run_after LIMIT 1 FOR UPDATE SKIP LOCKED)
-      RETURNING *`).run(now(), now(), skipKinds);
+      RETURNING *`).run(now(), now(), skipKinds, onlyAsked, skipUnasked, skipAsked);
   return r.rows[0] || null;
 }
 
@@ -110,25 +115,45 @@ async function runJob(job) {
 let timer = null;
 let stopping = false;
 
-/* One scheduler, a fixed number of jobs at once, and at most EVAL_CONCURRENCY measurements among them.
-   A tick used to start a whole new runner every five seconds while earlier ones were still busy, so a
+/* One scheduler, a fixed number of jobs at once, and at most EVAL_CONCURRENCY measurements nobody asked for among
+   them. A tick used to start a whole new runner every five seconds while earlier ones were still busy, so a
    queue of measurements all ran side by side, sharing one per-model pace and the connections live
-   calls use. */
+   calls use.
+
+   A measurement somebody asked for (Measure now) has EVAL_MANUAL_CONCURRENCY places of its own beside those, so
+   it never waits behind measurements nobody asked for: sharing their two, a person's Measure now could sit behind
+   two automatic measurements of written answers for an hour, watched the whole time. Those places run nothing
+   else. */
 let active = 0;
-const activeByKind = new Map();
-const limitOf = (kind) => (kind === 'eval_run' ? config.EVAL_CONCURRENCY : config.JOBS_CONCURRENCY);
+const activeByLane = new Map();
+const ASKED = 'eval_asked';
+const laneOf = (job) => (job.kind === 'eval_run' && triggerOf(job) === 'manual' ? ASKED : job.kind);
+const triggerOf = (job) => { try { return JSON.parse(job.payload || '{}').trigger ?? null; } catch { return null; } };
+const limitOf = (lane) => (lane === 'eval_run' ? config.EVAL_CONCURRENCY : config.JOBS_CONCURRENCY);
 let pumping = false;
 async function pump() {
   if (pumping || stopping) return;
   pumping = true;
   try {
-    while (!stopping && active < config.JOBS_CONCURRENCY) {
-      const full = [...activeByKind.entries()].filter(([k, n]) => n >= limitOf(k)).map(([k]) => k);
+    for (;;) {
+      if (stopping) break;
+      const asked = activeByLane.get(ASKED) || 0;
+      const sharedFree = active - asked < config.JOBS_CONCURRENCY;
+      const askedFree = asked < Math.max(0, config.EVAL_MANUAL_CONCURRENCY);
+      if (!sharedFree && !askedFree) break;
+      const full = [...activeByLane.entries()].filter(([k, n]) => k !== ASKED && k !== 'eval_run' && n >= limitOf(k)).map(([k]) => k);
       let job;
-      try { job = await claim(full); } catch { break; }
+      try {
+        job = await claim(full, {
+          onlyAsked: !sharedFree,
+          skipUnasked: (activeByLane.get('eval_run') || 0) >= config.EVAL_CONCURRENCY,
+          skipAsked: !askedFree,
+        });
+      } catch { break; }
       if (!job) break;
+      const lane = laneOf(job);
       active += 1;
-      activeByKind.set(job.kind, (activeByKind.get(job.kind) || 0) + 1);
+      activeByLane.set(lane, (activeByLane.get(lane) || 0) + 1);
       mine.set(job.id, job.kind);
       const t0 = Date.now();
       background.run(true, () => runJob(job))
@@ -136,7 +161,7 @@ async function pump() {
         .finally(() => {
           mine.delete(job.id);
           active -= 1;
-          activeByKind.set(job.kind, Math.max(0, (activeByKind.get(job.kind) || 1) - 1));
+          activeByLane.set(lane, Math.max(0, (activeByLane.get(lane) || 1) - 1));
           if (job.kind !== 'learn' || Date.now() - t0 > 1000) {
             console.log(JSON.stringify({ at: new Date().toISOString(), kind: 'job', job: job.kind, id: job.id, ms: Date.now() - t0 }));
           }
@@ -148,8 +173,15 @@ async function pump() {
   }
 }
 
+/** Look at the queue now rather than at the next tick: for a measurement somebody is waiting to see start. */
+export function wakeJobs() {
+  if (timer) void pump();
+}
+
 export function startJobs() {
   if (!config.JOBS_ENABLED || timer) return;
+  // started again after a stop (a server starts once; a test can stop it and start it again)
+  stopping = false;
   timer = setInterval(() => { void pump(); }, config.JOBS_TICK_MS);
   if (timer.unref) timer.unref();
   void pump();

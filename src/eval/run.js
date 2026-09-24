@@ -404,6 +404,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      the total comes down to what will actually be made, so the count reaches its end exactly when
      the last call does. */
   let remaining = null;
+  // the second looks still to come, allowed for in what is left once the race starts (see there)
+  let looksAhead = 0;
   const ended = (row) => !row || row.status !== 'running' || !!row.stop_requested_at;
   /* Every model call is counted the moment it comes back, so what the page says ran is exactly
      what was sent and paid for, however many models are running at once. */
@@ -442,6 +444,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   let spend = 0;
   // everything this run has spent, settled or not: what the spending limits are held to
   let spentTotal = 0;
+  /* What the calls still out are likely to cost, held against the limit beside what has been spent: a model
+     asks a few of its calls at once (see tryModel), so the limit is checked against both before one goes. */
+  let outUsd = 0;
+  const perCallUsd = () => (Number(plan.estimateUsd) > 0 ? Number(plan.estimateUsd) / Math.max(1, nominal) : 0);
   let reusedCount = 0;
   let savedUsd = 0;
   // Jev's reading of the models to try, taken for this measurement, is paid for with it
@@ -488,9 +494,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const endStopped = async () => {
     await settle(`Measuring ${workload.slug}, stopped`);
     await keepSavings();
+    /* Its count says what it had still to do when it stopped ("stopped at 120 of 300"), which never includes the
+       second looks it was only allowing for (see looksAhead): stopped on its very last call, it made them all. */
+    looksAhead = 0;
+    const planned = Math.max(done, remaining ? done + remaining() : total);
     const closed = await db.prepare(`UPDATE eval_runs SET status = 'stopped', outcome = 'stopped',
-                  finished_at = ?, phase = NULL, steps_done = ? WHERE id = ? AND status = 'running' RETURNING id`)
-      .run(now(), done, run.id);
+                  finished_at = ?, phase = NULL, steps_done = ?, steps_total = ? WHERE id = ? AND status = 'running' RETURNING id`)
+      .run(now(), done, planned, run.id);
     await db.prepare('UPDATE eval_runs SET phase = NULL WHERE id = ?').run(run.id);
     await deferAfterStop(workloadId);
     if (!closed.rows.length) return { ok: true, runId: run.id, stopped: true };
@@ -1022,18 +1032,29 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       const firstSet = new Set(first || []);
       st.seq = first ? [...first, ...[...kept.keys()].filter((x) => !firstSet.has(x))] : [...kept.keys()];
     }
-    for (let at = st.next ?? 0; at < st.seq.length; at += 1) {
-      const i = st.seq[at];
+    /* Its calls go out a few at a time (EVAL_CALLS_PER_MODEL), in its order, and everything about each is decided
+       as it comes back, as when they went one at a time: once it cannot win, is too slow, is stopped, or would take
+       the run past what it may spend, nothing more is sent, and the ones already out finish and count, since they
+       are paid for. So a model that cannot win answers at most EVAL_CALLS_PER_MODEL - 1 more calls than it would
+       have one at a time. One at a time, every measurement waited out each of a model's answers in turn. */
+    const width = Math.max(1, config.EVAL_CALLS_PER_MODEL);
+    let at = st.next ?? 0;
+    let quit = false;
+    // a call that threw, rethrown once the others out have come back
+    let thrown = null;
+    const out = new Set();
+    // what one of its calls is likely to cost, counted against the limit while it is out
+    const guess = () => (st.runs > 0 ? st.candCost / st.runs : perCallUsd());
+    /* One call at a time until one has come back answered, then a few: a model refused on every call (withdrawn, or
+       with no provider left that keeps nothing) is still asked once and stopped there, not refused a few times over. */
+    const room = () => (st.runs - st.errors > 0 ? width : 1);
+    const one = async (n) => {
+      const i = st.seq[n];
       const p = kept[i];
-      if (halt) { st.stopped = halt === 'budget' ? 'budget' : 'user'; break; }
-      /* Never past the most one measurement may spend, whatever it was quoted at: the quote counts
-         a few calls for each model dropped early, and a model can be dropped late. */
-      if (spentTotal >= hardLimit) { halt = 'budget'; st.stopped = 'budget'; break; }
-      if (await halted()) { halt = halt || 'stopped'; st.stopped = 'user'; break; }
       const r = await replayOnce({ body: p.body, callId: p.s.id, model: cand.model, recipe: cand.recipe, slot: 0, workload, reuse, reuseSince });
       note(r);
       // our own account, not this model: the whole measurement stops, and nothing is held against anybody
-      if (r.account) { halt = 'account'; accountHit = accountHit || { ...r, model: cand.model }; st.stopped = 'user'; break; }
+      if (r.account) { halt = 'account'; accountHit = accountHit || { ...r, model: cand.model }; st.stopped = 'user'; return 'quit'; }
       if (r.reused) st.reused += 1;
       st.runs += 1;
       let score = 1;
@@ -1085,8 +1106,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
           counted = true;
           if (st.stopped === 'user') {
             await keepReplay(run.id, p.s.id, key, 0, r, { score: null, judged: null, failure: null });
-            st.next = at + 1;
-            break;
+            return 'quit';
           }
           judged = yardstick === 'quality'
             ? await judgeQuality(askOf(p.body), got.value, p.a.ok ? p.a.value : p.b.value, { scope: workload.workspace_id })
@@ -1142,7 +1162,6 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         json: r.ok ? r.json : null, cost: r.ok ? paid(r) : 0, latency: r.latencyMs ?? null, ttft: r.ttftMs ?? r.latencyMs ?? null,
       });
       await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure });
-      st.next = at + 1;
       /* The best it could still do is get every remaining call right. When even that leaves it
          outside the review band, it cannot win, and every further call would be money spent on
          nothing. Never the one serving: that is a point estimate on part of the calls, and for what
@@ -1159,10 +1178,40 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       if (await step((counted ? 0 : 1) + judgeCalls, `Trying ${cand.label || cand.model}, ${st.runs} of ${kept.length} calls`)) {
         halt = halt || 'stopped';
         if (!st.stopped) st.stopped = 'user';
-        break;
+        return 'quit';
       }
-      if (st.stopped) break;
+      return st.stopped ? 'quit' : null;
+    };
+    for (;;) {
+      while (!quit && !st.stopped && !thrown && out.size < room() && at < st.seq.length) {
+        if (halt) { st.stopped = halt === 'budget' ? 'budget' : 'user'; quit = true; break; }
+        /* Never past the most one measurement may spend, whatever it was quoted at: the quote counts
+           a few calls for each model dropped early, and a model can be dropped late. Held to what has been
+           spent and what the calls still out are likely to cost. */
+        if (spentTotal + outUsd >= hardLimit) { halt = 'budget'; st.stopped = 'budget'; quit = true; break; }
+        if (await halted()) { halt = halt || 'stopped'; st.stopped = 'user'; quit = true; break; }
+        const cost = guess();
+        outUsd += cost;
+        const k = at;
+        at += 1;
+        // a call that throws ends the model once the others out have come back, as one thrown alone did
+        const task = one(k).then((said) => { if (said === 'quit') quit = true; }, (err) => { thrown = thrown || err; })
+          .finally(() => { outUsd -= cost; out.delete(task); });
+        out.add(task);
+      }
+      if (!out.size) break;
+      await Promise.race(out);
     }
+    // every call before this one has been asked and has come back
+    st.next = at;
+    /* Back in the order its calls were asked, whatever order they came back in: what is worked out from them later
+       reads them by position (a router is chosen on some and scored on the others, see crossFit), and a
+       measurement's result must not turn on which answer happened to arrive first. */
+    const place = new Map(st.seq.map((x, k) => [x, k]));
+    const inOrder = (a, b) => (place.get(a.i) ?? 0) - (place.get(b.i) ?? 0);
+    st.calls.sort(inOrder);
+    st.pairs.sort(inOrder);
+    if (thrown) throw thrown;
     return st;
   };
 
@@ -1379,31 +1428,42 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     // the calls it will send: its own one, and one or two of the customer's model where they are not in hand
     const sends = (c) => (lookRefs.has(c.id) ? 1 : recorded(c) ? 2 : 3);
     confirmLeft = picks.reduce((a, c) => a + sends(c), 0);
-    remaining = () => confirmLeft;
+    // what is left of this look, and of the looks after it that could still come (see looksAhead)
+    remaining = () => confirmLeft + looksAhead;
     const scores = [];
     const lat = [];
     const ttft = [];
     // the customer's own model against itself on these calls too, so the bar is read from both samples
     const freshNoise = [];
-    for (const c of picks) {
-      if (halt || spentTotal >= hardLimit) break;
-      if (await halted()) { halt = 'stopped'; break; }
+    /* A few of the calls at once, as in a model's first look (see tryModel), ended the same way: a stop, a problem
+       with our own account or the spending limit sends nothing more, and the calls already out finish. There is
+       nothing to decide part way here, since every call is read. */
+    let over = false;
+    await inParallel(picks, Math.max(1, config.EVAL_CALLS_PER_MODEL), async (c) => {
+      if (over || halt || spentTotal + outUsd >= hardLimit) { over = true; return; }
+      if (await halted()) { halt = 'stopped'; over = true; return; }
       confirmLeft = Math.max(0, confirmLeft - sends(c));
       const body = JSON.parse(c.request_json);
-      const got = await refsFor(c, body);
-      if (got.account) { halt = 'account'; accountHit = got.account; break; }
-      const { seen } = got;
-      if (seen.noise !== null) freshNoise.push(seen.noise);
-      const a = seen.refs.length ? await answer(c, body, seen) : { score: null, sent: 0 };
-      if (a.account) { halt = 'account'; accountHit = a.account; break; }
-      if (a.score !== null && a.score !== undefined) scores.push(a.score);
-      if (Number.isFinite(a.latency)) lat.push(a.latency);
-      if (Number.isFinite(a.ttft)) ttft.push(a.ttft);
-      if (await step(got.sent + (a.sent || 0), `Looking again at ${label} on calls it has not seen, ${scores.length} of ${picks.length}`)) {
-        halt = 'stopped';
-        break;
+      const cost = perCallUsd() * sends(c);
+      outUsd += cost;
+      try {
+        const got = await refsFor(c, body);
+        if (got.account) { halt = 'account'; accountHit = got.account; over = true; return; }
+        const { seen } = got;
+        if (seen.noise !== null) freshNoise.push(seen.noise);
+        const a = seen.refs.length ? await answer(c, body, seen) : { score: null, sent: 0 };
+        if (a.account) { halt = 'account'; accountHit = a.account; over = true; return; }
+        if (a.score !== null && a.score !== undefined) scores.push(a.score);
+        if (Number.isFinite(a.latency)) lat.push(a.latency);
+        if (Number.isFinite(a.ttft)) ttft.push(a.ttft);
+        if (await step(got.sent + (a.sent || 0), `Looking again at ${label} on calls it has not seen, ${scores.length} of ${picks.length}`)) {
+          halt = 'stopped';
+          over = true;
+        }
+      } finally {
+        outUsd -= cost;
       }
-    }
+    });
     confirmLeft = 0;
     /* The bar, read from both samples: how often the customer's model disagreed with itself on the first
        look's calls and on these. A bar read from one sample of a hundred moves a good deal by chance,
@@ -1539,11 +1599,22 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      fee, the budget after it. */
   let hardLimit = Math.max(Number(plan.ceilingUsd) || config.EVAL_MAX_USD_PER_RUN, quote);
   if (plan.optimizeBudget) hardLimit = Math.min(hardLimit, plan.optimizeBudget.leftUsd / (1 + config.ROUTING_FEE_PCT / 100));
+  /* The second looks to come (see below), counted into what is left from the start of the race: without them the
+     count grew by half again once the race ended, and the page's bar ran backwards or sat still. Up to
+     EVAL_CONFIRM_TRIES of them where there are enough calls no measurement has looked at for one, each on as many
+     calls as lookAgain takes: the first asks the customer's own model about each call as well, the ones after reuse
+     those answers. When fewer are needed, or none, the measurement ends sooner than it said, which is the way round
+     a count may be wrong. */
+  const sampledIds = new Set(samples.map((x) => x.id));
+  const unseenCalls = pool.filter((c) => !sampledIds.has(c.id) && !seenBefore.has(c.id)).length;
+  const lookSize = Math.min(unseenCalls, Math.max(callsToClear(floor, confirmZ), config.EVAL_CONFIRM_MIN,
+    Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(floor)), samples.length));
+  looksAhead = unseenCalls >= callsToClear(floor, confirmZ) ? lookSize * (1 + Math.max(1, config.EVAL_CONFIRM_TRIES)) : 0;
   remaining = () => {
     let left = 0;
     for (const n of answered.values()) left += Math.max(0, kept.length - n) * perCall;
     const open = Math.max(0, want - finished - answered.size);
-    return left + Math.min(open, Math.max(0, queue.length - next)) * kept.length * perCall;
+    return left + Math.min(open, Math.max(0, queue.length - next)) * kept.length * perCall + looksAhead;
   };
   const waiters = [];
   const wakeAll = () => { while (waiters.length) waiters.shift()(); };
@@ -1941,7 +2012,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const routing = config.ROUTER_V2 && kept.length >= Math.max(2 * config.ROUTER_KIND_MIN_CALLS, callsToClear(floor));
     if (worth.length && (jevUsable() || routing || forced)) {
       strategyLeft = worth.length * kept.length;
-      remaining = () => strategyLeft;
+      remaining = () => strategyLeft + looksAhead;
       try {
         for (const r of worth) {
           if (halt) break;
@@ -2053,6 +2124,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       if (r.model_id === servingNow) { best = r; confirmations.push({ r, c: { verdict: 'cleared', runs: 0, serving: true } }); break; }
       if (tries >= config.EVAL_CONFIRM_TRIES) continue;
       tries += 1;
+      // the looks that could still come after this one, each reusing the customer's answers this one asks for
+      looksAhead = Math.max(0, config.EVAL_CONFIRM_TRIES - tries) * lookSize;
       const c = plainResult(r) ? await confirmOn(r, fresh) : await confirmStrategyOn(r, fresh);
       confirmations.push({ r, c });
       if (c.verdict === 'cleared') { best = r; break; }
@@ -2061,6 +2134,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await interrupt(`Something went wrong here while looking again: ${String(err?.message || err).slice(0, 160)}.`, { retryMs: 0 });
     throw err;
   }
+  // no look comes after these
+  looksAhead = 0;
   /* Every other result that cleared was never looked at twice: past the models a run looks at again,
      after one was confirmed, or after the run was cut short. It says so, and is never read as confirmed
      (see confirmed in src/eval/outcome.js). With nothing written, it sorted first, took "needs a second

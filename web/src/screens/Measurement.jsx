@@ -121,6 +121,12 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
   const stopping = !!live?.stopping;
   const queued = !!live?.queued;
   const pct = live && live.total ? Math.min(100, Math.round((live.done / live.total) * 100)) : 0;
+  /* The bar never goes back while a run lasts: the calls still to come are counted afresh as models are dropped and
+     replaced, and grow when the second look starts, which moved it backwards. The time left says what is coming. */
+  const most = useRef({ id: null, pct: 0 });
+  if (most.current.id !== (live?.id ?? null)) most.current = { id: live?.id ?? null, pct: 0 };
+  most.current.pct = Math.max(most.current.pct, pct);
+  const barPct = most.current.pct;
   const history = runs || [];
   const shown = showAll ? history : history.slice(0, 4);
 
@@ -143,11 +149,13 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
               <div>
                 <div className="mrunt">
                   {stopping ? stoppingLine(live)
-                    : queued ? waitingLine(live.startsAt)
+                    : queued ? (live.planning ? 'Choosing which models to try' : waitingLine(live.startsAt))
                       : (live.phase || 'Measuring')}
                 </div>
                 <div className="mruns m">
-                  {queued ? 'Nothing has been sent yet, so nothing has been spent.' : (
+                  {queued ? (live.planning
+                    ? 'Understudy is asking which of the models switched on fit your requests. No model has been tried yet.'
+                    : 'Nothing has been sent yet, so nothing has been spent.') : (
                     <>
                       {/* "model calls", not "replays": for written answers most of the count is
                           a judge comparing them, and calling those replays made 132 replays
@@ -158,12 +166,12 @@ export default function Measurement({ w, busy, onRan, onOpenRun, openRunId, show
                   )}
                 </div>
               </div>
-              <div className="mpct m">{pct}%</div>
+              <div className="mpct m">{queued ? '' : leftLine(live.leftMs)}</div>
               {!stopping && !asking && (
                 <button className="minig mstopb" onClick={() => setAsking(true)}>Stop</button>
               )}
             </div>
-            <div className="mbar"><span style={{ width: `${pct}%` }} /></div>
+            <div className="mbar"><span style={{ width: `${barPct}%` }} /></div>
             {asking && !stopping ? (
               <div className="mstopask" role="group" aria-label="Stop this measurement">
                 <p>
@@ -340,6 +348,16 @@ const stoppingLine = (live) => {
   if (quiet < 60000) return 'Stopping once the call in flight comes back';
   const mins = Math.max(1, Math.round(quiet / 60000));
   return `Stopping. It has not been heard from for ${num(mins)} ${mins === 1 ? 'minute' : 'minutes'}`;
+};
+
+/* About how long a running measurement has left, at the pace it has kept so far (worked out by the server, see
+   leftOf in src/api.js), said as time rather than a percentage: the percentage jumped whenever the models still
+   to try were counted afresh, and "4%" after a minute said nothing about when it would be done. */
+const leftLine = (ms) => {
+  if (ms == null) return 'Working out time left';
+  if (ms < 60000) return 'Under a minute left';
+  const mins = Math.ceil(ms / 60000);
+  return `About ${num(mins)} ${mins === 1 ? 'minute' : 'minutes'} left`;
 };
 
 /* A measurement waiting its turn. One held back for a while, usually until the balance allows
