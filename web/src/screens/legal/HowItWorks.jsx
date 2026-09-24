@@ -404,7 +404,7 @@ export default function HowItWorks({ me, go, inApp = false }) {
       </Step>
 
       <Step n={4} id="switching" title="It switches, and continues to optimize"
-        intro="For each workload, you choose whether it switches on its own, asks you first, or never switches. It asks you first unless you choose otherwise.">
+        intro="You choose once, for every workload, whether a setup that passes is switched to on its own, waits for your yes, or is never switched to. It switches on its own unless you choose otherwise.">
         <div className="hwtwo hwwords">
           <div className="hwcol">
             <p>
