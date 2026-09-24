@@ -223,6 +223,17 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      page never waits on Jev, a measurement does. */
   // nobody asked for it: the schedule, a change in the catalogue, or a new workload's first calls
   const automatic = trigger === 'automatic' || trigger === 'first';
+  /* One nobody asked for that was queued while another measurement of this workload was still going is answered
+     by that one once it ends. Started after it instead, it measured the workload again straight away and paid
+     twice to learn the same thing. A stop answers it too: a person said stop. Only another job's ending counts,
+     since a run of this job that a restart interrupted is what the job is here to try again. */
+  if (automatic && jobId) {
+    const queuedAt = Number((await db.prepare('SELECT created_at FROM jobs WHERE id = ?').get(jobId))?.created_at) || 0;
+    const answered = queuedAt > 0 && await db.prepare(
+      `SELECT 1 FROM eval_runs WHERE workload_id = ? AND status IN ('done', 'stopped') AND finished_at >= ?
+          AND job_id IS DISTINCT FROM ? LIMIT 1`).get(workloadId, queuedAt, jobId);
+    if (answered) return { ok: false, reason: 'measured since this was queued' };
+  }
   /* A workspace that measures only when asked measures nothing by itself: not on its schedule, not
      for a new model in the catalogue, and not a new workload's first measurement either. Settings
      promises that nothing is replayed and nothing is spent until somebody presses Measure now. */

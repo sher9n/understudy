@@ -51,7 +51,7 @@ const { saveCatalog } = await import('../src/openrouter.js');
 const { runEvaluation, stopMeasuring, restingStatus } = await import('../src/eval/run.js');
 const { move } = await import('../src/billing.js');
 const { promote, rollBack } = await import('../src/eval/promote.js');
-const { nudgeForCatalog } = await import('../src/eval/schedule.js');
+const { nudgeForCatalog, dueForRecheck } = await import('../src/eval/schedule.js');
 const { calibrationFor, calibrated, forgetCalibration } = await import('../src/eval/calibrate.js');
 const { planFor } = await import('../src/eval/plan.js');
 const { forgetFacts } = await import('../src/models/facts.js');
@@ -235,14 +235,11 @@ const resultOf = async (runId, model) => (await results(runId)).find((r) => r.mo
 const runsOf = async (workloadId) => Number((await db.prepare('SELECT COUNT(*) AS n FROM eval_runs WHERE workload_id = ?').get(workloadId)).n);
 const reverts = async (workloadId) => Number((await db.prepare(
   `SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ? AND action IN ('revert', 'auto_revert', 'soft_revert')`).get(workloadId)).n);
-/* The hourly pass's own rule for what is due (src/server.js), for one workload. */
-const dueNow = async (workloadId) => !!(await db.prepare(
-  `SELECT w.id FROM workloads w
-    WHERE w.id = ? AND w.state = 'live' AND w.merged_into IS NULL
-      AND ((w.recheck_after IS NOT NULL AND w.recheck_after <= ?)
-        OR (w.recheck_after IS NULL
-            AND COALESCE((SELECT MAX(r.created_at) FROM eval_runs r WHERE r.workload_id = w.id), 0) < ?))`)
-  .get(workloadId, now(), now() - 30 * DAY));
+/* The hourly pass's own rule for what is due (dueForRecheck, used by src/server.js), for one workload. */
+const dueNow = async (workloadId) => {
+  const w = await load(workloadId);
+  return (await dueForRecheck(w.workspace_id, 30)).some((r) => r.id === workloadId);
+};
 
 /* 1. The second look under "at least as good" ---------------------------------------------- */
 

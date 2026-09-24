@@ -54,7 +54,7 @@ const { saveCatalog } = await import('../src/openrouter.js');
 const { runEvaluation } = await import('../src/eval/run.js');
 const { move } = await import('../src/billing.js');
 const { promote } = await import('../src/eval/promote.js');
-const { scheduleNext, deferAutomatic, nudgeForCatalog } = await import('../src/eval/schedule.js');
+const { scheduleNext, deferAutomatic, nudgeForCatalog, dueForRecheck } = await import('../src/eval/schedule.js');
 const { calibrationFor, calibrated, forgetCalibration } = await import('../src/eval/calibrate.js');
 const { planFor, barNeed } = await import('../src/eval/plan.js');
 const { considerMeasuring, convertWaits, startWaiting } = await import('../src/proxy.js');
@@ -361,6 +361,71 @@ test('a workload whose calls came as a server stopped is started when a server s
   await startWaiting();
   assert.equal(await queuedFor(ready.workload.id), 1);
   await cancelFor(ready.workload.id);
+});
+
+test('the hourly pass never queues a workload that is being measured or already waiting in the queue', async () => {
+  const { workspace, workload } = await seed({ n: 40, enabled: ['vendor/steady-small'] });
+  // booked an hour ahead for its measurement to start, and the hour is up
+  await db.prepare("UPDATE workloads SET state = 'live', recheck_after = ? WHERE id = ?").run(now() - 60000, workload.id);
+  const due = async () => (await dueForRecheck(workspace.id, 30)).some((r) => r.id === workload.id);
+  assert.equal(await due(), true, 'its booking has come due');
+  // but the measurement it was held for is still going, as one can more than an hour on
+  const runId = `run_busy_${process.pid}`;
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model, created_at)
+      VALUES (?, ?, ?, 'running', 'json', 'openai/gpt-5.4', ?)`).run(runId, workspace.id, workload.id, now() - 3600000);
+  assert.equal(await due(), false, 'not while it is being measured');
+  await db.prepare(`UPDATE eval_runs SET status = 'done', outcome = 'compared', finished_at = ? WHERE id = ?`).run(now(), runId);
+  // or it is waiting its turn in the queue behind two others
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'first' }, { unique: true });
+  assert.equal(await due(), false, 'nor while its measurement is waiting in the queue');
+  await cancelFor(workload.id);
+  assert.equal(await due(), true, 'and due again once neither is so');
+});
+
+test('a measurement nobody asked for, queued while another of the workload ran, is answered by that one', async () => {
+  const { workspace, workload } = await seed({ n: 40, enabled: ['vendor/steady-small'] });
+  const jobOf = () => db.prepare(`SELECT id, created_at FROM jobs WHERE kind = 'eval_run' AND status = 'queued'
+      AND (payload::jsonb ->> 'workloadId') = ?`).get(workload.id);
+  const runs = async () => Number((await db.prepare('SELECT COUNT(*) AS n FROM eval_runs WHERE workload_id = ?').get(workload.id)).n);
+  const addRun = (id, status, outcome, finishedAt, jobId) => db.prepare(
+    `INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model, created_at, finished_at, job_id)
+      VALUES (?, ?, ?, ?, ?, 'json', 'openai/gpt-5.4', ?, ?, ?)`).run(`${id}_${process.pid}`, workspace.id, workload.id, status, outcome,
+    finishedAt - 3600000, finishedAt, jobId);
+  // queued by the hourly pass while the first measurement, under a job of its own, was still going
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic' }, { unique: true });
+  const queued = await jobOf();
+  await addRun('run_first', 'done', 'compared', Number(queued.created_at) + 1, 'job_first');
+  const before = await runs();
+  const out = await runEvaluation(workload.id, { trigger: 'automatic', jobId: queued.id });
+  assert.equal(out.ok, false);
+  assert.match(out.reason, /measured since this was queued/, JSON.stringify(out));
+  assert.equal(await runs(), before, 'measured once, not again straight after, and nothing spent');
+  await cancelFor(workload.id);
+
+  // a stop answers it the same way: a person said stop
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic' }, { unique: true });
+  const beforeStop = await jobOf();
+  await addRun('run_stopped', 'stopped', 'stopped', Number(beforeStop.created_at) + 1, 'job_stopped');
+  assert.match((await runEvaluation(workload.id, { trigger: 'automatic', jobId: beforeStop.id })).reason, /measured since this was queued/);
+  await cancelFor(workload.id);
+
+  // one queued after the last one ended is not answered by it
+  await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic' }, { unique: true });
+  const after = await jobOf();
+  await db.prepare('UPDATE jobs SET created_at = ? WHERE id = ?').run(now() + 60000, after.id);
+  const ahead = await runEvaluation(workload.id, { trigger: 'automatic', jobId: after.id });
+  assert.doesNotMatch(String(ahead.reason), /measured since this was queued/, 'asked for after it ended, it goes ahead');
+
+  // and a run of its own job that a restart interrupted is what the job is here to try again, not an answer
+  const own = await db.prepare('SELECT id, created_at FROM jobs WHERE id = ?').get(after.id);
+  await addRun('run_own', 'failed', 'interrupted', Number(own.created_at) + 1, own.id);
+  const retried = await runEvaluation(workload.id, { trigger: 'automatic', jobId: own.id });
+  assert.doesNotMatch(String(retried.reason), /measured since this was queued/, 'its own interrupted run does not answer it');
+  await cancelFor(workload.id);
+
+  // a person asking is never answered this way
+  const asked = await runEvaluation(workload.id, { trigger: 'manual', jobId: queued.id });
+  assert.doesNotMatch(String(asked?.reason ?? ''), /measured since this was queued/);
 });
 
 test('workloads left waiting on a guessed time are measured at once when they have the calls, and wait for them when not', async () => {
