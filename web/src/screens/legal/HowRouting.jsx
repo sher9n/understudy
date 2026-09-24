@@ -316,7 +316,9 @@ function SimBars() {
   );
 }
 
-export default function HowRouting({ me, go }) {
+export default function HowRouting({ me, go, inApp = false }) {
+  // inside the app, whose frame already holds the page's <main>, a plain container (see App.jsx)
+  const Root = inApp ? 'div' : 'main';
   // arriving from a link to one part (/how-models-are-routed#second-look) lands on that part
   useEffect(() => {
     const id = window.location.hash.slice(1);
@@ -324,7 +326,7 @@ export default function HowRouting({ me, go }) {
   }, []);
 
   return (
-    <main className="hw" id="main">
+    <Root className="hw" id={inApp ? undefined : 'main'}>
       <header className="hwopen">
         <div>
           <div className="eyeb doceyeb">Model routing</div>
@@ -619,6 +621,6 @@ export default function HowRouting({ me, go }) {
           </div>
         )}
       </section>
-    </main>
+    </Root>
   );
 }
