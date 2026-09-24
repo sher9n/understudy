@@ -237,8 +237,9 @@ export default function HowWePick({ w, m, onChanged }) {
             Often more than one setup clears your bar. Besides single models, two combinations are worked
             out from the answers already paid for: a cheaper model whose every answer Jev checks, with{' '}
             {short(w.reference)} answering whenever Jev is unsure; and sorting by kind of request, where
-            each kind of request you send goes to the cheapest setup that answered that kind as well as{' '}
-            {short(w.reference)}, and anything else goes to {short(w.reference)}.
+            each kind of request you send goes to a setup that answered that kind as well as{' '}
+            {short(w.reference)}, picked for the biggest saving we are sure of, and anything else goes
+            to {short(w.reference)}.
           </p>
           <p>
             For every setup that cleared, we work out from its own answers how sure we are that it keeps

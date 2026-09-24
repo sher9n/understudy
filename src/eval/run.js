@@ -255,7 +255,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
              AND source NOT IN ('replay', 'test') AND (status_code IS NULL OR status_code < 400)) x
         WHERE rn <= ?)`).all(String(now()), workloadId, now() - 30 * DAY, config.EVAL_POOL_PER_DAY);
   const shape = workload.shape_kind;
-  const want = plan.models;
+  // how many models the race finishes; raised below to take in every setup of a router by kind serving now
+  let want = plan.models;
   const ownArm = ownArmKey(workload);
   /* A call's recorded answer, when the customer's own model gave it and it can be read, used as if it
      had been replayed: nothing is paid for it, and its own timing is never used for speed.
@@ -863,11 +864,17 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     if (servingParts.has(keyOf(cand))) cand.recipe = servingParts.get(keyOf(cand)).recipe ?? null;
     else if (serves(cand)) cand.recipe = served;
   }
-  for (const [k, o] of servingParts) {
-    if (queue.some((q) => keyOf(q) === k)) continue;
-    queue.unshift({ model: o.model, key: k === o.model ? undefined : k, recipe: o.recipe ?? null, label: null,
-      chance: null, savingShare: null, parts: null, family: null, note: 'part of the router serving now' });
+  /* Every setup of a router by kind serving now answers every call, and first: moved to the front of the
+     line wherever the plan had it, and counted in what the race finishes. Added only when it was missing,
+     one the plan held further back could be left unmeasured once the others finished, and the re-check
+     then read every call routed to it as wrong, and switched a healthy router back. */
+  for (const [k, o] of [...servingParts].reverse()) {
+    const at = queue.findIndex((q) => keyOf(q) === k);
+    const part = at >= 0 ? queue.splice(at, 1)[0] : { model: o.model, key: k === o.model ? undefined : k, recipe: o.recipe ?? null,
+      label: null, chance: null, savingShare: null, parts: null, family: null, note: 'part of the router serving now' };
+    queue.unshift(part);
   }
+  want = Math.max(want, servingParts.size);
   if (reasked || droppedLighter) {
     planRecord.refThinks = { planned: plan.refThinks, measured: refThinks };
     const nameOf = (o) => o.key || o.model;
@@ -1569,7 +1576,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const shown = (r) => (r && !plainResult(r) ? nameOfResult(r).label : r?.model_id);
 
   const cascadeFor = async (cand, st) => {
-    const spec = { kind: 'cascade', first: { model: cand.model, recipe: cand.recipe ?? null }, fallback: { model: reference, recipe: null } };
+    // its cheap model served the way it was measured: an open-weights model from the providers that answered it
+    const spec = { kind: 'cascade', first: { model: cand.model, recipe: servedRecipe(cand, st) ?? null }, fallback: { model: reference, recipe: null } };
     const label = labelOf(spec, reference);
     const checks = [];
     let checked = 0;
@@ -1629,12 +1637,15 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   /* The calls a router by kind of request learns from, as kinds.js reads them: each call's request, and
      each option's answer to it, scored, priced and timed. An answer that was not scored because its
      judgement never came back reads as the customer's model's own noise on that call, as it does for a
-     cascade. */
-  const routedCalls = (options) => kept.map((p, i) => ({
+     cascade. With `unknown` given, an answer that says nothing about the setup (never asked, or asked while
+     its provider was only busy) is that instead of a wrong one: a re-check leaves such calls out. */
+  const MISSING = { ok: false, score: 1, cost: 0, latency: null, ttft: null };
+  const routedCalls = (options, { unknown = MISSING } = {}) => kept.map((p, i) => ({
     raw: featuresRaw(p.body),
     results: options.map((o) => {
       const c = o.st.calls.find((x) => x.i === i);
-      if (!c) return { ok: false, score: 1, cost: 0, latency: null, ttft: null };
+      if (!c) return unknown;
+      if (unknown !== MISSING && c.transient) return unknown;
       return { ok: c.ok, score: c.scored ? c.score : (p.noise ?? noiseMean), cost: c.cost, latency: c.latency, ttft: c.ttft };
     }),
     ref: refOfPair(p),
@@ -1663,13 +1674,18 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     // the setup that answers most of the calls leads it, which is what the rest of the app calls serving
     const shares = kept.map((_, i) => table.reduce((a, t, k) => a + (t === i ? learned.sizes[k] : 0), 0));
     const lead = kept[shares.indexOf(Math.max(...shares))];
+    // each setup served the way it was measured: an open-weights model from the providers that answered it (servedRecipe)
+    const recipeOf = (o) => servedRecipe(o.cand, o.st) ?? null;
     return {
-      kind: 'router', version: ROUTER_VERSION,
-      options: kept.map((o) => ({ model: o.cand.model, recipe: o.cand.recipe ?? null, key: o.key })),
-      cheap: { model: lead.cand.model, recipe: lead.cand.recipe ?? null },
-      strong: { model: reference, recipe: null },
-      centroids: learned.centroids, minSim: learned.minSim, idf: learned.idf, table,
-      sizes: learned.sizes, silhouette: learned.silhouette,
+      lead,
+      spec: {
+        kind: 'router', version: ROUTER_VERSION,
+        options: kept.map((o) => ({ model: o.cand.model, recipe: recipeOf(o), key: o.key })),
+        cheap: { model: lead.cand.model, recipe: recipeOf(lead) },
+        strong: { model: reference, recipe: null },
+        centroids: learned.centroids, minSim: learned.minSim, idf: learned.idf, table,
+        sizes: learned.sizes, silhouette: learned.silhouette,
+      },
     };
   };
   /* The router by kind of request: over every setup that answered every call and costs less than the
@@ -1688,7 +1704,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   };
   const kindsRouter = async () => {
     const options = routerOptions();
-    if (!options.length || kept.length < 2 * config.ROUTER_KIND_MIN_CALLS) return false;
+    if (!options.length || kept.length < Math.max(2 * config.ROUTER_KIND_MIN_CALLS, callsToClear(floor))) return false;
     const cf = crossFitRouter(routedCalls(options), options, {
       floorPct: floor, margin: config.ROUTER_KIND_MARGIN, shrink: config.ROUTER_KIND_SHRINK, kMax: config.ROUTER_KINDS_MAX,
       minSize: config.ROUTER_KIND_MIN_CALLS, minSilhouette: config.ROUTER_KINDS_MIN_SILHOUETTE, seed: 7,
@@ -1703,8 +1719,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const bestSingle = singles.length ? Math.min(...singles) : null;
     if (v !== 'cleared' || reading.ratio === null || reading.ratio > 0.95) return false;
     if (bestSingle !== null && reading.ratio > bestSingle * (1 - config.ROUTER_MIN_EXTRA_SAVING)) return false;
-    const spec = specOfRouter(options, cf.spec, reference);
-    const lead = options.find((o) => o.cand.model === spec.cheap.model && (o.cand.recipe ?? null) === (spec.cheap.recipe ?? null)) || options[0];
+    const { spec, lead } = specOfRouter(options, cf.spec, reference);
+    /* The router serving now over these same setups was worked out already, exactly as it serves
+       (frozenKindsRouter), under this same name: written again, the run failed on a result it already
+       had, and was paid for again on every retry. What serves is only replaced by a router over other
+       setups; one over the same setups that slipped is switched back, and learned afresh later. */
+    if (results.some((r) => r.model_id === keyOfSpec(spec, reference))) return false;
     await insertResult(strategyRow(lead.cand, spec, reading, v, {
       difference: labelOf(spec, reference),
       rank: { kinds: cf.spec.sizes.length, silhouette: cf.spec.silhouette, toYours: round8(reading.escalated),
@@ -1714,18 +1734,42 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   };
   /* A router by kind of request serving now, re-checked exactly as it serves: its kinds and its table on
      these calls, with each of its setups answering them afresh (see servingParts). Never learned again
-     here: a re-check that learned a new router scored something other than what serves. A setup of it
-     that could not be measured this time counts as wrong on every call routed to it, which is the side
-     that switches back. Always written down, so a measurement can switch it back. */
+     here: a re-check that learned a new router scored something other than what serves.
+     A call routed to a setup that could not answer it this time (never asked, or its provider only busy)
+     is left out, the way a busy call never counts against a model on its own: counted as wrong, one busy
+     setup switched a healthy router back. What is left is read as ever, so a router clearly worse on the
+     calls that were answered is still found out; one that looks fine on too few of them is not said to
+     clear ('insufficient', which switches nothing). A setup its provider refused is the same fact about
+     the router as about a model on its own. Always written down, so a measurement can switch it back. */
   const frozenKindsRouter = async (spec) => {
     const options = spec.options.map((o) => {
       const k = o.key || partKey(o);
       const got = stats.get(k);
       return got ? { cand: got.cand, st: got.st, key: k } : { cand: { model: o.model, recipe: o.recipe ?? null }, st: { calls: [] }, key: k };
     });
-    const reading = simulateRoutes(spec, routedCalls(options));
+    const all = routedCalls(options, { unknown: null });
+    const known = all.filter((c) => {
+      const r = routeOf(spec, c.raw);
+      return r.option < 0 || c.results[r.option] !== null;
+    });
+    const reading = simulateRoutes(spec, known);
+    let verdict = verdictOf(reading);
     const lead = options.find((o) => o.cand.model === spec.cheap?.model) || options[0];
-    await insertResult(strategyRow(lead.cand, spec, reading, verdictOf(reading), { difference: labelOf(spec, reference) }));
+    const refused = options.find((o) => o.st.stopped === 'refused');
+    const row = strategyRow(lead.cand, spec, reading, verdict, { difference: labelOf(spec, reference) });
+    row.runs = known.length;
+    if (refused) {
+      row.verdict = 'failed';
+      row.stopped = 'refused';
+      row.error_text = refused.st.errorText ?? null;
+    } else if (known.length < all.length) {
+      row.error_text = `${all.length - known.length} of ${all.length} calls could not be answered by the setup they were routed to`;
+      if (known.length < all.length * 0.9 && verdict === 'cleared') {
+        verdict = 'insufficient';
+        row.verdict = verdict;
+      }
+    }
+    await insertResult(row);
     return true;
   };
 
@@ -1751,7 +1795,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const forced = leadKey && !servingKinds ? plain.find((r) => r.model_id === leadKey) : null;
     const worth = [...(forced ? [forced] : []),
       ...[...pool, ...close].filter((r) => r !== forced).sort((a, b) => a.cost_month_usd - b.cost_month_usd).slice(0, 3)];
-    const routing = config.ROUTER_V2 && kept.length >= 2 * config.ROUTER_KIND_MIN_CALLS;
+    /* A router is only worked out on calls enough for one to clear at all: a perfect run needs
+       callsToClear of them, and with fewer, finishing dropped models for a router was money for nothing. */
+    const routing = config.ROUTER_V2 && kept.length >= Math.max(2 * config.ROUTER_KIND_MIN_CALLS, callsToClear(floor));
     if (worth.length && (jevUsable() || routing || forced)) {
       strategyLeft = worth.length * kept.length;
       remaining = () => strategyLeft;
@@ -1808,12 +1854,27 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   /* What serves now is only ever replaced by something cheaper: a setup ranked above it on a slightly
      surer reading of one sample, and dearer, would switch a workload back and forth for nothing. */
   const servingCleared = cleared.find((r) => r.model_id === servingNow) || null;
-  const order = servingCleared
-    ? ranked.order.filter((r) => r === servingCleared || Number(r.cost_month_usd) < Number(servingCleared.cost_month_usd))
+  /* One that could not be judged this time (setups too busy to answer) still serves, and is held to the same
+     rule: only something cheaper is looked at in its place. */
+  const servingUnread = results.find((r) => r.model_id === servingNow && r.verdict === 'insufficient') || null;
+  const holding = servingCleared || servingUnread;
+  let order = holding
+    ? ranked.order.filter((r) => r === servingCleared || Number(r.cost_month_usd) < Number(holding.cost_month_usd))
     : ranked.order;
+  /* What serves and still clears keeps serving, even where a cautious priority would not switch to it
+     afresh: that priority is about what to switch to. Left out of the order, it was reported as "nothing
+     cleared your bar" while it went on serving. */
+  if (servingCleared && !order.includes(servingCleared)) order = [...order, servingCleared];
   for (const [k, r] of ranked.order.entries()) {
     r.choice_rank = k + 1;
     await db.prepare('UPDATE eval_results SET choice_rank = ? WHERE id = ?').run(k + 1, r.id);
+  }
+  /* What a cautious workload leaves out, as not sure enough: never looked at again, never offered as the
+     candidate, never tried on live calls. Marked "not reached", it was all three. */
+  const leftOut = ranked.left.map((x) => x.row).filter((r) => r !== servingCleared);
+  for (const r of leftOut) {
+    r.confirm_verdict = 'left_out';
+    await db.prepare(`UPDATE eval_results SET confirm_verdict = 'left_out' WHERE id = ?`).run(r.id);
   }
   const choiceOf = (r) => ({
     model: r.model_id, label: r.arm_json ? nameOfResult(r).label : r.model_id,
@@ -1862,7 +1923,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      look" off its workload, and was what an approval with no model named switched to. */
   const reached = new Set(confirmations.map((x) => x.r.id));
   for (const r of results) {
-    if (r.verdict !== 'cleared' || reached.has(r.id) || r.model_id === servingNow) continue;
+    if (r.verdict !== 'cleared' || reached.has(r.id) || r.model_id === servingNow || r.confirm_verdict === 'left_out') continue;
     r.confirm_verdict = 'not_reached';
     await db.prepare(`UPDATE eval_results SET confirm_verdict = 'not_reached' WHERE id = ? AND confirm_verdict IS NULL`).run(r.id);
   }
@@ -1923,7 +1984,11 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     let soft = true;
     if (mine && mine.verdict === 'missed') {
       why = `it no longer clears your bar: ${mine.gap_pct.toFixed(1)}% against a ${floor.toFixed(1)}% bar`;
-      soft = false;
+      /* For good, because answers that no longer match are a lasting fact about a model. Not so a router
+         by kind of request: its setups are each measured on their own too, and what it may have lost is its
+         table, when the kinds of request the workload gets have moved. Out for a while, and a later
+         measurement can learn it afresh, and has to clear both looks again; after a few, for good. */
+      soft = !!servingKinds && mine.model_id === servingNow;
     } else if (mine && mine.verdict === 'failed' && mine.stopped === 'refused') {
       why = `its provider refused it when it was re-checked${mine.error_text ? `, saying "${mine.error_text}"` : ''}`;
     } else if (mine && mine.verdict === 'slower' && !mine.stopped) {
@@ -1960,10 +2025,15 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   if (best && best.model_id === servingNow && switchedBack) best = null;
   const second = !best && confirmations.length && !confirmations[0].c.serving ? confirmations[0] : null;
   // one that cleared, and that the run ended before it could look at again: never read as confirmed
-  const unlooked = !best && !second ? cleared.find((r) => r.model_id !== servingNow && r.confirm_verdict === 'not_reached') : null;
+  // one in the order the run looked at, that is: never one dearer than what serves, which was not in line at all
+  const unlooked = !best && !second ? cleared.find((r) => r.model_id !== servingNow && r.confirm_verdict === 'not_reached' && order.includes(r)) : null;
   // what serves it came close to the bar on its re-check, and nothing cheaper cleared
   const servingRow = serving && !switchedBack ? results.find((r) => r.model_id === servingNow) : null;
   const servingClose = !best && !second && !unlooked && servingRow?.verdict === 'review';
+  // what serves could not be judged this time: some of the calls routed to its setups went unanswered
+  const servingUnjudged = !best && !second && !unlooked && !servingClose && servingRow?.verdict === 'insufficient' ? servingRow : null;
+  // what cleared was all left out by a cautious priority, as not sure enough to switch to
+  const leftOnly = !best && !second && !unlooked && !servingClose && !servingUnjudged && leftOut.length > 0 ? leftOut : null;
   /* How this workload switches: on its own ('auto'), when a person approves ('ask'), or never
      ('off': measured, never switched on its own and never asked about, though a person may still
      switch it by hand, and a switch back for safety still happens). Anything else is read as asking
@@ -2027,6 +2097,31 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         runId: run.id, reason: 'cleared your bar', auto: true, recipe,
       });
     }
+  } else if (servingUnjudged) {
+    /* Said as that, and never as "nothing cleared your bar" over a setup that goes on serving: it was not
+       found wanting, it could not be looked at in full. */
+    await settleStatus('certified', null);
+    await addActivity(workload.workspace_id, {
+      kind: 'floor',
+      title: `${shown(servingUnjudged)} could not be checked in full on ${workload.slug}`,
+      detail: `${servingUnjudged.error_text ? `${servingUnjudged.error_text[0].toUpperCase()}${servingUnjudged.error_text.slice(1)}` : 'Too few of its calls were answered to judge it'}, `
+        + 'so it was not judged either way. It keeps serving, its live calls are still watched, and the next measurement looks again.',
+      workloadId,
+    });
+  } else if (leftOnly) {
+    /* Something cleared, and this workload's priority, cautious, would not switch to it: said as that. It
+       used to read "the measurement ended before it could look at it again", and offered it as the candidate. */
+    const r = [...leftOnly].sort((a, b) => (Number(b.chance) || 0) - (Number(a.chance) || 0))[0];
+    await settleStatus('no_match', 'A candidate cleared, but not surely enough for a cautious workload');
+    await addActivity(workload.workspace_id, {
+      kind: 'floor',
+      title: `${shown(r)} cleared your bar on ${workload.slug}, but not surely enough for a cautious workload`,
+      detail: `${r.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar. We are ${r.chance === null || r.chance === undefined ? 'not'
+        : `${(Math.floor(Number(r.chance) * 1000) / 10).toFixed(1)}%`} sure it keeps your bar, and this workload's routing priority, Cautious, `
+        + `only switches at ${Math.round(config.CAUTIOUS_MIN_CHANCE * 100)}% or more. Nothing was switched. The next measurement looks again, `
+        + 'and choosing Balanced on the workload page lets it be looked at again then.',
+      workloadId,
+    });
   } else if (second || unlooked) {
     /* It cleared once and did not hold up on fresh calls, there were not enough fresh calls to look
        again, or the run ended before it could look. Nothing is switched on one look; a person decides,
@@ -2069,7 +2164,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   /* The next measurement: the workspace's rhythm when this one changed something or somebody asked for
      it, further out when it only found what the last one did. */
   await scheduleNext(workloadId, {
-    changed: !automatic || switchedBack || !!second || !!unlooked || servingClose || (!!best && !stillServing),
+    changed: !automatic || switchedBack || !!second || !!unlooked || servingClose || !!servingUnjudged || !!leftOnly || (!!best && !stillServing),
   });
   return { ok: true, runId: run.id, floor, results: results.length, partial: halt === 'balance', reused: reusedCount };
 }
@@ -2123,6 +2218,10 @@ export async function restingStatus(workloadId) {
   const ready = cheaperCleared(results);
   if (ready.length) {
     return { status: 'certified', note: confirmed(ready[0]) ? null : 'A candidate cleared once and needs a second look', routed };
+  }
+  // cleared, and left out by a cautious priority as not sure enough: what the run itself said at its end
+  if (results.some((r) => r.verdict === 'cleared' && r.confirm_verdict === 'left_out')) {
+    return { status: 'no_match', note: 'A candidate cleared, but not surely enough for a cautious workload', routed };
   }
   if (results.some((r) => r.verdict === 'review')) {
     return { status: 'certified', note: 'A candidate is close and needs a look', routed };

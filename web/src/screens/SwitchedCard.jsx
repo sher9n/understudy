@@ -64,7 +64,7 @@ function whyLine(s) {
    whole of what measuring cost; what is left is that share of it, not all of it again. */
 function leftDays(s, so) {
   const m = s.measuring || {};
-  const total = (m.spent || 0) + (m.background || 0) + (m.graded || 0);
+  const total = (m.spent || 0) + (m.background || 0) + (m.graded || 0) + (m.checked || 0);
   if (!(m.paybackDays > 0) || !(total > 0) || !(so?.net < 0)) return null;
   const perDay = total / m.paybackDays;
   return Math.max(1, Math.ceil(-so.net / perDay));
@@ -233,13 +233,14 @@ export default function SwitchedCard({ s }) {
               ? ` What the actual calls would have cost on ${from} is their cost divided by what the measurement found ${to} costs against it on the same calls.`
               : ''}
           </p>
-          {(s.measuring.spent > 0 || s.measuring.background > 0 || s.measuring.graded > 0) && (
+          {(s.measuring.spent > 0 || s.measuring.background > 0 || s.measuring.graded > 0 || s.measuring.checked > 0) && (
             <p className="swnote">
-              Finding and checking this switch has cost {usd((s.measuring.spent || 0) + (s.measuring.background || 0) + (s.measuring.graded || 0))}
-              {s.measuring.background > 0 || s.measuring.graded > 0
+              Finding and checking this switch has cost {usd((s.measuring.spent || 0) + (s.measuring.background || 0) + (s.measuring.graded || 0) + (s.measuring.checked || 0))}
+              {s.measuring.background > 0 || s.measuring.graded > 0 || s.measuring.checked > 0
                 ? ` (${[`${usd(s.measuring.spent || 0)} measuring`,
                   s.measuring.background > 0 ? `${usd(s.measuring.background)} background answers` : null,
-                  s.measuring.graded > 0 ? `${usd(s.measuring.graded)} answers read in the background` : null].filter(Boolean).join(', ')})`
+                  s.measuring.graded > 0 ? `${usd(s.measuring.graded)} answers read in the background` : null,
+                  s.measuring.checked > 0 ? `${usd(s.measuring.checked)} answers checked against ${from} in the background` : null].filter(Boolean).join(', ')})`
                 : ' in measuring'}.
               {so.net != null && so.calls > 0
                 ? (so.net >= 0

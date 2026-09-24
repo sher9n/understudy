@@ -484,13 +484,14 @@ export async function routeOnce(wsId, body, { source = 'routed', classify = true
       }
     } catch (err) {
       if (next && (!next.isFallback || worthFallback(err))) {
-        await keepFailedTry({ wsId, workload, requested, served, started, body, ref, source, strategy, err, fellBack: !!next.isFallback });
+        // a router says which of its models it sent the call to, and that one is what failed
+        await keepFailedTry({ wsId, workload, requested, served: err?.model || served, started, body, ref, source, strategy, err, fellBack: !!next.isFallback });
         continue;
       }
       const f = failureOf(err);
       reportCallFailure({
         kind: source === 'test' ? 'test call' : 'routed call',
-        model: served, status: f.status, workspaceId: wsId,
+        model: err?.model || served, status: f.status, workspaceId: wsId,
         message: f.json?.error?.message || err.message,
       });
       await recordCall({
@@ -605,9 +606,10 @@ async function streamWith({ res, wsId, workload, requested, body, ref, callId, s
   }
   if (strategy && strategy.spec.kind === 'router') {
     // picked before anything is sent, from what can be seen of the call, so it streams as ever
-    const pick = routeFor(strategy.spec, body);
-    served = pick.use.model;
-    recipe = pick.use.recipe ?? null;
+    const pick = routeFor(strategy.spec, body, { fallback: { model: workload.reference_model } });
+    // a router that names nothing to answer sends the call to the customer's own model, never to an error
+    served = pick.use?.model ?? workload.reference_model;
+    recipe = pick.use ? pick.use.recipe ?? null : null;
     decision = { ...decision, escalated: pick.escalated, check: pick.check };
   }
   let upstream;

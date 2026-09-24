@@ -81,8 +81,9 @@ export function ServingFlow({ kind, first, fallback, reference, sentOn = null, s
       <>
         <Node eyebrow="Reads the call first" title="What kind is it?" sub={`${kinds} kinds, learned from your calls`} tone="fn-check" />
         <div className="ffork">
-          {used.map((x) => (
-            <div className="fbranch" key={x.model}>
+          {used.map((x, i) => (
+            // by its place: two setups can be one model asked two ways
+            <div className="fbranch" key={x.option ?? i}>
               <Arrow label={x.share === null || x.share === undefined ? `${x.kinds} ${x.kinds === 1 ? 'kind' : 'kinds'}` : `${inHundred(x.share)} calls`} />
               <Node eyebrow="Answers" title={x.label} sub={`${x.kinds} ${x.kinds === 1 ? 'kind' : 'kinds'} of request`} tone="fn-brand" />
               <Arrow />

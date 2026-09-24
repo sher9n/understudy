@@ -599,11 +599,13 @@ export async function gateEval(workspaceId, { estimatedUsd = 0 } = {}) {
    background answers and answers read in the background, the three things charged as optimizing. */
 export async function optimizeSpent(workspaceId, days = 30) {
   const since = now() - days * 86400000;
+  // and the answers checked against the customer's own model after a switch (src/learn/control.js), optimizing like the rest
   const r = await db.prepare(
     `SELECT (SELECT COALESCE(SUM(spend_usd), 0) FROM eval_runs WHERE workspace_id = ? AND created_at >= ?)
           + (SELECT COALESCE(SUM(cost_usd), 0) FROM shadow_runs WHERE workspace_id = ? AND created_at >= ?)
-          + (SELECT COALESCE(SUM(cost_usd), 0) FROM graded_calls WHERE workspace_id = ? AND created_at >= ?) AS spent`)
-    .get(workspaceId, since, workspaceId, since, workspaceId, since);
+          + (SELECT COALESCE(SUM(cost_usd), 0) FROM graded_calls WHERE workspace_id = ? AND created_at >= ?)
+          + (SELECT COALESCE(SUM(cost_usd), 0) FROM control_checks WHERE workspace_id = ? AND created_at >= ?) AS spent`)
+    .get(workspaceId, since, workspaceId, since, workspaceId, since, workspaceId, since);
   return round8(Number(r?.spent || 0) * (1 + config.ROUTING_FEE_PCT / 100));
 }
 

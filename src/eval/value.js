@@ -38,8 +38,9 @@ const short = (m) => String(m || '').split('/').pop();
 // a try that failed and was answered another way: not a call of the customer's, but the evidence of a rescue
 const TRY = `COALESCE(check_json LIKE '%"by":"fell back"%' OR check_json LIKE '%"by":"experiment failed"%', FALSE)`;
 
-/* What testing this workload cost from a moment on, our fee included: measurements, background answers
-   and answers read in the background, the three things that are charged as optimizing. */
+/* What testing this workload cost from a moment on, our fee included: measurements, background answers,
+   answers read in the background and answers checked against the customer's own model after a switch,
+   the four things that are charged as optimizing. */
 async function optimizingSince(workloadId, since) {
   const spent = Number((await db.prepare(
     'SELECT COALESCE(SUM(spend_usd), 0) AS s FROM eval_runs WHERE workload_id = ? AND created_at >= ?').get(workloadId, since)).s);
@@ -47,7 +48,9 @@ async function optimizingSince(workloadId, since) {
     'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM shadow_runs WHERE workload_id = ? AND created_at >= ?').get(workloadId, since)).s);
   const graded = Number((await db.prepare(
     'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM graded_calls WHERE workload_id = ? AND created_at >= ?').get(workloadId, since)).s);
-  return round8(withFeeOn(spent + background + graded, config.ROUTING_FEE_PCT));
+  const checked = Number((await db.prepare(
+    'SELECT COALESCE(SUM(cost_usd), 0) AS s FROM control_checks WHERE workload_id = ? AND created_at >= ?').get(workloadId, since)).s);
+  return round8(withFeeOn(spent + background + graded + checked, config.ROUTING_FEE_PCT));
 }
 
 /* The same, a day at a time, for the history's line: each day labelled by the moment it ends, as
@@ -66,6 +69,8 @@ async function optimizingByDay(workloadId, first, days) {
   add(await db.prepare(`SELECT ${bucket} AS b, SUM(cost_usd) AS s FROM shadow_runs WHERE workload_id = ? AND created_at >= ? GROUP BY 1`)
     .all(first, workloadId, first - DAY));
   add(await db.prepare(`SELECT ${bucket} AS b, SUM(cost_usd) AS s FROM graded_calls WHERE workload_id = ? AND created_at >= ? GROUP BY 1`)
+    .all(first, workloadId, first - DAY));
+  add(await db.prepare(`SELECT ${bucket} AS b, SUM(cost_usd) AS s FROM control_checks WHERE workload_id = ? AND created_at >= ? GROUP BY 1`)
     .all(first, workloadId, first - DAY));
   return out.map((v) => withFeeOn(v, config.ROUTING_FEE_PCT));
 }
@@ -183,13 +188,24 @@ export async function valueOf(w) {
   const sentOn = Number(week.sent_on);
   const kind = arm?.spec?.kind ?? (switched ? 'model' : 'reference');
   /* For a router by kind of request, which of its setups answered the week's requests it did not send to
-     the customer's own model, and what each of those cost: it can send them to several. */
-  const byModel = kind === 'router' && Array.isArray(arm?.spec?.options) && n >= 20
-    ? (await db.prepare(`SELECT served_model AS model, COUNT(*) AS n, COALESCE(SUM(charged_usd), 0) AS paid FROM calls
+     the customer's own model, and what each of those cost: it can send them to several. Read from the kind
+     each call was taken for (its check says) through the router's own table, so two setups of one model
+     (the customer's own thinking less, and from its cheapest provider) are told apart; read by the model
+     that answered, they were one. */
+  let byOption = null;
+  if (kind === 'router' && Array.isArray(arm?.spec?.options) && n >= 20) {
+    const rows = await db.prepare(`SELECT substring(check_json from '"kind":([0-9]+)') AS k, COUNT(*) AS n,
+          COALESCE(SUM(charged_usd), 0) AS paid FROM calls
         WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND status_code = 200 AND COALESCE(escalated, 0) = 0
-          AND ${serving.sql} GROUP BY served_model`).all(w.id, weekFrom, ...serving.args))
-      .map((r) => ({ model: r.model, share: round8(Number(r.n) / n), perCall: Number(r.n) > 0 ? round8(Number(r.paid) / Number(r.n)) : null }))
-    : null;
+          AND ${serving.sql} GROUP BY 1`).all(w.id, weekFrom, ...serving.args);
+    const table = Array.isArray(arm.spec.table) ? arm.spec.table : [];
+    const sums = arm.spec.options.map(() => ({ n: 0, paid: 0 }));
+    for (const r of rows) {
+      const j = r.k === null || r.k === undefined ? -1 : table[Number(r.k)];
+      if (Number.isInteger(j) && j >= 0 && sums[j]) { sums[j].n += Number(r.n); sums[j].paid += Number(r.paid); }
+    }
+    byOption = sums.map((x, j) => ({ option: j, share: round8(x.n / n), perCall: x.n > 0 ? round8(x.paid / x.n) : null }));
+  }
   const paths = {
     kind,
     perDay: Number(allWeek.n) > 0 ? round8(Number(allWeek.n) / weekDays) : 0,
@@ -203,7 +219,7 @@ export async function valueOf(w) {
     perCall: n > 0 ? round8(Number(week.paid) / n) : null,
     shortPerCall: n - sentOn > 0 ? round8(Number(week.short_paid) / (n - sentOn)) : null,
     longPerCall: sentOn > 0 ? round8(Number(week.long_paid) / sentOn) : null,
-    byModel,
+    byOption,
     // what one of these calls would cost on the customer's own model alone, from the last thirty days
     ownPerCall: s30.calls > 0 && s30.would > 0 ? round8(s30.would / s30.calls) : null,
   };

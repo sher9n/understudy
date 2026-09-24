@@ -207,25 +207,24 @@ const BETTER = {
 
 /**
  * A candidate's answer against one of the customer's model's, three ways, in both orders.
- * Answers { verdict: 'better' | 'equal' | 'kept', pRef: [..], pCand: [..], cost } or null when Jev
- * could not be asked (the difference then stands).
+ * Answers { verdict: 'better' | 'equal' | 'kept', pRef: [..], pCand: [..], cost }; null when Jev is not
+ * used at all; and { verdict: null, transient: true, cost } when a reading did not come back, with what the
+ * one that did cost, so it is charged, and so whoever asked knows the difference was not settled and does
+ * not keep it as a verdict for two weeks.
  */
 export async function judgeBetter(request, cand, ref, { scope = null, askFn = ask } = {}) {
   if (!config.EVAL_THREE_WAY || !(jevUsable() || askFn !== ask)) return null;
-  const key = keyOf('better', 1, scope, config.JEV_MODEL, config.THREE_WAY_FORGIVE_MAX, config.THREE_WAY_BETTER_MIN, request, cand, ref);
+  const key = keyOf('better', 2, scope, config.JEV_MODEL, config.THREE_WAY_FORGIVE_MAX, config.THREE_WAY_BETTER_MIN, request, cand, ref);
   const hit = await cached(key);
   if (hit?.detail?.verdict) return { ...hit.detail, cost: 0, reused: true };
   const req = clip(request, 2500);
-  let one;
-  let two;
-  try {
-    [one, two] = await Promise.all([
-      askFn({ request: req, answers: { first: clip(cand, 2500), second: clip(ref, 2500) } }, { better: BETTER }),
-      askFn({ request: req, answers: { first: clip(ref, 2500), second: clip(cand, 2500) } }, { better: BETTER }),
-    ]);
-  } catch {
-    return null;
-  }
+  const settled = await Promise.allSettled([
+    askFn({ request: req, answers: { first: clip(cand, 2500), second: clip(ref, 2500) } }, { better: BETTER }),
+    askFn({ request: req, answers: { first: clip(ref, 2500), second: clip(cand, 2500) } }, { better: BETTER }),
+  ]);
+  const cost = settled.reduce((a, s) => a + (s.status === 'fulfilled' ? Number(s.value?.costUsd) || 0 : 0), 0);
+  if (settled.some((s) => s.status === 'rejected')) return { verdict: null, transient: true, cost };
+  const [one, two] = settled.map((s) => s.value);
   const p = (r, k) => {
     const x = Number(r?.answers?.better?.probabilities?.[k]);
     if (!Number.isFinite(x)) throw new Error('Jev gave no probabilities');
@@ -238,11 +237,13 @@ export async function judgeBetter(request, cand, ref, { scope = null, askFn = as
     pCand = [p(one, 'first'), p(two, 'second')];
     pRef = [p(one, 'second'), p(two, 'first')];
   } catch {
-    return null;
+    return { verdict: null, transient: true, cost };
   }
-  const verdict = Math.min(...pCand) >= config.THREE_WAY_BETTER_MIN ? 'better'
-    : Math.max(...pRef) < config.THREE_WAY_FORGIVE_MAX ? 'equal' : 'kept';
-  const cost = (Number(one.costUsd) || 0) + (Number(two.costUsd) || 0);
+  /* Forgiven only when both readings put the chance the customer's answer is the better one under
+     THREE_WAY_FORGIVE_MAX, and among those, better when both put the candidate's at THREE_WAY_BETTER_MIN
+     or more. "Better" alone let through one both readings gave the customer's answer a third of a chance. */
+  const forgiven = Math.max(...pRef) < config.THREE_WAY_FORGIVE_MAX;
+  const verdict = !forgiven ? 'kept' : Math.min(...pCand) >= config.THREE_WAY_BETTER_MIN ? 'better' : 'equal';
   const out = { verdict, pRef: pRef.map((x) => Math.round(x * 1000) / 1000), pCand: pCand.map((x) => Math.round(x * 1000) / 1000) };
   await keep(key, { score: verdict === 'kept' ? 1 : 0, judgedBy: 'jev3', detail: out });
   return { ...out, cost };
@@ -308,7 +309,11 @@ export async function judgeBarPair(request, a, b, { scope = null, subject = 'b' 
       // a difference only in wording or in what is included: is the judged side at least as good?
       if (threeWay && out.score === 1 && !out.transient && mayForgive(kind)) {
         const bt = await judgeBetter(request, judged, ref, { scope });
-        if (bt) {
+        // a reading that did not come back: the difference stands this time, and is not kept as a verdict
+        if (bt?.transient) {
+          out.cost += bt.cost;
+          out.transient = true;
+        } else if (bt) {
           out.cost += bt.cost;
           out.detail = { ...out.detail, three: { verdict: bt.verdict, pRef: bt.pRef, pCand: bt.pCand } };
           if (bt.verdict !== 'kept') {
@@ -433,6 +438,8 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
           const bt = await judgeBetter(request, cand, refs[i], { scope });
           if (!bt) continue;
           cost += bt.cost;
+          // a reading that did not come back: the difference stands this time, and is not kept as a verdict
+          if (bt.transient) { transient = true; continue; }
           three.push({ ref: i, verdict: bt.verdict, pRef: bt.pRef, pCand: bt.pCand });
           if (bt.verdict !== 'kept') {
             each[i] = 0;

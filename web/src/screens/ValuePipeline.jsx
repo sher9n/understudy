@@ -404,23 +404,24 @@ function flowModel(c) {
        test's until then. */
     const s = v.spec;
     const kinds = kindsOf(s, v.reference);
-    const liveBy = p.byModel;
+    // this week's requests, by the setup that answered them, told apart by their place in the router's table
+    const liveBy = p.byOption;
     const partsIn = kinds.parts.filter((x) => x.kinds > 0);
     const measuredSum = partsIn.reduce((a, x) => a + (x.share ?? 0), 0);
     const shareOf = (x) => {
-      if (liveBy) return liveBy.filter((b) => b.model === x.model).reduce((a, b) => a + b.share, 0);
+      if (liveBy) return liveBy.find((b) => b.option === x.option)?.share ?? 0;
       // the test's shares of the kinds, scaled so the part sent to the customer's own model is what the test sent there
       if (!known(x.share)) return null;
       return known(sentOn) && measuredSum > 0 ? (x.share / measuredSum) * (1 - sentOn) : x.share;
     };
-    const perCallOf = (x) => (liveBy ? liveBy.find((b) => b.model === x.model)?.perCall ?? null : null);
+    const perCallOf = (x) => (liveBy ? liveBy.find((b) => b.option === x.option)?.perCall ?? null : null);
     add({
       id: 'sorter', eyebrow: 'Sorts first', title: 'What kind of request?', note: `${kindsWord(kinds.count)}, learned from your requests`,
       detail: {
         title: 'Each request is matched to a kind',
         text: `When this setup was tested, Understudy grouped your own requests into ${kindsWord(kinds.count)} by what they ask, `
           + `and tested every setup on every kind. Now each request is matched to the kind it is most like before it is sent, `
-          + `and goes to the setup that answered that kind as well as ${ref} for the least money. A request unlike any it learned from goes to ${ref}. `
+          + `and goes to a setup that answered that kind as well as ${ref}, the table picked for the biggest saving we are sure of. A request unlike any it learned from goes to ${ref}. `
           + 'Nothing is checked afterwards, so no request waits for two answers.',
         big: num(kinds.count), small: kinds.count === 1 ? 'kind of request' : 'kinds of request',
       },
@@ -460,7 +461,7 @@ function flowModel(c) {
     end = 'sent';
     bottomTo = 'strong';
     first = 'sorter';
-    intro = `Understudy learned the kinds of request this workload gets, and sends each kind to the setup that answers it as well as ${ref} for the least money. The thicker the line, the more requests take that path.`;
+    intro = `Understudy learned the kinds of request this workload gets, and sends each kind to a setup that answers it as well as ${ref}, picked for the biggest saving we are sure of. The thicker the line, the more requests take that path.`;
   } else if (kind === 'router') {
     const s = v.spec;
     const cheap = short(s.cheap.model);
@@ -813,7 +814,7 @@ const RANK = { serving: 0, passed: 1, trial: 2, unsure: 3, dearer: 4, failed: 5 
 function familyWords(f, ref) {
   if (f === 'cascade') return { name: 'Check first', what: `A cheaper model answers, a quick check decides, and ${ref} answers when the check is unsure.` };
   if (f === 'router') {
-    return { name: 'Sorted by kind of request', what: `Understudy learns the kinds of request you send and sends each kind to the cheapest setup that answered it as well as ${ref} in the test. Everything else goes to ${ref}.` };
+    return { name: 'Sorted by kind of request', what: `Understudy learns the kinds of request you send and sends each kind to a setup that answered it as well as ${ref} in the test, picked for the biggest saving we are sure of. Everything else goes to ${ref}.` };
   }
   if (f === 'lighter') return { name: `${ref}, thinking less`, what: 'The same model, set to think less before it answers. Thinking is billed, so it costs less.' };
   if (f === 'cheapest') return { name: `${ref} from its cheapest provider`, what: 'Exactly the same model, bought from whichever company runs it most cheaply.' };
@@ -997,9 +998,12 @@ function emptySetups(c) {
       : 'No test has finished yet. Press Measure now below to try again.';
   }
   if (!t.auto) return 'No setups have been tested yet. This workspace only tests when asked, so press Measure now below when you are ready.';
-  if (t.seen >= t.firstAfter) return 'No setups have been tested yet. The first test starts soon.';
-  return `No setups have been tested yet. The first test starts by itself once Understudy has seen ${num(t.firstAfter)} of your requests. `
-    + `It has seen ${num(t.seen)} so far.`;
+  /* 40 requests only books the first test (considerMeasuring in src/proxy.js): it runs once there are enough
+     of them for a setup to be able to pass, and when testing would pay for itself within two months. */
+  const when = 'It runs as soon as there are enough of your requests for a setup to be able to pass, and testing would pay for itself within two months.';
+  if (t.seen >= t.firstAfter) return `No setups have been tested yet. The first test is booked. ${when}`;
+  return `No setups have been tested yet. The first test is booked once Understudy has seen ${num(t.firstAfter)} of your requests; `
+    + `it has seen ${num(t.seen)} so far. ${when}`;
 }
 
 function Setups({ c }) {

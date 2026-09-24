@@ -411,7 +411,7 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
                     {why && <span className="cdwhy">{why}</span>}
                     {sureWords(r, cert) && <span className="cdwhy">{sureWords(r, cert)}</span>}
                     {choiceWords(r, cert) && <span className="cdwhy">{choiceWords(r, cert)}</span>}
-                    {r.confirm && <span className="cdwhy">{confirmWords(r.confirm)}</span>}
+                    {r.confirm && confirmWords(r.confirm) && <span className="cdwhy">{confirmWords(r.confirm)}</span>}
                   </div>
                 </div>
               );
@@ -463,7 +463,8 @@ export default function WorkloadDetail({ id, onBack, onChanged }) {
 function sureWords(r) {
   if (r.verdict !== 'cleared' || r.chance === null || r.chance === undefined) return null;
   const sure = r.chance >= 0.999 ? 'more than 99.9%' : `${(Math.floor(r.chance * 1000) / 10).toFixed(1)}%`;
-  const better = r.betterPct > 0 ? ` Where its answer differed from yours, it was the better one on ${Number(r.betterPct).toFixed(1)}% of calls.` : '';
+  // counted over every call it answered (src/eval/run.js), so said that way
+  const better = r.betterPct > 0 ? ` On ${Number(r.betterPct).toFixed(1)}% of the calls, its answer was the better one.` : '';
   return `How sure we are it keeps your bar: ${sure}.${better}`;
 }
 
@@ -531,6 +532,8 @@ const confirmedLook = (c) => !c || c.verdict === 'cleared' || c.verdict === 'liv
 function confirmWords(c) {
   if (c.verdict === 'live') return 'Second look: on live calls, a small share at a time once switched';
   if (c.verdict === 'not_reached') return 'Second look: not reached in this measurement, so it is not switched to by itself';
+  // the line above it already says why a cautious workload left it out
+  if (c.verdict === 'left_out') return null;
   if (c.verdict === 'insufficient' && !c.runs) return 'Second look: not enough calls it had not seen yet';
   const pct = (x) => (x === null || x === undefined ? '?' : `${Number(x).toFixed(2)}%`);
   const said = c.verdict === 'cleared' ? 'cleared again' : c.verdict === 'missed' ? 'did not hold up'

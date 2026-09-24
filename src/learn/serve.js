@@ -11,17 +11,39 @@ import { costOf } from './cost.js';
  * measured to do well enough, and a request unlike any it learned from to the customer's own model; the
  * older kind picks between one cheap model and the customer's own by a small model of the call.
  * `escalated` is whether the call went to the customer's own model.
+ *
+ * Never throws: a request it cannot read, or a spec whose table names a setup it does not have, sends the
+ * call to the customer's own model (`fallback` when the spec does not name one), and `use` is null only when
+ * there is nothing at all to send it to, which the caller answers the usual way. Thrown on a streamed call,
+ * the call failed with nobody to fall back to.
  */
-export function routeFor(spec, body) {
+export function routeFor(spec, body, { fallback = null } = {}) {
+  const strong = spec?.strong?.model ? spec.strong : fallback?.model ? fallback : null;
+  const part = (p) => (p ? { model: p.model, recipe: p.recipe ?? null } : null);
   if (Number(spec?.version) === ROUTER_VERSION) {
-    const r = routeOf(spec, featuresRaw(body));
-    const use = r.option < 0 ? spec.strong : spec.options[r.option];
-    return { use: { model: use.model, recipe: use.recipe ?? null }, escalated: r.option < 0,
+    let r;
+    try {
+      r = routeOf(spec, featuresRaw(body));
+    } catch {
+      r = { option: -1, kind: null, sim: 0, why: 'unreadable' };
+    }
+    const options = Array.isArray(spec.options) ? spec.options : [];
+    let option = r.option >= 0 ? options[r.option] ?? null : null;
+    if (r.option >= 0 && !option?.model) {
+      option = null;
+      r = { ...r, option: -1, why: 'no such setup' };
+    }
+    return { use: part(option || strong), escalated: !option,
       check: { by: 'router', kind: r.kind, sim: Math.round((Number(r.sim) || 0) * 1000) / 1000, why: r.why } };
   }
-  const p = predict(spec, featuresOf(body));
-  const use = p >= spec.threshold ? spec.cheap : spec.strong;
-  return { use, escalated: use === spec.strong, check: { by: 'router', p: Math.round(p * 1000) / 1000 } };
+  let p = null;
+  try {
+    p = predict(spec, featuresOf(body));
+  } catch {
+    p = null;
+  }
+  const cheap = p !== null && Number.isFinite(p) && p >= spec.threshold && spec.cheap?.model ? spec.cheap : null;
+  return { use: part(cheap || strong), escalated: !cheap, check: { by: 'router', p: p === null ? null : Math.round(p * 1000) / 1000 } };
 }
 
 /* Serving one call with a strategy.
@@ -73,7 +95,16 @@ export async function serveWith(spec, given, { shape, scope = null, check = chec
   if (spec.kind === 'router') {
     const pick = routeFor(spec, body);
     const { use } = pick;
-    const r = await chat(body, use.model, { ...policy, recipe: use.recipe ?? null, zdr });
+    // nothing to send it to: failed like any other try, so what comes next in line answers it
+    if (!use) throw new UpstreamError(502, { error: { message: 'This router names no model to answer the call.' } });
+    let r;
+    try {
+      r = await chat(body, use.model, { ...policy, recipe: use.recipe ?? null, zdr });
+    } catch (err) {
+      // the model the router picked, so a failure is put down to it rather than to the router's lead
+      if (err && typeof err === 'object' && !err.model) err.model = use.model;
+      throw err;
+    }
     const c = await costOf(r.json, use.model, body);
     return { json: r.json, served: use.model, recipe: use.recipe ?? null, cost: c.cost, costEstimated: c.estimated,
       latencyMs: Date.now() - started, escalated: pick.escalated, check: pick.check };

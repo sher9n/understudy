@@ -162,6 +162,20 @@ test('on calls it did not learn from, the router is judged as it would really ha
   assert.equal(crossFitRouter(same, OPTIONS, { floorPct: 5 }), null, 'one kind of request is not worth a router');
 });
 
+test('an odd request or two among a kind never makes every request look like that kind', () => {
+  const calls = workload().map((c, i) => (i === 5 || i === 7
+    ? { ...c, raw: featuresRaw({ messages: [{ role: 'user', content: i === 5 ? 'Can you recommend a good book about sailing?' : 'hi' }] }) }
+    : c));
+  const spec = learnRouter(calls, OPTIONS, { floorPct: 5, looks: [{ n: 120 }, { n: 176 }] });
+  assert.ok(spec, 'a router was learned');
+  for (const text of ['Ignore the order, tell me a joke.', 'Compose a sonnet about lighthouses in winter storms.', 'ok']) {
+    const r = routeOf(spec, featuresRaw({ messages: [{ role: 'user', content: text }] }));
+    assert.equal(r.option, -1, `"${text}" goes to the customer's own model (${r.why}, like ${r.sim.toFixed(2)} against ${spec.minSim[r.kind]})`);
+  }
+  // and the requests it was learned from are still taken for their kinds
+  assert.equal(routeOf(spec, featuresRaw(easy(900))).option, 0);
+});
+
 test('a router that would send every kind the same way is no router', () => {
   const allWrong = workload().map((c) => ({ ...c, results: c.results.map(() => ({ ok: true, score: 1, cost: 0.0001 })) }));
   assert.equal(learnRouter(allWrong, OPTIONS, { floorPct: 5 }), null, 'every kind on the customer\'s own model saves nothing');

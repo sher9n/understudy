@@ -130,7 +130,7 @@ export function nameOfResult(row) {
       short: names.length === 1 ? `${names[0]} or ${short(spec.strong?.model)}, by kind of request` : `${names[0]} and ${names.length - 1} more, by kind of request`,
       first: spec.cheap.model, fallback: spec.strong.model, threshold: null, options: spec.options.map((o) => o.model),
       kinds: table.length || null,
-      parts: spec.options.map((o, j) => ({ model: o.model, label: names[j], kinds: table.filter((t) => t === j).length, share: shareOf((t) => t === j) })),
+      parts: spec.options.map((o, j) => ({ option: j, model: o.model, label: names[j], kinds: table.filter((t) => t === j).length, share: shareOf((t) => t === j) })),
       yours: { kinds: table.filter((t) => t < 0).length, share: shareOf((t) => t < 0) } };
   }
   if (spec.kind === 'router') {

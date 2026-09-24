@@ -47,9 +47,12 @@ export function cheaperCleared(results, feePct = config.ROUTING_FEE_PCT) {
   const refCost = ref?.cost_month_usd ?? null;
   const ceiling = 1 / (1 + (Number(feePct) || 0) / 100);
   const rank = (r) => (r.choice_rank === null || r.choice_rank === undefined ? Infinity : Number(r.choice_rank));
+  /* One a cautious workload left out as not sure enough is never offered: offered, approving with no
+     model named switched to exactly what the workload's own priority had turned down. */
   return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null && refCost != null
     && Number(r.cost_month_usd) < Number(refCost)
-    && (r.cost_ratio == null || Number(r.cost_ratio) < ceiling))
+    && (r.cost_ratio == null || Number(r.cost_ratio) < ceiling)
+    && r.confirm_verdict !== 'left_out')
     .sort((a, b) => (confirmed(b) - confirmed(a)) || (rank(a) - rank(b)) || (a.cost_month_usd - b.cost_month_usd));
 }
 

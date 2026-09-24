@@ -61,7 +61,13 @@ const { move } = await import('../src/billing.js');
 const { default: v1 } = await import('../src/proxy.js');
 const { onServed } = await import('../src/learn/choose.js');
 const { afterServed, reviewWorkload, forgetState } = await import('../src/learn/explore.js');
-const { controlRecord } = await import('../src/learn/control.js');
+const { controlRecord, maybeControl, scoreServed } = await import('../src/learn/control.js');
+const { optimizeSpent } = await import('../src/billing.js');
+const { judgeBetter } = await import('../src/eval/judge.js');
+const { routeFor } = await import('../src/learn/serve.js');
+const { cheaperCleared } = await import('../src/eval/outcome.js');
+const { zdrFor } = await import('../src/workspace.js');
+const { default: config } = await import('../src/config.js');
 
 await migrate({ quiet: true });
 
@@ -95,6 +101,8 @@ const right = (i) => ({ order: i, status: 'shipped', refund: isRefund(i) ? 'issu
 // what the stand-in has gone wrong on, for the scenarios that break something after a switch
 let quickBroken = false;
 let cheapBroken = false;
+// models whose provider answers with this status instead, for the scenarios where one is too busy to answer
+const failing = new Map();
 
 /* The written answers: the customer's own model says when it arrives; the better writer says the same and
    adds how to follow it; the worse writer leaves out when it arrives. */
@@ -172,6 +180,11 @@ const server = http.createServer((req, res) => {
       return;
     }
     const model = payload.model;
+    if (failing.has(model)) {
+      res.writeHead(failing.get(model), { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Provider is overloaded' } }));
+      return;
+    }
     const sys = payload.messages?.find((m) => m.role === 'system')?.content || '';
     const user = String(payload.messages?.filter((m) => m.role === 'user').pop()?.content || '');
     let content;
@@ -406,10 +419,53 @@ test('the router serves live calls by their kind, plain and streamed, and anythi
   assert.equal(JSON.parse(oddRow.check_json).why, 'unfamiliar');
 });
 
+test('a measurement re-checks a healthy router and keeps it, beside a router learned again over the same setups', async () => {
+  const { workload } = kinds;
+  const arm = await armOf(workload.id);
+  const out = await runEvaluation(workload.id, { trigger: 'automatic' });
+  assert.equal(out.ok, true, `the run finishes: ${JSON.stringify(out)}`);
+  const key = `router:${CHEAP}+${STEADY}~kinds`;
+  const rows = (await resultsOf(out.runId)).filter((r) => r.model_id === key);
+  assert.equal(rows.length, 1, 'one result for the router serving, never a second under the same name');
+  assert.equal(rows[0].verdict, 'cleared', `${rows[0].gap_pct}%`);
+  assert.deepEqual(JSON.parse(rows[0].arm_json).table, JSON.parse(arm.spec_json).table, 'the one serving, as it serves');
+  const w = await load(workload.id);
+  assert.equal(w.routed_arm_id, arm.id, 'still serving');
+  const said = await db.prepare(`SELECT title FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(workload.id);
+  assert.match(said.title, /still clears your bar/);
+});
+
+test('a setup too busy to answer during a re-check never switches a router back', async () => {
+  const { workload } = kinds;
+  const arm = await armOf(workload.id);
+  const before = Number((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(workload.id)).n);
+  failing.set(STEADY, 503);
+  try {
+    const out = await runEvaluation(workload.id, { trigger: 'automatic' });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const steady = await resultOf(out.runId, STEADY);
+    assert.equal(steady.stopped, 'errors', 'the busy setup stopped');
+    const row = await resultOf(out.runId, `router:${CHEAP}+${STEADY}~kinds`);
+    assert.equal(row.verdict, 'insufficient', `the calls it could not answer are left out, not counted wrong: ${row.verdict}, ${row.gap_pct}%`);
+    assert.ok(row.runs < 120, `judged on the calls that were answered: ${row.runs}`);
+    assert.match(row.error_text || '', /could not be answered/);
+    assert.equal((await load(workload.id)).routed_arm_id, arm.id, 'still serving');
+    const after = Number((await db.prepare('SELECT COUNT(*) AS n FROM promotions WHERE workload_id = ?').get(workload.id)).n);
+    assert.equal(after, before, 'nothing switched back');
+    const said = await db.prepare(`SELECT title FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(workload.id);
+    assert.match(said.title, /could not be checked in full/);
+  } finally {
+    failing.delete(STEADY);
+  }
+});
+
 /* 3. Written answers, judged three ways ----------------------------------------------------------- */
+
+let writer = null;
 
 test('a written answer that adds what helps is counted better, and one that leaves out a fact is worse', async () => {
   const shop = await seed({ enabled: [BETTER, WORSE], text: true });
+  writer = shop;
   const before = jevAsked;
   const out = await runEvaluation(shop.workload.id);
   assert.equal(out.ok, true, JSON.stringify(out));
@@ -459,6 +515,64 @@ test('after a switch, answers checked against the customer\'s model in the backg
   }
 });
 
+test('what the background checks cost is optimizing spend, and counts against the budget', async () => {
+  const { workspace } = balanced;
+  const sum = async (sql) => Number((await db.prepare(sql).get(workspace.id)).s);
+  const checks = await sum('SELECT COALESCE(SUM(cost_usd), 0) AS s FROM control_checks WHERE workspace_id = ?');
+  assert.ok(checks > 0, 'the checks above were paid for');
+  const others = await sum('SELECT COALESCE(SUM(spend_usd), 0) AS s FROM eval_runs WHERE workspace_id = ?')
+    + await sum('SELECT COALESCE(SUM(cost_usd), 0) AS s FROM shadow_runs WHERE workspace_id = ?')
+    + await sum('SELECT COALESCE(SUM(cost_usd), 0) AS s FROM graded_calls WHERE workspace_id = ?');
+  const spent = await optimizeSpent(workspace.id);
+  assert.ok(Math.abs(spent - (others + checks) * 1.01) < 1e-6, `optimizing spend ${spent} counts the checks' ${checks} beside ${others}`);
+});
+
+test('a burst of calls never runs more than two background checks at once for one workload', async () => {
+  const { workload, request } = writer;
+  const w = await load(workload.id);
+  assert.ok(w.routed_arm_id, 'the better writer serves');
+  const seen = [];
+  let at = 0;
+  let most = 0;
+  // the customer's own model answering in the background, slowly, so the checks overlap
+  const serve = async (spec, body, opts) => {
+    seen.push(opts);
+    at += 1;
+    most = Math.max(most, at);
+    await new Promise((r) => setTimeout(r, 150));
+    at -= 1;
+    return { json: { choices: [{ message: { content: refText(900) } }] }, cost: 0.002, latencyMs: 150 };
+  };
+  const decision = { armId: w.routed_arm_id, explored: false, escalated: false };
+  const response = { choices: [{ message: { content: writerText(BETTER, 900) } }] };
+  const outs = await Promise.all(Array.from({ length: 8 }, () => maybeControl({ workload: w, body: request(900), response, decision },
+    { rng: () => 0, serve })));
+  assert.equal(outs.filter(Boolean).length, 2, 'two ran, the rest were passed over rather than queued');
+  assert.equal(most, 2);
+  // asked with the workspace's own rule on providers that keep nothing
+  assert.equal(seen[0].zdr, await zdrFor(workload.workspace_id));
+  // a call a router or check sent on to the customer's own model is checked too
+  const sentOn = await maybeControl({ workload: w, body: request(901), response, decision: { ...decision, escalated: true } },
+    { rng: () => 0, serve });
+  assert.ok(sentOn, 'checked');
+  assert.equal(JSON.parse(sentOn.detail_json).escalated, true);
+});
+
+test('the control group judges by the yardstick the switch was measured by, and leaves out calls nobody finished', async () => {
+  const body = writer.request(902);
+  const served = { choices: [{ message: { content: writerText(WORSE, 902) } }] };
+  const ref = { choices: [{ message: { content: refText(902) } }] };
+  const same = await scoreServed(body, served, ref, 'free_text', { yardstick: 'agreement' });
+  assert.equal(same.score, 1, 'held to the same answer, leaving out when it arrives is a different answer');
+  const good = await scoreServed(body, served, ref, 'free_text', { yardstick: 'quality' });
+  assert.equal(good.judgedBy, 'llm-quality', 'held to "at least as good", the quality judge reads it');
+  assert.equal(good.score, 0, 'and the stand-in judge calls it a tie');
+  // an answer cut short counts against what served only when the customer's model finished the same call
+  const cut = { choices: [{ message: { content: 'Order 902 ship' }, finish_reason: 'length' }] };
+  assert.equal((await scoreServed(body, cut, ref, 'free_text')).score, 1);
+  assert.equal((await scoreServed(body, cut, cut, 'free_text')).score, null, 'both cut short: the call says nothing');
+});
+
 /* 5. A serving router, re-checked as it serves --------------------------------------------------------- */
 
 test('a measurement re-checks the serving router exactly as it serves, and switches it back when its cheap model slips', async () => {
@@ -477,8 +591,81 @@ test('a measurement re-checks the serving router exactly as it serves, and switc
     const w = await load(workload.id);
     assert.equal(w.routed_model, null, 'switched back to the customer\'s own model');
     const r = await db.prepare('SELECT * FROM promotions WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1').get(workload.id);
-    assert.equal(r.action, 'auto_revert');
+    // for a while, not for good: what a router may have lost is its table, and a later measurement can learn it afresh
+    assert.equal(r.action, 'soft_revert');
+    assert.equal((await db.prepare('SELECT status FROM arms WHERE id = ?').get(arm.id)).status, 'resting');
   } finally {
     cheapBroken = false;
+  }
+});
+
+/* 6. The edges: three-way readings, and routers with specs that make no sense ----------------------------- */
+
+test('a difference is forgiven only when both readings leave the customer\'s answer little chance of being better', async () => {
+  let n = 0;
+  // Jev as asked twice, with the candidate first in the first reading and second in the second
+  const reading = (pCand, pRef, fail = false) => async (state) => {
+    n += 1;
+    if (fail && n % 2 === 0) throw new Error('Jev is busy');
+    const candFirst = String(state.answers.first).startsWith('cand');
+    const probabilities = { first: candFirst ? pCand : pRef, second: candFirst ? pRef : pCand, equal: Math.max(0, 1 - pCand - pRef) };
+    return { answers: { better: { type: 'choice', probabilities } }, costUsd: 0.001 };
+  };
+  const ask3 = (tag, pCand, pRef, fail) => judgeBetter(`request ${tag}`, `cand ${tag}`, `ref ${tag}`, { askFn: reading(pCand, pRef, fail) });
+  assert.equal((await ask3('a', 0.7, 0.2)).verdict, 'better');
+  assert.equal((await ask3('b', 0.5, 0.2)).verdict, 'equal');
+  assert.equal((await ask3('c', 0.65, 0.35)).verdict, 'kept', 'better by a head, but the customer\'s answer kept a third of a chance');
+  const busy = await ask3('d', 0.9, 0.05, true);
+  assert.equal(busy.transient, true, 'one reading did not come back');
+  assert.equal(busy.verdict, null);
+  assert.ok(Math.abs(busy.cost - 0.001) < 1e-12, `the reading that did come back is paid for: ${busy.cost}`);
+});
+
+test('a router whose spec names a setup it does not have, or none at all, sends the call to the customer\'s own model', () => {
+  const body = { messages: [{ role: 'user', content: 'Where is my order #5?' }] };
+  const kindsSpec = (extra) => ({ kind: 'router', version: 2, options: [{ model: CHEAP }], strong: { model: REF },
+    centroids: [new Array(256).fill(0)], minSim: [0], idf: new Array(256).fill(1), table: [3], sizes: [10], ...extra });
+  const missing = routeFor(kindsSpec(), body);
+  assert.equal(missing.use.model, REF, 'the table names setup 3 of 1');
+  assert.equal(missing.escalated, true);
+  assert.equal(missing.check.why, 'no such setup');
+  const noStrong = routeFor(kindsSpec({ strong: null }), body, { fallback: { model: 'fallback/model' } });
+  assert.equal(noStrong.use.model, 'fallback/model');
+  assert.equal(routeFor(kindsSpec({ strong: null }), body).use, null, 'with nothing at all, nothing, for the caller to answer the usual way');
+  const unreadable = routeFor({ ...kindsSpec(), centroids: null }, { messages: [{ role: 'user', content: { odd: true } }] });
+  assert.equal(unreadable.use.model, REF);
+  // the older kind, with its weights gone
+  const old = routeFor({ kind: 'router', cheap: { model: CHEAP }, strong: { model: REF }, threshold: 0.5, weights: null }, body);
+  assert.equal(old.use.model, REF);
+});
+
+/* 7. A cautious workload with nothing it is sure enough of ------------------------------------------------ */
+
+test('what a cautious workload is not sure enough of is never looked at again, offered or tried, and it says so', async () => {
+  const sure = config.CAUTIOUS_MIN_CHANCE;
+  // surer than 120 clean calls can ever make anything, so both setups that clear are left out
+  config.CAUTIOUS_MIN_CHANCE = 0.9999;
+  try {
+    const shop = await seed({ enabled: [THIN, QUICK], workspaceRouting: 'cautious' });
+    const out = await runEvaluation(shop.workload.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const rows = await resultsOf(out.runId);
+    for (const m of [THIN, QUICK]) {
+      const r = rows.find((x) => x.model_id === m);
+      assert.equal(r.verdict, 'cleared');
+      assert.equal(r.confirm_verdict, 'left_out', `${m} was left out, not "not reached"`);
+      assert.equal(r.confirm_runs, null, 'and never looked at again');
+    }
+    assert.deepEqual(cheaperCleared(rows), [], 'nothing is offered to approve');
+    const w = await load(shop.workload.id);
+    assert.equal(w.routed_model, null, 'nothing switched');
+    assert.equal(w.status_note, 'A candidate cleared, but not surely enough for a cautious workload');
+    const said = await db.prepare(`SELECT title, detail FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(shop.workload.id);
+    assert.match(said.title, /not surely enough for a cautious workload/);
+    assert.doesNotMatch(said.detail, /most one measurement may spend/, 'never put down to money');
+    const trying = await db.prepare(`SELECT COUNT(*) AS n FROM arms WHERE workload_id = ? AND status = 'trying'`).get(shop.workload.id);
+    assert.equal(Number(trying.n), 0, 'and not tried on live calls, where an experiment could switch to it');
+  } finally {
+    config.CAUTIOUS_MIN_CHANCE = sure;
   }
 });

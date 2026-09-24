@@ -441,9 +441,23 @@ export function learnRouter(calls, options, { floorPct, margin = 0.8, shrink = 2
      own already. And one that does no better than a single setup alone is not worth its moving part. */
   if (!best || !(best.value > 0) || new Set(best.table).size < 2 || !(best.value > alone + 1e-9)) return null;
   const readings = per.map((p, q) => ({ kind: p.kind, calls: p.calls, option: best.table[q], noise: p.noise, tried: p.tried }));
+  /* How like a kind a request has to be to be taken for it: as like as the least like of its members, less
+     a little, but never looser than most of them warrant. The least like alone let one odd request among a
+     kind's members (a joke asked of an order workload) lower the line so far that anything at all was
+     taken for that kind and sent to its cheaper setup. So the line is also held at the kind's middle, less
+     three spreads (the median absolute deviation, scaled to a standard deviation), and the higher of the
+     two is kept: a kind with no odd members keeps the line it always had. */
+  const quantile = (xs2, q) => {
+    const s = [...xs2].sort((a, b) => a - b);
+    const at = (s.length - 1) * q;
+    const lo = Math.floor(at);
+    return s[lo] + (s[Math.min(s.length - 1, lo + 1)] - s[lo]) * (at - lo);
+  };
   const minSim = kinds.centres.map((c, k) => {
     const sims = xs.filter((_, i) => kinds.assign[i] === k).map((x) => dot(x, c));
-    return Math.max(0, Math.min(...sims) - 0.02);
+    const middle = quantile(sims, 0.5);
+    const spread = quantile(sims.map((s) => Math.abs(s - middle)), 0.5) * 1.4826;
+    return Math.max(0, Math.min(...sims) - 0.02, middle - 3 * Math.max(spread, 0.02) - 0.02);
   });
   const round = (x) => Math.round(x * 10000) / 10000;
   return {

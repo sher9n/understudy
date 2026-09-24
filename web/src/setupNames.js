@@ -37,8 +37,9 @@ export function kindsOf(spec, ref) {
   const shareOf = (pick) => (total > 0 ? table.reduce((a, t, k) => a + (pick(t) ? Number(sizes[k]) || 0 : 0), 0) / total : null);
   return {
     count: table.length,
+    // `option` is the setup's place in the router's table, which is how live calls are told apart (paths.byOption)
     parts: spec.options.map((o, j) => ({
-      model: o.model, label: partName(o, ref), kinds: table.filter((t) => t === j).length, share: shareOf((t) => t === j),
+      option: j, model: o.model, label: partName(o, ref), kinds: table.filter((t) => t === j).length, share: shareOf((t) => t === j),
     })),
     yours: { kinds: table.filter((t) => t < 0).length, share: shareOf((t) => t < 0) },
   };

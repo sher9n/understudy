@@ -367,8 +367,8 @@ export default function HowRouting({ me, go }) {
             <p>
               Two setups are combinations. In the first, a cheaper model answers and Jev, a fast AI judge made by
               TypeSafe, checks each answer; when Jev is unsure, <M /> answers instead. In the second, requests are
-              sorted by kind, and each kind goes to the cheapest setup that handles it as well as <M />. Sorting is
-              explained <a href="#kinds">further down</a>.
+              sorted by kind, and each kind goes to a setup that handles it as well as <M />. Sorting is explained{' '}
+              <a href="#kinds">further down</a>.
             </p>
           </div>
           <figure>
@@ -503,9 +503,10 @@ export default function HowRouting({ me, go }) {
             </p>
             <p>
               So Understudy groups the tested requests by the words they use, and tests every setup on each group.
-              Then it builds a sorting table: each kind of request goes to the setup that answers it as well as{' '}
-              <M /> for the least money, and a request unlike any it learned from goes to <M />. It keeps only a
-              few averages to do this, never your requests.
+              Then it builds a sorting table. A setup may only take a kind it answers as well as <M />, and of all
+              the tables that could be made that way, it keeps the one with the biggest saving we are sure of. A
+              request unlike any it learned from goes to <M />. It keeps only a few averages to do this, never your
+              requests.
             </p>
             <p>
               The sorting has to earn its place. If a cheap model’s mistakes are spread evenly over every kind,

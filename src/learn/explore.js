@@ -918,8 +918,9 @@ export async function markTrying(workload, { runId, results, refMonthly, floor }
     if (r.verdict === 'reference' || r.stopped || r.verdict !== 'cleared') continue;
     /* Nor one that cleared once and then did not hold up on calls it had never seen: its first reading was
        the lucky one, and live calls are not where to find that out again. One the second look never
-       reached, or had too few unseen calls for, has not been found wanting, and stays in. */
-    if (['missed', 'review', 'slower', 'failed'].includes(r.confirm_verdict)) continue;
+       reached, or had too few unseen calls for, has not been found wanting, and stays in. One a cautious
+       workload left out as not sure enough is not tried either: live experiments could switch to it. */
+    if (['missed', 'review', 'slower', 'failed', 'left_out'].includes(r.confirm_verdict)) continue;
     if (refMonthly !== null && (r.cost_month_usd === null || r.cost_month_usd >= refMonthly)) continue;
     if (await everReverted(workload.id, r.model_id)) continue;
     const ratio = r.cost_ratio ?? (refMonthly ? r.cost_month_usd / refMonthly : null);
