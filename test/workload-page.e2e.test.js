@@ -251,26 +251,29 @@ test('every measurement is a line: when, what started it, how many requests, how
   const nothing = await run(ws, wid, { at: t - 3 * DAY, results: [{ key: CHEAP, verdict: 'missed', gap: 9 }] });
   const going = await run(ws, wid, { at: t - MIN, status: 'running', results: [] });
   const { measurements: m } = await pageOf(await load(wid));
-  const by = Object.fromEntries(m.map((x) => [x.id, x]));
+  const by = Object.fromEntries(m.map((x) => [x.id, { ...x, tag: { tone: x.tag.tone, text: x.tag.text } }]));
+  // every tag says what it means, for its hover
+  for (const x of m) assert.ok(x.tag.why && x.tag.why.length > 20, `${x.tag.text} says what it means`);
   assert.equal(m[0].id, going, 'newest first');
-  assert.deepEqual(by[going].tag, { tone: 'brand', text: 'Measuring now' });
+  assert.deepEqual(by[going].tag, { tone: 'brand', text: 'Testing now' });
   assert.equal(by[going].live, true);
   assert.equal(by[going].mins, null);
   assert.equal(by[first].what, 'First test');
-  assert.deepEqual(by[first].tag, { tone: 'ok', text: '1 setup cleared' });
-  assert.equal(by[mine].what, 'Started by you');
+  assert.deepEqual(by[first].tag, { tone: 'ok', text: '1 model passed' });
+  assert.equal(by[mine].what, 'Started manually');
   assert.equal(by[mine].n, 27);
   assert.equal(by[mine].mins, 11);
   near(by[mine].usd, withFee(0.13), 'what it cost the customer, our fee included');
-  assert.deepEqual(by[mine].tag, { tone: 'warn', text: 'Close' });
+  assert.deepEqual(by[mine].tag, { tone: 'warn', text: 'Close match' });
   assert.equal(by[twice].what, 'Regular re-test');
   assert.deepEqual(by[twice].tag, { tone: 'ok', text: 'Passed twice' });
-  assert.deepEqual(by[unsure].tag, { tone: 'bad', text: 'Could not measure' });
-  assert.deepEqual(by[refused].tag, { tone: 'bad', text: 'Your model could not answer' });
+  // a test that compared nothing says which way it ended, rather than "could not measure"
+  assert.deepEqual(by[unsure].tag, { tone: 'bad', text: "Couldn't compare models" });
+  assert.deepEqual(by[refused].tag, { tone: 'bad', text: 'Not enough valid results' });
   assert.deepEqual(by[broke].tag, { tone: 'warn', text: 'Balance ran out' });
   assert.deepEqual(by[cut].tag, { tone: 'mut', text: 'Stopped' });
-  assert.deepEqual(by[lost].tag, { tone: 'mut', text: 'Interrupted' });
-  assert.deepEqual(by[nothing].tag, { tone: 'mut', text: 'Nothing cleared yet' });
+  assert.deepEqual(by[lost].tag, { tone: 'mut', text: 'Test incomplete' });
+  assert.deepEqual(by[nothing].tag, { tone: 'mut', text: 'No match yet' });
 });
 
 test('once switched, the measurement that switched says so, and one that finds what serves still keeps the bar says that', async () => {
@@ -286,16 +289,19 @@ test('once switched, the measurement that switched says so, and one that finds w
   const kept = await run(ws, wid, { at: t - 2 * DAY, results: [{ key: CHEAP, verdict: 'cleared', gap: 1 }, { key: OTHER, verdict: 'missed', gap: 8 }] });
   const w = await load(wid);
   const by = Object.fromEntries((await pageOf(w)).measurements.map((x) => [x.id, x]));
-  assert.deepEqual(by[made].tag, { tone: 'brand', text: 'Passed, switched' });
-  assert.deepEqual(by[kept].tag, { tone: 'ok', text: 'Still as good' });
+  assert.equal(by[made].tag.text, 'Passed, switched');
+  assert.equal(by[made].tag.tone, 'brand');
+  assert.equal(by[kept].tag.text, 'Still passing');
+  assert.equal(by[kept].tag.tone, 'ok');
 
   // opened: the one it switched to is the one serving, named as such, and in the run that switched to it, it is a candidate like the rest
   const madePage = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(made));
-  assert.match(madePage.take, /Asked again on 100 requests it had never seen, vendor\/steady-small held up\. Understudy switched to it\./);
+  // a model named the way people know it, from the catalogue
+  assert.equal(madePage.take, 'steady passed, then passed again on 100 new requests it had never seen, so Understudy switched to it.');
   assert.equal(madePage.cands.find((c) => c.key === CHEAP).verdict, 'Passed twice');
   const keptPage = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(kept));
-  assert.equal(keptPage.cands.find((c) => c.key === CHEAP).verdict, 'Keeps serving');
-  assert.match(keptPage.take, /^The setup serving still answers at least as well as gpt-5\.4\. Nothing cheaper passed, so nothing changes\.$/);
+  assert.equal(keptPage.cands.find((c) => c.key === CHEAP).verdict, 'Still passing');
+  assert.equal(keptPage.take, 'The model in use is still within the allowed difference of the original model, gpt-5.4. No cheaper model passed, so nothing changes.');
 });
 
 test('an opened measurement places every setup by what a request costs on it, and says in a sentence what it found', async () => {
@@ -310,17 +316,23 @@ test('an opened measurement places every setup by what a request costs on it, an
   ] });
   const w = await load(wid);
   const rp = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(small));
-  assert.equal(rp.take, '27 requests can show a setup is within about 9% of yours, not within 3%. The full test starts by itself at 176.');
+  assert.match(rp.take, new RegExp('^This test used 27 requests, too few to switch anything\\. Showing that a model answers differently from the '
+    + 'original model on under 3% of requests takes at least 88\\. The full test needs 176 recent requests, so the result can be checked again '
+    + "on new ones, and starts by itself when they're in: you have \\d+ so far(, so the earliest is \\d{1,2} [A-Z][a-z]{2})?\\.$"), rp.take);
+  near(rp.noise, 0.01, 'how often the original model differed from itself, which the allowed difference is set from');
   near(rp.bar, 0.03, 'the bar');
   assert.equal(rp.yardstick, 'agreement');
   near(rp.yours.perCall, 0.0036, 'a request on the customer\'s own model, from its answers in this measurement');
   assert.equal(rp.yours.p50, 2000);
   assert.deepEqual(rp.cands.map((c) => [c.key, c.tone, c.verdict]), [
     [CHEAP, 'warn', 'Too few to be sure'],
-    [OTHER, 'bad', 'Missed'],
-    ['vendor/refuses', 'bad', 'Could not answer'],
-    ['vendor/dropped', 'mut', 'Stopped early'],
-  ], 'passed first, then close, then missed, then stopped early');
+    [OTHER, 'bad', 'Not a match'],
+    // stopped early because it could no longer win: clearly not a match, which is the reason, not a system error
+    ['vendor/dropped', 'bad', 'Clearly not a match'],
+    ['vendor/refuses', 'bad', 'Failed requests'],
+  ], 'passed first, then close, then not a match, closest first');
+  for (const c of rp.cands) assert.ok(c.why && c.why.length > 20, `${c.verdict} says why`);
+  assert.match(rp.cands.find((c) => c.key === 'vendor/dropped').why, /^Testing stopped early because the model was already different enough/);
   const cheap = rp.cands[0];
   near(cheap.perCall, 0.1 * 0.0036, 'what a request costs on it: its measured share of the customer\'s own');
   near(cheap.hi, 0.091, 'the range its count allows');
@@ -332,13 +344,22 @@ test('an opened measurement places every setup by what a request costs on it, an
   // one the customer's own model could not steady is said as that
   const unsure = await run(ws, wid, { at: t - 2 * DAY, outcome: 'unmeasurable', noise: 63.6, sample: 11, results: [] });
   const up = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(unsure));
-  assert.match(up.take, /^gpt-5\.4 gave a different answer to the same request 64% of the time when asked each of 11 twice/);
+  assert.match(up.take, /^The original model, gpt-5\.4, gave a different answer to the same request 64% of the time when each of 11 requests was run twice/);
   assert.deepEqual(up.cands, []);
   // one big enough to show it, where the closest was only close
   const close = await run(ws, wid, { at: t - 3 * DAY, sample: 120, floor: 3, results: [{ key: CHEAP, verdict: 'review', gap: 2.5, hi: 4.1, needed: 100 }] });
   const cp = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(close));
-  assert.equal(cp.cands[0].verdict, 'Close');
-  assert.match(cp.take, /^The closest, vendor\/steady-small, answered differently on 2\.5% of them, against a bar of 3%\./);
+  assert.equal(cp.cands[0].verdict, 'Close match');
+  assert.equal(cp.take, 'steady was the closest match. It answered differently from the original model on 2.5% of the requests tested. '
+    + "The original model answers differently from itself on 1% of requests, so at most 3% is allowed, but the test isn't yet sure it "
+    + 'stays within that. It will be tested again next time.');
+  // and one that differed more than allowed says it was not close enough
+  const far = await run(ws, wid, { at: t - 5 * DAY, sample: 120, floor: 33.33333333, noise: 26.66666667,
+    results: [{ key: CHEAP, verdict: 'review', gap: 45, hi: 61, needed: 100 }] });
+  const fp = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(far));
+  assert.equal(fp.take, 'steady was the closest match. It answered differently from the original model on 45% of the requests tested. '
+    + "The original model answers differently from itself on 26.7% of requests, so at most 33.3% is allowed, and this model wasn't close "
+    + 'enough to replace it yet. It will be tested again next time.');
   // written answers held to answers at least as good
   const judged = await run(ws, wid, { at: t - 4 * DAY, yardstick: 'quality', results: [{ key: CHEAP, verdict: 'cleared' }] });
   assert.equal((await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(judged))).yardstick, 'quality');

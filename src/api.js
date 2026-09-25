@@ -508,7 +508,7 @@ function shortStrategy(w) {
   try { spec = JSON.parse(w.arm_spec); } catch { return null; }
   const s = (m) => String(m || '').split('/').pop();
   if (spec.kind === 'cascade') return `${s(spec.first.model)}, checked`;
-  if (spec.kind === 'router') return `${s(spec.cheap.model)}, picked per call`;
+  if (spec.kind === 'router') return `${s(spec.cheap.model)}, picked per request`;
   if (spec.kind === 'model' && spec.model === w.reference_model && spec.recipe?.reasoning) return `${s(spec.model)}, thinking less`;
   return null;
 }

@@ -3,9 +3,9 @@ import { dayOf } from './dates.js';
 
 /* The drawings on a workload's page (web/src/screens/WorkloadDetail.jsx), each the design artboard's own, drawn
    from the page's figures (src/workloadPage.js): requests a day against the day's limit, how far along the requests
-   a first test needs are, every setup a measurement tried by its cost against how often it answered differently,
-   the live flow of requests once a workload is switched, the daily checks against the customer's own model, and
-   the cost of a request before and now. Every colour is a theme token. */
+   a first test needs are, every model a test tried by its cost against how often it answered differently from the
+   original model, the live flow of requests once a workload is switched, the daily checks against the original model,
+   and the cost of a request before and now. Every colour is a theme token. */
 
 const DAY = 86400000;
 
@@ -19,6 +19,7 @@ const S = { viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWi
 export const I = {
   chev: <svg className="wp-chev" {...S} strokeWidth={1.8}><path d="M6 3.5L10.5 8 6 12.5" /></svg>,
   info: <svg {...S}><circle cx="8" cy="8" r="6.2" /><path d="M8 7.2v4M8 4.9v.2" /></svg>,
+  check: <svg {...S} strokeWidth={1.9}><path d="M3.4 8.4l3 3 6.2-6.8" /></svg>,
   gear: <svg {...S} strokeWidth={1.6}><path d="M2.6 4.6h10.8M2.6 11.4h10.8" /><circle cx="6" cy="4.6" r="1.9" /><circle cx="10" cy="11.4" r="1.9" /></svg>,
   text: <svg {...S}><path d="M3 4h10M3 7h10M3 10h6" /></svg>,
   braces: <svg {...S}><path d="M6 2.8C4.4 2.8 4.6 4.6 4.6 6S3.4 8 3.4 8s1.2.6 1.2 2-.2 3.2 1.4 3.2M10 2.8c1.6 0 1.4 1.8 1.4 3.2s1.2 2 1.2 2-1.2.6-1.2 2 .2 3.2-1.4 3.2" /></svg>,
@@ -146,7 +147,7 @@ export function SelfPic({ self, yardstick }) {
     const mark = self.most ?? self.bar;
     const worse = yardstick === 'quality';
     const said = worse ? 'clearly worse than its own other answer' : 'a different answer from its own other one';
-    const markWords = self.most ? `${pctw(mark)}: the most a bar can be set from` : `pass mark ${pctw(mark)}`;
+    const markWords = self.most ? `${pctw(mark)}: above this, no steady standard` : `allowed difference ${pctw(mark)}`;
     return (
       <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img"
         aria-label={`Your model gave ${said} on ${pctw(self.noise)} of ${self.n} requests, each asked twice${mark !== null ? `; ${markWords}` : ''}`}>
@@ -163,12 +164,12 @@ export function SelfPic({ self, yardstick }) {
     );
   }
   const share = self?.total > 0 ? Math.min(1, self.done / self.total) : 0;
-  const ended = self?.outcome === 'refused' ? 'your model could not answer'
+  const ended = self?.outcome === 'refused' ? "the original model couldn't answer"
     : self?.outcome === 'interrupted' ? 'interrupted here' : self?.outcome === 'stopped' ? 'stopped here' : 'ended here';
   return (
     <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img"
-      aria-label={`${self?.done ?? 0} of ${self?.total ?? 0} model calls made before it ${ended === 'ended here' ? 'ended' : ended.replace(' here', '')}`}>
-      <text x={L} y={T - 10} className="t-ink t-bold">{`${(self?.done ?? 0).toLocaleString('en-US')} of ${(self?.total ?? 0).toLocaleString('en-US')} model calls made`}</text>
+      aria-label={`${self?.done ?? 0} of ${self?.total ?? 0} model answers collected before it ${ended === 'ended here' ? 'ended' : ended.replace(' here', '')}`}>
+      <text x={L} y={T - 10} className="t-ink t-bold">{`${(self?.done ?? 0).toLocaleString('en-US')} of ${(self?.total ?? 0).toLocaleString('en-US')} model answers collected`}</text>
       <rect x={L} y={T} width={w} height="16" rx="8" fill="var(--grid)" />
       {share > 0 && <rect x={L} y={T} width={Math.max(16, x(share) - L)} height="16" rx="8" fill="var(--mut)" />}
       <line x1={x(share)} x2={x(share)} y1={T - 5} y2={T + 21} stroke="var(--ink)" strokeWidth="2" />
@@ -225,9 +226,17 @@ export function CompareChart({ run }) {
   const zoneW = yours ? Math.max(0, Math.min(x(yours), W - R) - L) : 0;
   const zoneH = y(0) - y(run.bar);
   return (
-    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="How the candidates compare with your model on cost and answers">
+    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img"
+      aria-label={`The models tested, by what a request costs on each and how often it was ${String(run.axis).toLowerCase()}`}>
       {yours && run.bar > 0 && <rect x={L} y={y(run.bar)} width={zoneW} height={zoneH} fill="var(--okq)" />}
-      {yours && run.bar > 0 && zoneW > 140 && zoneH > 20 && <text x={L + 8} y={y(run.bar) + 14} className="t-ok ui">Cheaper and as good</text>}
+      {/* "as good" said more than the test measures: it measures how close the answers are, within the allowed difference */}
+      {yours && run.bar > 0 && zoneW > 290 && zoneH > 20 && <text x={L + 8} y={y(run.bar) + 14} className="t-ok ui">Cheaper and within the allowed difference</text>}
+      {yours && run.bar > 0 && zoneW > 150 && zoneW <= 290 && zoneH > 34 && (
+        <text x={L + 8} y={y(run.bar) + 14} className="t-ok ui">
+          <tspan x={L + 8}>Cheaper, and within the</tspan>
+          <tspan x={L + 8} dy="15">allowed difference</tspan>
+        </text>
+      )}
       {yticks.map((t) => (
         <g key={t}>
           <line x1={L} x2={W - R} y1={y(t)} y2={y(t)} stroke="var(--grid)" />
@@ -240,19 +249,22 @@ export function CompareChart({ run }) {
           <text x={x(v)} y={T + h + 16} textAnchor="middle">{tickUsd(v)}</text>
         </g>
       ))}
-      <text x={L + w / 2} y={H - 6} textAnchor="middle" className="ui">Cost per call, less to the left</text>
+      <text x={L + w / 2} y={H - 6} textAnchor="middle" className="ui">Cost per request, less to the left</text>
       <text x="14" y={T + h / 2} textAnchor="middle" className="ui" transform={`rotate(-90 14 ${T + h / 2})`}>{run.axis}</text>
       {run.bar > 0 && (
-        <>
+        <g>
+          <title>{`Allowed difference, ${barPct}%: the most another model may differ from the original model, set from how often the original model differs from itself`}</title>
           <line x1={L} x2={W - R} y1={y(run.bar)} y2={y(run.bar)} stroke="var(--ok)" strokeWidth="1.6" strokeDasharray="6 4" />
-          <text x={W - R} y={y(run.bar) - 6} textAnchor="end" className="t-ok t-bold">bar {barPct}%</text>
-        </>
+          <text x={W - R} y={y(run.bar) - 6} textAnchor="end" className="t-ok t-bold halo">Allowed difference · {barPct}%</text>
+        </g>
       )}
+      {/* The original model is not drawn as a dot at 0%: it differs from itself too, and a dot there said it never does.
+         Only what it costs is marked, as the edge of "cheaper". */}
       {yours && (
         <g>
-          <title>{`Your own model, ${run.reference}`}</title>
-          <path d={`M${x(yours)} ${y(0) - 8} L${x(yours) + 8} ${y(0)} L${x(yours)} ${y(0) + 8} L${x(yours) - 8} ${y(0)} Z`} fill="var(--ink)" />
-          <text x={x(yours)} y={y(0) - 13} textAnchor="middle" className="t-ink ui">yours</text>
+          <title>{`The original model, ${run.reference}: ${tickUsd(yours)} a request`}</title>
+          <line x1={x(yours)} x2={x(yours)} y1={T} y2={T + h} stroke="var(--ink)" strokeWidth="1.2" strokeDasharray="2 3" opacity="0.55" />
+          <text x={x(yours) > L + 150 ? x(yours) - 5 : x(yours) + 5} y={T + 11} textAnchor={x(yours) > L + 150 ? 'end' : 'start'} className="t-ink ui halo">original model's cost</text>
         </g>
       )}
       {pts.map((c) => (
@@ -306,7 +318,7 @@ export function FlowSvg({ d, still = false, waiting = false }) {
   const middle = d.kind === 'cascade' ? ['checks each answer', 'with Jev']
     : d.kind === 'sorted' ? ['sorts each request', 'by its kind']
       : d.kind === 'router' ? ['picks for each', 'request']
-        : ['sends each request', 'to the cheaper setup'];
+        : ['sends each request', 'to the cheaper model'];
   const top = waiting ? `will start at ${Math.round((d.rollout ?? 1) * 100)}%` : `${cheapPct}% answered here`;
   const bottom = waiting ? 'answers all, for now'
     : d.kind === 'cascade' ? `${100 - cheapPct}% sent on, unsure`
@@ -396,7 +408,7 @@ export function FlowSvg({ d, still = false, waiting = false }) {
       <text x={mid(G.cheap)} y={G.cheap[1] + 22} textAnchor="middle" className="t-ok ui t-bold"><title>{d.label}</title>{fitName(d.cheap)}</text>
       <text x={mid(G.cheap)} y={G.cheap[1] + 40} textAnchor="middle" className="t-ok">{top}</text>
       <rect {...box4(G.yours)} rx="12" fill="var(--raise)" stroke="var(--line)" />
-      <text x={mid(G.yours)} y={G.yours[1] + 22} textAnchor="middle" className="t-ink ui t-bold">{refShort}, yours</text>
+      <text x={mid(G.yours)} y={G.yours[1] + 22} textAnchor="middle" className="t-ink ui t-bold">{refShort}, original</text>
       <text x={mid(G.yours)} y={G.yours[1] + 40} textAnchor="middle">{bottom}</text>
       <g data-dots="" />
     </svg>
@@ -434,7 +446,7 @@ export function QualitySpark({ daily, bar }) {
   const pts = daily.map((v, i) => `${x(i)},${y(v)}`).join(' ');
   const area = `0,${y(0)} ${pts} ${x(n - 1)},${y(0)}`;
   return (
-    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Share of checked calls worse than yours, each day, against the bar">
+    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Share of checked requests that differed from the original model, each day, against the allowed difference">
       {n > 1 && <polygon points={area} fill="var(--okq)" />}
       {n > 1 && <polyline points={pts} fill="none" stroke="var(--ok)" strokeWidth="1.8" />}
       <line x1="0" x2={W - 30} y1={y(bar)} y2={y(bar)} stroke="var(--bad)" strokeDasharray="4 3" strokeWidth="1.2" />

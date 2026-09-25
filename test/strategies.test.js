@@ -124,7 +124,7 @@ test('strategies have one name each, in words and as a key', () => {
   assert.equal(keyOfSpec(lighter, 'openai/gpt-5.4'), 'openai/gpt-5.4#lighter');
   assert.equal(keyOfSpec({ kind: 'model', model: 'm/x', recipe: null }, 'openai/gpt-5.4'), 'm/x');
   const router = { kind: 'router', cheap: { model: 'm/cheap' }, strong: { model: 'openai/gpt-4.1' } };
-  assert.equal(labelOf(router), 'cheap or gpt-4.1, picked call by call');
+  assert.equal(labelOf(router), 'cheap or gpt-4.1, picked request by request');
 });
 
 test('the customer\'s own model from its cheapest provider is named as that, never as thinking less', () => {
