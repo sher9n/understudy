@@ -1,8 +1,8 @@
 /* A workload's page, as its four questions (src/workloadPage.js), end to end on a real database and through the
    page's own routes.
 
-   What is checked: whether there is enough traffic to optimize, counted the way a test counts it, with at most
-   EVAL_POOL_PER_DAY a day and the day the rest can arrive by; every measurement in a word, whatever it ended as; the
+   What is checked: whether there is enough traffic to optimize, counted the way a test counts it, by count alone
+   however many arrive in a day, and how many more a test needs; every measurement in a word, whatever it ended as; the
    calls and who answered each; and once switched, what Understudy is doing: the share the cheaper setup answers,
    what a request costs before and now, saved this month and on track for, the daily checks against the customer's
    own model, and the speed. One measurement opened: the sentence of what it found and every setup it tried, placed
@@ -49,8 +49,9 @@ const auth = await import('../src/auth.js');
 const { move, withFee } = await import('../src/billing.js');
 const { saveCatalog } = await import('../src/openrouter.js');
 const { learningSettled, workloadFor } = await import('../src/traffic.js');
-const { pageOf, runPageOf, callsOf, stepsTo } = await import('../src/workloadPage.js');
+const { pageOf, runPageOf, callsOf } = await import('../src/workloadPage.js');
 const { routedSavings } = await import('../src/eval/actual.js');
+const { poolOf } = await import('../src/eval/run.js');
 const { optimizingSince } = await import('../src/eval/value.js');
 const { armKey, labelOf } = await import('../src/learn/arms.js');
 const { app } = await import('../src/server.js');
@@ -162,20 +163,50 @@ async function run(ws, wid, { at, trigger = 'automatic', outcome = 'compared', s
 
 /* 1. Enough data to optimize? ---------------------------------------------------------------------- */
 
-test('the rest of the requests a test needs arrive at most a day\'s worth a day, today\'s room first', () => {
-  // 54 so far, all of them today: 6 more can count today, then 60 a day
-  const steps = stepsTo(54, 176, { d: 100, counted: 54 }, 60);
-  assert.deepEqual(steps.map((s) => [s.from, s.to, s.d, s.today]), [[54, 60, 100, true], [60, 120, 101, false], [120, 176, 102, false]]);
-  // a day already full adds nothing today
-  assert.deepEqual(stepsTo(60, 100, { d: 7, counted: 60 }, 60).map((s) => [s.from, s.to, s.d]), [[60, 100, 8]]);
-  assert.deepEqual(stepsTo(200, 176, { d: 1, counted: 0 }, 60), [], 'nothing to wait for once there are enough');
+test('a busy day counts whole: 180 requests on one day are enough for a test that needs 176', async () => {
+  const { ws } = await account();
+  const wid = await workload(ws, 'one-busy-day');
+  const today = Math.floor(now() / DAY);
+  for (let i = 0; i < 180; i += 1) await call(ws, wid, { at: today * DAY + i * 1000 });
+  const { enough } = await pageOf(await load(wid));
+  assert.equal(enough.have, 180, 'every one of the day\'s requests counts');
+  assert.equal(enough.need, 176);
+  assert.equal(enough.yes, true, 'so a test can run the day they arrive');
+  assert.equal(enough.daily[29].counted, 180);
+  assert.equal('earliest' in enough || 'steps' in enough || 'perDay' in enough, false, 'no day-by-day schedule to wait for');
 });
 
-test('enough data is counted the way a test counts it: its own requests with their text, not failed, at most a day\'s worth a day', async () => {
+test('the requests a test counts stop at the most it draws on, however many there are', async () => {
+  const { ws } = await account();
+  const wid = await workload(ws, 'capped');
+  const today = Math.floor(now() / DAY);
+  const was = config.EVAL_POOL_MAX;
+  config.EVAL_POOL_MAX = 25;
+  try {
+    for (let i = 0; i < 40; i += 1) await call(ws, wid, { at: today * DAY + i * 1000 });
+    assert.equal((await pageOf(await load(wid))).enough.have, 25, 'held to the pool, not to a day');
+  } finally { config.EVAL_POOL_MAX = was; }
+});
+
+test('a test draws on every day in turn: a busy day fills in, and never crowds the quiet days out', async () => {
+  const { ws } = await account();
+  const wid = await workload(ws, 'spread');
+  const today = Math.floor(now() / DAY);
+  for (let i = 0; i < 100; i += 1) await call(ws, wid, { at: today * DAY + i * 1000 });
+  for (let d = 1; d <= 4; d += 1) for (let i = 0; i < 5; i += 1) await call(ws, wid, { at: (today - d) * DAY + i * 1000 });
+  const byDay = (rows) => rows.reduce((a, r) => { const k = Math.floor(Number(r.created_at) / DAY); a[k] = (a[k] || 0) + 1; return a; }, {});
+  const some = byDay(await poolOf(wid, { max: 30 }));
+  for (let d = 1; d <= 4; d += 1) assert.equal(some[today - d], 5, 'every quiet day is taken whole');
+  assert.equal(some[today], 10, 'and the busy day fills the rest');
+  assert.equal((await poolOf(wid, { max: 1000 })).length, 120, 'with room, every request is in');
+  assert.equal((await pageOf(await load(wid))).enough.have, 120, 'and counted, the busy day whole');
+});
+
+test('enough data is counted the way a test counts it: its own requests with their text, not failed, however many a day', async () => {
   const { ws } = await account();
   const wid = await workload(ws, 'counting');
   const today = Math.floor(now() / DAY);
-  // 70 today (only 60 count), 10 yesterday, 3 failed, 2 with no text kept, 4 tests and replays that never count
+  // 70 today, 10 yesterday, 3 failed, 2 with no text kept, 4 tests and replays that never count
   for (let i = 0; i < 70; i += 1) await call(ws, wid, { at: today * DAY + i * 1000 });
   for (let i = 0; i < 10; i += 1) await call(ws, wid, { at: (today - 1) * DAY + i * 1000 });
   for (let i = 0; i < 3; i += 1) await call(ws, wid, { at: (today - 2) * DAY + i * 1000, status: 502 });
@@ -183,29 +214,25 @@ test('enough data is counted the way a test counts it: its own requests with the
   for (let i = 0; i < 2; i += 1) await call(ws, wid, { at: (today - 1) * DAY + 5000 + i, source: 'test' });
   for (let i = 0; i < 2; i += 1) await call(ws, wid, { at: (today - 1) * DAY + 6000 + i, source: 'replay' });
   const { enough } = await pageOf(await load(wid));
-  assert.equal(enough.have, 70, 'sixty from today and ten from yesterday');
+  assert.equal(enough.have, 80, 'all seventy from today and ten from yesterday');
   assert.equal(enough.need, 176, 'a structured workload\'s first bar, 3%, takes 176 of them');
   assert.equal(enough.yes, false);
-  assert.equal(enough.perDay, config.EVAL_POOL_PER_DAY);
   assert.equal(enough.daily.length, 30);
   const last = enough.daily[29];
   assert.equal(last.d, today);
   assert.equal(last.n, 70, 'every request of the day is drawn');
-  assert.equal(last.counted, 60, 'but only sixty of them count');
+  assert.equal(last.counted, 70, 'and every one of them counts');
   assert.equal(enough.daily[27].n, 3, 'the failed ones are drawn');
   assert.equal(enough.daily[27].counted, 0, 'and not counted');
   assert.equal(enough.daily[26].counted, 0, 'nor the ones whose text is not kept');
   assert.equal(enough.daily[28].n, 10, 'tests and replays are not requests');
   assert.equal(enough.total, 85);
-  // today is full, so the rest come 60 a day from tomorrow: 70 -> 130 -> 176
-  assert.deepEqual(enough.steps.map((s) => [s.from, s.to, s.d - today]), [[70, 130, 1], [130, 176, 2]]);
-  assert.equal(enough.earliest, today + 2);
 
-  // left waiting for a count already: that count is what it needs
+  // left waiting for a count already: that count is what it needs, and reaching it is enough
   await db.prepare('UPDATE workloads SET measure_at_calls = 80 WHERE id = ?').run(wid);
   const again = (await pageOf(await load(wid))).enough;
   assert.equal(again.need, 80);
-  assert.equal(again.earliest, today + 1);
+  assert.equal(again.yes, true, 'eighty of eighty, whichever days they came on');
 
   // written answers have a looser first bar, 10%, and need fewer
   const text = await workload(ws, 'counting-text', { shape: 'free_text' });
@@ -222,8 +249,6 @@ test('a workload with enough says so, with what a test uses, and when it is next
   const { enough } = await pageOf(await load(wid));
   assert.equal(enough.yes, true);
   assert.equal(enough.have, 300);
-  assert.deepEqual(enough.steps, []);
-  assert.equal(enough.earliest, null);
   assert.equal(enough.sample, config.EVAL_SAMPLE_MAX, 'a test uses 120 of them');
   assert.equal(enough.everyDays, config.MEASURE_EVERY_DAYS);
   assert.equal(enough.nextAt, next);
@@ -318,7 +343,7 @@ test('an opened measurement places every setup by what a request costs on it, an
   const rp = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(small));
   assert.match(rp.take, new RegExp('^This test used 27 requests, too few to switch anything\\. Showing that a model answers differently from the '
     + 'original model on under 3% of requests takes at least 88\\. The full test needs 176 recent requests, so the result can be checked again '
-    + "on new ones, and starts by itself when they're in: you have \\d+ so far(, so the earliest is \\d{1,2} [A-Z][a-z]{2})?\\.$"), rp.take);
+    + "on new ones, and starts by itself when they're in: you have \\d+ so far\\.$"), rp.take);
   near(rp.noise, 0.01, 'how often the original model differed from itself, which the allowed difference is set from');
   near(rp.bar, 0.03, 'the bar');
   assert.equal(rp.yardstick, 'agreement');
@@ -363,6 +388,56 @@ test('an opened measurement places every setup by what a request costs on it, an
   // written answers held to answers at least as good
   const judged = await run(ws, wid, { at: t - 4 * DAY, yardstick: 'quality', results: [{ key: CHEAP, verdict: 'cleared' }] });
   assert.equal((await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(judged))).yardstick, 'quality');
+});
+
+test('a model too slow says by how much: its time, the original model\'s, and the most the workload allows', async () => {
+  const { ws } = await account();
+  const wid = await workload(ws, 'speed-words');
+  const t = now();
+  const rid = await run(ws, wid, { at: t - DAY, refP50: 2000, results: [
+    { key: 'vendor/slow-typical', verdict: 'slower', stopped: 'speed', runs: 3, gap: 0, p50: 5400 },
+    { key: 'vendor/slow-tail', verdict: 'slower', stopped: 'speed', runs: 18, gap: 0, p50: 2400 },
+    { key: 'cascade:vendor/checked', verdict: 'slower', gap: 0, p50: 2600, spec: { kind: 'cascade', first: { model: 'vendor/checked' }, fallback: { model: REF } } },
+  ] });
+  // held to 1.5 times the original model's typical time, and twice its slowest tenth on the slowest answers, each plus 0.3 s
+  await db.prepare(`UPDATE eval_runs SET ref_latency_p90 = 3000, plan_json = ? WHERE id = ?`)
+    .run(JSON.stringify({ speed: { pref: 'slower_ok', factor: 1.5, slowEnd: 2, metric: 'latency' } }), rid);
+  await db.prepare(`UPDATE eval_results SET latency_p90 = 7200 WHERE run_id = ? AND model_id = 'cascade:vendor/checked'`).run(rid);
+  // the model slow only at its end: 12 answers at 2 s, 6 past the 6.3 s its slowest may take
+  for (let i = 0; i < 18; i += 1) {
+    await db.prepare(`INSERT INTO eval_replays (id, run_id, call_id, model_id, slot, reused, status, cost_usd, latency_ms, created_at)
+      VALUES (?, ?, NULL, 'vendor/slow-tail', 0, 0, 200, 0.0001, ?, ?)`).run(id('rep'), rid, i < 12 ? 2000 : 7000, t - DAY);
+  }
+  const w = await load(wid);
+  const rp = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(rid));
+  const why = (key) => rp.cands.find((c) => c.key === key).why;
+  assert.equal(rp.cands.find((c) => c.key === 'vendor/slow-typical').verdict, 'Slower than original');
+  assert.equal(why('vendor/slow-typical'), 'On a typical request this model took 5.4 s, and the original model 2.0 s. That\'s 3.4 s slower, '
+    + '2.7 times as long, and this workload allows up to 3.3 s.');
+  assert.equal(why('vendor/slow-tail'), 'On a typical request this model took 2.4 s, and the original model 2.0 s. That\'s 0.4 s slower, which this '
+    + 'workload allows (up to 3.3 s). But 6 of its 18 answers took longer than 6.3 s. This workload lets about 1 in 10 answers take that long, '
+    + 'and 6 in 18 is too many.');
+  assert.equal(why('cascade:vendor/checked'), 'On a typical request this model took 2.6 s, and the original model 2.0 s. That\'s 0.6 s slower, '
+    + 'which this workload allows (up to 3.3 s). But its slowest answers were too slow: its slowest 1 in 10 took over 7.2 s, and this workload '
+    + 'allows them up to 6.3 s.');
+
+  // the difference said is the one between the two times as written: 5.4 s less 2.0 s is 3.4 s, never 3.5 s
+  const rounded = await run(ws, wid, { at: t - 3 * DAY, refP50: 1982, results: [
+    { key: 'vendor/rounding', verdict: 'slower', stopped: 'speed', runs: 3, p50: 5449 },
+    { key: 'vendor/just-past', verdict: 'slower', stopped: 'speed', runs: 9, p50: 3301 },
+  ] });
+  await db.prepare(`UPDATE eval_runs SET ref_latency_p90 = 3000, plan_json = ? WHERE id = ?`)
+    .run(JSON.stringify({ speed: { pref: 'slower_ok', factor: 1.5, slowEnd: 2, metric: 'latency' } }), rounded);
+  const rr = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(rounded));
+  assert.equal(rr.cands.find((c) => c.key === 'vendor/rounding').why, 'On a typical request this model took 5.4 s, and the original model 2.0 s. '
+    + 'That\'s 3.4 s slower, 2.7 times as long, and this workload allows up to 3.3 s.');
+  // just past a limit that rounds to the same tenth: both to a hundredth, so the words never say 3.3 s where 3.3 s is allowed
+  assert.match(rr.cands.find((c) => c.key === 'vendor/just-past').why, /took 3\.30 s, and the original model 2\.0 s\. .* allows up to 3\.27 s\.$/);
+
+  // a test that kept no speed rule says it without figures, as before
+  const old = await run(ws, wid, { at: t - 2 * DAY, results: [{ key: 'vendor/slow-typical', verdict: 'slower', p50: 5400 }] });
+  const op = await runPageOf(w, await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(old));
+  assert.equal(op.cands[0].why, 'It answered more slowly than the original model, by more than this workload allows.');
 });
 
 /* 3. The calls ------------------------------------------------------------------------------------- */

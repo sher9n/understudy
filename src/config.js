@@ -167,9 +167,11 @@ export const config = {
   EVAL_PAYBACK_MONTHS: num('EVAL_PAYBACK_MONTHS', 2),
   EVAL_PROTECT_SHARE: num('EVAL_PROTECT_SHARE', 0.5),
   EVAL_JUDGE_MODEL: str('EVAL_JUDGE_MODEL', 'openai/gpt-5.4-mini'),
-  /* The calls a measurement draws on: at most this many from each of the last thirty days, so a busy
-     workload is sampled across its month rather than from its last few hours. */
-  EVAL_POOL_PER_DAY: num('EVAL_POOL_PER_DAY', 60),
+  /* The calls a measurement draws on: at most this many from the last thirty days, taken from each day in
+     turn (every day's first, then every day's second, and so on), so a busy workload is still sampled across
+     its month rather than from its last few hours. Every usable call counts towards a test, however many
+     arrive in one day: a cap of 60 a day once held back a workload that had its calls on the day they came. */
+  EVAL_POOL_MAX: num('EVAL_POOL_MAX', 1800),
   /* Whether the answer the customer's own model actually gave a call is used as one of the two the bar
      needs, so only one is paid for. */
   EVAL_USE_RECORDED: bool('EVAL_USE_RECORDED', true),

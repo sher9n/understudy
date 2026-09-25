@@ -87,6 +87,25 @@ export function slowEndCount(n, share = 0.1, alpha = 0.05) {
   return n + 1;
 }
 
+/* The calls a measurement can draw on: this workload's own traffic over thirty days, spread across
+   those days. It used to be the newest six hundred, which on a busy workload is its last few hours.
+   Each day's calls are taken in turn, every day's first before any day's second, up to EVAL_POOL_MAX:
+   a quiet month is taken whole, and a busy one still spans its days, but a day with more calls than the
+   others is never held to their number, so every call counts towards a test (see eligible in plan.js).
+   Calls that failed when they were made are left out: replaying them measures nothing. Each comes
+   with the key of the strategy that served it, if one did (see `recorded` in runEvaluation). */
+export async function poolOf(workloadId, { seed = String(now()), max = config.EVAL_POOL_MAX } = {}) {
+  return db.prepare(
+    `SELECT c.id, c.request_json, c.response_json, c.served_model, c.source, c.cost_usd, c.created_at, c.arm_id,
+            a.key AS arm_key
+       FROM calls c LEFT JOIN arms a ON a.id = c.arm_id
+      WHERE c.id IN (SELECT id FROM (
+          SELECT id, row_number() OVER (PARTITION BY (created_at / 86400000) ORDER BY md5(id || ?)) AS rn, md5(id || ?) AS h
+            FROM calls WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
+             AND source NOT IN ('replay', 'test') AND (status_code IS NULL OR status_code < 400)) x
+        ORDER BY rn, h LIMIT ?)`).all(seed, seed, workloadId, now() - 30 * DAY, max);
+}
+
 /* Run tasks with at most `n` going at once. When one throws, the others finish what they are
    doing and start nothing more, and the error is thrown once they have: thrown at once, it left
    the other lanes sending paid calls that nothing would ever settle. */
@@ -263,19 +282,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return { ok: false, reason: plan.reason };
   }
 
-  /* The calls a measurement can draw on: this workload's own traffic over thirty days, spread across
-     those days. It used to be the newest six hundred, which on a busy workload is its last few hours.
-     Calls that failed when they were made are left out: replaying them measures nothing. Each comes
-     with the key of the strategy that served it, if one did (see `recorded`). */
-  const pool = await db.prepare(
-    `SELECT c.id, c.request_json, c.response_json, c.served_model, c.source, c.cost_usd, c.created_at, c.arm_id,
-            a.key AS arm_key
-       FROM calls c LEFT JOIN arms a ON a.id = c.arm_id
-      WHERE c.id IN (SELECT id FROM (
-          SELECT id, row_number() OVER (PARTITION BY (created_at / 86400000) ORDER BY md5(id || ?)) AS rn
-            FROM calls WHERE workload_id = ? AND request_json IS NOT NULL AND created_at >= ?
-             AND source NOT IN ('replay', 'test') AND (status_code IS NULL OR status_code < 400)) x
-        WHERE rn <= ?)`).all(String(now()), workloadId, now() - 30 * DAY, config.EVAL_POOL_PER_DAY);
+  const pool = await poolOf(workloadId);
   const shape = workload.shape_kind;
   // how many models the race finishes; raised below to take in every setup of a router by kind serving now
   let want = plan.models;

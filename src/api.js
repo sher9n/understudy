@@ -703,7 +703,7 @@ api.get('/workloads/:id', async (req, res) => {
     nextAt: w.recheck_after ? Number(w.recheck_after) : null,
     /* waiting for calls rather than for a time (see waitForCalls): how many of them it needs, counted as a
        measurement counts them, and how many it has; the call that brings them starts it */
-    waitingFor: Number(w.measure_at_calls) > 0 ? { calls: Number(w.measure_at_calls), have: plan.pool, perDay: config.EVAL_POOL_PER_DAY } : null,
+    waitingFor: Number(w.measure_at_calls) > 0 ? { calls: Number(w.measure_at_calls), have: plan.pool } : null,
     picked: plan.order.slice(0, plan.models).map((r) => r.model),
     /* How the models were chosen, for the page to explain: what ruled each group out, in what
        order the rest will be tried and why, what Jev and the leaderboard said, how old each fact

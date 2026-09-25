@@ -158,6 +158,19 @@
 .wp-tipbox p { margin: 0; }
 .wp-tipbox p + p { margin-top: 6px; }
 .wp-tipbox b { font-weight: 700; }
+/* a model's circle on a test's chart, and what it says when pointed at, focused or tapped (outside .wp: it floats) */
+.wp .wp-sv .wp-dot { cursor: pointer; outline: none; }
+.wp .wp-sv .wp-dot circle { stroke: transparent; stroke-width: 0; transition: stroke-width 0.12s; }
+.wp .wp-sv .wp-dot:hover circle, .wp .wp-sv .wp-dot.is-on circle, .wp .wp-sv .wp-dot:focus-visible circle { stroke: var(--ink); stroke-width: 2.5; }
+.wp-dottip .wp-dt-head { display: flex; gap: 8px; align-items: center; font-weight: 700; font-size: 13px; overflow-wrap: anywhere; }
+.wp-dottip .wp-dt-no { flex: none; width: 20px; height: 20px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 11px;
+  font-weight: 700; color: #fff; }
+[data-mode='dark'] .wp-dottip .wp-dt-no { color: #03060d; }
+.wp-dottip .wp-dt-out { font-weight: 700; margin-top: 4px; }
+.wp-dottip dl { margin: 8px 0 0; display: grid; gap: 6px; }
+.wp-dottip dt { color: var(--mut); font-size: 11.5px; }
+.wp-dottip dd { margin: 1px 0 0; font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .wp .wp-sv .wp-dot circle { transition: none; } }
 .wp .wp-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--mut-read); margin-top: 6px; }
 .wp .wp-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
 .wp .wp-legend i.wp-dash { width: 16px; height: 0; border-radius: 0; border-top: 2px dashed var(--ok); vertical-align: 3px; }

@@ -1,4 +1,5 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { dayOf } from './dates.js';
 
 /* The drawings on a workload's page (web/src/screens/WorkloadDetail.jsx), each the design artboard's own, drawn
@@ -55,18 +56,18 @@ function niceTop(v) {
   return step * p;
 }
 
-/** Requests a day over thirty days, to scale; with the day's limit, the part of a day past it drawn faint. */
-export function DailyChart({ days, cap = null }) {
+/** Requests a day over thirty days, to scale; the part of a day no test can use (it failed, or its text was not kept)
+    drawn faint. Every other request counts towards a test, however many arrive in a day. */
+export function DailyChart({ days }) {
   const [ref, W] = useWidthOf(560, 300);
   const H = 150; const L = 36; const R = 8; const T = 14; const B = 26; const w = W - L - R; const h = H - T - B;
-  const top = niceTop(Math.max(cap ?? 0, ...days.map((x) => x.n)));
+  const top = niceTop(Math.max(...days.map((x) => x.n)));
   const bw = w / days.length;
   const y = (v) => T + h - (v / top) * h;
   const ticks = top === 60 ? [0, 30, 60] : [0, top / 2, top];
   const label = [0, 14, days.length - 1];
   return (
-    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img"
-      aria-label={cap ? `Requests a day over the last 30 days, at most ${cap} a day counted` : 'Requests a day over the last 30 days'}>
+    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Requests a day over the last 30 days">
       {ticks.map((t) => (
         <g key={t}>
           <line x1={L} x2={W - R} y1={y(t)} y2={y(t)} stroke="var(--grid)" strokeWidth="1" />
@@ -76,24 +77,18 @@ export function DailyChart({ days, cap = null }) {
       {days.map((d, i) => {
         const x = L + i * bw + bw * 0.18;
         const bwid = bw * 0.64;
-        const counted = cap ? d.counted : d.n;
-        const past = cap ? Math.max(0, d.n - d.counted) : 0;
+        const counted = Math.min(d.n, d.counted ?? d.n);
+        const unusable = Math.max(0, d.n - counted);
         return (
           <g key={d.d}>
-            <title>{`${dayLabel(d.d)}: ${d.n.toLocaleString('en-US')} ${d.n === 1 ? 'request' : 'requests'}${cap && d.n !== d.counted ? `, ${d.counted} counted` : ''}`}</title>
-            {past > 0 && <rect x={x} y={y(d.n)} width={bwid} height={Math.max(1, (past / top) * h)} rx="1.5" fill="var(--brand)" opacity="0.22" />}
+            <title>{`${dayLabel(d.d)}: ${d.n.toLocaleString('en-US')} ${d.n === 1 ? 'request' : 'requests'}${unusable ? `, ${unusable.toLocaleString('en-US')} of them can't be used in a test` : ''}`}</title>
+            {unusable > 0 && <rect x={x} y={y(d.n)} width={bwid} height={Math.max(1, (unusable / top) * h)} rx="1.5" fill="var(--brand)" opacity="0.22" />}
             {counted > 0
               ? <rect x={x} y={y(counted)} width={bwid} height={Math.max(1, (counted / top) * h)} rx="1.5" fill="var(--brand)" />
-              : past > 0 ? null : <rect x={x} y={T + h - 1.5} width={bwid} height="1.5" fill="var(--line-strong)" />}
+              : unusable > 0 ? null : <rect x={x} y={T + h - 1.5} width={bwid} height="1.5" fill="var(--line-strong)" />}
           </g>
         );
       })}
-      {cap && (
-        <>
-          <line x1={L} x2={W - R} y1={y(cap)} y2={y(cap)} stroke="var(--warn)" strokeDasharray="4 4" strokeWidth="1.2" />
-          <text x={W - R} y={y(cap) - 5} textAnchor="end" className="t-warn">at most {cap} a day count</text>
-        </>
-      )}
       {/* under the first, middle and last day; kept inside the drawing when it is narrower than the artboard's */}
       {label.map((i) => (
         <text key={i} x={W < 560 ? Math.min(W - 24, Math.max(24, L + i * bw + bw / 2)) : L + i * bw + bw / 2} y={H - 6}
@@ -103,25 +98,23 @@ export function DailyChart({ days, cap = null }) {
   );
 }
 
-/** How far along the requests a first test needs are, and when the rest can arrive, at most `perDay` a day. */
-export function Meter({ have, need, perDay, steps, auto = true }) {
+/** How far along the requests a first test needs are, by count alone: how many there are, and how many more it takes.
+    The test starts the moment the count is reached, however many of them arrive in one day. */
+export function Meter({ have, need, auto = true }) {
   const [ref, W] = useWidthOf(520, 280);
-  const H = 92; const L = 4; const R = 4; const w = W - L - R; const T = 30;
+  const H = 80; const L = 4; const R = 4; const w = W - L - R; const T = 30;
   const x = (v) => L + (Math.min(v, need) / Math.max(1, need)) * w;
+  const left = Math.max(0, need - have);
+  const gap = x(need) - x(have);
   return (
     <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img"
-      aria-label={`${have} of the ${need} requests the test needs, at most ${perDay} a day`}>
+      aria-label={`${have} of the ${need} requests a test needs${left ? `, ${left} to go` : ''}`}>
       <rect x={L} y={T} width={w} height="16" rx="8" fill="var(--grid)" />
-      {steps.map((s, k) => {
-        const width = x(s.to) - x(s.from);
-        return (
-          <g key={s.d}>
-            <rect x={x(s.from) + 1.5} y={T + 1.5} width={Math.max(0, width - 3)} height="13" rx="6.5" fill="none" stroke="var(--brand)"
-              strokeWidth="1.4" strokeDasharray="3 3" opacity={Math.max(0.3, 0.75 - k * 0.15)} />
-            {width >= 44 && <text x={(x(s.from) + x(s.to)) / 2} y={T + 34} textAnchor="middle">{s.today ? 'today' : dayLabel(s.d)}</text>}
-          </g>
-        );
-      })}
+      {left > 0 && gap > 6 && (
+        <rect x={x(have) + 1.5} y={T + 1.5} width={Math.max(0, gap - 3)} height="13" rx="6.5" fill="none" stroke="var(--brand)"
+          strokeWidth="1.4" strokeDasharray="3 3" opacity="0.6" />
+      )}
+      {left > 0 && gap >= 64 && <text x={(x(have) + x(need)) / 2} y={T + 34} textAnchor="middle">{left.toLocaleString('en-US')} to go</text>}
       {have > 0 && <rect x={L} y={T} width={Math.max(0, x(have) - L)} height="16" rx="8" fill="var(--brand)" />}
       <text x={L} y={T - 10} className="t-brand t-bold">{have} so far</text>
       <line x1={x(need)} x2={x(need)} y1={T - 6} y2={T + 22} stroke="var(--ok)" strokeWidth="2" />
@@ -192,8 +185,45 @@ const SHARE_TOPS = [0.08, 0.12, 0.2, 0.4, 0.6, 0.8, 1];
  * differently from the customer's own model, or worse: the bar, the region that is cheaper and as good, and the
  * customer's own model. Numbered as the table under it.
  */
-export function CompareChart({ run }) {
+export function CompareChart({ run, tip = null }) {
   const [ref, W] = useWidthOf(600, 320);
+  /* A model's details, from `tip`, while its circle is pointed at or focused, and after a click or a tap (all a phone
+     has) until a tap elsewhere or Escape: floating above the page, in the app's own box, which carries the theme's
+     colours, as the page's other bubbles do (Help in web/src/screens/WorkloadDetail.jsx). */
+  const [open, setOpen] = useState(null);
+  const [at, setAt] = useState(null);
+  const dotEls = useRef(new Map());
+  const box = useRef(null);
+  const tipId = `wp-dot-${useId().replace(/[^A-Za-z0-9]/g, '')}`;
+  const shown = tip && open ? open.key : null;
+  const place = useCallback(() => {
+    const r = shown ? dotEls.current.get(shown)?.getBoundingClientRect() : null;
+    if (!r) return;
+    const width = Math.min(280, window.innerWidth - 24);
+    const left = Math.max(12, Math.min(r.left + r.width / 2 - width / 2, window.innerWidth - width - 12));
+    const hgt = Math.min(box.current?.offsetHeight || 0, window.innerHeight - 24);
+    const below = r.bottom + 8;
+    const above = r.top - 8 - hgt;
+    const top = !hgt || below + hgt <= window.innerHeight - 12 ? below : above >= 12 ? above : Math.max(12, window.innerHeight - 12 - hgt);
+    setAt({ top, left, width });
+  }, [shown]);
+  useLayoutEffect(() => {
+    if (!shown) { setAt(null); return undefined; }
+    place();
+    // placed again once it is drawn and its height is known, and whenever the page moves under it
+    const raf = requestAnimationFrame(place);
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place); };
+  }, [shown, place]);
+  useEffect(() => {
+    if (!open?.pinned) return undefined;
+    const away = (e) => { if (!dotEls.current.get(open.key)?.contains(e.target) && !box.current?.contains(e.target)) setOpen(null); };
+    const esc = (e) => { if (e.key === 'Escape') setOpen(null); };
+    document.addEventListener('pointerdown', away);
+    document.addEventListener('keydown', esc);
+    return () => { document.removeEventListener('pointerdown', away); document.removeEventListener('keydown', esc); };
+  }, [open]);
   const H = W < 460 ? 270 : 300; const L = 52; const R = 18; const T = 16; const B = 46; const w = W - L - R; const h = H - T - B;
   const pts = run.cands.map((c, i) => ({ ...c, no: i + 1 })).filter(plotted);
   const yours = Number(run.yours?.perCall) > 0 ? Number(run.yours.perCall) : null;
@@ -226,7 +256,9 @@ export function CompareChart({ run }) {
   const zoneW = yours ? Math.max(0, Math.min(x(yours), W - R) - L) : 0;
   const zoneH = y(0) - y(run.bar);
   return (
-    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img"
+    <>
+    {/* a group rather than a picture where its circles are buttons: a picture's insides are hidden from a screen reader */}
+    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role={tip ? 'group' : 'img'}
       aria-label={`The models tested, by what a request costs on each and how often it was ${String(run.axis).toLowerCase()}`}>
       {yours && run.bar > 0 && <rect x={L} y={y(run.bar)} width={zoneW} height={zoneH} fill="var(--okq)" />}
       {/* "as good" said more than the test measures: it measures how close the answers are, within the allowed difference */}
@@ -267,14 +299,45 @@ export function CompareChart({ run }) {
           <text x={x(yours) > L + 150 ? x(yours) - 5 : x(yours) + 5} y={T + 11} textAnchor={x(yours) > L + 150 ? 'end' : 'start'} className="t-ink ui halo">original model's cost</text>
         </g>
       )}
-      {pts.map((c) => (
-        <g key={c.key}>
-          <title>{`${c.no}. ${c.label}: ${String(run.axis).split(' ')[0].toLowerCase()} on ${(c.gap * 100).toFixed(1)}%`}</title>
-          <circle cx={x(c.perCall)} cy={y(c.gap)} r="9.5" fill={toneColor(c.tone)} />
-          <text x={x(c.perCall)} y={y(c.gap) + 3.8} textAnchor="middle" className="dotno">{c.no}</text>
-        </g>
-      ))}
+      {pts.map((c) => {
+        const said = `${c.no}. ${c.label}: ${c.verdict}, ${String(run.axis).split(' ')[0].toLowerCase()} on ${(c.gap * 100).toFixed(1)}% of requests`;
+        // pointed at, it shows; a click or a tap keeps it until a tap elsewhere, and a second one on it closes it
+        const hover = (on) => setOpen((o) => (o?.pinned ? o : on ? { key: c.key, pinned: false } : o?.key === c.key ? null : o));
+        const pin = () => setOpen((o) => (o?.pinned && o.key === c.key ? null : { key: c.key, pinned: true }));
+        return tip ? (
+          <g key={c.key} ref={(el) => { if (el) dotEls.current.set(c.key, el); else dotEls.current.delete(c.key); }}
+            className={`wp-dot${shown === c.key ? ' is-on' : ''}`} tabIndex={0} role="button" aria-label={said}
+            aria-expanded={open?.pinned && open.key === c.key ? 'true' : 'false'} aria-describedby={shown === c.key ? tipId : undefined}
+            onPointerEnter={(e) => { if (e.pointerType === 'mouse') hover(true); }}
+            onPointerLeave={(e) => { if (e.pointerType === 'mouse') hover(false); }}
+            onFocus={(e) => { if (e.currentTarget.matches(':focus-visible')) hover(true); }}
+            onBlur={() => hover(false)}
+            onClick={pin}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setOpen(null);
+              else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pin(); }
+            }}>
+            <circle cx={x(c.perCall)} cy={y(c.gap)} r="9.5" fill={toneColor(c.tone)} />
+            <text x={x(c.perCall)} y={y(c.gap) + 3.8} textAnchor="middle" className="dotno">{c.no}</text>
+          </g>
+        ) : (
+          <g key={c.key}>
+            <title>{said}</title>
+            <circle cx={x(c.perCall)} cy={y(c.gap)} r="9.5" fill={toneColor(c.tone)} />
+            <text x={x(c.perCall)} y={y(c.gap) + 3.8} textAnchor="middle" className="dotno">{c.no}</text>
+          </g>
+        );
+      })}
     </svg>
+    {/* drawn once hidden to learn its height, then placed under the circle, or above it where below would run off */}
+    {shown && createPortal(
+      <div ref={box} id={tipId} role="tooltip" className="wp-tipbox wp-dottip"
+        style={at ? { top: at.top, left: at.left, width: at.width } : { top: -9999, left: -9999, width: 280, visibility: 'hidden' }}>
+        {tip(pts.find((p) => p.key === shown) ?? null)}
+      </div>,
+      ref.current?.closest('[data-mode]') ?? document.body,
+    )}
+    </>
   );
 }
 

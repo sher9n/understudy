@@ -261,7 +261,7 @@ test('a measurement nobody asked for waits until it could show anything, and cos
 
 
 /* More calls for a workload, recorded as its own are, then moved to one day, so the count a measurement draws on
-   (at most EVAL_POOL_PER_DAY from any one day) is known exactly. */
+   (every usable call, however many a day) is known exactly. */
 async function addCalls(workspace, workload, count, daysAgo) {
   for (let i = 0; i < count; i += 1) {
     const request = { model: 'openai/gpt-5.4', messages: [{ role: 'user', content: `document #${daysAgo}-${i}-${Math.random()}` }],
@@ -295,18 +295,14 @@ test('a measurement waiting for calls starts on the call that brings them, never
   assert.equal(v.tests.need, 176, 'the page says how many');
   assert.equal(v.tests.have, 40, 'and how many there are');
 
-  // the calls arrive: one day at a time, since at most 60 from any one day count
-  await addCalls(workspace, workload, 60, 20);
-  await addCalls(workspace, workload, 60, 21);
-  await addCalls(workspace, workload, 15, 22);
+  // the calls arrive, most of them on one day: every one counts, however many a day brings
+  await addCalls(workspace, workload, 125, 20);
+  await addCalls(workspace, workload, 10, 21);
   await considerMeasuring(workspace.id, await load(workload.id));
   assert.equal(await queuedFor(workload.id), 0, 'one call short: nothing yet');
-  // more calls on a day that already gave its 60 bring nothing
-  await addCalls(workspace, workload, 10, 20);
-  await considerMeasuring(workspace.id, await load(workload.id));
-  assert.equal(await queuedFor(workload.id), 0, 'past the day\'s 60: still one short');
-  // the call that brings the count
-  await addCalls(workspace, workload, 1, 22);
+  assert.equal((await valueOf(await load(workload.id))).tests.have, 175, 'a busy day is counted whole, not held to 60');
+  // the call that brings the count, on the day that already brought 125
+  await addCalls(workspace, workload, 1, 20);
   await considerMeasuring(workspace.id, await load(workload.id));
   assert.equal(await queuedFor(workload.id), 1, 'started by that call');
   w = await load(workload.id);

@@ -473,7 +473,7 @@ test('a workload never tested says when its first test starts, counted the way t
   /* and how many of its requests the first test waits for (the count its first bar takes), counted exactly as the
      test counts them, the call that brings them starting it */
   assert.deepEqual(v.tests, { runs: 0, auto: config.MEASURE_EVERY_DAYS > 0, seen: 4, firstAfter: config.EVAL_FIRST_RUN_MIN_CALLS,
-    need: barNeed(row).calls, have: 4, perDay: config.EVAL_POOL_PER_DAY });
+    need: barNeed(row).calls, have: 4 });
   // one turned down already says the count it was left waiting for
   await db.prepare('UPDATE workloads SET measure_at_calls = 90 WHERE id = ?').run(wid);
   assert.equal((await valueOf(await load(wid))).tests.need, 90);
