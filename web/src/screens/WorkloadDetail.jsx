@@ -717,15 +717,13 @@ function Help({ label, children, trigger = null }) {
   );
 }
 
-/* What a test's "Requests sampled" column counts, in the words its information bubble says (see Help). */
-function SampledWords({ rp }) {
+/* What a test's "Requests sampled" column counts, in the words its information bubble says (see Help): the user's
+   sentence, as given on 25 Sep. */
+function SampledWords() {
   return (
     <>
       <p><b>Requests sampled</b></p>
-      <p>How many of this test's requests each model answered. The test took {num(rp.sample)} of this workload's real requests, ran each one through every model, and compared each model's answers with the original model's.</p>
-      <p>A model answers fewer when testing stops early, for example once it's already clearly not a match.</p>
-      <p>A model that passes is tested again on new requests it has never seen, before anything switches to it. Those show as, for example, "+ 88 new".</p>
-      <p>Select a model to see every request it answered.</p>
+      <p>How many requests were tested on this model.</p>
     </>
   );
 }
@@ -769,7 +767,7 @@ function RunDetail({ rp, wid }) {
               <th>Model</th>
               <th>Outcome</th>
               <th className="r">{col}<Help label={axis}><ColumnWords rp={rp} /></Help></th>
-              <th className="r">Requests sampled<Help label="Requests sampled"><SampledWords rp={rp} /></Help></th>
+              <th className="r">Requests sampled<Help label="Requests sampled"><SampledWords /></Help></th>
               <th className="r">Cost / request</th>
               <th className="r">{time}</th>
             </tr>
