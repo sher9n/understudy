@@ -344,10 +344,13 @@ function slowerWhy(r, sp) {
   const m50 = Number(ttft ? r.ttft_p50 : r.latency_p50) || 0;
   if (!(m50 > 0) || !(sp.refP50 > 0)) return null;
   const how = ttft ? ' to start answering' : '';
-  // decided on the times themselves (as tooSlow is), said in the times as written
-  const slower = secsShown(m50) - secsShown(sp.refP50);
-  const ratio = secsShown(m50) / Math.max(1, secsShown(sp.refP50));
+  /* Decided on the times themselves (as tooSlow is), and said in the times as written: the difference is the one
+     between them as they read, to a hundredth where they are written so (3.34 s less 2.0 s is 1.3 s), and how many
+     times as long is worked out from the times themselves, so it never reads 1.6 beside 3.34 s and 2.0 s. */
   const [took, most] = secsPair(m50, sp.limits.p50);
+  const fine = /\.\d\d s$/.test(took);
+  const slower = (fine ? Math.round(m50 / 10) * 10 : secsShown(m50)) - secsShown(sp.refP50);
+  const ratio = m50 / sp.refP50;
   const vs = `On a typical request this model took ${took}${how}, and the original model ${secsWords(sp.refP50)}.`;
   if (m50 > sp.limits.p50) {
     return `${vs} That's ${secsWords(slower)} slower, ${ratio.toFixed(1)} times as long, and this workload allows up to ${most}.`;

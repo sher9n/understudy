@@ -432,7 +432,8 @@ test('a model too slow says by how much: its time, the original model\'s, and th
   assert.equal(rr.cands.find((c) => c.key === 'vendor/rounding').why, 'On a typical request this model took 5.4 s, and the original model 2.0 s. '
     + 'That\'s 3.4 s slower, 2.7 times as long, and this workload allows up to 3.3 s.');
   // just past a limit that rounds to the same tenth: both to a hundredth, so the words never say 3.3 s where 3.3 s is allowed
-  assert.match(rr.cands.find((c) => c.key === 'vendor/just-past').why, /took 3\.30 s, and the original model 2\.0 s\. .* allows up to 3\.27 s\.$/);
+  assert.equal(rr.cands.find((c) => c.key === 'vendor/just-past').why, 'On a typical request this model took 3.30 s, and the original model '
+    + '2.0 s. That\'s 1.3 s slower, 1.7 times as long, and this workload allows up to 3.27 s.');
 
   // a test that kept no speed rule says it without figures, as before
   const old = await run(ws, wid, { at: t - 2 * DAY, results: [{ key: 'vendor/slow-typical', verdict: 'slower', p50: 5400 }] });
