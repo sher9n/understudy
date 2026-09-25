@@ -277,7 +277,7 @@ async function testsOf(w) {
   if (runs > 0) return { runs, auto };
   const seen = Number((await db.prepare('SELECT COUNT(*) AS n FROM calls WHERE workload_id = ?').get(w.id)).n);
   const need = Number(w.measure_at_calls) > 0 ? Number(w.measure_at_calls) : barNeed(w).calls;
-  return { runs, auto, seen, firstAfter: config.EVAL_FIRST_RUN_MIN_CALLS, need, have: await usableCalls(w), perDay: config.EVAL_POOL_PER_DAY };
+  return { runs, auto, seen, firstAfter: config.EVAL_FIRST_RUN_MIN_CALLS, need, have: await usableCalls(w) };
 }
 
 /* What happened to a workload, oldest first, as facts for its page to put into words. */

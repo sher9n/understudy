@@ -13,9 +13,8 @@ import { controlRecord, barOf } from './learn/control.js';
 import { nameOfResult, armById, labelOf } from './learn/arms.js';
 
 /* A workload's page, as the four questions it answers at a glance (web/src/screens/WorkloadPage.jsx):
- *   enough        is there enough of its traffic to optimize it, counted the way a test counts it, and if not,
- *                 how the rest can arrive (at most EVAL_POOL_PER_DAY count from any one day) and so the earliest
- *                 a test can start;
+ *   enough        is there enough of its traffic to optimize it, counted the way a test counts it: by count alone,
+ *                 however many arrive in a day, so the request that brings the count to what a test needs starts it;
  *   measurements  every measurement it has had, each with what it found in a word;
  *   calls         its calls, newest first, and who answered each;
  * and once it is switched,
@@ -33,9 +32,9 @@ const short = (m) => String(m || '').split('/').pop();
 // a try that failed and was answered another way: not one of the customer's requests (see src/eval/value.js)
 const TRY = `COALESCE(check_json LIKE '%"by":"fell back"%' OR check_json LIKE '%"by":"experiment failed"%', FALSE)`;
 
-/* Requests a day over the last thirty days, by the day a test counts them in (created_at / DAY, which is UTC):
-   every request, and the ones a test counts, which are the customer's own with their text kept and not failed,
-   at most EVAL_POOL_PER_DAY from a day (eligible in src/eval/plan.js). */
+/* Requests a day over the last thirty days (created_at / DAY, which is UTC): every request, and the ones a test
+   counts, which are the customer's own with their text kept and not failed, however many a day (eligible in
+   src/eval/plan.js). */
 async function dailyOf(w, t) {
   const today = Math.floor(t / DAY);
   const rows = await db.prepare(
@@ -48,32 +47,12 @@ async function dailyOf(w, t) {
   return Array.from({ length: 30 }, (_, k) => {
     const d = today - 29 + k;
     const r = by.get(d);
-    return { d, n: Number(r?.n || 0), counted: Math.min(Number(r?.usable || 0), config.EVAL_POOL_PER_DAY) };
+    return { d, n: Number(r?.n || 0), counted: Number(r?.usable || 0) };
   });
 }
 
-/* How the rest of the requests a test needs can arrive, at most `perDay` a day: what today can still add, then
-   each day after it. The last step's day is the earliest the test can start. */
-export function stepsTo(have, need, today, perDay) {
-  const steps = [];
-  let at = have;
-  let d = today.d;
-  let room = Math.max(0, perDay - today.counted);
-  for (let k = 0; k < 60 && at < need; k += 1) {
-    if (room > 0) {
-      const to = Math.min(need, at + room);
-      steps.push({ from: at, to, d, today: d === today.d });
-      at = to;
-    }
-    d += 1;
-    room = perDay;
-  }
-  return steps;
-}
-
-/* 1. Enough data to optimize? */
+/* 1. Enough data to optimize? By count alone: how many a test can use, and how many it needs. */
 async function enoughOf(w, t) {
-  const perDay = config.EVAL_POOL_PER_DAY;
   const every = await cadenceOf(w.workspace_id);
   const daily = await dailyOf(w, t);
   const have = await usableCalls(w);
@@ -84,13 +63,10 @@ async function enoughOf(w, t) {
   // when it is next tested by itself: its own booking, or the workspace's rhythm after its last test
   const nextAt = !every ? null : w.recheck_after ? Number(w.recheck_after)
     : last ? Number(last.created_at) + every * DAY : null;
-  const steps = yes ? [] : stepsTo(have, need, daily[daily.length - 1], perDay);
   return {
-    yes, have, need, perDay,
+    yes, have, need,
     total: daily.reduce((a, x) => a + x.n, 0),
     daily,
-    steps,
-    earliest: steps.length ? steps[steps.length - 1].d : null,
     // how many of them a test uses
     sample: sampleSizeFor(have),
     everyDays: every,
@@ -348,7 +324,52 @@ export async function pageOf(w) {
    (or worse), what a request costs on it, how fast it answered, and its outcome, in the words of why it did or did not
    qualify, with a sentence that says so (why). `said` is how a sentence names it: a model by the name people know it by. */
 const TOO_FEW = "It answered too few requests for the test to be sure whether it stays within the allowed difference. It's tested again once there are more.";
-function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = false, floorPct = null, quality = false, names = new Map() }) {
+const SLOWER = 'It answered more slowly than the original model, by more than this workload allows.';
+
+// a time as the page writes it (secs in web/src/screens/WorkloadDetail.jsx): 870 ms under a tenth of a second, else 1.2 s
+const secsWords = (ms) => (ms < 95 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
+// the same time as a number, rounded as it is written, so a difference said beside two times is theirs: 5.4 less 2.0 is 3.4
+const secsShown = (ms) => (ms < 95 ? Math.round(ms) : Math.round(ms / 100) * 100);
+/* Two times that are compared, written so that they read as different where they are: a model just past the limit is
+   never "3.3 s, where 3.3 s is allowed", but 3.30 s against 3.27 s. */
+const secsPair = (a, b) => (a !== b && secsWords(a) === secsWords(b)
+  ? [`${(a / 1000).toFixed(2)} s`, `${(b / 1000).toFixed(2)} s`] : [secsWords(a), secsWords(b)]);
+
+/* Why a model was too slow, in the figures that decided it (tooSlow in src/eval/run.js): its typical time against the
+   original model's and the most this workload allows; and where its typical time was allowed, the answers that ran
+   past the looser limit on the slowest ones, where about 1 in 10 may. Null where the test kept no figures to say it. */
+function slowerWhy(r, sp) {
+  if (!sp?.limits) return null;
+  const ttft = sp.metric === 'ttft';
+  const m50 = Number(ttft ? r.ttft_p50 : r.latency_p50) || 0;
+  if (!(m50 > 0) || !(sp.refP50 > 0)) return null;
+  const how = ttft ? ' to start answering' : '';
+  // decided on the times themselves (as tooSlow is), said in the times as written
+  const slower = secsShown(m50) - secsShown(sp.refP50);
+  const ratio = secsShown(m50) / Math.max(1, secsShown(sp.refP50));
+  const [took, most] = secsPair(m50, sp.limits.p50);
+  const vs = `On a typical request this model took ${took}${how}, and the original model ${secsWords(sp.refP50)}.`;
+  if (m50 > sp.limits.p50) {
+    return `${vs} That's ${secsWords(slower)} slower, ${ratio.toFixed(1)} times as long, and this workload allows up to ${most}.`;
+  }
+  const allowed = `${vs} That's ${slower > 0 ? `${secsWords(slower)} slower, which this workload allows` : 'within what this workload allows'} `
+    + `(up to ${most}).`;
+  const over = sp.over?.get(r.model_id);
+  if (over && over.over > 0) {
+    return `${allowed} But ${over.over} of its ${over.n} answers took longer than ${secsWords(sp.limits.p90)}. This workload lets about 1 in 10 `
+      + `answers take that long, and ${over.over} in ${over.n} is too many.`;
+  }
+  // a way of serving several models is timed as a whole, with no answer of its own to count: said by its slowest tenth
+  const m90 = Number(ttft ? r.ttft_p90 : r.latency_p90) || 0;
+  if (m90 > sp.limits.p90) {
+    const [slowest, allows] = secsPair(m90, sp.limits.p90);
+    return `${allowed} But its slowest answers were too slow: its slowest 1 in 10 took over ${slowest}, and this workload allows them `
+      + `up to ${allows}.`;
+  }
+  return null;
+}
+
+function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = false, floorPct = null, quality = false, names = new Map(), speed = null }) {
   const name = nameOfResult(r);
   const n = Number(r.runs) || 0;
   const isServing = !!serving && r.model_id === serving;
@@ -357,7 +378,7 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
   if (r.verdict === 'failed') {
     out = ['bad', 'Failed requests', "The model's provider refused or failed some of this test's requests, so it can't be relied on for this workload."];
   } else if (r.verdict === 'slower') {
-    out = ['warn', 'Slower than original', 'It answered more slowly than the original model, by more than this workload allows.'];
+    out = ['warn', 'Slower than original', slowerWhy(r, speed) ?? SLOWER];
   } else if (isServing && !switchRun && r.verdict === 'cleared') {
     // what serves, checked again; in the test that switched to it, it was a model like the rest
     out = ['ok', 'Still passing', 'This is the model answering this workload now. It was tested again and is still within the allowed difference.'];
@@ -427,10 +448,6 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
 const TONE_ORDER = { ok: 0, warn: 1, bad: 2, mut: 3 };
 const z2 = 1.6449 ** 2;
 const pctWords = (x) => `${Math.round(x * 1000) / 10}%`;
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-// a day as a test counts it (a UTC day), in words: "27 Sep"
-const dayWords = (d) => { const x = new Date(Number(d) * DAY); return `${x.getUTCDate()} ${MONTHS[x.getUTCMonth()]}`; };
 
 /* The sentences at the top of an opened test: what it found, and what happens because of it. Where answers were
    compared on "at least as good" rather than "the same", or the judge was not trusted, a sentence more says so. */
@@ -506,7 +523,7 @@ function mainTake(run, cands, w, { small = null, refName }) {
     const what = quality ? "gives clearly worse answers than the original model's" : 'answers differently from the original model';
     const wait = small.calls
       ? ` The full test needs ${small.calls} recent requests, so the result can be checked again on new ones, and starts by itself when they're in`
-        + (small.have !== null ? `: you have ${small.have} so far${small.earliest ? `, so the earliest is ${small.earliest}` : ''}` : '') + '.'
+        + (small.have !== null ? `: you have ${small.have} so far` : '') + '.'
       : '';
     return `${said}This test used ${n} requests, too few to switch anything. Showing that a model ${what} on under ${barWords} of `
       + `requests takes at least ${small.need}.${wait}`;
@@ -576,16 +593,39 @@ export async function runPageOf(w, run) {
   const unsure = Number(check?.errors) > 0;
   const floorPct = run.floor_pct === null || run.floor_pct === undefined ? null : Number(run.floor_pct);
   const quality = run.yardstick === 'quality';
-  const cands = results.map((r) => candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure, floorPct, quality, names }))
+  /* The speed this test held every model to (tooSlow in src/eval/run.js): at most `factor` times the original model's
+     typical time, and on its slowest tenth `slowEnd` times the original model's, each with a little slack. For a model
+     too slow, how many of its answers ran past the second, which its words give (slowerWhy). */
+  const refP50 = Number(metric === 'ttft' ? run.ref_ttft_p50 : run.ref_latency_p50) || 0;
+  const refP90 = Number(metric === 'ttft' ? run.ref_ttft_p90 : run.ref_latency_p90) || refP50;
+  const rule = plan?.speed;
+  const speed = rule?.factor > 0 && refP50 > 0 ? {
+    metric, refP50, refP90, over: new Map(),
+    limits: {
+      p50: Number(rule.factor) * refP50 + config.SPEED_SLACK_MS,
+      p90: (Number(rule.slowEnd) || Number(rule.factor) + config.SPEED_SLOW_END_EXTRA) * refP90 + config.SPEED_SLACK_MS,
+    },
+  } : null;
+  const slow = results.filter((r) => r.verdict === 'slower').map((r) => r.model_id);
+  if (speed && slow.length) {
+    // timed as the test timed them: an answer's whole time, or its first word's, a whole answer counting as its first word
+    const t = metric === 'ttft' ? 'COALESCE(ttft_ms, latency_ms)' : 'latency_ms';
+    const rows = await db.prepare(
+      `SELECT model_id, COUNT(*) AS n, COUNT(*) FILTER (WHERE ${t} > ?) AS over FROM eval_replays
+        WHERE run_id = ? AND model_id = ANY(?::text[]) AND error IS NULL AND (status IS NULL OR status < 400) AND ${t} > 0
+        GROUP BY model_id`).all(speed.limits.p90, run.id, slow);
+    for (const x of rows) speed.over.set(x.model_id, { n: Number(x.n), over: Number(x.over) });
+  }
+  const cands = results.map((r) => candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure, floorPct, quality, names, speed }))
     .sort((a, b) => (TONE_ORDER[a.tone] - TONE_ORDER[b.tone])
       || ((a.gap ?? 2) - (b.gap ?? 2)) || ((a.perCall ?? 1) - (b.perCall ?? 1)));
   /* A test too small to show anything: what it would have taken, the count the full test waits for where the workload
-     still waits for it, and how many it has and the earliest they can be in (card 1's figures). */
+     still waits for it, and how many it has (card 1's figures). */
   let small = null;
   if (floorPct && sample && (z2 / (sample + z2)) * 100 > floorPct) {
     const calls = !w.routed_model && Number(w.measure_at_calls) > 0 ? Number(w.measure_at_calls) : null;
     const e = calls ? await enoughOf(w, now()) : null;
-    small = { need: callsToClear(floorPct), calls, have: e ? e.have : null, earliest: e?.earliest !== null && e?.earliest !== undefined ? dayWords(e.earliest) : null };
+    small = { need: callsToClear(floorPct), calls, have: e ? e.have : null };
   }
   const refName = names.get(run.reference_model) || short(run.reference_model);
   return {

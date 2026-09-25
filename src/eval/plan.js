@@ -40,22 +40,20 @@ const OWN_ANSWER = (c) => `${c}response_json IS NOT NULL AND ${c}served_model = 
   AND (${c}arm_id IS NULL OR ${c}arm_id IN (SELECT a.id FROM arms a WHERE a.workload_id = ? AND a.key = ?))`;
 export const ownArmKey = (workload) => armKey(referenceSpec(workload));
 
-/** The calls a run is allowed to replay: this workload's own traffic, with content kept, at most
-    EVAL_POOL_PER_DAY from each day, exactly as the run draws them. And how many of them carry the
-    answer the customer's own model gave, which the run uses instead of paying for it again. */
+/** The calls a run is allowed to replay: this workload's own traffic over thirty days, with content kept,
+    every one of them up to EVAL_POOL_MAX, exactly as the run draws them (by count, never capped by day).
+    And how many of them carry the answer the customer's own model gave, which the run uses instead of
+    paying for it again: the same share as over all of them, since the run takes each day in turn. */
 async function eligible(workload) {
-  const perDay = config.EVAL_POOL_PER_DAY;
   const r = await db.prepare(
-    `SELECT COALESCE(SUM(LEAST(n, ?)), 0) AS n, COALESCE(SUM(own::float * LEAST(1.0, ?::float / n)), 0) AS own FROM (
-        SELECT (c.created_at / 86400000) AS d, COUNT(*) AS n,
-               COUNT(*) FILTER (WHERE ${OWN_ANSWER('c.')}) AS own
-          FROM calls c
-         WHERE c.workload_id = ? AND c.request_json IS NOT NULL AND c.created_at >= ?
-           AND c.source NOT IN ('replay', 'test') AND (c.status_code IS NULL OR c.status_code < 400)
-         GROUP BY 1) x`)
-    .get(perDay, perDay, String(workload.reference_model ?? ''), workload.id, ownArmKey(workload), workload.id, now() - 30 * DAY);
-  const n = Number(r?.n || 0);
-  return { n, recordedShare: n && config.EVAL_USE_RECORDED ? Math.min(1, Number(r.own || 0) / n) : 0 };
+    `SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE ${OWN_ANSWER('c.')}) AS own
+       FROM calls c
+      WHERE c.workload_id = ? AND c.request_json IS NOT NULL AND c.created_at >= ?
+        AND c.source NOT IN ('replay', 'test') AND (c.status_code IS NULL OR c.status_code < 400)`)
+    .get(String(workload.reference_model ?? ''), workload.id, ownArmKey(workload), workload.id, now() - 30 * DAY);
+  const all = Number(r?.n || 0);
+  const n = Math.min(all, config.EVAL_POOL_MAX);
+  return { n, recordedShare: all && config.EVAL_USE_RECORDED ? Math.min(1, Number(r.own || 0) / all) : 0 };
 }
 
 /** How many calls a measurement of this workload could draw on now, counted exactly as a run counts them
@@ -333,7 +331,7 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
       plan.needCalls = need <= config.EVAL_SAMPLE_MAX ? poolNeed : null;
       plan.reason = `Waiting for more calls: a measurement on ${sample} of them could not show a cheaper model is as good as yours `
         + `at a ${barPct.toFixed(barPct < 10 ? 1 : 0)}% bar, even one that matched every answer. It takes about ${need}, which `
-        + `${poolNeed} calls from the last thirty days give (at most ${config.EVAL_POOL_PER_DAY} of them from any one day). `
+        + `${poolNeed} calls from the last thirty days give, however many of them arrive in one day. `
         + 'It starts by itself as soon as they are here, and you can measure now whenever you like.';
       return plan;
     }

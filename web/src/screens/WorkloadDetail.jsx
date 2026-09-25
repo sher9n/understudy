@@ -10,8 +10,8 @@ import '../workload-page.css';
 
 /* A workload's page, as the design artboard draws it: four answers at a glance, and once it is switched, what
  * Understudy is doing for it and what that saves.
- *   1. Are there enough requests to test models? Counted the way a test counts them, and if not yet, how the rest
- *      can arrive and so the earliest a test can start (it starts by itself).
+ *   1. Are there enough requests to test models? Counted the way a test counts them, by count alone however many
+ *      arrive in a day, and if not yet, how many more a test needs (it starts by itself once they are in).
  *   2. What the workspace has chosen should happen when a cheaper model passes, as a chip that opens Settings.
  *   3. Every model test, each opening to the chart of how its models compared and the list of them.
  *   4. The recent requests, and which model answered each.
@@ -407,14 +407,13 @@ function Ready({ w, cand, busy, copiesOnly, act, go }) {
 function Enough({ e }) {
   const daily = e.daily || [];
   const busyDays = daily.filter((x) => x.n > 0);
-  const past = daily.some((x) => x.n > x.counted);
+  // what arrived but no test can use: it failed, or its text was not kept (every other request counts, whatever the day)
+  const unusable = daily.some((x) => x.n > x.counted);
   let arrived = '';
   if (!busyDays.length) arrived = 'None have arrived in the last 30 days.';
-  else if (busyDays.length === 1) {
-    const one = busyDays[0];
-    arrived = one.n > e.perDay ? `All ${num(one.n)} arrived on ${dayLabel(one.d)}, and ${e.perDay} of them count.` : `All ${num(one.n)} arrived on ${dayLabel(one.d)}.`;
-  } else arrived = `${num(e.total)} arrived on ${busyDays.length} of the last 30 days.`;
-  if (past && busyDays.length > 1) arrived += " The faint part of a bar arrived but doesn't count towards a test.";
+  else if (busyDays.length === 1) arrived = `All ${num(busyDays[0].n)} arrived on ${dayLabel(busyDays[0].d)}.`;
+  else arrived = `${num(e.total)} arrived on ${busyDays.length} of the last 30 days.`;
+  if (unusable) arrived += " The faint part of a bar arrived but can't be used in a test: it failed, or its text wasn't kept.";
 
   if (e.yes) {
     const next = e.nextAt ? (e.nextAt <= Date.now() ? 'next test soon' : `next test ${dateShort(e.nextAt)}`) : 'tested when you ask';
@@ -445,14 +444,13 @@ function Enough({ e }) {
       <div className="wp-cardbody wp-enough">
         <div>
           <div className="wp-answer"><span className="wp-big">{num(e.have)}<small>of {num(e.need)} requests</small></span><span className="wp-pill is-warn"><span className="wp-pd" />Not enough yet</span></div>
-          <Meter have={e.have} need={e.need} perDay={e.perDay} steps={e.steps} auto={auto} />
+          <Meter have={e.have} need={e.need} auto={auto} />
           <p className="wp-lead">
-            At most <b>{e.perDay} requests a day</b> count towards a test, so the earliest {auto ? 'a test can start' : 'a full test can run'} is{' '}
-            <b>{e.earliest === null ? 'soon' : e.steps.length === 1 && e.steps[0].today ? 'today' : dayLabel(e.earliest)}</b>.{' '}
-            {auto ? "It starts by itself, so there's no need to wait here." : 'Your workspace tests only when you ask: press Test now once they are in.'}
+            A test needs <b>{num(e.need - e.have)} more {e.need - e.have === 1 ? 'request' : 'requests'}</b>, however many arrive in a day.{' '}
+            {auto ? "It starts by itself as soon as they're in, so there's no need to wait here." : 'Your workspace tests only when you ask: press Test now once they are in.'}
           </p>
         </div>
-        <div><DailyChart days={daily} cap={e.perDay} /><p className="wp-lead">{arrived}</p></div>
+        <div><DailyChart days={daily} /><p className="wp-lead">{arrived}</p></div>
       </div>
     </section>
   );
@@ -610,6 +608,32 @@ function ColumnWords({ rp }) {
   );
 }
 
+/* One model on a test's chart, pointed at, focused or tapped: its number and name, its outcome, and each figure its row
+   in the table has, beside the original model's where the test has it. */
+function DotWords({ c, rp }) {
+  if (!c) return null;
+  const quality = rp.yardstick === 'quality';
+  const ref = rp.yours || {};
+  // a saving short of the whole cost is never rounded up to all of it: 99.5% less is "99% less", not "100% less"
+  const less = (x) => `${Math.min(99, Math.round(x * 100))}%`;
+  const vs = !(ref.perCall > 0) ? '' : Math.abs(c.perCall / ref.perCall - 1) < 0.005 ? `, about the same as the original model's ${perCall(ref.perCall)}`
+    : `, ${c.perCall < ref.perCall ? `${less(1 - c.perCall / ref.perCall)} less` : `${pct0(c.perCall / ref.perCall - 1)} more`} than the original model's ${perCall(ref.perCall)}`;
+  return (
+    <>
+      <p className="wp-dt-head"><span className="wp-dt-no" style={{ background: toneColor(c.tone) }}>{c.no}</span><span>{c.label}</span></p>
+      <p className="wp-dt-out" style={{ color: toneColor(c.tone) }}>{c.verdict}</p>
+      <dl>
+        <div><dt>{quality ? 'Worse than original model' : 'Different from original model'}</dt>
+          <dd>{pct1(c.gap)} of requests{rp.bar > 0 ? `, at most ${pct1(rp.bar)} allowed` : ''}</dd></div>
+        <div><dt>Cost per request</dt><dd>{perCall(c.perCall)}{vs}</dd></div>
+        <div><dt>{rp.metric === 'ttft' ? 'Time to first word' : 'Typical time'}</dt>
+          <dd>{c.p50 ? `${secs(c.p50)}${ref.p50 ? `, the original model ${secs(ref.p50)}` : ''}` : 'not timed'}</dd></div>
+        <div><dt>Requests answered</dt><dd>{num(c.n)}</dd></div>
+      </dl>
+    </>
+  );
+}
+
 /* What the dashed line is: the most another model may differ from the original model, set from how often the original
    model differs from itself, with a little more allowed because a variation measured on one test moves by chance. */
 function AllowedWords({ rp }) {
@@ -711,7 +735,7 @@ function RunDetail({ rp }) {
       </p>
       {chart && (
         <div className="wp-chartbox">
-          <CompareChart run={run} />
+          <CompareChart run={run} tip={(c) => <DotWords c={c} rp={rp} />} />
           <div className="wp-legend">
             <span><i style={{ background: 'var(--ok)' }} />passed</span>
             <span><i style={{ background: 'var(--warn)' }} />close match, slower, or too few to be sure</span>
