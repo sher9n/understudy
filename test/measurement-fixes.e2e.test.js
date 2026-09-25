@@ -688,8 +688,9 @@ test('a replay or a judgement whose answer says nothing of its cost is charged a
     // the language-model judges, the same way
     const pair = await judgePair('a request', 'one answer of some length', 'another answer entirely');
     assert.ok(Math.abs(pair.cost - perCall('judge/small')) < 1e-12, `${pair.cost}`);
+    // "at least as good" is read both ways round: two calls, each charged at its price
     const quality = await judgeQuality('another request', 'a first answer', 'a second answer', { scope: workload.workspace_id });
-    assert.ok(Math.abs(quality.cost - perCall('judge/small')) < 1e-12, `${quality.cost}`);
+    assert.ok(Math.abs(quality.cost - 2 * perCall('judge/small')) < 1e-12, `${quality.cost}`);
     // a cost the provider does give is taken as it is, even when it is nothing
     costless.set('vendor/steady-small', 'zero');
     const free = await replayOnce({ body, model: 'vendor/steady-small', workload, reuse: false });

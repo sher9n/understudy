@@ -4,8 +4,9 @@ import { priceCall } from '../openrouter.js';
 import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval } from '../billing.js';
 import { planFor, ownArmKey, barNeed } from './plan.js';
-import { judgeBarPair, judgeCandidate, judgeQuality, canJudge } from './judge.js';
-import { extract, disagreement, gates, floorFrom, verdictWith, sampleCalls, barIsMeaningful, structuredCompare, proseText, callsToClear } from './compare.js';
+import { judgeBarPair, judgeCandidate, judgeQuality, canJudge, translated } from './judge.js';
+import { checklistFor, breakOne } from './checklist.js';
+import { extract, disagreement, gates, floorFrom, marginFloor, verdictWith, sampleCalls, barIsMeaningful, structuredCompare, proseText, callsToClear } from './compare.js';
 import { promote, revert, trafficOf, everReverted } from './promote.js';
 import { replayOnce } from './replay.js';
 import { thinkingFit } from './select.js';
@@ -69,6 +70,8 @@ const pct = (xs, p) => {
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 // a candidate's own name in a run: the model, or the customer's model thinking less
 const keyOf = (cand) => cand.key || cand.model;
+// an answer as a judge of "at least as good" reads it: written text as it is, a structured one as its JSON
+const asText = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 const short = (m) => String(m || '').split('/').pop();
 
 /* The fewest of n calls past the slow end that chance would give less than one time in twenty,
@@ -164,6 +167,7 @@ const UNUSABLE = {
 const KIND_WORDS = {
   wording: 'wording only', omission: 'leaves things out', fact: 'changes facts', decision: 'reaches different decisions',
   refusal: 'refuses', 'cut off': 'stops mid-answer', worse: 'gives worse answers', unrelated: 'answers something else', truncated: 'runs out of room',
+  instruction: 'ignores your instruction',
   empty: 'answers nothing', 'unparseable json': 'returns broken JSON', 'no tool call': 'calls no tool',
   'unparseable arguments': 'returns broken tool arguments', refused: 'is refused by its provider',
 };
@@ -475,6 +479,18 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   let judgeCheckRecord = null;
   // agreement: the same answer as the customer's own model; quality: at least as good an answer
   let yardstick = 'agreement';
+  /* Under "at least as good": which judge reads it on this workload (null, Jev with the language model behind it;
+     'llm', the language model alone, where the planted answers found Jev unreliable here: see chooseJudge), and what
+     the workload's own instruction asks of every answer (src/eval/checklist.js). */
+  let judgePrefer = null;
+  let checklist = [];
+  const qualityOf = (body, answer, reference) => judgeQuality(askOf(body), asText(answer), asText(reference),
+    { scope: workload.workspace_id, prefer: judgePrefer, checklist });
+  /* The bar, from how often the customer's model differed from itself, or was clearly worse than itself: a multiple
+     of that for "the same answer", and that plus a margin for "at least as good" (see marginFloor). */
+  const barFrom = (noisePct) => (yardstick === 'quality'
+    ? marginFloor(noisePct, { marginPct: config.EVAL_QUALITY_MARGIN_PCT, minPct: config.EVAL_FLOOR_MIN_PCT })
+    : floorFrom(noisePct, { multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT }));
   const judgeLabel = () => {
     const all = [...judgedWith];
     if (all.some((j) => j.startsWith('jev'))) return 'jev';
@@ -740,24 +756,45 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      model is then held to. The second look reads its bar from these pooled with its own, so the two
      have to be the same kind of score. */
   let barScores = noiseScores;
-  /* Written work with no one right answer: the customer's own model gives a different, equally good
-     answer nearly every time, so "the same answer" is no bar at all. Rather than give up, the bar
-     becomes "at least as good": how often the customer's model gives a clearly worse answer than its
-     own other one. Only when that is steady too is the workload measured on it. */
+  /* Work with no one right answer, written or structured: the customer's own model gives a different, equally good
+     answer to the same call so often that "the same answer" is no bar at all. Rather than give up, the bar becomes
+     "at least as good": how often the customer's model gives a clearly worse answer than its own other one, read both
+     ways round, and held to what the workload's own instruction asks of every answer. It used to be tried on written
+     work only, read one way round, and kept only when that came out under the same 40% too: a judge leaning towards
+     whichever answer it read first put a customer's model clearly worse than itself on 47% of calls, and the workload
+     "could not be measured" at all. Now there is no such rate: a varied workload's bar is simply wide (marginFloor),
+     and it takes more calls to show a setup keeps it. */
   const agreementNoise = noise;
-  let qualityNoise = null;
-  if (shape === 'free_text' && config.EVAL_QUALITY_YARDSTICK && canJudge() && config.EVAL_JUDGE_MODEL
-    && !barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
-    if (await step(0, `Asking whether ${reference}'s answers are at least as good as each other`)) return await endStopped();
+  let judgeCheck = null;
+  if (config.EVAL_QUALITY_YARDSTICK && canJudge() && !barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
+    const pairs = kept.filter((p) => p.a.ok && p.b.ok);
+    // what the workload's instruction asks of every answer, read once for each version of it
+    if (shape === 'free_text') {
+      if (await step(0, 'Reading what your instruction asks of every answer')) return await endStopped();
+      checklist = await checklistFor(workload, kept.map((p) => p.body), { charge: addJudge });
+    }
+    /* The judge is chosen on answers whose verdict is known before it is asked: answers planted as clearly worse (cut
+       short, another request's, in the wrong language, ignoring the instruction) and one that is not (only its spacing
+       changed). Jev reads them first; where it misses one, the language model reads them too, and the one that got
+       them all right reads this run. Where both miss, nothing either settles is switched to on its word alone. */
+    if (await step(0, 'Testing the judge on answers planted as clearly worse')) return await endStopped();
+    const chosen = await chooseJudge(kept, { scope: workload.workspace_id, addJudge, checklist, shape });
+    judgePrefer = chosen.prefer;
+    judgeCheck = chosen.check;
+    judgeUnsure = chosen.unsure;
+    const phase = `Asking whether ${reference}'s answers are at least as good as each other`;
+    if (await step(0, phase)) return await endStopped();
+    total += pairs.length;
     const worse = [];
     try {
-      await inParallel(kept.filter((p) => p.a.ok && p.b.ok), 6, async (p) => {
+      await inParallel(pairs, 6, async (p) => {
         if (stopped) return;
         if (await halted()) { stopped = true; return; }
-        const j = await judgeQuality(askOf(p.body), p.b.value, p.a.value, { scope: workload.workspace_id });
+        const j = await qualityOf(p.body, p.b.value, p.a.value);
         addJudge(j.cost);
+        if (j.cost > 0 && await step(1, phase)) stopped = true;
         if (j.transient || j.score === null) { judgeMisses += 1; return; }
-        judgedWith.add(j.judgedBy);
+        if (j.judgedBy) judgedWith.add(j.judgedBy);
         p.worse = j.score;
         worse.push(j.score);
       });
@@ -766,33 +803,32 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       throw err;
     }
     if (stopped) return await endStopped();
-    if (worse.length >= Math.min(10, kept.length)) qualityNoise = mean(worse);
-    if (qualityNoise !== null && barIsMeaningful(qualityNoise * 100, config.EVAL_NOISE_MAX_PCT)) {
-      yardstick = 'quality';
-      noise = mean(worse);
-      /* From here on the bar is "at least as good", and so is every reading of it: the second look's
-         pooled bar, and the customer's model's own score on a call a strategy sends on to it. Pooled
-         with the agreement scores, which only give way to this yardstick when they are over 40%, a
-         second look's bar came out far above the first look's (agreement 55% and quality 6% gave
-         about 38% against 7.5%), and a model clearly worse on 15% of calls was confirmed and
-         switched to. */
-      barScores = worse;
-      for (const p of kept) p.noise = p.worse;
-      planRecord.yardstick = { kind: 'quality', agreementNoisePct: round8(agreementNoise * 100), qualityNoisePct: round8(noise * 100) };
-      await db.prepare('UPDATE eval_runs SET plan_json = ?, yardstick = ? WHERE id = ?').run(JSON.stringify(planRecord), 'quality', run.id);
+    /* Too few readings came back to set a bar from: the judge was not answering, which says nothing about the
+       workload, so it tries again later rather than saying it cannot be measured. */
+    if (!worse.length || (worse.length < Math.min(10, pairs.length) && worse.length * 2 < pairs.length)) {
+      return await interrupt(`The judge answered on only ${worse.length} of the ${pairs.length} pairs of ${reference}'s answers, `
+        + 'so the bar could not be set.');
     }
-  }
-  let judgeCheck = null;
-  if (shape === 'free_text') {
-    judgeCheck = yardstick === 'quality'
-      ? await qualityChecks(kept, workload.workspace_id, addJudge)
-      : await plantChecks(kept, workload.workspace_id, addJudge);
+    yardstick = 'quality';
+    noise = mean(worse);
+    /* From here on the bar is "at least as good", and so is every reading of it: the second look's pooled bar, and
+       the customer's model's own score on a call a strategy sends on to it. Pooled with the agreement scores, which
+       only give way to this yardstick when they are over 40%, a second look's bar came out far above the first
+       look's (agreement 55% and quality 6% gave about 38% against 7.5%), and a model clearly worse on 15% of calls
+       was confirmed and switched to. */
+    barScores = worse;
+    for (const p of kept) p.noise = p.worse;
+    planRecord.yardstick = {
+      kind: 'quality', agreementNoisePct: round8(agreementNoise * 100), qualityNoisePct: round8(noise * 100),
+      marginPct: config.EVAL_QUALITY_MARGIN_PCT, judge: judgeCheck?.judge ?? null, checklist: checklist.map((x) => x.say),
+    };
+    await db.prepare('UPDATE eval_runs SET plan_json = ?, yardstick = ? WHERE id = ?').run(JSON.stringify(planRecord), 'quality', run.id);
+  } else if (shape === 'free_text') {
+    judgeCheck = await plantChecks(kept, workload.workspace_id, addJudge);
     judgeUnsure = judgeCheck.errors > 0;
-    judgeCheckRecord = { ...judgeCheck, misses: judgeMisses, yardstick };
   }
-  const floor = floorFrom(noise * 100, {
-    multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT,
-  });
+  if (judgeCheck) judgeCheckRecord = { ...judgeCheck, misses: judgeMisses, yardstick, prefer: judgePrefer };
+  const floor = barFrom(noise * 100);
 
   // how fast the customer's own model is on these very calls: the yardstick for speed
   const timed = kept.flatMap((p) => [p.ra, p.rb]).filter((r) => r.ok && !r.recorded);
@@ -809,9 +845,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   await db.prepare('UPDATE workloads SET floor_pct = ?, updated_at = ? WHERE id = ?')
     .run(round8(floor), now(), workloadId);
 
-  /* If the reference model cannot answer its own calls consistently, the bar it produces is
-     not a quality standard, it is noise. Stop here and say so. */
-  if (!barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
+  /* If the reference model cannot answer its own calls consistently, "the same answer" is not a quality standard, it
+     is noise; held to "at least as good" instead (above), it is measured whatever. This is left only for a deployment
+     with nobody to judge whether one answer is as good as another, or with that yardstick turned off. */
+  if (yardstick !== 'quality' && !barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
     await settle(`Measuring ${workload.slug}, setting the bar`);
     await keepSavings();
     if (!await finish('unmeasurable', `reference disagreed with itself on ${(noise * 100).toFixed(1)}% of calls`)) {
@@ -823,9 +860,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     await addActivity(workload.workspace_id, {
       kind: 'floor',
       title: `We could not measure ${workload.slug}`,
-      detail: `${reference} gave a different answer to the same call ${(noise * 100).toFixed(0)}% of the time`
-        + (qualityNoise !== null ? `, and a clearly worse one than its own other answer ${(qualityNoise * 100).toFixed(0)}% of the time` : '')
-        + ', so there is no steady bar to hold a cheaper model to. Nothing has been switched.',
+      detail: `${reference} gave a different answer to the same call ${(noise * 100).toFixed(0)}% of the time, `
+        + 'and nothing here can judge whether one answer is as good as another, so there is no steady bar to hold a cheaper model to. '
+        + 'Nothing has been switched.',
       workloadId,
     });
     await scheduleNext(workloadId, { changed: !automatic });
@@ -1093,7 +1130,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         if (!got.ok) {
           st.failures += 1;
           failure = got.reason;
-        } else if (shape === 'free_text') {
+        } else if (shape === 'free_text' || yardstick === 'quality') {
           /* The replay has come back and is counted before the judgement is asked for, so a stop
              that lands between the two still counts the call that ran and was paid for. */
           answered.set(key, st.runs);
@@ -1109,7 +1146,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
             return 'quit';
           }
           judged = yardstick === 'quality'
-            ? await judgeQuality(askOf(p.body), got.value, p.a.ok ? p.a.value : p.b.value, { scope: workload.workspace_id })
+            ? await qualityOf(p.body, got.value, p.a.ok ? p.a.value : p.b.value)
             : await judgeCandidate(askOf(p.body), got.value, p.a.ok ? p.a.value : null, p.b.ok ? p.b.value : null,
               { scope: workload.workspace_id });
           addJudge(judged.cost);
@@ -1335,9 +1372,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const g = extract(got.json, shape);
     if (!g.ok) return { score: 1, judged: 0 };
     let judged = 0;
-    if (shape === 'free_text') {
+    if (shape === 'free_text' || yardstick === 'quality') {
       const j = yardstick === 'quality'
-        ? await judgeQuality(askOf(body), g.value, refs[0].value, { scope: workload.workspace_id })
+        ? await qualityOf(body, g.value, refs[0].value)
         : await judgeCandidate(askOf(body), g.value, refs[0].value, refs[1]?.value ?? null, { scope: workload.workspace_id });
       addJudge(j.cost);
       if (j.cost > 0) judged += 1;
@@ -1378,9 +1415,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const refs = [extract(ra.json, shape), extract(rb.json, shape)].filter((x, k) => [ra, rb][k].ok && x.ok);
     let noise = null;
     if (refs.length === 2) {
-      if (shape === 'free_text') {
+      if (shape === 'free_text' || yardstick === 'quality') {
         const j = yardstick === 'quality'
-          ? await judgeQuality(askOf(body), refs[1].value, refs[0].value, { scope: workload.workspace_id })
+          ? await qualityOf(body, refs[1].value, refs[0].value)
           : await judgeBarPair(askOf(body), refs[0].value, refs[1].value, { scope: workload.workspace_id, bar: true });
         addJudge(j.cost);
         if (j.cost > 0) sent += 1;
@@ -1470,11 +1507,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        and a second look held to the first sample's bar alone turned good models down whenever the two
        samples happened to differ. The candidate's own reading is from these calls only, as it must be.
        Both samples are read by the same yardstick: under "at least as good", the first look's bar
-       scores are the quality ones (see barScores), as these are. */
+       scores are the quality ones (see barScores), as these are, and the bar is theirs plus the margin. */
     const pooled = [...barScores, ...freshNoise];
-    const bar = pooled.length ? floorFrom(mean(pooled) * 100, {
-      multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT,
-    }) : floor;
+    const bar = pooled.length ? barFrom(mean(pooled) * 100) : floor;
     const v = verdictWith(scores, bar, { reviewBand, z: confirmZ });
     let verdict = judgeUnsure && v.verdict === 'cleared' ? 'review' : v.verdict;
     let note = null;
@@ -1736,6 +1771,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     let v = read.verdict;
     if ((v === 'cleared' || v === 'review') && !quickEnough(metric === 'ttft' ? reading.ttft : reading.latency)) v = 'slower';
     if (reading.slow && (v === 'cleared' || v === 'review')) v = 'slower';
+    /* A judge that got answers planted to test it wrong settles nothing on its own, and a strategy's scores are its
+       readings too: a cascade over a model held back for exactly that cleared, and could have been switched to. What
+       serves keeps serving on "review", as a plain model does. */
+    if (judgeUnsure && v === 'cleared') v = 'review';
     return v;
   };
   const fastEnough = (r) => quickEnough(metric === 'ttft' ? r.ttft : r.latency);
@@ -2656,31 +2695,140 @@ async function plantChecks(kept, scope, addJudge) {
   return out;
 }
 
-/* The quality judge on pairs whose answer is known: an answer against itself with only its spacing
-   changed is not worse, and an answer cut to its first third is. */
-async function qualityChecks(kept, scope, addJudge) {
-  const out = { errors: 0, same: 0, different: 0, cases: [] };
-  const texts = kept.filter((p) => p.a?.ok && typeof p.a.value === 'string' && p.a.value.trim().length > 60);
-  for (const p of texts.slice(0, 2)) {
-    const t = p.a.value;
+/* Answers planted as clearly worse, or not, built from the customer's model's own answers to sampled calls, so they
+   are about this workload (see chooseJudge). At most two of each:
+   - its spacing changed, which is NOT worse, so a judge that leans against whichever answer it reads second is caught;
+   - cut to its first third, which is worse;
+   - another call's answer, to a request that asked something else, which is worse;
+   - made to break a requirement of the workload's own instruction (repeated past its limit, stripped of what it must
+     include, out of the shape it must have: see breakOne), which is worse;
+   - put into another language, German or, where it is not English, English, which is worse, since the person asked
+     in the language the real answer is in. Only prose is translated: code, JSON and figures read much the same in
+     any language, and a structured answer never is. */
+// what the person wrote in a request, its instruction left out, since every request of a workload shares that
+const userText = (body) => (Array.isArray(body?.messages) ? body.messages : []).filter((m) => m?.role === 'user')
+  .map((m) => (typeof m.content === 'string' ? m.content
+    : Array.isArray(m.content) ? m.content.map((x) => (typeof x?.text === 'string' ? x.text : '')).join(' ') : '')).join('\n');
+// how much two requests share: the words they have in common, of all the words either has
+export const sharedAsk = (a, b) => {
+  const of = (t) => new Set(String(t).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+  const x = of(a);
+  const y = of(b);
+  if (!x.size || !y.size) return 1;
+  let n = 0;
+  for (const w of x) if (y.has(w)) n += 1;
+  return n / (x.size + y.size - n);
+};
+const sharedWords = (a, b) => {
+  const of = (t) => new Set(String(t).toLowerCase().match(/\p{L}{4,}/gu) || []);
+  const x = of(a);
+  const y = of(b);
+  if (!x.size) return 1;
+  let n = 0;
+  for (const w of x) if (y.has(w)) n += 1;
+  return n / x.size;
+};
+async function plantedFor(kept, { checklist = [], shape, addJudge }) {
+  const pool = kept.filter((p) => p.a?.ok && asText(p.a.value).trim().length > 20);
+  const out = [];
+  for (const p of pool.slice(0, 2)) {
+    const t = asText(p.a.value);
     const variant = t.replace(/\s+/, '  ');
-    if (variant.trim() !== t.trim()) {
-      const j = await judgeQuality(askOf(p.body), variant, t, { scope });
-      addJudge(j.cost);
-      if (!j.transient && j.score !== null) {
-        out.same += 1;
-        if (j.score !== 0) { out.errors += 1; out.cases.push('an answer with only its spacing changed read as worse'); }
-      }
-    }
-    const words = t.trim().split(/\s+/);
-    if (words.length < 30) continue;
-    const cut = words.slice(0, Math.ceil(words.length / 3)).join(' ');
-    const k = await judgeQuality(askOf(p.body), cut, t, { scope });
-    addJudge(k.cost);
-    if (k.transient || k.score === null) continue;
-    out.different += 1;
-    if (k.score !== 1) { out.errors += 1; out.cases.push('an answer cut to its first third read as at least as good'); }
+    if (variant.trim() !== t.trim()) out.push({ p, answer: variant, reference: t, expect: 0, kind: 'spacing' });
+  }
+  let cuts = 0;
+  for (const p of pool) {
+    if (cuts >= 2) break;
+    const t = asText(p.a.value).trim();
+    const words = t.split(/\s+/);
+    const cut = words.length >= 30 ? words.slice(0, Math.ceil(words.length / 3)).join(' ')
+      : t.length >= 120 ? t.slice(0, Math.ceil(t.length / 3)) : null;
+    if (!cut) continue;
+    out.push({ p, answer: cut, reference: t, expect: 1, kind: 'cut' });
+    cuts += 1;
+  }
+  /* Only for a request that asked something else: two that share most of their words ("a poem about the sea, #3" and
+     "#4") ask the same thing, and the other one's answer is as good an answer, so a judge saying so is right. */
+  const sameAnswer = (x, y) => asText(x.a.value).trim().toLowerCase() === asText(y.a.value).trim().toLowerCase();
+  const askedElse = (x, y) => sharedAsk(userText(x.body), userText(y.body)) < 0.5;
+  let others = 0;
+  for (let k = 0; k + 1 < pool.length && others < 2; k += 1) {
+    const p = pool[k];
+    const q = pool.slice(k + 1).find((x) => askedElse(x, p) && !sameAnswer(x, p));
+    if (!q) continue;
+    out.push({ p, answer: asText(q.a.value), reference: asText(p.a.value), expect: 1, kind: 'another request' });
+    others += 1;
+  }
+  if (shape !== 'free_text') return out;
+  let broken = 0;
+  for (const p of pool) {
+    if (broken >= 2) break;
+    const b = breakOne(checklist, p.a.value);
+    if (!b) continue;
+    out.push({ p, answer: b.text, reference: p.a.value, expect: 1, kind: 'ignored instruction', note: b.item.say });
+    broken += 1;
+  }
+  let langs = 0;
+  let tries = 0;
+  for (const p of pool) {
+    if (langs >= 2 || tries >= 3) break;
+    const t = p.a.value;
+    if (t.trim().split(/\s+/).length < 8 || t.includes('```') || /^\s*[[{<]/.test(t)) continue;
+    tries += 1;
+    const tr = await translated(t);
+    addJudge(tr.cost);
+    // a translation that kept most of the words is not in another language
+    if (!tr.text || sharedWords(t, tr.text) > 0.5) continue;
+    out.push({ p, answer: tr.text, reference: t, expect: 1, kind: 'wrong language', note: tr.to });
+    langs += 1;
   }
   return out;
 }
 
+const PLANTED_WORDS = {
+  spacing: () => 'an answer with only its spacing changed read as worse',
+  cut: () => 'an answer cut to its first third read as at least as good',
+  'another request': () => "another request's answer read as at least as good",
+  'ignored instruction': (x) => `an answer that ignores the instruction (${String(x.note).toLowerCase()}) read as at least as good`,
+  'wrong language': (x) => `the answer put into ${x.note} read as at least as good`,
+};
+
+/* One judge on the planted answers: how many it read, and which it got wrong, in words. */
+async function readPlanted(planted, { scope, addJudge, prefer }) {
+  const out = { judge: prefer, read: 0, errors: 0, same: 0, different: 0, cases: [] };
+  await inParallel(planted, 4, async (x) => {
+    const j = await judgeQuality(askOf(x.p.body), x.answer, x.reference, { scope, prefer });
+    addJudge(j.cost);
+    if (j.transient || j.score === null || j.score === undefined) return;
+    out.read += 1;
+    if (x.expect === 0) out.same += 1; else out.different += 1;
+    if (j.score !== x.expect) { out.errors += 1; out.cases.push(PLANTED_WORDS[x.kind](x)); }
+  });
+  return out;
+}
+
+/* Which judge reads "at least as good" on this workload: the one that gets the planted answers right (plantedFor).
+   Jev is tried first, being faster and cheaper; where it misses one, or answered on too few to say, the language
+   model reads the same answers, and whichever missed fewer reads the run (Jev where they missed as many and read
+   as many). Where the one chosen missed any, nothing it settles is switched to on its word alone (unsure). Answers
+   { prefer: null for Jev with the language model behind it, or 'llm', unsure, check: what the page and the record
+   say of it }. */
+async function chooseJudge(kept, { scope, addJudge, checklist, shape }) {
+  const planted = await plantedFor(kept, { checklist, shape, addJudge });
+  const kinds = [...new Set(planted.map((x) => x.kind))];
+  const record = (best, tried, extra = {}) => ({
+    errors: best?.errors ?? 0, same: best?.same ?? 0, different: best?.different ?? 0, cases: best?.cases ?? [],
+    planted: planted.length, kinds, judge: best ? (best.judge === 'llm' ? 'llm' : 'jev') : null,
+    tried: tried.map((t) => ({ judge: t.judge === 'llm' ? 'llm' : 'jev', read: t.read, errors: t.errors })), ...extra,
+  });
+  if (!planted.length) return { prefer: null, unsure: false, check: record(null, []) };
+  const tried = [];
+  if (jevUsable()) tried.push(await readPlanted(planted, { scope, addJudge, prefer: 'jev' }));
+  const jevRight = tried.length && tried[0].errors === 0 && tried[0].read * 2 >= planted.length;
+  if (!jevRight && config.EVAL_JUDGE_MODEL) tried.push(await readPlanted(planted, { scope, addJudge, prefer: 'llm' }));
+  const usable = tried.filter((t) => t.read > 0);
+  // no judge answered on any of them: nobody's word was tested, so nothing is switched to on it alone
+  if (!usable.length) return { prefer: null, unsure: true, check: record(null, tried, { cases: ['no judge answered on the planted answers'] }) };
+  const best = usable.reduce((a, b) => (b.errors < a.errors || (b.errors === a.errors && b.read > a.read) ? b : a));
+  return { prefer: best.judge === 'llm' ? 'llm' : null, unsure: best.errors > 0, check: record(best, tried) };
+}

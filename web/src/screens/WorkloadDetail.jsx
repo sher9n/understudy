@@ -1,13 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { href } from '../router.js';
 import { plainClick } from '../nav.jsx';
-import { api, usd, num, timeIST } from '../api.js';
+import { api, num, timeIST } from '../api.js';
 import { more } from '../moreApi.js';
-import Learning from './Learning.jsx';
-import Outcomes from './Outcomes.jsx';
-import HowWePick from './HowWePick.jsx';
-import SectionBoundary from '../SectionBoundary.jsx';
-import { I, dayLabel, toneColor, plotted, DailyChart, Meter, CompareChart, FlowSvg, CostBars, QualitySpark } from '../WorkloadCharts.jsx';
+import { dayIST } from '../dates.js';
+import { I, dayLabel, toneColor, plotted, DailyChart, Meter, CompareChart, FlowSvg, CostBars, QualitySpark, SelfPic } from '../WorkloadCharts.jsx';
 import '../workload-page.css';
 
 /* A workload's page, as the design artboard draws it: four answers at a glance, and once it is switched, what
@@ -17,11 +14,11 @@ import '../workload-page.css';
  *   2. What the workspace has chosen should happen when a cheaper setup passes, as a chip that opens Settings.
  *   3. Every measurement, each opening to the chart of how its candidates compared and the list of them.
  *   4. The calls, and who answered each.
- * Every action the page had is still here: measuring now, with its progress and a way to stop; approving a switch
- * a person has to say yes to; switching back; giving a switch still taking over every request; and for a workload
- * whose requests reach us only as copies, the way to route them. The rest (how models are chosen, savings in the
- * customer's own code, what live calls are teaching, how calls turned out) waits behind one line at the foot.
- * The figures come from GET /api/workloads/:id/page (src/workloadPage.js); the actions from the workload itself. */
+ * Its actions: measuring now, with its progress and a way to stop; approving a switch a person has to say yes to;
+ * switching back; giving a switch still taking over every request; and for a workload whose requests reach us only
+ * as copies, the way to route them. The figures come from GET /api/workloads/:id/page (src/workloadPage.js); the
+ * actions from the workload itself. Amounts are written as the design writes them: what a measurement or a month
+ * cost to the cent, what one request costs to a hundredth of a cent. */
 
 const KIND = {
   json: ['braces', 'Structured answers'],
@@ -38,11 +35,24 @@ const pct0 = (x) => `${Math.round(x * 100)}%`;
 const secs = (ms) => (ms < 95 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
 const withFee = (v, feePct) => (Number(v) || 0) * (1 + (Number(feePct) || 0) / 100);
 // a date as India tells it, without its year: "24 Oct"
-const dateShort = (ms) => new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
+const dateShort = dayIST;
+/* Money to the cent: what a measurement, a month or thirty days of calls cost, "$0.14". A charge too small to reach a
+   cent says so rather than reading as nothing. */
+const cents = (v) => {
+  const x = Number(v) || 0;
+  if (x !== 0 && Math.abs(x) < 0.005) return x < 0 ? 'under -$0.01' : 'under $0.01';
+  return `${x < 0 ? '-' : ''}$${Math.abs(x).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
 // a whole-dollar figure where it is large enough to read that way
-const money = (v) => (Math.abs(v) >= 10 ? `${v < 0 ? '-' : ''}$${Math.round(Math.abs(v)).toLocaleString('en-US')}` : usd(v));
-// what a request costs beside a bar, where there is room for two figures: $0.0038
-const perCall = (v) => (v >= 1 || v < 1e-6 ? usd(v) : `$${Number(v).toPrecision(2)}`);
+const money = (v) => (Math.abs(v) >= 10 ? `${v < 0 ? '-' : ''}$${Math.round(Math.abs(v)).toLocaleString('en-US')}` : cents(v));
+/* What one request costs, to a hundredth of a cent, where the cost of a model call lives: "$0.0038". From a dollar up
+   to the cent, and one too small for a hundredth of a cent says so. */
+const perCall = (v) => {
+  const x = Number(v) || 0;
+  if (Math.abs(x) >= 1) return cents(x);
+  if (x !== 0 && Math.abs(x) < 0.00005) return 'under $0.0001';
+  return `${x < 0 ? '-' : ''}$${Math.abs(x).toFixed(4)}`;
+};
 
 /* A second look that confirmed: cleared again on requests never seen, or for a way of serving that is checked as it
    runs, looked at on live requests once switched. No second look at all (a measurement from before there were any)
@@ -56,18 +66,13 @@ export default function WorkloadDetail({ id, onBack, onChanged, go }) {
   // what went wrong with something pressed on the page, said beside it; the page itself stays
   const [actErr, setActErr] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
-  const [learn, setLearn] = useState(null);
-  const [learnErr, setLearnErr] = useState(null);
 
-  const loadLearn = useCallback(() => api.learning(id).then((x) => { setLearn(x); setLearnErr(null); }).catch((e) => setLearnErr(e.message)), [id]);
   const load = useCallback(() => Promise.all([
     api.workload(id).then((x) => { setW(x); setErr(null); }).catch((e) => setErr(e.message)),
     api.workloadPage(id).then(setPg).catch((e) => setErr(e.message)),
   ]), [id]);
   // another workload's figures are never shown under this one's name while its own are read
-  useEffect(() => { setW(null); setPg(null); setLearn(null); setLearnErr(null); setMoreOpen(false); load(); }, [id, load]);
-  useEffect(() => { if (moreOpen && !learn) loadLearn(); }, [moreOpen, learn, loadLearn]);
+  useEffect(() => { setW(null); setPg(null); load(); }, [id, load]);
 
   const live = useLive(w, async () => { await load(); onChanged?.(); });
 
@@ -149,41 +154,7 @@ export default function WorkloadDetail({ id, onBack, onChanged, go }) {
         <Enough e={pg.enough} />
         <Measurements w={w} pg={pg} live={live} />
         <Calls w={w} pg={pg} />
-
-        <section className="wp-card">
-          <button type="button" className="wp-morebtn" aria-expanded={moreOpen} aria-controls="wp-more" onClick={() => setMoreOpen((v) => !v)}>
-            {I.chev}More about this workload
-            <span className="wp-s">how models are chosen, savings in your code, what live calls teach, how calls turned out</span>
-          </button>
-        </section>
       </div>
-
-      {moreOpen && (
-        <div className="wp-morebody" id="wp-more">
-          <HowWePick w={w} m={m} onChanged={load} />
-          {w.advice?.length > 0 && (
-            <section className="opt" aria-labelledby="advice-h">
-              <div className="opthead"><h2 id="advice-h">Savings in your own code</h2>
-                <span className="s">Things only you can change, with what each would save. Nothing here is done for you.</span></div>
-              <div className="cbody">
-                {w.advice.map((a) => (
-                  <div className="kvrow" key={a.kind}>
-                    <span className="kvk">{a.title}</span>
-                    <span className="kvv">{a.detail}</span>
-                    {a.monthlyUsd ? <span className="kva kvm">{usd(a.monthlyUsd)} a month</span> : <span className="kva" />}
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-          <SectionBoundary title="What live calls are teaching us">
-            <Learning w={w} d={learn} err={learnErr} onReload={loadLearn} onSwitched={async () => { await load(); onChanged?.(); }} />
-          </SectionBoundary>
-          <SectionBoundary title="How calls turned out">
-            <Outcomes key={w.id} w={w} />
-          </SectionBoundary>
-        </div>
-      )}
     </div>
   );
 }
@@ -322,7 +293,7 @@ function Doing({ w, d, busy, copiesOnly, act, go }) {
           {/* green only when it is a saving: testing that cost more than the switch saved is said plainly, in ink */}
           <div className={`wp-tile${d.savedMonth > 0 ? ' hero' : ''}`}>
             <span className="wp-k">Saved this month</span>
-            <span className="wp-v">{usd(d.savedMonth)}</span>
+            <span className="wp-v">{cents(d.savedMonth)}</span>
             <span className="wp-n">{waiting ? 'starts once requests come through Understudy'
               : d.onTrack > 0 ? `on track for ${money(d.onTrack)} a month` : 'at this pace, testing costs more than it saves'}</span>
           </div>
@@ -389,7 +360,7 @@ function Ready({ w, cand, busy, copiesOnly, act, go }) {
           </div>
           <div className="wp-tile">
             <span className="wp-k">Cost per call</span>
-            {before > 0 && after > 0 ? <CostBars before={before} after={after} fmt={perCall} /> : <span className="wp-v">{cand.costMonth ? `${usd(cand.costMonth)}` : 'not priced'}</span>}
+            {before > 0 && after > 0 ? <CostBars before={before} after={after} fmt={perCall} /> : <span className="wp-v">{cand.costMonth ? cents(cand.costMonth) : 'not priced'}</span>}
             <span className="wp-n">{before > 0 && after > 0 ? `${Math.round(Math.max(0, 1 - after / before) * 100)}% less` : cand.costMonth ? 'a month at your volume' : ''}</span>
           </div>
           <div className="wp-tile">
@@ -535,7 +506,7 @@ function LiveRun({ w, live, feePct }) {
         <span className="wp-ww"><span className="wp-when">{title}</span><span className="wp-what">{sub}</span></span>
         <span className="wp-num">{r.sample ? `${num(r.sample)} requests` : ''}</span>
         <span className="wp-num">{queued ? '' : leftLine(r.leftMs)}</span>
-        <span className="wp-num">{queued ? '' : usd(withFee(r.spend, feePct))}</span>
+        <span className="wp-num">{queued ? '' : cents(withFee(r.spend, feePct))}</span>
         <span className={`wp-tag ${stopping ? 'is-mut' : 'is-brand'}`}>{stopping ? 'Stopping' : queued ? 'Waiting to start' : 'Measuring now'}</span>
       </div>
       <div className="wp-liverow">
@@ -584,11 +555,11 @@ function RunRow({ w, r, open, onToggle }) {
         <span className="wp-ww">
           <span className="wp-when">{timeIST(r.at)} IST</span><span className="wp-what">{r.what}</span>
           {/* on a narrow screen the figures beside it have no room, so they are a line under it instead */}
-          <span className="wp-what narrow">{`${num(r.n)} requests${r.mins ? `, ${num(r.mins)} min` : ''}, ${usd(r.usd)}`}</span>
+          <span className="wp-what narrow">{`${num(r.n)} requests${r.mins ? `, ${num(r.mins)} min` : ''}, ${cents(r.usd)}`}</span>
         </span>
         <span className="wp-num">{num(r.n)} requests</span>
         <span className="wp-num">{r.mins ? `${num(r.mins)} min` : ''}</span>
-        <span className="wp-num">{usd(r.usd)}</span>
+        <span className="wp-num">{cents(r.usd)}</span>
         <span className={`wp-tag is-${r.tag.tone}`}>{r.tag.text}</span>
       </button>
       <div className="wp-rundetail" id={did} hidden={!open}>
@@ -599,7 +570,12 @@ function RunRow({ w, r, open, onToggle }) {
         ) : (
           <>
             <div className="wp-take">{I.info}<span>{rp.take}</span></div>
-            {rp.cands.length > 0 && <RunDetail rp={rp} />}
+            {rp.cands.length > 0 ? <RunDetail rp={rp} /> : rp.self && (
+              <div className="wp-chartbox wp-selfbox">
+                <p className="wp-sub">{rp.self.noise !== null ? `${short(rp.reference)} against itself` : 'How far it got'}</p>
+                <SelfPic self={rp.self} yardstick={rp.yardstick} />
+              </div>
+            )}
           </>
         ))}
       </div>
@@ -649,7 +625,7 @@ function RunDetail({ rp }) {
                   <td><span className={`wp-tag is-${c.tone}`}>{c.verdict}</span></td>
                   <td className={`r m${c.gap === null ? ' none' : ''}`} data-label={axis.split(' ')[0]}>{c.gap === null ? 'not judged' : pct1(c.gap)}</td>
                   <td className={`r m${c.hi === null ? ' none' : ''}`} data-label="Up to">{c.hi === null ? '' : pct0(c.hi)}</td>
-                  <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Per call">{c.perCall === null ? 'not priced' : usd(c.perCall)}</td>
+                  <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Per call">{c.perCall === null ? 'not priced' : perCall(c.perCall)}</td>
                   <td className={`r m${!c.p50 ? ' none' : ''}`} data-label={rp.metric === 'ttft' ? 'First word' : 'Typical'}>{c.p50 ? secs(c.p50) : 'not timed'}</td>
                 </tr>
               ))}
@@ -676,7 +652,7 @@ function Calls({ w, pg }) {
   const summary = !c.total ? 'none in the last 30 days'
     : w.promotedAt && copiesOnly ? `${num(c.total)} calls in 30 days, copies your own model answered`
       : w.promotedAt ? `${num(c.total)} calls in 30 days, ${pct0(c.cheapShare)} answered by the cheaper setup${c.cheapSince ? ' since the switch' : ''}`
-        : `${num(c.total)} calls in 30 days, ${usd(c.cost)}${c.ownOnly ? ', all on your own model' : ''}`;
+        : `${num(c.total)} calls in 30 days, ${cents(c.cost)}${c.ownOnly ? ', all on your own model' : ''}`;
   return (
     <section className="wp-card" aria-labelledby="wp-calls-h">
       <div className="wp-cardhead"><h3 id="wp-calls-h"><span className="wp-q">3</span>The calls</h3><span className="wp-s">{summary}</span></div>
@@ -727,7 +703,7 @@ function CallRow({ w, x, open, onToggle }) {
         <td className="m">{timeIST(x.at)} IST</td>
         <td><span className="wp-srv"><i style={{ background: who }} /><span className="wp-mdl">{x.model || 'no model named'}{how}</span></span></td>
         <td className={`r m${x.ms === null ? ' none' : ''}`} data-label="Took">{x.ms === null ? 'not timed' : secs(x.ms)}</td>
-        <td className="r m" data-label="Cost">{usd(x.cost)}</td>
+        <td className="r m" data-label="Cost">{perCall(x.cost)}</td>
         <td><span className={`wp-tag is-${tag[0]}`} title={failed ? `The provider answered ${x.status}` : undefined}>{tag[1]}</span></td>
       </tr>
       {open && (

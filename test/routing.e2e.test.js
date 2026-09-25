@@ -690,9 +690,14 @@ test('the control group judges by the yardstick the switch was measured by, and 
   const ref = { choices: [{ message: { content: refText(902) } }] };
   const same = await scoreServed(body, served, ref, 'free_text', { yardstick: 'agreement' });
   assert.equal(same.score, 1, 'held to the same answer, leaving out when it arrives is a different answer');
-  const good = await scoreServed(body, served, ref, 'free_text', { yardstick: 'quality' });
+  // held to "at least as good" by the judge its measurement chose (here the language model), the quality judge reads it
+  const good = await scoreServed(body, served, ref, 'free_text', { yardstick: 'quality', prefer: 'llm' });
   assert.equal(good.judgedBy, 'llm-quality', 'held to "at least as good", the quality judge reads it');
   assert.equal(good.score, 0, 'and the stand-in judge calls it a tie');
+  // with no judge chosen, Jev reads it first, both ways round, and sees what the writer left out
+  const jev = await scoreServed(body, served, ref, 'free_text', { yardstick: 'quality' });
+  assert.equal(jev.judgedBy, 'jev-quality');
+  assert.equal(jev.score, 1);
   // an answer cut short counts against what served only when the customer's model finished the same call
   const cut = { choices: [{ message: { content: 'Order 902 ship' }, finish_reason: 'length' }] };
   assert.equal((await scoreServed(body, cut, ref, 'free_text')).score, 1);

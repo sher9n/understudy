@@ -6,6 +6,7 @@ import { valueOf, optimizingSince } from './eval/value.js';
 import { routedSavings } from './eval/actual.js';
 import { cadenceOf } from './eval/schedule.js';
 import { outcomeOf } from './eval/outcome.js';
+import { canJudge } from './eval/judge.js';
 import { servingKey } from './eval/promote.js';
 import { controlRecord, barOf } from './learn/control.js';
 import { nameOfResult, armById, labelOf } from './learn/arms.js';
@@ -183,6 +184,11 @@ async function doingOf(w, v, t) {
   };
 }
 
+// how many of the answers planted to test a measurement's judge it got wrong
+const judgeErrors = (run) => {
+  try { return Number(JSON.parse(run.judge_check_json || 'null')?.errors) || 0; } catch { return 0; }
+};
+
 /* A measurement as a line in the list: what started it, and what it found, in a word. */
 function tagOf(r, sum, w) {
   const outcome = outcomeOf(r);
@@ -198,6 +204,8 @@ function tagOf(r, sum, w) {
   if (Number(sum?.twice) > 0) return { tone: 'ok', text: 'Passed twice' };
   const cleared = Number(sum?.cleared) || 0;
   if (cleared > 0) return { tone: 'ok', text: `${cleared} ${cleared === 1 ? 'setup' : 'setups'} cleared` };
+  // held back only because the judge got answers planted to test it wrong (see candOf)
+  if (Number(sum?.within) > 0 && judgeErrors(r) > 0) return { tone: 'warn', text: 'Passed, judge unsure' };
   if (Number(sum?.close) > 0) return { tone: 'warn', text: 'Close' };
   return { tone: 'mut', text: 'Nothing cleared yet' };
 }
@@ -205,19 +213,22 @@ function tagOf(r, sum, w) {
 /* 2. Every measurement, newest first. */
 async function measurementsOf(w) {
   const runs = await db.prepare(
-    `SELECT id, status, outcome, error, trigger, sample_size, spend_usd, created_at, started_at, finished_at
+    `SELECT id, status, outcome, error, trigger, sample_size, spend_usd, created_at, started_at, finished_at, floor_pct, judge_check_json
        FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 30`).all(w.id);
   if (!runs.length) return [];
   const first = await db.prepare('SELECT id FROM eval_runs WHERE workload_id = ? ORDER BY created_at LIMIT 1').get(w.id);
   const serving = w.routed_model ? await servingKey(w) : null;
   const sums = await db.prepare(
-    `SELECT run_id,
-            COUNT(*) FILTER (WHERE verdict = 'cleared' AND model_id <> ?) AS cleared,
-            COUNT(*) FILTER (WHERE verdict = 'review' AND model_id <> ?) AS close,
-            COUNT(*) FILTER (WHERE verdict = 'cleared' AND confirm_verdict IN ('cleared', 'live') AND model_id <> ?) AS twice,
-            COUNT(*) FILTER (WHERE verdict = 'cleared' AND model_id = ?) AS kept
-       FROM eval_results WHERE run_id = ANY(?::text[]) AND verdict <> 'reference' GROUP BY run_id`)
-    .all(serving ?? '', serving ?? '', serving ?? '', serving ?? '', runs.map((r) => r.id));
+    `SELECT e.run_id,
+            COUNT(*) FILTER (WHERE e.verdict = 'cleared' AND e.model_id <> ?) AS cleared,
+            COUNT(*) FILTER (WHERE e.verdict = 'review' AND e.model_id <> ?) AS close,
+            COUNT(*) FILTER (WHERE e.verdict = 'cleared' AND e.confirm_verdict IN ('cleared', 'live') AND e.model_id <> ?) AS twice,
+            COUNT(*) FILTER (WHERE e.verdict = 'cleared' AND e.model_id = ?) AS kept,
+            COUNT(*) FILTER (WHERE e.verdict = 'review' AND e.model_id <> ? AND r.floor_pct IS NOT NULL
+              AND COALESCE(e.gap_hi, e.gap_pct) <= r.floor_pct) AS within
+       FROM eval_results e JOIN eval_runs r ON r.id = e.run_id
+      WHERE e.run_id = ANY(?::text[]) AND e.verdict <> 'reference' GROUP BY e.run_id`)
+    .all(serving ?? '', serving ?? '', serving ?? '', serving ?? '', serving ?? '', runs.map((r) => r.id));
   const sumOf = new Map(sums.map((s) => [s.run_id, s]));
   return runs.map((r) => {
     const start = Number(r.started_at || r.created_at);
@@ -302,7 +313,7 @@ export async function pageOf(w) {
 
 /* One setup in a measurement, as its row: what it is called, how many requests it answered, how often it answered
    differently (or worse), the range that could be, what a request costs on it, how fast it answered, and its result. */
-function candOf(r, { sample, serving, refPer, metric, avg, switchRun }) {
+function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = false, floorPct = null }) {
   const name = nameOfResult(r);
   const n = Number(r.runs) || 0;
   const isServing = !!serving && r.model_id === serving;
@@ -315,7 +326,11 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun }) {
   else if (r.stopped && n < sample) [tone, verdict] = ['mut', 'Stopped early'];
   else if (r.verdict === 'cleared' && (r.confirm_verdict === 'cleared' || r.confirm_verdict === 'live')) [tone, verdict] = ['ok', 'Passed twice'];
   else if (r.verdict === 'cleared') [tone, verdict] = ['ok', 'Cleared'];
-  else if (r.verdict === 'review') {
+  /* Held back only because the judge missed an answer planted as clearly worse (see chooseJudge in src/eval/run.js):
+     it kept the bar as the judge read it, which is not "close". */
+  else if (r.verdict === 'review' && unsure && floorPct !== null && Number(r.gap_hi ?? r.gap_pct) <= floorPct) {
+    [tone, verdict] = ['warn', 'Passed, judge unsure'];
+  } else if (r.verdict === 'review') {
     [tone, verdict] = Number(r.calls_needed) > n ? ['warn', 'Too few to be sure'] : ['warn', isServing && !switchRun ? 'Close, still serving' : 'Close'];
   } else if (r.verdict === 'insufficient') [tone, verdict] = ['warn', 'Too few to be sure'];
   else [tone, verdict] = ['bad', 'Missed'];
@@ -349,15 +364,35 @@ const TONE_ORDER = { ok: 0, warn: 1, bad: 2, mut: 3 };
 const z2 = 1.6449 ** 2;
 const pctWords = (x) => `${Math.round(x * 1000) / 10}%`;
 
-/* The one sentence at the top of an opened measurement: what it found, and what happens because of it. */
-function takeOf(run, cands, w, { reachNeed }) {
+/* The sentence at the top of an opened measurement: what it found, and what happens because of it. Where answers were
+   held to "at least as good" rather than "the same", or the judge was not trusted, a sentence more says so. */
+function takeOf(run, cands, w, { reachNeed, check }) {
+  const main = mainTake(run, cands, w, { reachNeed });
+  const outcome = outcomeOf(run);
+  const compared = !['unmeasurable', 'refused', 'no_balance'].includes(outcome) && !(run.status === 'running' || run.status === 'queued');
+  const notes = [];
+  if (compared && run.yardstick === 'quality' && cands.length) {
+    notes.push(`Because ${short(run.reference_model)} answers the same request differently each time, each setup was held to answers `
+      + 'at least as good as yours rather than to the same answers.');
+  }
+  if (compared && Number(check?.errors) > 0 && cands.length) {
+    const planted = Number(check.planted) || Number(check.errors);
+    notes.push(`The judge was first tested on ${planted} answers whose right verdict is already known, and it got ${check.errors} wrong, `
+      + 'so nothing is switched on its word. The next measurement tests the judge again.');
+  }
+  return [main, ...notes].join(' ');
+}
+
+function mainTake(run, cands, w, { reachNeed }) {
   const ref = short(run.reference_model);
   const outcome = outcomeOf(run);
   const n = Number(run.sample_size) || 0;
   if (run.status === 'running' || run.status === 'queued') return 'Still running. Each setup appears here once it has answered its requests.';
   if (outcome === 'unmeasurable') {
     return `${ref} gave a different answer to the same request ${Math.round(Number(run.noise_pct) || 0)}% of the time when asked each of ${n} twice, `
-      + 'so there was no steady bar to hold a cheaper setup to. Nothing was tried, and nothing switched.';
+      + 'so there was no steady bar to hold a cheaper setup to. Nothing was tried, and nothing switched.'
+      + (canJudge() && config.EVAL_QUALITY_YARDSTICK
+        ? ' Workloads like this are now held to answers at least as good as yours instead, so the next measurement compares setups.' : '');
   }
   if (outcome === 'refused') return `${ref} could not answer most of these requests, so there was no bar to hold a cheaper setup to. Nothing switched.`;
   if (outcome === 'no_balance') return 'The balance ran out once the bar was set, so nothing was tried. Add credit and it can run again.';
@@ -395,9 +430,16 @@ function takeOf(run, cands, w, { reachNeed }) {
     return `${said}${n} requests can show a setup is within about ${Math.round(reach)}% of yours, not within ${Math.round(bar)}%.`
       + (reachNeed ? ` The full test starts by itself at ${reachNeed}.` : '');
   }
+  // kept the bar as the judge read it, and held back only because the judge was not trusted (see candOf)
+  const unsure = cands.find((c) => c.verdict === 'Passed, judge unsure' && c.gap !== null);
+  if (unsure) {
+    return `${said}${unsure.label} kept the bar as the judge read it: ${run.yardstick === 'quality' ? 'worse' : 'different'} on `
+      + `${pctWords(unsure.gap)} of them, against a bar of ${Math.round(bar * 10) / 10}%.`;
+  }
   const close = cands.find((c) => c.tone === 'warn' && c.gap !== null);
   if (close) {
-    return `${said}The closest, ${close.label}, answered differently on ${pctWords(close.gap)} of them, against a bar of ${Math.round(bar * 10) / 10}%.`
+    const how = run.yardstick === 'quality' ? 'gave a worse answer' : 'answered differently';
+    return `${said}The closest, ${close.label}, ${how} on ${pctWords(close.gap)} of them, against a bar of ${Math.round(bar * 10) / 10}%.`
       + ' It is looked at again next time.';
   }
   return `${said}No cheaper setup answered as well as ${ref} on these ${n} requests.`;
@@ -426,14 +468,18 @@ export async function runPageOf(w, run) {
   const serving = w.routed_model ? await servingKey(w) : null;
   const sample = Number(run.sample_size) || 0;
   const switchRun = !!w.routed_model && w.promoted_run_id === run.id;
-  const cands = results.map((r) => candOf(r, { sample, serving, refPer, metric, avg, switchRun }))
+  let check = null;
+  try { check = run.judge_check_json ? JSON.parse(run.judge_check_json) : null; } catch { check = null; }
+  const unsure = Number(check?.errors) > 0;
+  const floorPct = run.floor_pct === null || run.floor_pct === undefined ? null : Number(run.floor_pct);
+  const cands = results.map((r) => candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure, floorPct }))
     .sort((a, b) => (TONE_ORDER[a.tone] - TONE_ORDER[b.tone])
       || ((a.gap ?? 2) - (b.gap ?? 2)) || ((a.perCall ?? 1) - (b.perCall ?? 1)));
   // for a measurement too small to show anything, the count the full test waits for
   const reachNeed = !w.routed_model && Number(w.measure_at_calls) > 0 ? Number(w.measure_at_calls) : null;
   return {
     id: run.id,
-    take: takeOf(run, cands, w, { reachNeed }),
+    take: takeOf(run, cands, w, { reachNeed, check }),
     bar: round8((Number(run.floor_pct) || 0) / 100),
     yardstick: run.yardstick === 'quality' ? 'quality' : 'agreement',
     metric,
@@ -443,5 +489,24 @@ export async function runPageOf(w, run) {
       p50: metric === 'ttft' ? Number(run.ref_ttft_p50) || null : Number(run.ref_latency_p50) || null,
     },
     cands: cands.map(({ twice, confirmRuns, ...c }) => c),
+    self: selfOf(run, plan),
+  };
+}
+
+/* What a measurement that compared nothing can still be drawn from: how often the customer's own model's two answers
+   to one request differed (or, held to "at least as good", how often one was clearly worse), against the pass mark it
+   set, or against the most a bar could be set from where it could not set one; and how far it got. */
+function selfOf(run, plan) {
+  const share = (x) => (x === null || x === undefined || !Number.isFinite(Number(x)) ? null : round8(Number(x) / 100));
+  const outcome = outcomeOf(run);
+  return {
+    outcome,
+    n: Number(run.sample_size) || 0,
+    noise: share(run.noise_pct),
+    agreement: share(plan?.yardstick?.agreementNoisePct),
+    bar: outcome === 'unmeasurable' ? null : share(run.floor_pct),
+    most: outcome === 'unmeasurable' ? round8(config.EVAL_NOISE_MAX_PCT / 100) : null,
+    done: Number(run.steps_done) || 0,
+    total: Number(run.steps_total) || 0,
   };
 }

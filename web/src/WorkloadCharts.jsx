@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { dayOf } from './dates.js';
 
 /* The drawings on a workload's page (web/src/screens/WorkloadDetail.jsx), each the design artboard's own, drawn
    from the page's figures (src/workloadPage.js): requests a day against the day's limit, how far along the requests
@@ -8,8 +9,8 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 const DAY = 86400000;
 
-/** A day as a test counts it (UTC, created_at / DAY), by its date: "24 Sept". */
-export const dayLabel = (d) => new Date(d * DAY).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+/** A day as a test counts it (UTC, created_at / DAY), by its date: "24 Sep". */
+export const dayLabel = (d) => dayOf(d);
 
 const TONE = { ok: 'var(--ok)', warn: 'var(--warn)', bad: 'var(--bad)', mut: 'var(--mut)', brand: 'var(--brand)' };
 export const toneColor = (t) => TONE[t] || TONE.mut;
@@ -124,6 +125,54 @@ export function Meter({ have, need, perDay, steps, auto = true }) {
       <text x={L} y={T - 10} className="t-brand t-bold">{have} so far</text>
       <line x1={x(need)} x2={x(need)} y1={T - 6} y2={T + 22} stroke="var(--ok)" strokeWidth="2" />
       <text x={x(need)} y={T - 10} textAnchor="end" className="t-ok t-bold">{need}: {auto ? 'starts by itself' : 'ready to test'}</text>
+    </svg>
+  );
+}
+
+/**
+ * A measurement that compared nothing, drawn rather than only said: how often the customer's own model's two answers
+ * to one request differed (or, held to "at least as good", how often one was clearly worse), against the pass mark it
+ * set, or against the most a bar can be set from where it could not set one. Where it ended before it could say even
+ * that, how far along its model calls it got.
+ */
+export function SelfPic({ self, yardstick }) {
+  const [ref, W] = useWidthOf(520, 280);
+  const H = 78; const L = 4; const R = 4; const w = W - L - R; const T = 26;
+  const x = (v) => L + Math.max(0, Math.min(1, Number(v) || 0)) * w;
+  const pctw = (v) => `${Math.round(Number(v) * 1000) / 10}%`;
+  // a label hung from a point on the track, kept inside the drawing
+  const anchor = (v) => (v < 0.3 ? 'start' : v > 0.7 ? 'end' : 'middle');
+  if (self?.noise !== null && self?.noise !== undefined) {
+    const mark = self.most ?? self.bar;
+    const worse = yardstick === 'quality';
+    const said = worse ? 'clearly worse than its own other answer' : 'a different answer from its own other one';
+    const markWords = self.most ? `${pctw(mark)}: the most a bar can be set from` : `pass mark ${pctw(mark)}`;
+    return (
+      <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img"
+        aria-label={`Your model gave ${said} on ${pctw(self.noise)} of ${self.n} requests, each asked twice${mark !== null ? `; ${markWords}` : ''}`}>
+        <text x={L} y={T - 10} className="t-ink t-bold">{`${worse ? 'Clearly worse than itself' : 'Different from itself'} on ${pctw(self.noise)} of requests`}</text>
+        <rect x={L} y={T} width={w} height="16" rx="8" fill="var(--grid)" />
+        {self.noise > 0 && <rect x={L} y={T} width={Math.max(16, x(self.noise) - L)} height="16" rx="8" fill={self.most ? 'var(--bad)' : 'var(--brand)'} />}
+        {mark !== null && (
+          <>
+            <line x1={x(mark)} x2={x(mark)} y1={T - 5} y2={T + 21} stroke={self.most ? 'var(--warn)' : 'var(--ok)'} strokeWidth="2" />
+            <text x={x(mark)} y={T + 38} textAnchor={anchor(mark)} className={`${self.most ? 't-warn' : 't-ok'} t-bold`}>{markWords}</text>
+          </>
+        )}
+      </svg>
+    );
+  }
+  const share = self?.total > 0 ? Math.min(1, self.done / self.total) : 0;
+  const ended = self?.outcome === 'refused' ? 'your model could not answer'
+    : self?.outcome === 'interrupted' ? 'interrupted here' : self?.outcome === 'stopped' ? 'stopped here' : 'ended here';
+  return (
+    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img"
+      aria-label={`${self?.done ?? 0} of ${self?.total ?? 0} model calls made before it ${ended === 'ended here' ? 'ended' : ended.replace(' here', '')}`}>
+      <text x={L} y={T - 10} className="t-ink t-bold">{`${(self?.done ?? 0).toLocaleString('en-US')} of ${(self?.total ?? 0).toLocaleString('en-US')} model calls made`}</text>
+      <rect x={L} y={T} width={w} height="16" rx="8" fill="var(--grid)" />
+      {share > 0 && <rect x={L} y={T} width={Math.max(16, x(share) - L)} height="16" rx="8" fill="var(--mut)" />}
+      <line x1={x(share)} x2={x(share)} y1={T - 5} y2={T + 21} stroke="var(--ink)" strokeWidth="2" />
+      <text x={x(share)} y={T + 38} textAnchor={anchor(share)} className="t-bold">{ended}</text>
     </svg>
   );
 }

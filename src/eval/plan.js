@@ -314,6 +314,11 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   plan.yardstick = (await db.prepare(
     `SELECT yardstick FROM eval_runs WHERE workload_id = ? AND yardstick IS NOT NULL AND ${FOUND()} AND ${OUTCOME_OF()} = 'compared'
       ORDER BY created_at DESC LIMIT 1`).get(workload.id))?.yardstick ?? null;
+  /* Whether the customer's model last disagreed with itself too often for "the same answer" to be a bar: a structured
+     workload is then held to "at least as good" too, which is judged, and the quote counts that judging. */
+  const lastBar = await db.prepare(`SELECT noise_pct FROM eval_runs WHERE workload_id = ? AND status = 'done' AND noise_pct IS NOT NULL
+      ORDER BY created_at DESC LIMIT 1`).get(workload.id);
+  plan.noisy = Number(lastBar?.noise_pct) > config.EVAL_NOISE_MAX_PCT;
   plan.worth = worthOf({ ranked: first.ranked, refPer: first.refPrice ?? 0, month, serving: workload.routed_model, servingAs, tries });
   /* A measurement nobody asked for waits until it has enough calls to show anything: on too few, even a
      model that matched every answer could not clear the bar, and all it would buy is a bar. */
@@ -466,8 +471,9 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
  * Written answers are judged, and each judgement is priced at what it costs (see judgePrices): the
  * bar's pairs, the pairs whose answer is known that test the judge, and every candidate answer. When
  * the customer's own model varies too much for "the same answer" to be a bar, every pair is read again
- * for "at least as good", and the candidates are judged that way, always by the language model. The
- * run finds out which it needs as it goes, so a workload not compared before is quoted the dearer.
+ * for "at least as good", both ways round, and the candidates are judged that way too, by whichever
+ * judge got the planted answers right. The run finds out which it needs as it goes, so a workload not
+ * compared before is quoted the dearer.
  *
  * Strategies for the cheaper models that cannot manage alone, and Jev's reading of how the models
  * suit the task, which the measurement pays for, are counted too. */
@@ -491,18 +497,25 @@ function estimate(plan, profile, facts, workload) {
   for (const c of finalists) total += c.price * s;
   for (const c of extra) total += c.price * screened;
 
-  // judging written answers, by the yardstick the run will use, or the dearer when that is not known yet
-  const prices = workload.shape_kind === 'free_text' && canJudge()
-    ? judgePrices(pin, pout, facts.models.get(config.EVAL_JUDGE_MODEL)) : null;
+  /* Judging written answers, by the yardstick the run will use, or the dearer when that is not known yet. A structured
+     workload is compared field by field, which is free, unless its model last disagreed with itself too often for that
+     to be a bar (plan.noisy), when it is held to "at least as good" like written work. */
+  const text = workload.shape_kind === 'free_text';
+  const judged = canJudge() && (text || (config.EVAL_QUALITY_YARDSTICK && (plan.yardstick === 'quality' || plan.noisy)));
+  const prices = judged ? judgePrices(pin, pout, facts.models.get(config.EVAL_JUDGE_MODEL)) : null;
   const yardsticks = !prices ? []
-    : !config.EVAL_QUALITY_YARDSTICK || plan.yardstick === 'agreement' ? ['agreement']
-      : plan.yardstick === 'quality' ? ['quality'] : ['agreement', 'quality'];
+    : !text ? ['quality']
+      : !config.EVAL_QUALITY_YARDSTICK || plan.yardstick === 'agreement' ? ['agreement']
+        : plan.yardstick === 'quality' ? ['quality'] : ['agreement', 'quality'];
   const judging = yardsticks.map((yard) => {
     const quality = yard === 'quality';
     const pair = quality ? prices.quality : prices.bar;
     const answer = quality ? prices.quality : prices.candidate;
-    // every pair read for sameness first, and again for "at least as good"; and up to four known pairs
-    const bar = s * prices.bar + (quality ? s * prices.quality : 0) + 4 * pair;
+    /* Every written pair read for sameness first, and again for "at least as good". Held to that, the judge is tested
+       on up to ten planted answers, read again by the language model where Jev misses one, two of them put into another
+       language first, and the instruction is read once as a checklist; held to the same answer, on up to four. */
+    const planted = quality ? 10 * (prices.quality + prices.llmQuality) + 2 * prices.translate + prices.checklist : 4 * pair;
+    const bar = (text ? s * prices.bar : 0) + (quality ? s * prices.quality : 0) + planted;
     return { pair, answer, cost: bar + (finalists.length * s + extra.length * screened) * answer };
   }).sort((a, b) => b.cost - a.cost)[0] || null;
   if (judging) total += judging.cost;

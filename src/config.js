@@ -245,6 +245,14 @@ export const config = {
   /* Written work with no one right answer is held to "at least as good" when it cannot be held to
      "the same answer". */
   EVAL_QUALITY_YARDSTICK: bool('EVAL_QUALITY_YARDSTICK', true),
+  /* Under "at least as good", the pass mark is how often the customer's model gives a clearly worse answer than its
+     own other one, plus this many points, and never past half plus this many (marginFloor in src/eval/compare.js).
+     There is no rate above which such a workload cannot be measured: a varied one simply needs more calls before a
+     setup can be shown to keep it. */
+  EVAL_QUALITY_MARGIN_PCT: num('EVAL_QUALITY_MARGIN_PCT', 5),
+  /* A written workload's instruction read once as a checklist of what every answer must do (a length, a shape, text
+     that must or must not appear), and every answer checked against it beside the reading (src/eval/checklist.js). */
+  EVAL_CHECKLIST: bool('EVAL_CHECKLIST', true),
   /* Re-checks that keep confirming what serves are spaced out, doubling at most this many times;
      a change in the catalogue that could matter to a workload brings its next one forward to within
      EVAL_NUDGE_HOURS. */
