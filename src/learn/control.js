@@ -2,7 +2,7 @@ import config from '../config.js';
 import { db, id, now } from '../db/index.js';
 import { chargeEval, account, backgroundLeft } from '../billing.js';
 import { extract, disagreement, structuredCompare, proseText } from '../eval/compare.js';
-import { judgeCandidate, judgeBarPair, judgeQuality } from '../eval/judge.js';
+import { judgeCandidate, judgeBarPair, judgeQuality, numbersDiffer, numbersOf } from '../eval/judge.js';
 import { askOf } from '../eval/ask.js';
 import { keptChecklist } from '../eval/checklist.js';
 import { OUTCOME_OF } from '../eval/outcome.js';
@@ -49,19 +49,35 @@ const short = (m) => String(m || '').split('/').pop();
  * (unsettled): that counts against a setup being switched to, never towards switching back one that serves,
  * which a judge failing the same way on every check would otherwise do on no evidence at all. Held to "at least as
  * good", written or structured, it is read as the measurement read it: by the judge its planted answers chose
- * (`prefer`), held to the workload's own instruction (`checklist`), a structured answer as its JSON.
+ * (`prefer`), held to the workload's own instruction (`checklist`), a structured answer as its JSON. And as the measurement
+ * holds a written answer to the figures the customer's model states the same both times (qualityAgainst in
+ * src/eval/run.js): where the served answer changes a figure, `again()` asks the customer's model once more, and a figure
+ * it states again makes the served answer worse whatever a reading says, since a judge can see that two answers give
+ * different figures, not which one is right. `twice` says the customer's model was asked that second time.
  */
-export async function scoreServed(body, served, ref, shape, { scope = null, yardstick = 'agreement', prefer = null, checklist = null } = {}) {
+export async function scoreServed(body, served, ref, shape, { scope = null, yardstick = 'agreement', prefer = null, checklist = null, again = null } = {}) {
   const a = extract(served, shape);
   const b = extract(ref, shape);
   if (!b.ok) return { score: null, better: 0, judgedBy: null, cost: 0, kind: null };
   if (!a.ok) return { score: 1, better: 0, judgedBy: 'no answer', cost: 0, kind: a.reason || 'no answer' };
   if (yardstick === 'quality') {
+    let extra = 0;
+    let twice = false;
+    if (again && typeof a.value === 'string' && typeof b.value === 'string' && numbersOf(b.value).length > 0 && numbersDiffer(a.value, b.value)) {
+      let more = null;
+      try { more = await again(); } catch { more = null; }
+      twice = true;
+      extra += Number(more?.cost) || 0;
+      const c = more?.json ? extract(more.json, shape) : null;
+      if (c?.ok && typeof c.value === 'string' && !numbersDiffer(b.value, c.value)) {
+        return { score: 1, better: 0, judgedBy: 'numbers', cost: extra, kind: 'fact', twice };
+      }
+    }
     const text = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
     const j = await judgeQuality(askOf(body), text(a.value), text(b.value), { scope, prefer, checklist });
-    if (j.transient || j.score === null || j.score === undefined) return { score: null, better: 0, judgedBy: null, cost: j.cost || 0, kind: null };
-    return { score: j.score, better: j.detail?.candBetter ? 1 : 0, judgedBy: j.judgedBy, cost: j.cost || 0,
-      kind: j.score > 0 ? (j.detail?.kind || 'worse') : null };
+    if (j.transient || j.score === null || j.score === undefined) return { score: null, better: 0, judgedBy: null, cost: (j.cost || 0) + extra, kind: null, twice };
+    return { score: j.score, better: j.detail?.candBetter ? 1 : 0, judgedBy: j.judgedBy, cost: (j.cost || 0) + extra,
+      kind: j.score > 0 ? (j.detail?.kind || 'worse') : null, twice };
   }
   if (shape === 'free_text') {
     const j = await judgeCandidate(askOf(body), a.value, b.value, null, { scope });
@@ -186,9 +202,21 @@ async function control(workload, { body, response, callId, decision }, { serve }
      worse only when the customer's model finishes the same call, the way the measurement leaves out the
      calls the customer's own model could not answer. */
   let own = null;
+  const ownAnswer = async () => serve(referenceSpec(workload), body, { shape: workload.shape_kind, scope: workload.workspace_id,
+    zdr: await zdrFor(workload.workspace_id) });
+  // asked a second time only to see whether it states a figure the served answer changed again (see scoreServed)
+  const again = yardstick === 'quality' && workload.shape_kind === 'free_text'
+    ? async () => {
+      try {
+        const r = await ownAnswer();
+        return { json: r?.json ?? null, cost: Number(r?.cost) || 0 };
+      } catch (err) {
+        return { json: null, cost: Number(err?.spent) || 0 };
+      }
+    }
+    : null;
   try {
-    own = await serve(referenceSpec(workload), body, { shape: workload.shape_kind, scope: workload.workspace_id,
-      zdr: await zdrFor(workload.workspace_id) });
+    own = await ownAnswer();
   } catch (err) {
     row.status = Number(err?.status) || 0;
     // our own account refusing is nobody's reading; a provider that failed on the customer's model says nothing either
@@ -199,7 +227,7 @@ async function control(workload, { body, response, callId, decision }, { serve }
     row.cost_usd += Number(own.cost) || 0;
     let s = null;
     try {
-      s = await scoreServed(body, response, own.json, workload.shape_kind, { scope: workload.workspace_id, yardstick, prefer, checklist });
+      s = await scoreServed(body, response, own.json, workload.shape_kind, { scope: workload.workspace_id, yardstick, prefer, checklist, again });
     } catch {
       s = null;
     }
@@ -209,7 +237,7 @@ async function control(workload, { body, response, callId, decision }, { serve }
         row.score = s.score;
         row.better = s.better ? 1 : 0;
         row.judged_by = s.judgedBy;
-        row.detail_json = JSON.stringify({ kind: s.kind ?? null, escalated: !!decision.escalated });
+        row.detail_json = JSON.stringify({ kind: s.kind ?? null, escalated: !!decision.escalated, ...(s.twice ? { askedTwice: true } : {}) });
       }
     }
   }

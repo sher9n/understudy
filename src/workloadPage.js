@@ -464,9 +464,21 @@ function takeOf(run, cands, w, opts) {
   const compared = !['unmeasurable', 'refused', 'no_balance'].includes(outcome) && !(run.status === 'running' || run.status === 'queued');
   const notes = [];
   const check = opts.check;
+  // why it was judged the way it was (planRecord.judging in src/eval/run.js)
+  let plan = null;
+  try { plan = run.plan_json ? JSON.parse(run.plan_json) : null; } catch { plan = null; }
+  const why = plan?.judging?.reason ?? plan?.yardstick?.reason ?? null;
   if (compared && run.yardstick === 'quality' && cands.length) {
-    notes.push('Because the original model answers the same request differently each time, each model was checked for answers at '
-      + "least as good as the original model's, rather than the same answers.");
+    notes.push(why === 'open-ended'
+      ? 'These requests ask for open-ended writing, where many different answers are each as good, so each model was checked for '
+        + "answers at least as good as the original model's, rather than the same answers."
+      : why === 'chosen'
+        ? "As this workload's setting asks, each model was checked for answers at least as good as the original model's, rather than "
+          + 'the same answers.'
+        : 'Because the original model answers the same request differently each time, each model was checked for answers at '
+          + "least as good as the original model's, rather than the same answers.");
+  } else if (compared && plan?.judging?.mode === 'same' && cands.length) {
+    notes.push("As this workload's setting asks, each model was checked for the same answers as the original model's.");
   }
   if (compared && Number(check?.errors) > 0 && cands.length) {
     const planted = Number(check.planted) || Number(check.errors);
@@ -482,11 +494,21 @@ function mainTake(run, cands, w, { small = null, refName }) {
   const quality = run.yardstick === 'quality';
   if (run.status === 'running' || run.status === 'queued') return 'Still running. Each model appears here once it has answered its requests.';
   if (outcome === 'unmeasurable') {
+    // held to the same answer by the workload's own setting (planRecord.judging in src/eval/run.js), which only a person changes
+    let plan = null;
+    try { plan = run.plan_json ? JSON.parse(run.plan_json) : null; } catch { plan = null; }
+    const heldSame = plan?.judging?.mode === 'same';
+    const judgeable = canJudge() && config.EVAL_QUALITY_YARDSTICK;
     return `The original model, ${refName}, gave a different answer to the same request ${Math.round(Number(run.noise_pct) || 0)}% of the time `
       + `when each of ${n} requests was run twice, so there was no steady standard to compare other models with. `
       + 'No other model was tried, and nothing switched.'
-      + (canJudge() && config.EVAL_QUALITY_YARDSTICK
-        ? " Workloads like this are now compared on whether answers are at least as good as the original model's, so the next test compares models." : '');
+      + (!judgeable ? ''
+        : heldSame && w?.judge_mode === 'same'
+          ? " This workload's setting asks for the same answers as the original model's. Set Answers judged, at the top of this page, to "
+            + "Automatically or At least as good, and the next test compares models on whether their answers are at least as good."
+          : heldSame
+            ? " With this workload's setting changed since, the next test compares models on whether their answers are at least as good."
+            : " Workloads like this are now compared on whether answers are at least as good as the original model's, so the next test compares models.");
   }
   if (outcome === 'refused') {
     return `The original model, ${refName}, couldn't answer most of this test's requests when they were run again, so there was `
@@ -700,9 +722,28 @@ const countedOf = (row) => (row.scored === null || row.scored === undefined
 function comparedWords(by, shape, scored) {
   const b = String(by || '');
   if (b === 'same text') return 'The text was identical';
-  if (b === 'checklist') return "Checked against the instructions in the request";
+  if (b === 'checklist' || b.endsWith('+checklist')) return 'Checked against the instructions in the request';
+  if (b === 'numbers' || b.endsWith('+numbers')) return "A figure in it differs from the original model's";
+  if (b === 'jev-quality' || b === 'llm-quality') return 'Read by a judge model twice, once each way round';
   if (b) return 'Read by a judge model';
   return scored && shape !== 'free_text' ? 'Compared field by field' : null;
+}
+
+/* The judge's two readings of one answer held to "at least as good", for its page: for each, which answer it found the
+   better ('answer', this model's; 'original'; or 'equal'), what it leaned to where a lean too slight to count was read
+   as a tie, and how sure it was; and a requirement of the instruction the answer broke, or a figure it changed. The
+   answer judged is first in the first reading and second in the second (judgeQuality in src/eval/judge.js). */
+function readingsWords(r) {
+  if (!r || typeof r !== 'object') return null;
+  const side = (pick, i) => (pick === 'equal' || !pick ? 'equal' : (pick === 'first') === (i === 0) ? 'answer' : 'original');
+  const picks = Array.isArray(r.picks) ? r.picks : [];
+  return {
+    each: picks.map((p, i) => {
+      const leaned = Array.isArray(r.seen) ? side(r.seen[i], i) : null;
+      return { side: side(p, i), leaned: leaned && leaned !== side(p, i) ? leaned : null, sure: r.chances?.[i] ?? null };
+    }),
+    split: !!r.split, better: !!r.better, broke: r.broke || null, figures: !!r.figures,
+  };
 }
 
 /* How one request's answer was read, in words: the score the test gave it (0 the same as the original model, 1 a
@@ -789,7 +830,8 @@ export async function runAnswersOf(w, run, key, { page = 1, per = ANSWERS_PER_PA
        FROM read`).get(...mineArgs, LASTING_STATUSES);
   const rows = await db.prepare(
     `WITH mine AS (${mine})
-     SELECT call_id, answer, score, scored, difference, failure, error, status, latency_ms, ttft_ms, cost_usd, judged_by, reused, created_at
+     SELECT call_id, answer, score, scored, difference, failure, error, status, latency_ms, ttft_ms, cost_usd, judged_by, reused, readings,
+            created_at
        FROM mine ORDER BY created_at, id LIMIT ? OFFSET ?`)
     .all(...mineArgs, per + 1, (p - 1) * per);
   const page1 = rows.slice(0, per);
@@ -910,6 +952,9 @@ export async function runAnswersOf(w, run, key, { page = 1, per = ANSWERS_PER_PA
         fields,
         values,
         compared: x.failure || x.error || !countedOf(x) ? null : comparedWords(x.judged_by, shape, true),
+        /* held to "at least as good", what the judge's two readings said (readingsOf in src/eval/run.js): each one's pick,
+           'answer' for this model's, 'original' or 'equal', how sure it was, and a requirement it broke or a figure it changed */
+        readings: readingsWords(parse(x.readings)),
         ms: Number(ttft ? (x.ttft_ms ?? x.latency_ms) : x.latency_ms) || null,
         cost: x.cost_usd === null || x.cost_usd === undefined ? null : round8(Number(x.cost_usd)),
         reused: Number(x.reused) === 1,

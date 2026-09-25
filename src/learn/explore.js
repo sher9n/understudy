@@ -3,7 +3,8 @@ import { db, id, now } from '../db/index.js';
 import { addActivity, track } from '../traffic.js';
 import { chargeEval } from '../billing.js';
 import { extract, disagreement, structuredCompare, proseText } from '../eval/compare.js';
-import { judgeBarPair } from '../eval/judge.js';
+import { judgeBarPair, judgeQuality, numbersDiffer } from '../eval/judge.js';
+import { keptChecklist } from '../eval/checklist.js';
 import { promote, revert, everReverted, keyOfSpec, rollBack } from '../eval/promote.js';
 import { diffRange } from './decide.js';
 import { notify } from '../notify.js';
@@ -17,7 +18,7 @@ import { combineDays, fairRecord } from './fair.js';
 import { watchPins } from './pins.js';
 import { memo, forgetState } from './memo.js';
 import { account, backgroundLeft } from '../billing.js';
-import { maybeControl, controlRecord, controlBreach } from './control.js';
+import { maybeControl, controlRecord, controlBreach, barOf } from './control.js';
 
 /* Learning, from what live calls show, which way of serving a workload works best.
  *
@@ -246,11 +247,15 @@ async function readState(workload) {
     if (!fairDays.has(r.arm_id)) fairDays.set(r.arm_id, []);
     fairDays.get(r.arm_id).push({ ageDays: Number(r.age), tasks: r.tasks, n: r.n, w: r.w, ws: r.ws, q: r.q, ok: r.ok, wok: r.wok, wcost: r.wcost });
   }
+  /* Background answers read the way the workload is judged now (barOf): read for "the same answer", a runner-up's
+     different poem counted against it, and those readings say nothing once the workload is held to "at least as good". */
+  const shadowYard = (await barOf(workload)).yardstick;
   const shadowRows = await db.prepare(
     `SELECT arm_id, FLOOR((? - created_at) / 86400000.0) AS age, COUNT(*) AS n, SUM(agreement) AS s,
             SUM(CASE WHEN agreement >= 0.999 THEN 1 ELSE 0 END) AS same
        FROM shadow_runs WHERE workload_id = ? AND created_at >= ? AND agreement IS NOT NULL
-      GROUP BY 1, 2`).all(t, workload.id, since);
+        AND COALESCE(yardstick, 'agreement') = ?
+      GROUP BY 1, 2`).all(t, workload.id, since, shadowYard);
   const shadow = new Map();
   const same = new Map();
   for (const r of shadowRows) {
@@ -439,8 +444,28 @@ export function mayContinue(workload, servingArm, armId) {
 
 /* How closely a background answer matched the one that was used: 1 the same, 0 different. Free
    text is judged the way a measurement judges it; anything with a shape is compared field by
-   field. */
-async function agreementOf(body, used, other, shape, scope) {
+   field. Where the workload's newest measurement held it to "at least as good" (`bar`, from barOf in
+   control.js), it is 1 when the background answer is at least as good as the one used and 0 when it is
+   clearly worse, read by the judge that measurement chose, against its instruction's checklist: a
+   background poem that differs from the live one, as every poem does, is not a poem that fell short.
+   A written answer that changes a figure the used answer states counts as short: there is no second
+   answer here to show whether that figure holds, and a background answer only ever argues for
+   switching, so it is read strictly. */
+async function agreementOf(body, used, other, shape, scope, bar = null) {
+  if (bar?.yardstick === 'quality') {
+    const a = extract(used, shape);
+    const b = extract(other, shape);
+    if (!a.ok) return { agreement: null, cost: 0 };
+    if (!b.ok) return { agreement: 0, cost: 0, judgedBy: 'no answer' };
+    if (typeof a.value === 'string' && typeof b.value === 'string' && numbersDiffer(b.value, a.value)) {
+      return { agreement: 0, cost: 0, judgedBy: 'numbers' };
+    }
+    const text = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+    // the background answer judged against the used one, as a measurement judges a model against the customer's
+    const j = await judgeQuality(requestText(body), text(b.value), text(a.value), { scope, prefer: bar.prefer, checklist: bar.checklist });
+    if (j.transient || j.score === null || j.score === undefined) return { agreement: null, cost: j.cost || 0, judgedBy: 'not judged' };
+    return { agreement: 1 - j.score, cost: j.cost || 0, judgedBy: j.judgedBy };
+  }
   if (shape === 'free_text') {
     const a = extract(used, shape);
     const b = extract(other, shape);
@@ -488,6 +513,12 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   const shares = thompsonShares(candidates.map((c) => ({ id: c.id, a: c.post.a, b: c.post.b })));
   const arm = pickFrom(candidates.map((c) => ({ arm: c, p: shares.get(c.id) })), rng()).arm;
   const started = Date.now();
+  // read as the workload is judged now: "the same answer", or "at least as good" with the judge and checklist of its measurement
+  const bar = await barOf(workload);
+  const yardstick = bar.yardstick === 'quality' ? 'quality' : 'agreement';
+  const judging = yardstick === 'quality'
+    ? { yardstick, prefer: bar.prefer, checklist: workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null }
+    : null;
   let out = null;
   let status = 200;
   let reading = { agreement: null, cost: 0 };
@@ -501,7 +532,7 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   }
   if (out?.json) {
     try {
-      reading = await agreementOf(body, response, out.json, workload.shape_kind, workload.workspace_id);
+      reading = await agreementOf(body, response, out.json, workload.shape_kind, workload.workspace_id, judging);
     } catch {
       // a reading that went wrong on our side says nothing about the runner-up
       reading = { agreement: null, cost: 0, judgedBy: 'not read' };
@@ -512,12 +543,12 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   const cost = (Number(out?.cost) || 0) + (Number(reading.cost) || 0);
   const row = {
     id: id('shd'), workspace_id: workload.workspace_id, workload_id: workload.id, arm_id: arm.id, call_id: callId,
-    agreement: reading.agreement, cost_usd: cost, latency_ms: out ? out.latencyMs ?? Date.now() - started : null, status,
+    agreement: reading.agreement, yardstick, cost_usd: cost, latency_ms: out ? out.latencyMs ?? Date.now() - started : null, status,
     detail_json: JSON.stringify({ judgedBy: reading.judgedBy ?? null, escalated: out?.escalated ?? null,
       ...(out?.costEstimated ? { costEstimated: true } : {}) }), created_at: now(),
   };
-  await db.prepare(`INSERT INTO shadow_runs (id, workspace_id, workload_id, arm_id, call_id, agreement, cost_usd, latency_ms,
-      status, detail_json, created_at) VALUES (@id, @workspace_id, @workload_id, @arm_id, @call_id, @agreement, @cost_usd,
+  await db.prepare(`INSERT INTO shadow_runs (id, workspace_id, workload_id, arm_id, call_id, agreement, yardstick, cost_usd, latency_ms,
+      status, detail_json, created_at) VALUES (@id, @workspace_id, @workload_id, @arm_id, @call_id, @agreement, @yardstick, @cost_usd,
       @latency_ms, @status, @detail_json, @created_at)`).run(row);
   if (cost > 0) await chargeEval(workload.workspace_id, cost, `Background answer for ${workload.slug} on ${arm.label}`);
   // counted against the day's budget straight away, not when the record is next read
@@ -866,14 +897,19 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
      Said in the activity feed only where somebody could act on it by switching: never on a workload
      that never switches, whose page still shows how the background answers matched. */
   if (s.mode === 'shadow' && (workload.optimize_mode === 'ask' || workload.optimize_mode === 'auto')) {
-    const floor = Number(workload.floor_pct) || config.EVAL_FLOOR_MIN_PCT;
+    /* the bar and the way of judging of one measurement (barOf), the one the background answers were read by: held to
+       "at least as good", an answer that was not clearly worse counts, and the bar is the margin that measurement set */
+    const bar = await barOf(workload);
+    const floor = bar.floorPct;
+    const quality = bar.yardstick === 'quality';
     for (const a of cheaperThan(st, serving ? serving.ratio : 1).filter((x) => x.post.nShadow >= min && !x.stats?.suggestedAt)) {
       const sameShare = a.same / a.post.nShadow;
       if ((1 - sameShare) * 100 > floor) continue;
       await addActivity(workload.workspace_id, {
         kind: 'ok',
-        title: `${a.label} matched your live answers on ${workload.slug}`,
-        detail: `In the background it answered ${a.post.nShadow} of your live calls and gave the same answer on ${a.same} of them, `
+        title: quality ? `${a.label} kept up with your live answers on ${workload.slug}` : `${a.label} matched your live answers on ${workload.slug}`,
+        detail: `In the background it answered ${a.post.nShadow} of your live calls and gave `
+          + `${quality ? 'an answer at least as good' : 'the same answer'} on ${a.same} of them, `
           + `inside your ${floor.toFixed(1)}% bar. Nothing was changed: approve it on the workload's page to switch.`,
         workloadId: workload.id,
       });

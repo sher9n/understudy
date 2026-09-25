@@ -233,7 +233,7 @@ export const forgetPlanAll = () => pageMemo.clear();
    is: it is the sentence under a button that cannot be pressed. */
 export async function planFor(workload, { canRoute, forRun = false, memo = false, automatic = false } = {}) {
   if (memo && !forRun) {
-    const key = [workload.speed_pref, workload.routed_model, workload.reference_model, workload.status, canRoute].join('|');
+    const key = [workload.speed_pref, workload.judge_mode, workload.routed_model, workload.reference_model, workload.status, canRoute].join('|');
     const hit = pageMemo.get(workload.id);
     if (hit && hit.key === key && Date.now() - hit.at < PAGE_MEMO_MS) return hit.plan;
     const plan = await planFor(workload, { canRoute, forRun: false });
@@ -309,9 +309,19 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   plan.cachedBar = sample ? Math.min(sample, paidFresh + Math.min(Math.max(0, sample - freshPool), paidUsed)) / sample : 0;
   plan.unseenPool = Math.round(pool * (1 - drawn.seen));
   // the yardstick the last measurement that compared anything used, when there was one: it decides what the judging costs
-  plan.yardstick = (await db.prepare(
-    `SELECT yardstick FROM eval_runs WHERE workload_id = ? AND yardstick IS NOT NULL AND ${FOUND()} AND ${OUTCOME_OF()} = 'compared'
-      ORDER BY created_at DESC LIMIT 1`).get(workload.id))?.yardstick ?? null;
+  const lastCompared = await db.prepare(
+    `SELECT yardstick, plan_json FROM eval_runs WHERE workload_id = ? AND yardstick IS NOT NULL AND ${FOUND()} AND ${OUTCOME_OF()} = 'compared'
+      ORDER BY created_at DESC LIMIT 1`).get(workload.id);
+  plan.yardstick = lastCompared?.yardstick ?? null;
+  /* Whether that measurement read the work as plainly not open-ended writing (planRecord.judging in src/eval/run.js): it
+     differed from itself in figures, facts or decisions, or few of its requests read as open-ended. Only then is a written
+     workload judged automatically quoted "the same answer" alone; one read before open-ended writing was looked for, or
+     read near the line, may be held to "at least as good" this time, and is quoted the dearer. */
+  let lastJudging = null;
+  try { lastJudging = JSON.parse(lastCompared?.plan_json || 'null')?.judging ?? null; } catch { lastJudging = null; }
+  const open = lastJudging?.openEnded;
+  plan.closedWork = !!(lastJudging && lastJudging.mode === 'auto' && !lastJudging.reason && open
+    && (open.share === null || (Number(open.share) < config.EVAL_OPEN_ENDED_KEEP_SHARE && !open.yes)));
   /* Whether the customer's model last disagreed with itself too often for "the same answer" to be a bar: a structured
      workload is then held to "at least as good" too, which is judged, and the quote counts that judging. */
   const lastBar = await db.prepare(`SELECT noise_pct FROM eval_runs WHERE workload_id = ? AND status = 'done' AND noise_pct IS NOT NULL
@@ -501,10 +511,22 @@ function estimate(plan, profile, facts, workload) {
   const text = workload.shape_kind === 'free_text';
   const judged = canJudge() && (text || (config.EVAL_QUALITY_YARDSTICK && (plan.yardstick === 'quality' || plan.noisy)));
   const prices = judged ? judgePrices(pin, pout, facts.models.get(config.EVAL_JUDGE_MODEL)) : null;
+  /* Written work is judged as its setting says (workloads.judge_mode), and automatically as the run decides: "at least as
+     good" for varied or open-ended work (see judgeMode in src/eval/run.js). Automatically, a workload last held to "the
+     same answer" is quoted that alone only where its work read as plainly not open-ended (plan.closedWork). */
+  const mode = text && ['same', 'quality'].includes(workload.judge_mode) ? workload.judge_mode : 'auto';
   const yardsticks = !prices ? []
     : !text ? ['quality']
-      : !config.EVAL_QUALITY_YARDSTICK || plan.yardstick === 'agreement' ? ['agreement']
-        : plan.yardstick === 'quality' ? ['quality'] : ['agreement', 'quality'];
+      : !config.EVAL_QUALITY_YARDSTICK || mode === 'same' ? ['agreement']
+        : mode === 'quality' || plan.yardstick === 'quality' ? ['quality']
+          : plan.yardstick === 'agreement' && (plan.closedWork || !config.EVAL_OPEN_ENDED) ? ['agreement'] : ['agreement', 'quality'];
+  /* Reading what kind of writing the requests ask for, when judged automatically: up to EVAL_OPEN_ENDED_ASK requests, each
+     read by Jev and, where Jev cannot answer one, by the language model, at no more than one reading of a pair (half of
+     llmQuality, which is two). */
+  if (prices && text && mode === 'auto' && config.EVAL_OPEN_ENDED && config.EVAL_QUALITY_YARDSTICK) {
+    const perRead = (jevUsable() ? ((Math.min(pin, 2500) + 250) * config.JEV_PRICE_PER_MTOK) / 1e6 : 0) + prices.llmQuality / 2;
+    total += Math.min(s, config.EVAL_OPEN_ENDED_ASK) * perRead;
+  }
   const judging = yardsticks.map((yard) => {
     const quality = yard === 'quality';
     const pair = quality ? prices.quality : prices.bar;

@@ -12,7 +12,8 @@ import '../workload-page.css';
  * Understudy is doing for it and what that saves.
  *   1. Are there enough requests to test models? Counted the way a test counts them, by count alone however many
  *      arrive in a day, and if not yet, how many more a test needs (it starts by itself once they are in).
- *   2. What the workspace has chosen should happen when a cheaper model passes, as a chip that opens Settings.
+ *   2. What the workspace has chosen should happen when a cheaper model passes, as a chip that opens Settings; and for
+ *      written answers, how another model's are judged against the original model's, as a chip that opens the choices.
  *   3. Every model test, each opening to the chart of how its models compared and the list of them.
  *   4. The recent requests, and which model answered each.
  * Its words keep one noun for each thing: requests (never calls), a test (never a measurement), a model, the original
@@ -30,6 +31,23 @@ const KIND = {
   enum: ['choice', 'Fixed choices'],
 };
 const MODE = { auto: 'Automatic', ask: 'Ask me first', off: 'Never switch' };
+
+/* How a workload's answers are judged when another model is tested on them (judge_mode; see judgeMode in
+   src/eval/run.js): Understudy's choice at each test, or always one of the two ways. */
+const JUDGING = [
+  { mode: 'auto', chip: 'Automatically', label: 'Automatically',
+    note: "Understudy decides at each test: at least as good for open-ended writing such as poems and stories, and wherever the original model's own answers vary too much to match; the same answer for everything else." },
+  { mode: 'same', chip: 'Same answer', label: 'The same answer',
+    note: "Another model passes only when it gives the same answers as the original model. Right when facts, figures or decisions have to match." },
+  { mode: 'quality', chip: 'At least as good', label: 'At least as good',
+    note: "Another model passes when its answers are at least as good as the original model's, even when they're worded differently. Right for creative writing." },
+];
+// why the newest test judged answers as at least as good (planRecord.judging.reason)
+const JUDGED_WHY = {
+  'open-ended': 'these requests ask for open-ended writing',
+  varied: 'the original model answers the same request differently each time',
+  chosen: "this workload's setting asks for it",
+};
 
 const short = (m) => (m ? String(m).split('/').pop() : 'your model');
 const pct1 = (x) => `${(x * 100).toFixed(1)}%`;
@@ -69,6 +87,8 @@ export default function WorkloadDetail({ id, onBack, onChanged, go }) {
   // what went wrong with something pressed on the page, said beside it; the page itself stays
   const [actErr, setActErr] = useState(null);
   const [busy, setBusy] = useState(false);
+  // how its answers are judged, opened from the chip under its name
+  const [judgingOpen, setJudgingOpen] = useState(false);
 
   const load = useCallback(() => Promise.all([
     api.workload(id).then((x) => { setW(x); setErr(null); }).catch((e) => setErr(e.message)),
@@ -132,6 +152,14 @@ export default function WorkloadDetail({ id, onBack, onChanged, go }) {
                 {/* what happens when a cheaper model passes; testing goes on whichever is chosen */}
                 <a className="wp-chip set" href={href('settings', null, 'optimize')} onClick={toSettings}
                   title="What happens when a cheaper model passes: the workspace's choice, in Settings">{I.gear}Switching: {MODE[w.optimizeMode] || MODE.auto}</a>
+                {/* how another model's answers are compared with the original model's: this workload's own choice, for written
+                    answers only (answers with a set shape are compared field by field) */}
+                {w.judgeChoice && (
+                  <button type="button" className="wp-chip set" aria-expanded={judgingOpen} aria-controls="wp-judging"
+                    onClick={() => setJudgingOpen((v) => !v)} title="How another model's answers are compared with the original model's when it is tested">
+                    {I.gear}Answers judged: {(JUDGING.find((j) => j.mode === w.judgeMode) || JUDGING[0]).chip}
+                  </button>
+                )}
               </div>
             </div>
             <div className="wp-headacts">
@@ -147,6 +175,8 @@ export default function WorkloadDetail({ id, onBack, onChanged, go }) {
           {/* why Test now cannot run, unless it is that there are too few requests yet, which card 1 shows */}
           {!running && !m.canRun && m.reason && pg.enough.yes && <p className="wp-why">{m.reason}</p>}
         </div>
+
+        {judgingOpen && w.judgeChoice && <Judging w={w} busy={busy} act={act} onClose={() => setJudgingOpen(false)} />}
 
         {(actErr || live.err) && (
           <div className="wp-err" role="alert">
@@ -398,6 +428,58 @@ function Ready({ w, cand, busy, copiesOnly, act, go }) {
             <button type="button" className="wp-btn" onClick={() => { navigator.clipboard?.writeText(cand.model).catch(() => {}); }}>Copy the model name</button>
           )}
         </div>
+      </div>
+    </section>
+  );
+}
+
+/* How another model's answers are compared with the original model's when one is tested on this workload (judge_mode;
+   see judgeMode in src/eval/run.js): Automatically unless it is changed, as three cards in a radio group like the
+   workspace's choices in Settings, the arrow keys moving between them. Opened from the chip under the workload's name
+   and closed from its own button. Under the cards, how the newest test judged and why; a change applies from the next. */
+function Judging({ w, busy, act, onClose }) {
+  const chosen = JUDGING.some((j) => j.mode === w.judgeMode) ? w.judgeMode : 'auto';
+  const refs = useRef({});
+  const choose = (mode) => { if (mode !== chosen) act(() => api.setJudging(w.id, mode))(); };
+  const onKey = (e) => {
+    const i = JUDGING.findIndex((j) => j.mode === chosen);
+    const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const next = JUDGING[(i + step + JUDGING.length) % JUDGING.length].mode;
+    refs.current[next]?.focus();
+    choose(next);
+  };
+  const last = w.judgedAs;
+  const lastWords = !last ? 'No test has compared models on this workload yet.'
+    : last.yardstick === 'quality'
+      ? `The newest test checked for answers at least as good as the original model's${JUDGED_WHY[last.reason] ? `, because ${JUDGED_WHY[last.reason]}` : ''}.`
+      : `The newest test checked for the same answers as the original model's${last.mode === 'same' ? ", as this workload's setting asked"
+        : last.closed === 'facts' ? ', because its answers state figures, facts or decisions, which have to match'
+          : last.closed === 'requests' ? ", because its requests don't ask for open-ended writing like poems or stories" : ''}.`;
+  return (
+    <section className="wp-card" id="wp-judging" aria-labelledby="wp-judging-h">
+      <div className="wp-cardhead">
+        <h3 id="wp-judging-h">How answers are judged</h3>
+        <button type="button" className="wp-textbtn" onClick={onClose}>Close</button>
+      </div>
+      <div className="wp-cardbody wp-judging">
+        <p className="wp-lead" style={{ margin: 0 }}>
+          When another model is tested on this workload, each of its answers is compared with the original model's answer to the same request.
+        </p>
+        <div className="wp-opts" role="radiogroup" aria-labelledby="wp-judging-h" onKeyDown={onKey}>
+          {JUDGING.map((j) => (
+            <button type="button" key={j.mode} ref={(el) => { refs.current[j.mode] = el; }} className="wp-opt" role="radio"
+              aria-checked={j.mode === chosen} tabIndex={j.mode === chosen ? 0 : -1} disabled={busy} onClick={() => choose(j.mode)}>
+              <div className="wp-optop">
+                <span className="wp-optnm"><span className="wp-radio" aria-hidden="true" />{j.label}</span>
+                {j.mode === 'auto' && <span className="wp-def">Recommended</span>}
+              </div>
+              <div className="wp-optd">{j.note}</div>
+            </button>
+          ))}
+        </div>
+        <div className="wp-applies">{I.info}<span>{lastWords} A change applies from the next test.</span></div>
       </div>
     </section>
   );
@@ -1064,6 +1146,8 @@ function AnswerCard({ x, got }) {
           </div>
         </>
       )}
+      {/* part of how it was scored, which is kept whatever the retention setting removes: none of the answers' text */}
+      {quality && x.readings && <Readings r={x.readings} />}
       <dl className="wp-ansfacts">
         <div><dt>Score</dt><dd>{x.score === null ? 'none' : scoreWords(x.score)}{!x.counted && x.score !== null ? ", doesn't count" : ''}</dd></div>
         {x.compared && <div><dt>Compared</dt><dd>{x.compared}</dd></div>}
@@ -1073,6 +1157,42 @@ function AnswerCard({ x, got }) {
           <dd>{x.reused ? 'nothing new, reused from an earlier test' : x.cost === null ? 'not priced' : perCall(x.cost)}{x.original_cost ? `, the original model ${perCall(x.original_cost)}` : ''}</dd></div>
       </dl>
     </li>
+  );
+}
+
+/* What the judge said of one answer held to "at least as good" (readingsWords in src/workloadPage.js). It reads the two
+   answers twice, swapped round the second time, because a judge can lean to whichever answer it reads first; an answer
+   counts as worse only when both readings find the original model's better, or when it breaks a rule in the request's
+   instructions, or changes a figure the original model gave both times. A lean too slight to count is shown as the tie
+   it was read as, with what it leaned to. */
+const SIDE_WORDS = { answer: "this model's answer was better", original: "the original model's answer was better", equal: 'about equally good' };
+const sureWords = (p) => (p === null || p === undefined || !Number.isFinite(Number(p)) ? '' : `, ${Math.round(Number(p) * 100)}% sure`);
+function Readings({ r }) {
+  const each = Array.isArray(r.each) ? r.each : [];
+  const both = (side) => each.length === 2 && each.every((e) => e.side === side);
+  const why = r.figures ? 'A figure in it differs from the one the original model gave both times, so it counts as worse whatever a reading says.'
+    : r.broke ? `It breaks a rule in the request's instructions ("${r.broke}"), so it counts as worse whatever the readings say.`
+      : each.length !== 2 ? null
+        : both('original') ? "Both readings found the original model's answer better, so it counts as clearly worse."
+          : both('answer') ? "Both readings found this model's answer better, so it counts as at least as good, and better."
+            : "It counts as worse only when both readings find the original model's answer better, so it counts as at least as good.";
+  return (
+    <div className="wp-ansblock wp-readings">
+      <p className="wp-sub">What the judge said</p>
+      {each.length > 0 && (
+        <ul className="wp-readlist">
+          {each.map((e, i) => (
+            <li key={i}>
+              <b>{i === 0 ? 'First reading' : 'Second reading, the answers swapped round'}:</b>{' '}
+              {e.leaned
+                ? `about equally good. It leaned to ${e.leaned === 'answer' ? "this model's answer" : "the original model's"}${sureWords(e.sure)}, too little to count.`
+                : `${SIDE_WORDS[e.side] || SIDE_WORDS.equal}${sureWords(e.sure)}.`}
+            </li>
+          ))}
+        </ul>
+      )}
+      {why && <p className={`wp-ansnote${r.figures || r.broke || both('original') ? ' is-decide' : ''}`}>{why}</p>}
+    </div>
   );
 }
 

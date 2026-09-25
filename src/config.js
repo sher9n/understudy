@@ -252,6 +252,27 @@ export const config = {
      There is no rate above which such a workload cannot be measured: a varied one simply needs more calls before a
      setup can be shown to keep it. */
   EVAL_QUALITY_MARGIN_PCT: num('EVAL_QUALITY_MARGIN_PCT', 5),
+  /* Under "at least as good", a reading counts one answer as the better only where Jev gives it at least this chance;
+     anything less is a tie. Reading both ways round already cancels a lean towards a position; this keeps a mild
+     preference from counting as "clearly worse" (on 25 Sep, over a poem workload's stored answers, it left every
+     answer that broke the instruction worse and GPT-5.4 against itself worse on none of 60). */
+  EVAL_QUALITY_SURE: num('EVAL_QUALITY_SURE', 0.5),
+  /* Open-ended writing (a poem, a story, a slogan) is held to "at least as good" however well the customer's model
+     agrees with itself: two poems from one model share a voice, a judge reads them as the same, and that made a bar no
+     other model's different poem could meet. A workload is open-ended when Jev (or the judge model) reads at least
+     EVAL_OPEN_ENDED_SHARE of EVAL_OPEN_ENDED_ASK of its requests as asking for such writing with a chance of
+     EVAL_OPEN_ENDED_P or more; its poems scored 0.96, its friendly customer replies 0.65 to 0.72, and explanations,
+     summaries and translations under 0.3. Where the customer's own two answers differ in figures, facts or decisions
+     it stays on "the same answer" whatever the reading says. */
+  EVAL_OPEN_ENDED: bool('EVAL_OPEN_ENDED', true),
+  EVAL_OPEN_ENDED_ASK: num('EVAL_OPEN_ENDED_ASK', 8),
+  EVAL_OPEN_ENDED_P: num('EVAL_OPEN_ENDED_P', 0.85),
+  EVAL_OPEN_ENDED_SHARE: num('EVAL_OPEN_ENDED_SHARE', 0.8),
+  /* The share that keeps work open-ended once the newest measurement read it so: lower than the share it takes to become
+     so, so a workload of mixed requests is not judged one way at one re-check and the other way at the next. */
+  EVAL_OPEN_ENDED_KEEP_SHARE: num('EVAL_OPEN_ENDED_KEEP_SHARE', 0.6),
+  // the most of the customer's own pairs that may differ in figures, facts or decisions for work to still count as open-ended
+  EVAL_OPEN_ENDED_FACTS_MAX: num('EVAL_OPEN_ENDED_FACTS_MAX', 0.1),
   /* A written workload's instruction read once as a checklist of what every answer must do (a length, a shape, text
      that must or must not appear), and every answer checked against it beside the reading (src/eval/checklist.js). */
   EVAL_CHECKLIST: bool('EVAL_CHECKLIST', true),

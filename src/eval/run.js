@@ -4,7 +4,7 @@ import { priceCall } from '../openrouter.js';
 import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval } from '../billing.js';
 import { planFor, ownArmKey, barNeed } from './plan.js';
-import { judgeBarPair, judgeCandidate, judgeQuality, canJudge, translated } from './judge.js';
+import { judgeBarPair, judgeCandidate, judgeQuality, canJudge, translated, openEndedOf, numbersDiffer, numbersOf } from './judge.js';
 import { checklistFor, breakOne } from './checklist.js';
 import { extract, disagreement, gates, floorFrom, marginFloor, verdictWith, sampleCalls, barIsMeaningful, structuredCompare, proseText, callsToClear } from './compare.js';
 import { promote, revert, trafficOf, everReverted } from './promote.js';
@@ -153,20 +153,40 @@ function answerText(json) {
 /* `scored` is whether the answer counted towards the model's figure: false for a judgement that did not come back, or a
    refusal from a provider that was only busy, which are kept with a score all the same. `look` is 2 for an answer to a
    model's second look, on new requests (lookAgain), and null for its first (see 032-answers-as-read.sql). */
-async function keepReplay(runId, callId, model, slot, r, { score = null, judged = null, failure = null, scored = null, look = null } = {}) {
+/* What the judge said of one answer held to "at least as good", as its page shows it request by request: what each of its
+   two readings chose ('first', 'second' or 'equal', the answer judged first in the first) and how sure each was, whether
+   they split, whether it was the better, a requirement of the instruction it broke, and a figure it changed. JSON for
+   eval_replays.readings (033-open-ended-judging.sql); null where there was no reading. */
+function readingsOf(j) {
+  const d = j?.detail;
+  if (!d && j?.judgedBy !== 'numbers') return null;
+  const out = {};
+  if (Array.isArray(d?.picks)) out.picks = d.picks;
+  // what each reading leaned to before a lean under EVAL_QUALITY_SURE was read as a tie
+  if (Array.isArray(d?.seen)) out.seen = d.seen;
+  if (Array.isArray(d?.chances)) out.chances = d.chances.map((x) => (x === null || x === undefined ? null : Math.round(Number(x) * 100) / 100));
+  if (d?.split) out.split = true;
+  if (d?.candBetter) out.better = true;
+  if (d?.broke) out.broke = String(d.broke).slice(0, 160);
+  if (j?.judgedBy === 'numbers') out.figures = true;
+  return Object.keys(out).length ? JSON.stringify(out) : null;
+}
+
+async function keepReplay(runId, callId, model, slot, r, { score = null, judged = null, failure = null, scored = null, look = null, readings = null } = {}) {
   await db.prepare(
     `INSERT INTO eval_replays (id, run_id, call_id, model_id, slot, cache_key, reused, status, error, failure, answer,
-            latency_ms, ttft_ms, completion_tokens, reasoning_tokens, cost_usd, score, judged_by, difference, scored, look, created_at)
+            latency_ms, ttft_ms, completion_tokens, reasoning_tokens, cost_usd, score, judged_by, difference, scored, look, readings,
+            created_at)
      VALUES (@id, @run_id, @call_id, @model_id, @slot, @cache_key, @reused, @status, @error, @failure, @answer,
             @latency_ms, @ttft_ms, @completion_tokens, @reasoning_tokens, @cost_usd, @score, @judged_by, @difference,
-            @scored, @look, @created_at)`).run({
+            @scored, @look, @readings, @created_at)`).run({
     id: id('rpl'), run_id: runId, call_id: callId, model_id: model, slot, cache_key: r.key ?? null,
     reused: r.reused ? 1 : 0, status: r.status ?? null, error: r.error ?? null, failure,
     answer: answerText(r.json), latency_ms: r.latencyMs ?? null, ttft_ms: r.ttftMs ?? null,
     completion_tokens: r.completionTokens ?? null, reasoning_tokens: r.reasoningTokens ?? null,
     cost_usd: round8(r.cost || 0), score, judged_by: judged?.judgedBy ?? null,
     difference: score > 0 ? (judged?.detail?.kind ?? failure ?? null) : null,
-    scored: scored === null ? null : (scored ? 1 : 0), look, created_at: now(),
+    scored: scored === null ? null : (scored ? 1 : 0), look, readings, created_at: now(),
   });
 }
 
@@ -497,6 +517,14 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   let checklist = [];
   const qualityOf = (body, answer, reference) => judgeQuality(askOf(body), asText(answer), asText(reference),
     { scope: workload.workspace_id, prefer: judgePrefer, checklist });
+  /* Under "at least as good", an answer that changes a figure the customer's model states the same both times is worse
+     whatever a reading says: a judge can see that two answers give different figures, not which one is right. Written
+     answers only; a structured one's fields are compared as fields. */
+  const figuresHeld = (a, b) => yardstick === 'quality' && typeof a === 'string' && typeof b === 'string'
+    && numbersOf(a).length > 0 && !numbersDiffer(a, b);
+  const qualityAgainst = (body, answer, refA, refB) => (figuresHeld(refA, refB) && typeof answer === 'string' && numbersDiffer(answer, refA)
+    ? { score: 1, judgedBy: 'numbers', detail: { kind: 'fact', numbers: [numbersOf(answer), numbersOf(refA)] }, cost: 0 }
+    : qualityOf(body, answer, refA));
   /* The bar, from how often the customer's model differed from itself, or was clearly worse than itself: a multiple
      of that for "the same answer", and that plus a margin for "at least as good" (see marginFloor). */
   const barFrom = (noisePct) => (yardstick === 'quality'
@@ -711,6 +739,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
 
   if (await step(0, `Comparing ${reference}'s answers with each other`)) return await endStopped();
   const noiseScores = [];
+  /* Of the customer's own pairs a judge read, how many differ in a figure, a fact or a decision: work whose facts matter,
+     which stays on "the same answer" however open-ended its requests read (see openEndedOf). */
+  let barRead = 0;
+  let barFacts = 0;
   try {
   await inParallel(kept, 6, async (p) => {
     if (stopped) return;
@@ -732,6 +764,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       if (j.transient || !j.judgedBy) { judgeMisses += 1; return; }
       score = j.score;
       judgedWith.add(j.judgedBy);
+      barRead += 1;
+      // a difference in figures, or one the judge named a fact or a decision, which is never forgiven (see judgeBarPair)
+      if (j.judgedBy === 'numbers' || (j.score === 1 && ['fact', 'decision'].includes(j.detail?.kind))) barFacts += 1;
     } else {
       const d = disagreement(p.a, p.b, shape);
       if (d === null) {
@@ -777,7 +812,43 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      and it takes more calls to show a setup keeps it. */
   const agreementNoise = noise;
   let judgeCheck = null;
-  if (config.EVAL_QUALITY_YARDSTICK && canJudge() && !barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT)) {
+  /* How this workload is judged: as its setting says (workloads.judge_mode), and by default by what its work is. "At least
+     as good" where the customer's model varies so much that "the same answer" is no bar (varied), and for open-ended
+     writing however well it agrees with itself: two poems from one model share a voice and read as the same, which set a
+     bar no other model's different poem could meet. On 24 Sep a poem workload failed every model tested, and 492 of the
+     498 differences counted against them were in wording alone (wl_mufo6b151fhb1ngm). Work whose own answers differ in
+     figures, facts or decisions stays on "the same answer" however its requests read. */
+  // a choice for written work only: answers with a shape are compared field by field, as their fields decide
+  const judgeMode = shape === 'free_text' && ['same', 'quality'].includes(workload.judge_mode) ? workload.judge_mode : 'auto';
+  const varied = !barIsMeaningful(noise * 100, config.EVAL_NOISE_MAX_PCT);
+  let openRead = null;
+  if (judgeMode === 'auto' && !varied && shape === 'free_text' && config.EVAL_OPEN_ENDED && config.EVAL_QUALITY_YARDSTICK && canJudge()) {
+    const facts = barRead ? barFacts / barRead : 0;
+    if (facts > config.EVAL_OPEN_ENDED_FACTS_MAX) openRead = { yes: false, share: null, n: 0, judgedBy: null, facts };
+    else {
+      /* Work the newest measurement read as open-ended stays so unless its requests now clearly read otherwise
+         (EVAL_OPEN_ENDED_KEEP_SHARE): the daily checks after a switch follow the newest measurement's way of judging, so
+         a workload of mixed requests flipping between the two at every re-check would be held to one, then the other. */
+      const before = await db.prepare(`SELECT plan_json FROM eval_runs WHERE workload_id = ? AND id <> ? AND status = 'done'
+          AND yardstick IS NOT NULL ORDER BY created_at DESC LIMIT 1`).get(workload.id, run.id);
+      let wasOpen = false;
+      try { wasOpen = JSON.parse(before?.plan_json || 'null')?.judging?.reason === 'open-ended'; } catch { wasOpen = false; }
+      if (await step(0, 'Reading what kind of writing your requests ask for')) return await endStopped();
+      const r = await openEndedOf(kept.map((p) => askOf(p.body)), { scope: workload.workspace_id,
+        share: wasOpen ? config.EVAL_OPEN_ENDED_KEEP_SHARE : config.EVAL_OPEN_ENDED_SHARE });
+      addJudge(r.cost);
+      openRead = { ...r, facts, kept: wasOpen };
+    }
+  }
+  const judgeReason = judgeMode === 'same' ? null : judgeMode === 'quality' ? 'chosen' : varied ? 'varied' : openRead?.yes ? 'open-ended' : null;
+  // what decided it, kept with the measurement so its page can say why each model was judged the way it was
+  planRecord.judging = {
+    mode: judgeMode, reason: judgeReason,
+    // with the chance each request read was given, so what decided it can be seen request by request
+    openEnded: openRead && { yes: !!openRead.yes, share: openRead.share, n: openRead.n, judge: openRead.judgedBy,
+      ps: openRead.ps ?? [], factsShare: round8(openRead.facts), ...(openRead.kept ? { kept: true } : {}) },
+  };
+  if (config.EVAL_QUALITY_YARDSTICK && canJudge() && judgeReason) {
     const pairs = kept.filter((p) => p.a.ok && p.b.ok);
     // what the workload's instruction asks of every answer, read once for each version of it
     if (shape === 'free_text') {
@@ -830,7 +901,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     barScores = worse;
     for (const p of kept) p.noise = p.worse;
     planRecord.yardstick = {
-      kind: 'quality', agreementNoisePct: round8(agreementNoise * 100), qualityNoisePct: round8(noise * 100),
+      kind: 'quality', reason: judgeReason, agreementNoisePct: round8(agreementNoise * 100), qualityNoisePct: round8(noise * 100),
       marginPct: config.EVAL_QUALITY_MARGIN_PCT, judge: judgeCheck?.judge ?? null, checklist: checklist.map((x) => x.say),
     };
     await db.prepare('UPDATE eval_runs SET plan_json = ?, yardstick = ? WHERE id = ?').run(JSON.stringify(planRecord), 'quality', run.id);
@@ -839,6 +910,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     judgeUnsure = judgeCheck.errors > 0;
   }
   if (judgeCheck) judgeCheckRecord = { ...judgeCheck, misses: judgeMisses, yardstick, prefer: judgePrefer };
+  // how it is judged, and why, kept whichever way it went (under "at least as good" it is kept above already)
+  if (yardstick !== 'quality') await db.prepare('UPDATE eval_runs SET plan_json = ? WHERE id = ?').run(JSON.stringify(planRecord), run.id);
   const floor = barFrom(noise * 100);
 
   // how fast the customer's own model is on these very calls: the yardstick for speed
@@ -1157,7 +1230,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
             return 'quit';
           }
           judged = yardstick === 'quality'
-            ? await qualityOf(p.body, got.value, p.a.ok ? p.a.value : p.b.value)
+            ? await qualityAgainst(p.body, got.value, p.a.ok ? p.a.value : p.b.value, p.a.ok && p.b.ok ? p.b.value : null)
             : await judgeCandidate(askOf(p.body), got.value, p.a.ok ? p.a.value : null, p.b.ok ? p.b.value : null,
               { scope: workload.workspace_id });
           addJudge(judged.cost);
@@ -1209,7 +1282,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         settled: settled === undefined ? score : settled,
         json: r.ok ? r.json : null, cost: r.ok ? paid(r) : 0, latency: r.latencyMs ?? null, ttft: r.ttftMs ?? r.latencyMs ?? null,
       });
-      await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure, scored });
+      await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure, scored, readings: yardstick === 'quality' ? readingsOf(judged) : null });
       /* The best it could still do is get every remaining call right. When even that leaves it
          outside the review band, it cannot win, and every further call would be money spent on
          nothing. Never the one serving: that is a point estimate on part of the calls, and for what
@@ -1388,11 +1461,11 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     let judged = 0;
     if (shape === 'free_text' || yardstick === 'quality') {
       const j = yardstick === 'quality'
-        ? await qualityOf(body, g.value, refs[0].value)
+        ? await qualityAgainst(body, g.value, refs[0].value, refs[1]?.value ?? null)
         : await judgeCandidate(askOf(body), g.value, refs[0].value, refs[1]?.value ?? null, { scope: workload.workspace_id });
       addJudge(j.cost);
       if (j.cost > 0) judged += 1;
-      return { score: j.transient || j.score === null ? null : j.score, judged };
+      return { score: j.transient || j.score === null ? null : j.score, judged, readings: yardstick === 'quality' ? readingsOf(j) : null };
     }
     const each = [];
     for (const ref of refs) {
@@ -1560,7 +1633,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         const read = got.ok ? extract(got.json, shape) : null;
         await keepReplay(run.id, c.id, r.model_id, 0, got, {
           score: s.score, scored: s.score !== null && s.score !== undefined, look: 2,
-          failure: !got.ok ? 'refused' : !read.ok ? read.reason : null,
+          failure: !got.ok ? 'refused' : !read.ok ? read.reason : null, readings: s.readings ?? null,
         });
         return { score: s.score, sent: 1 + s.judged, latency: got.ok ? got.latencyMs : null, ttft: got.ok ? (got.ttftMs ?? got.latencyMs) : null };
       },
