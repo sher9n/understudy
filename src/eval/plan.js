@@ -8,7 +8,7 @@ import { ratingsFor } from '../models/arena.js';
 import { profileOf, speedRule } from './profile.js';
 import { selectCandidates, refThinksOf } from './select.js';
 import { fitsFor } from './fit.js';
-import { historyFor, fleetHistory } from './history.js';
+import { historyFor, fleetHistory, cantKeepUpOn } from './history.js';
 import { judgePrices, canJudge } from './judge.js';
 import { callsToClear } from './compare.js';
 import { calibrationFor } from './calibrate.js';
@@ -206,7 +206,8 @@ export async function wouldTry(workload, modelIds) {
   const sel = selectCandidates({
     facts: { ...facts, models }, profile, reference: workload.reference_model,
     enabled: await enabledSet(workload.workspace_id), want: keep.size, tryMultiple: 1,
-    reverted: await heldBack(workload.id), serving: workload.routed_model, servingAs: await servingKey(workload),
+    reverted: await heldBack(workload.id), cantKeepUp: await cantKeepUpOn(workload.id),
+    serving: workload.routed_model, servingAs: await servingKey(workload),
     speed: speedRule(workload, profile, config),
     refThinks: refThinksOf(facts.models.get(workload.reference_model) || null, profile.refThinking, profile.thinking),
     config, at: now(), zdrOnly: await zdrFor(workload.workspace_id),
@@ -285,7 +286,8 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const servingAs = workload.routed_model ? await servingKey(workload) : null;
   const base = {
     facts, profile, reference: workload.reference_model, enabled, want: models,
-    tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, serving: workload.routed_model, servingAs,
+    tryMultiple: config.EVAL_TRY_MULTIPLE, reverted: history.reverted, cantKeepUp: history.cantKeepUp,
+    serving: workload.routed_model, servingAs,
     servingRecipe: parseRecipe(workload.routed_recipe),
     history, speed, refThinks, speedHistory: fleet.speed, busy: fleet.busy, config, at: now(),
     zdrOnly: await zdrFor(workload.workspace_id),

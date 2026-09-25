@@ -9,7 +9,7 @@ import http from 'node:http';
 
 process.env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || 'stand-in';
 const { default: config } = await import('../src/config.js');
-const { takeSlot, giveBack, paceNow, chat } = await import('../src/openrouter.js');
+const { takeSlot, giveBack, paceNow, chat, streamCollect, UpstreamError } = await import('../src/openrouter.js');
 
 let seq = 0;
 const model = () => `pace/model-${process.pid}-${(seq += 1)}`;
@@ -125,6 +125,127 @@ test('a measurement call turned away for coming too fast is tried again, and slo
     assert.equal(asked, 2);
     assert.equal(paceNow(m).gap, 60, 'and the model it was sent to is now spaced out');
     assert.equal(paceNow(m).out, 0, 'with its turn given back');
+  } finally {
+    undo();
+    await new Promise((r) => { server.close(r); });
+  }
+});
+
+/* A provider that cannot keep up: a refusal while the model is already given the longest wait between calls is what a
+   test holds against it (EVAL_KEEP_UP_REFUSALS, the owner's rule of 26 Sep 2026), so giveBack says which ones those are,
+   and a call carries how many of its tries were, answered or not. */
+
+test('a refusal counts against a model only once it is already given the longest wait', async () => {
+  const undo = set({ MODEL_MAX_IN_FLIGHT: 4, MODEL_MIN_GAP_MS: 0, MODEL_BACKOFF_START_MS: 10, MODEL_BACKOFF_MAX_MS: 40, MODEL_BACKOFF_EASE_AFTER: 2 });
+  try {
+    const m = model();
+    const said = [];
+    for (let k = 0; k < 5; k += 1) said.push(giveBack(await takeSlot(m, true), { refused: true }));
+    // the gap goes 10, 20, 40: only the refusals that find it already at 40 count
+    assert.deepEqual(said, [false, false, false, true, true]);
+    assert.equal(giveBack(await takeSlot(m, true)), false, 'a call it takes is no refusal');
+    assert.equal(giveBack(null, { refused: true }), false, "nor is a call that was never paced, such as a customer's own");
+  } finally { undo(); }
+});
+
+// a provider that turns the first `refusals` calls away for coming too fast, then answers (or never does, with Infinity)
+async function crowded(refusals) {
+  let asked = 0;
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      asked += 1;
+      if (asked <= refusals) {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '0.001' });
+        res.end(JSON.stringify({ error: { message: 'slow down' } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: 'gen-1', choices: [{ message: { role: 'assistant', content: 'ok' } }], usage: { prompt_tokens: 3, completion_tokens: 1, cost: 0.000001 } }));
+    });
+  });
+  await new Promise((r) => { server.listen(0, '127.0.0.1', r); });
+  return { server, asked: () => asked };
+}
+
+test('a call says how many of its tries were turned away at the longest wait, whether it was answered in the end or not', async () => {
+  const p = await crowded(3);
+  // the longest wait is reached on the first refusal, so the second and third find it there
+  const undo = set({ OPENROUTER_BASE: `http://127.0.0.1:${p.server.address().port}`, MODEL_MIN_GAP_MS: 0, MODEL_BACKOFF_START_MS: 5,
+    MODEL_BACKOFF_MAX_MS: 5, MODEL_BACKOFF_EASE_AFTER: 20, UPSTREAM_RETRY_WAIT_MAX_MS: 5 });
+  try {
+    const out = await chat({ messages: [{ role: 'user', content: 'hello' }] }, model(), { pace: true, retries: 3 });
+    assert.equal(out.json.choices[0].message.content, 'ok', 'answered on the fourth try');
+    assert.equal(out.refusedAtLongest, 2, 'two of its refusals came at the longest wait');
+  } finally {
+    undo();
+    await new Promise((r) => { p.server.close(r); });
+  }
+  const never = await crowded(Infinity);
+  const undo2 = set({ OPENROUTER_BASE: `http://127.0.0.1:${never.server.address().port}`, MODEL_MIN_GAP_MS: 0, MODEL_BACKOFF_START_MS: 5,
+    MODEL_BACKOFF_MAX_MS: 5, MODEL_BACKOFF_EASE_AFTER: 20, UPSTREAM_RETRY_WAIT_MAX_MS: 5 });
+  try {
+    const err = await chat({ messages: [{ role: 'user', content: 'hello' }] }, model(), { pace: true, retries: 2 }).then(() => null, (e) => e);
+    assert.ok(err instanceof UpstreamError && err.status === 429, `turned away every time: ${err?.status}`);
+    assert.equal(err.refusedAtLongest, 2, 'and the refusal it ends on carries the count too');
+    // a customer's own call is never paced, so nothing it meets is held against the model
+    const live = await chat({ messages: [{ role: 'user', content: 'hello' }] }, model(), { pace: false, retries: 1 }).then(() => null, (e) => e);
+    assert.equal(live.refusedAtLongest, 0);
+  } finally {
+    undo2();
+    await new Promise((r) => { never.server.close(r); });
+  }
+});
+
+test("a test's streamed call carries the same count, answered in one piece or not answered at all", async () => {
+  const p = await crowded(2);
+  const undo = set({ OPENROUTER_BASE: `http://127.0.0.1:${p.server.address().port}`, MODEL_MIN_GAP_MS: 0, MODEL_BACKOFF_START_MS: 5,
+    MODEL_BACKOFF_MAX_MS: 5, MODEL_BACKOFF_EASE_AFTER: 20, UPSTREAM_RETRY_WAIT_MAX_MS: 5 });
+  try {
+    const out = await streamCollect({ messages: [{ role: 'user', content: 'hello' }] }, model(), { retries: 3 });
+    assert.equal(out.json.choices[0].message.content, 'ok', 'a provider that ignores streaming is read in one piece');
+    assert.equal(out.refusedAtLongest, 1, 'one refusal came at the longest wait');
+  } finally {
+    undo();
+    await new Promise((r) => { p.server.close(r); });
+  }
+  const never = await crowded(Infinity);
+  const undo2 = set({ OPENROUTER_BASE: `http://127.0.0.1:${never.server.address().port}`, MODEL_MIN_GAP_MS: 0, MODEL_BACKOFF_START_MS: 5,
+    MODEL_BACKOFF_MAX_MS: 5, MODEL_BACKOFF_EASE_AFTER: 20, UPSTREAM_RETRY_WAIT_MAX_MS: 5 });
+  try {
+    const err = await streamCollect({ messages: [{ role: 'user', content: 'hello' }] }, model(), { retries: 3 }).then(() => null, (e) => e);
+    assert.ok(err instanceof UpstreamError && err.status === 429, `turned away every time: ${err?.status}`);
+    assert.equal(err.refusedAtLongest, 3, 'three of its four refusals came at the longest wait');
+  } finally {
+    undo2();
+    await new Promise((r) => { never.server.close(r); });
+  }
+});
+
+test("a test's call answered as a stream after refusals carries its count through the stream", async () => {
+  let n = 0;
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      n += 1;
+      if (n <= 3) {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '0.001' });
+        res.end(JSON.stringify({ error: { message: 'slow down' } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ id: 'gen-1', choices: [{ delta: { content: 'o' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'k' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 1, cost: 0.000001 } })}\n\n`);
+      res.end('data: [DONE]\n\n');
+    });
+  });
+  await new Promise((r) => { server.listen(0, '127.0.0.1', r); });
+  const undo = set({ OPENROUTER_BASE: `http://127.0.0.1:${server.address().port}`, MODEL_MIN_GAP_MS: 0, MODEL_BACKOFF_START_MS: 5,
+    MODEL_BACKOFF_MAX_MS: 5, MODEL_BACKOFF_EASE_AFTER: 20, UPSTREAM_RETRY_WAIT_MAX_MS: 5 });
+  try {
+    const out = await streamCollect({ messages: [{ role: 'user', content: 'hello' }] }, model(), { retries: 3 });
+    assert.equal(out.json.choices[0].message.content, 'ok', 'the streamed answer is put back together');
+    assert.equal(out.refusedAtLongest, 2, 'and two of the refusals before it came at the longest wait');
   } finally {
     undo();
     await new Promise((r) => { server.close(r); });

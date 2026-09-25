@@ -43,7 +43,19 @@ export async function historyFor(workload) {
 
   // switched back for good, or for something that can change within its cool-off, which grows each time
   const reverted = await heldBack(workload.id);
-  return { own, shape, reverted, live: liveElsewhere(await liveRates(workload.shape_kind), workload.workspace_id) };
+  return { own, shape, reverted, cantKeepUp: await cantKeepUpOn(workload.id),
+    live: liveElsewhere(await liveRates(workload.shape_kind), workload.workspace_id) };
+}
+
+/* The models a test of this workload failed because their provider could not keep up with its requests (stopped 'busy':
+   turned away for coming too fast EVAL_KEEP_UP_REFUSALS times at the longest wait, see heldToKeepUp in src/eval/run.js).
+   None is tried on this workload again, however long ago that was: a provider that cannot take one request in the
+   longest wait cannot carry the workload's real traffic (the owner's rule, 26 Sep 2026). */
+export async function cantKeepUpOn(workloadId) {
+  const rows = await db.prepare(
+    `SELECT DISTINCT r.model_id FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
+      WHERE e.workload_id = ? AND r.stopped = 'busy'`).all(workloadId);
+  return new Set(rows.map((r) => r.model_id));
 }
 
 /* How often each model's live calls worked, on the same kind of answer, for everybody.
@@ -121,8 +133,9 @@ let fleetAt = 0;
  * model.
  *
  * Busy: the models whose providers were too busy to answer a measurement in the last few
- * hours. OpenRouter shares a model's capacity between everybody who uses it, and a model at
- * its limit this afternoon is likely to be at it again an hour later, but not tomorrow. */
+ * hours, or could not keep up with one at all. OpenRouter shares a model's capacity between
+ * everybody who uses it, and a model at its limit this afternoon is likely to be at it again an
+ * hour later, but not tomorrow. */
 export async function fleetHistory({ fresh = false } = {}) {
   if (!fresh && fleetMemo && Date.now() - fleetAt < 5 * 60000) return fleetMemo;
   const rows = await db.prepare(
@@ -149,7 +162,7 @@ export async function fleetHistory({ fresh = false } = {}) {
   const b = await db.prepare(
     `SELECT r.model_id, COUNT(*) AS n, MAX(e.created_at) AS at
        FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
-      WHERE e.created_at >= ? AND r.stopped = 'errors'
+      WHERE e.created_at >= ? AND r.stopped IN ('errors', 'busy')
       GROUP BY r.model_id`).all(now() - 6 * HOUR);
   for (const x of b) busy.set(x.model_id, { n: Number(x.n), at: Number(x.at) });
 

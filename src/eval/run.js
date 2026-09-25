@@ -999,6 +999,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const servingParts = new Map(servingKinds ? servingKinds.options.map((o) => [o.key || partKey(o), o]) : []);
   const serves = (cand) => !!servingNow && (keyOf(cand) === servingNow || (leadKey !== null && keyOf(cand) === leadKey)
     || servingParts.has(keyOf(cand)));
+  /* Whether a model is held to keeping up with this workload's requests (EVAL_KEEP_UP_REFUSALS): never what serves, which
+     is carrying the workload now, nor the customer's own model asked another way, whose provider carries it today. */
+  const heldToKeepUp = (cand) => cand.model !== reference && !serves(cand);
   const isLighter = (cand) => String(cand.key || '').endsWith('#lighter');
   let reasked = false;
   let droppedLighter = false;
@@ -1133,6 +1136,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       providers: new Map(),
       // the next of the calls to put to it
       next: 0,
+      // its requests turned away for coming too fast while it was already given the longest wait (see heldToKeepUp)
+      tooFast: 0,
     };
     if (resume) st.stopped = null;
     const key = keyOf(cand);
@@ -1176,6 +1181,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       note(r);
       // our own account, not this model: the whole measurement stops, and nothing is held against anybody
       if (r.account) { halt = 'account'; accountHit = accountHit || { ...r, model: cand.model }; st.stopped = 'user'; return 'quit'; }
+      st.tooFast = (st.tooFast || 0) + (Number(r.refusedAtLongest) || 0);
       if (r.reused) st.reused += 1;
       st.runs += 1;
       let score = 1;
@@ -1283,6 +1289,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         json: r.ok ? r.json : null, cost: r.ok ? paid(r) : 0, latency: r.latencyMs ?? null, ttft: r.ttftMs ?? r.latencyMs ?? null,
       });
       await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure, scored, readings: yardstick === 'quality' ? readingsOf(judged) : null });
+      /* Its provider turned EVAL_KEEP_UP_REFUSALS of its requests away for coming too fast while it was already given the
+         longest wait between them: it cannot keep up with this workload's traffic, so it has failed, before anything is
+         said about its answers or its speed, and no later test of this workload tries it again (cantKeepUpOn in
+         src/eval/history.js). Only slowed, it held the test at the longest wait for every one of its requests. It takes
+         the place of a stop for errors, which is what those same refusals end in once its tries run out. */
+      if (heldToKeepUp(cand) && st.tooFast >= config.EVAL_KEEP_UP_REFUSALS && (!st.stopped || st.stopped === 'errors')) st.stopped = 'busy';
       /* The best it could still do is get every remaining call right. When even that leaves it
          outside the review band, it cannot win, and every further call would be money spent on
          nothing. Never the one serving: that is a point estimate on part of the calls, and for what
@@ -1344,7 +1356,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const judge = (scores) => {
       const read = verdictWith(scores, floor, { reviewBand });
       let verdict;
-      if (st.stopped === 'refused' || st.stopped === 'errors') verdict = 'failed';
+      if (st.stopped === 'refused' || st.stopped === 'errors' || st.stopped === 'busy') verdict = 'failed';
       else if (st.stopped === 'speed') verdict = 'slower';
       /* Dropped part way because even every remaining call right could not bring it inside the review
          band: it cannot win. Only a candidate is ever dropped that way, never what serves (see
@@ -1532,7 +1544,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      from both samples, at the workload's strictness (a cautious workload's is 97.5% rather than 95%), and to
      the speed rule on these calls too: a second look used to check answers only, so a model that was quick
      on the first sample and slow on the second went through. */
-  const lookAgain = async (r, freshCalls, { label, answer }) => {
+  /* `busy`, when given, names the model (by its row's key) a look has found cannot keep up, or null: the look then sends
+     nothing more, ends as 'busy', and that model's row says it failed (failBusy). */
+  const lookAgain = async (r, freshCalls, { label, answer, busy = () => null }) => {
     const least = callsToClear(floor, confirmZ);
     const from = freshCalls.filter((c) => !seenBefore.has(c.id));
     if (from.length < least) {
@@ -1563,6 +1577,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        with our own account or the spending limit sends nothing more, and the calls already out finish. There is
        nothing to decide part way here, since every call is read. */
     let over = false;
+    // the model this look found cannot keep up, once it has (see busy)
+    let busyKey = null;
     await inParallel(picks, Math.max(1, config.EVAL_CALLS_PER_MODEL), async (c) => {
       if (over || halt || spentTotal + outUsd >= hardLimit) { over = true; return; }
       if (await halted()) { halt = 'stopped'; over = true; return; }
@@ -1577,6 +1593,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         if (seen.noise !== null) freshNoise.push(seen.noise);
         const a = seen.refs.length ? await answer(c, body, seen) : { score: null, sent: 0 };
         if (a.account) { halt = 'account'; accountHit = a.account; over = true; return; }
+        if (!busyKey) {
+          busyKey = busy();
+          if (busyKey) over = true;
+        }
         if (a.score !== null && a.score !== undefined) scores.push(a.score);
         if (Number.isFinite(a.latency)) lat.push(a.latency);
         if (Number.isFinite(a.ttft)) ttft.push(a.ttft);
@@ -1589,6 +1609,19 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       }
     });
     confirmLeft = 0;
+    /* A model its provider could not keep up with on these calls has failed whatever its answers were like: nothing
+       more is read into them, and the next in line gets its look. */
+    if (busyKey) {
+      const note = `its provider turned requests away for coming too fast even with ${Math.round(config.MODEL_BACKOFF_MAX_MS / 1000)} seconds `
+        + 'between them, so it cannot keep up with this workload';
+      await db.prepare(`UPDATE eval_results SET confirm_runs = ?, confirm_verdict = 'busy', confirm_note = ? WHERE id = ?`)
+        .run(scores.length, note, r.id);
+      Object.assign(r, { confirm_runs: scores.length, confirm_verdict: 'busy', confirm_note: note });
+      await failBusy(busyKey);
+      // a strategy one of whose models could not keep up has failed with it
+      if (busyKey !== r.model_id) await failBusy(r.model_id);
+      return { verdict: 'busy', runs: scores.length, note };
+    }
     /* The bar, read from both samples: how often the customer's model disagreed with itself on the first
        look's calls and on these. A bar read from one sample of a hundred moves a good deal by chance,
        and a second look held to the first sample's bar alone turned good models down whenever the two
@@ -1621,12 +1654,16 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        answered it the first time, and never with a cascade's leave to fall back on others. Asked the way it
        happened to be asked before, a second look could be answered by providers a switch would never use. */
     const served = servedRecipe(cand, st);
+    // its requests on this look turned away at the longest wait (see heldToKeepUp)
+    let tooFast = 0;
     return lookAgain(r, freshCalls, {
       label: cand.label || cand.model,
+      busy: () => (heldToKeepUp(cand) && tooFast >= config.EVAL_KEEP_UP_REFUSALS ? r.model_id : null),
       answer: async (c, body, seen) => {
         const got = await replayOnce({ body, callId: c.id, model: cand.model, recipe: served, slot: 0, workload });
         note(got);
         if (got.account) return { account: { ...got, model: cand.model } };
+        tooFast += Number(got.refusedAtLongest) || 0;
         const s = await scoreReply(body, got, seen.refs);
         /* Kept like an answer to its first look, as the second look, so its page can show the calls this look was
            decided on: counted where it has a score, which is what the look's figure averages (lookAgain). */
@@ -1648,9 +1685,16 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     let spec = null;
     try { spec = JSON.parse(r.arm_json); } catch { spec = null; }
     if (!spec || !['cascade', 'router'].includes(spec.kind)) return { verdict: 'unconfirmed', runs: 0, note: 'there was nothing to look again with' };
+    // each of its models' requests on this look turned away at the longest wait, and the first that could not keep up
+    const tooFast = new Map();
+    let busyPart = null;
     const ask = async (part, c, body) => {
       const got = await replayOnce({ body, callId: c.id, model: part.model, recipe: part.recipe ?? null, slot: 0, workload });
       note(got);
+      const k = partKey(part);
+      const n = (tooFast.get(k) || 0) + (Number(got.refusedAtLongest) || 0);
+      tooFast.set(k, n);
+      if (!busyPart && heldToKeepUp({ model: part.model, key: k }) && n >= config.EVAL_KEEP_UP_REFUSALS) busyPart = k;
       return got;
     };
     // what the customer's own model gives the call: as far from its other answer as it is here, as long as it took
@@ -1660,6 +1704,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     });
     return lookAgain(r, freshCalls, {
       label: labelOf(spec, reference),
+      busy: () => busyPart,
       answer: async (c, body, seen) => {
         if (spec.kind === 'cascade') {
           const first = await ask(spec.first, c, body);
@@ -1707,6 +1752,14 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
                 @chance, @safe_saving, @better_pct)`)
       .run({ gap_lo: null, gap_hi: null, calls_needed: null, providers_json: null, chance: null, safe_saving: null, better_pct: null, ...row });
     results.push(row);
+  };
+
+  /* A model found unable to keep up after its row was written (finished later for a strategy, or on its second look):
+     its row says so from then on, as the failure it is, so its page shows why and no later test of this workload tries
+     it again (cantKeepUpOn in src/eval/history.js). */
+  const failBusy = async (modelKey) => {
+    await db.prepare(`UPDATE eval_results SET verdict = 'failed', stopped = 'busy' WHERE run_id = ? AND model_id = ?`).run(run.id, modelKey);
+    for (const x of results) if (x.model_id === modelKey) Object.assign(x, { verdict: 'failed', stopped: 'busy' });
   };
 
   /* The race. Several models at once, each in its own lane, the next in line starting as soon
@@ -2154,6 +2207,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
             // finishes the calls it was dropped before, going on from where it stopped
             const more = await tryModel(cand, { noDrop: true, resume: st });
             answered.delete(keyOf(cand));
+            // found unable to keep up only now: its row, written before, says so from here on
+            if (more.stopped === 'busy') await failBusy(r.model_id);
             if (more.runs < kept.length || more.stopped) continue;
             st = more;
           }

@@ -380,7 +380,12 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
   const isServing = !!serving && r.model_id === serving;
   const differs = quality ? "gave clearly worse answers than the original model's" : 'answered differently from the original model';
   let out;
-  if (r.verdict === 'failed') {
+  if (r.verdict === 'failed' && r.stopped === 'busy') {
+    // its provider could not keep up (EVAL_KEEP_UP_REFUSALS): failed for good on this workload
+    out = ['bad', "Couldn't keep up", `Its provider kept turning this test's requests away for coming too fast, even with Understudy waiting `
+      + `${Math.round(config.MODEL_BACKOFF_MAX_MS / 1000)} seconds between them. A model that can't keep up can't handle this workload's `
+      + "traffic, so it failed and won't be tested on this workload again."];
+  } else if (r.verdict === 'failed') {
     out = ['bad', 'Failed requests', "The model's provider refused or failed some of this test's requests, so it can't be relied on for this workload."];
   } else if (r.verdict === 'slower') {
     out = ['warn', 'Slower than original', slowerWhy(r, speed) ?? SLOWER];
@@ -708,7 +713,7 @@ const DIFF_WORDS = {
 const CONFIRM_WORDS = {
   cleared: 'it passed', missed: "it didn't pass", review: "it came close, but didn't pass", slower: 'it was too slow on them',
   insufficient: "there weren't yet enough new requests to look again", not_reached: "it wasn't reached, because another model passed first",
-  live: 'it passed on live requests',
+  live: 'it passed on live requests', busy: "its provider couldn't keep up with the requests",
 };
 
 /* Whether an answer counted towards the model's figure, as the test wrote down, or for an answer kept before it did,

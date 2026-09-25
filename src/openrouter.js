@@ -45,10 +45,14 @@ export async function takeSlot(model, pace) {
   await new Promise((resolve) => { p.queue.push(resolve); drain(p); });
   return p;
 }
-/** A paced call is over: `refused` when the provider turned it away for coming too fast. */
+/** A paced call is over: `refused` when the provider turned it away for coming too fast. Says whether that refusal came
+    while the model was already given the longest wait between calls (MODEL_BACKOFF_MAX_MS): a provider that turns calls
+    away even then cannot keep up, which a test counts against the model (EVAL_KEEP_UP_REFUSALS in src/config.js). */
 export function giveBack(p, { refused = false } = {}) {
-  if (!p) return;
+  if (!p) return false;
   p.out = Math.max(0, p.out - 1);
+  // read before the gap moves: a refusal that only brought it up to the longest wait is not one at it
+  const atLongest = refused && p.gap >= config.MODEL_BACKOFF_MAX_MS;
   if (refused) {
     p.gap = Math.min(config.MODEL_BACKOFF_MAX_MS, Math.max(config.MODEL_BACKOFF_START_MS, p.gap * 2));
     p.easy = 0;
@@ -61,7 +65,12 @@ export function giveBack(p, { refused = false } = {}) {
     }
   }
   drain(p);
+  return atLongest;
 }
+
+/* How many of one call's tries were turned away at the longest wait (see giveBack), carried on what the call answers or
+   throws, so a test can hold it against the model it asked. */
+const counted = (err, refusedAtLongest) => Object.assign(err, { refusedAtLongest });
 /** How one model is being paced, for tests and the page. */
 export const paceNow = (model) => {
   const p = paces.get(model);
@@ -212,6 +221,8 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
   priceCaps = null } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
   const payload = buildUpstream(body, model, recipe, { zdr, cacheHint, priceCaps });
+  // this call's tries turned away at the longest wait (see giveBack)
+  let atLongest = 0;
   for (let attempt = 0; ; attempt += 1) {
     const slot = await takeSlot(model, pace);
     const started = Date.now();
@@ -224,15 +235,15 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
     } catch (err) {
       giveBack(slot);
       // no answer at all, or none in time: a provider that cannot be reached, said as one
-      throw new UpstreamError(err?.name === 'TimeoutError' || err?.name === 'AbortError' ? 408 : 0,
-        { error: { message: err?.name === 'TimeoutError' ? 'The provider did not answer in time.' : 'The provider could not be reached.' } });
+      throw counted(new UpstreamError(err?.name === 'TimeoutError' || err?.name === 'AbortError' ? 408 : 0,
+        { error: { message: err?.name === 'TimeoutError' ? 'The provider did not answer in time.' : 'The provider could not be reached.' } }), atLongest);
     }
     let text;
     try {
       text = await res.text();
     } finally {
       // the turn is over once the answer is in; one turned away for coming too fast slows this model down
-      giveBack(slot, { refused: res.status === 429 });
+      if (giveBack(slot, { refused: res.status === 429 })) atLongest += 1;
     }
     let json = null;
     try { json = JSON.parse(text); } catch { /* upstream sent something unparseable */ }
@@ -242,8 +253,8 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
       await new Promise((r) => setTimeout(r, Math.min(wait, maxWaitMs ?? config.UPSTREAM_RETRY_WAIT_MAX_MS)));
       continue;
     }
-    if (!res.ok) throw priceMoved(res.status, json, model, body, priceCaps?.[model]) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
-    return { json, latencyMs: Date.now() - started };
+    if (!res.ok) throw counted(priceMoved(res.status, json, model, body, priceCaps?.[model]) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } }), atLongest);
+    return { json, latencyMs: Date.now() - started, refusedAtLongest: atLongest };
   }
 }
 
@@ -262,11 +273,13 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
   const payload = buildUpstream(body, model, recipe, { zdr, cacheHint, priceCaps });
   payload.stream = true;
   payload.stream_options = { include_usage: true };
+  // this call's tries turned away at the longest wait (see giveBack)
+  let atLongest = 0;
   for (let attempt = 0; ; attempt += 1) {
     const slot = await takeSlot(model, pace);
     // given back exactly once, however this try ends (letGo is reached from every ending)
     let freed = false;
-    const free = (refused = false) => { if (!freed) { freed = true; giveBack(slot, { refused }); } };
+    const free = (refused = false) => { if (!freed) { freed = true; if (giveBack(slot, { refused })) atLongest += 1; } };
     const sentAt = Date.now();
     const ctl = new AbortController();
     const stop = (why) => { if (!ctl.signal.aborted) ctl.abort(why); };
@@ -299,8 +312,8 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
     } catch (err) {
       letGo();
       const late = err?.name === 'TimeoutError' || ctl.signal.reason?.name === 'TimeoutError';
-      throw new UpstreamError(late ? 408 : 0,
-        { error: { message: late ? 'The provider did not answer in time.' : 'The provider could not be reached.' } });
+      throw counted(new UpstreamError(late ? 408 : 0,
+        { error: { message: late ? 'The provider did not answer in time.' : 'The provider could not be reached.' } }), atLongest);
     } finally {
       clearTimeout(toStart);
     }
@@ -319,7 +332,7 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
       const text = await res.text();
       let json = null;
       try { json = JSON.parse(text); } catch { /* not json */ }
-      throw priceMoved(res.status, json, model, body, priceCaps?.[model]) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } });
+      throw counted(priceMoved(res.status, json, model, body, priceCaps?.[model]) || new UpstreamError(res.status, json ?? { error: { message: text.slice(0, 400) } }), atLongest);
     }
     // started: from here the answer may take as long as it is allowed, so long as it keeps coming
     const hush = () => {
@@ -354,6 +367,7 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
     }
     const out = new Response(watched, { status: res.status, statusText: res.statusText, headers: res.headers });
     out.sentAt = sentAt;
+    out.refusedAtLongest = atLongest;
     return out;
   }
 }
@@ -372,6 +386,8 @@ export async function streamCollect(body, model, { recipe = null, retries = 3, s
   /* Timed from when the request actually left, after any spacing, so waiting our turn is
      never counted against a model's speed. */
   const started = res.sentAt ?? Date.now();
+  // its tries turned away at the longest wait before it was answered (see giveBack)
+  const atLongest = res.refusedAtLongest ?? 0;
   /* A provider that ignores the request to stream answers in one piece. That is still an
      answer: it is read as one, and only the moment of its first word is unknown. */
   if (!/event-stream/i.test(res.headers.get('content-type') || '')) {
@@ -379,9 +395,9 @@ export async function streamCollect(body, model, { recipe = null, retries = 3, s
     let whole = null;
     try { whole = JSON.parse(text); } catch { /* not json either */ }
     if (!whole || whole.error) {
-      throw new UpstreamError(Number(whole?.error?.code) || 502, whole ?? { error: { message: text.slice(0, 400) } });
+      throw counted(new UpstreamError(Number(whole?.error?.code) || 502, whole ?? { error: { message: text.slice(0, 400) } }), atLongest);
     }
-    return { json: whole, latencyMs: Date.now() - started, ttftMs: null };
+    return { json: whole, latencyMs: Date.now() - started, ttftMs: null, refusedAtLongest: atLongest };
   }
   let firstAt = null;
   let content = '';
@@ -441,7 +457,7 @@ export async function streamCollect(body, model, { recipe = null, retries = 3, s
   }
   if (buf) read(buf);
   if (failed) {
-    throw new UpstreamError(Number(failed.code) || 502, { error: failed });
+    throw counted(new UpstreamError(Number(failed.code) || 502, { error: failed }), atLongest);
   }
   const toolCalls = calls.filter(Boolean);
   const json = {
@@ -458,7 +474,7 @@ export async function streamCollect(body, model, { recipe = null, retries = 3, s
     }],
     usage,
   };
-  return { json, latencyMs: Date.now() - started, ttftMs: firstAt === null ? null : firstAt - started };
+  return { json, latencyMs: Date.now() - started, ttftMs: firstAt === null ? null : firstAt - started, refusedAtLongest: atLongest };
 }
 
 /* OpenRouter's own routing products. They are not models: they choose one for you at call
