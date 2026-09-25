@@ -99,6 +99,25 @@ test('answers planted as ignoring the instruction break it plainly, or are not p
   assert.equal(breakOne([], poem), null);
 });
 
+test('a least number of lines: checked in code, and planted by cutting an answer short of it', () => {
+  const four = 'The sea is wide\nThe waves are loud\nThe night is long\n- Acme Poems';
+  assert.equal(checkItem({ kind: 'min_lines', n: 4 }, four), true);
+  assert.equal(checkItem({ kind: 'min_lines', n: 5 }, four), false);
+  // the blank lines between verses are not lines of the poem
+  assert.equal(checkItem({ kind: 'min_lines', n: 4 }, 'One\n\nTwo\n\nThree'), false);
+  const cut = breakOne([{ kind: 'min_lines', n: 4, say: 'At least four lines' }], four);
+  assert.ok(cut && checkItem(cut.item, cut.text) === false && four.startsWith(cut.text), JSON.stringify(cut));
+  assert.equal(cut.text.split('\n').length, 3, 'one line short of the least it may have');
+  // nothing shorter than one line is an answer, so a least of one is never planted as broken
+  assert.equal(breakOne([{ kind: 'min_lines', n: 1, say: 'At least one line' }], four), null);
+  // an answer is worse by it only where the reference keeps it
+  assert.equal(brokenAgainst([{ kind: 'min_lines', n: 4, say: 'At least four lines' }], 'Just one line', four)?.say, 'At least four lines');
+  assert.equal(brokenAgainst([{ kind: 'min_lines', n: 4, say: 'At least four lines' }], 'Just one line', 'And one here'), null);
+  // "between four and six lines" is read as two items, and both are kept
+  const range = cleanItems({ items: [{ kind: 'min_lines', n: 4, say: 'At least four lines' }, { kind: 'max_lines', n: 6, say: 'At most six lines' }] });
+  assert.deepEqual(range.map((x) => [x.kind, x.n]), [['min_lines', 4], ['max_lines', 6]]);
+});
+
 test('the checklist keeps only what code can check or a reading can settle, and no more than it should', () => {
   const items = cleanItems({ items: [
     { kind: 'max_words', n: '50', say: 'At most 50 words' },

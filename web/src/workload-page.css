@@ -28,8 +28,15 @@
 .wp .wp-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 4px 10px; border-radius: 999px;
   border: 1px solid var(--line); background: var(--raise); color: var(--mut-read); white-space: nowrap; line-height: 1.5; }
 .wp .wp-chip svg { width: 13px; height: 13px; flex: none; }
-.wp a.wp-chip.set { color: var(--brand-read); border-color: color-mix(in srgb, var(--brand) 35%, var(--line)); background: var(--brandq); font-weight: 600; }
-.wp a.wp-chip.set:hover { text-decoration: none; filter: brightness(0.98); }
+.wp a.wp-chip.set, .wp button.wp-chip.set { color: var(--brand-read); border-color: color-mix(in srgb, var(--brand) 35%, var(--line)); background: var(--brandq); font-weight: 600; }
+.wp a.wp-chip.set:hover, .wp button.wp-chip.set:hover { text-decoration: none; filter: brightness(0.98); }
+/* a chip that opens something on the page itself, rather than going somewhere */
+.wp button.wp-chip { font: inherit; font-size: 12.5px; cursor: pointer; }
+.wp button.wp-chip[aria-expanded="true"] { box-shadow: 0 0 0 1px var(--brand); }
+/* how answers are judged: its three choices, and what the newest test did under them, a note that wraps on a phone */
+.wp .wp-judging { display: grid; gap: 14px; }
+.wp .wp-judging .wp-applies { align-items: flex-start; }
+.wp .wp-judging .wp-applies svg { margin-top: 3px; }
 .wp .wp-pill { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 999px; font-weight: 600; font-size: 13.5px; line-height: 1.5; white-space: nowrap; }
 .wp .wp-pill.is-ok { background: var(--okq); color: var(--ok); }
 .wp .wp-pill.is-warn { background: var(--warnq); color: var(--warn); }
@@ -243,6 +250,9 @@
 .wp .wp-ansnote.is-ok { color: var(--ok); }
 .wp .wp-ansnote.is-decide { color: var(--bad); }
 .wp .wp-ansnote.is-written { color: var(--warn); }
+/* the judge's two readings of an answer held to "at least as good" */
+.wp .wp-readlist { margin: 0; padding: 0 0 0 18px; display: grid; gap: 4px; font-size: 13px; color: var(--ink); }
+.wp .wp-readlist b { font-weight: 600; }
 /* a structured answer written out, its differing fields marked where they stand (JsonView) */
 .wp .wp-anstext.is-json { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.6; white-space: normal; }
 .wp .wp-jline { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 5px; margin: 0 -5px; border-radius: 4px; }

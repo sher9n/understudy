@@ -775,6 +775,12 @@ api.get('/workloads/:id', async (req, res) => {
     // savings the customer can make in their own code, with what each would save (src/eval/advice.js)
     advice: await adviceFor(w),
     speedPref: w.speed_pref || null,
+    /* how its answers are judged when another model is tested on them: its setting ('auto' unless set), and how the
+       newest test judged them and why (planRecord.judging in src/eval/run.js) */
+    judgeMode: JUDGE_MODES.includes(w.judge_mode) && w.shape_kind === 'free_text' ? w.judge_mode : 'auto',
+    judgedAs: await judgedAsOf(w.id),
+    // whether it can be chosen at all: written answers only, since answers with a set shape are compared field by field
+    judgeChoice: w.shape_kind === 'free_text',
     calls: t.calls, cost: round8(t.cost),
     promotedAt: w.promoted_at,
     /* What a measurement would do, and whether it can. The button reads this rather than
@@ -1119,6 +1125,46 @@ api.post('/workloads/:id/explore', async (req, res) => {
 /* How much slower than the customer's own model a switched-to model may be on this workload.
    "auto" follows the traffic: streamed answers keep the same speed, others may be a little slower. */
 const SPEED_PREFS = ['auto', 'same', 'slower_ok', 'any'];
+
+/* How a workload's answers are judged when another model is tested on them: 'auto' lets each test choose ("at least as
+   good" for open-ended writing and for answers that vary too much for "the same answer" to mean anything, "the same
+   answer" for the rest), 'same' always holds another model to the original model's answers, and 'quality' always to
+   answers at least as good (see judgeMode in src/eval/run.js). Stored null for 'auto'. */
+const JUDGE_MODES = ['auto', 'same', 'quality'];
+
+/** How the newest finished test judged a workload's answers, and why: { yardstick, reason, mode, closed } or null before
+    any. `closed` is why it kept to the same answer when it could have chosen: 'facts' where the original model's own
+    answers differ in figures, facts or decisions, 'requests' where its requests did not read as open-ended writing. */
+async function judgedAsOf(workloadId) {
+  const r = await db.prepare(`SELECT yardstick, plan_json FROM eval_runs WHERE workload_id = ? AND status = 'done'
+      AND EXISTS (SELECT 1 FROM eval_results e WHERE e.run_id = eval_runs.id AND e.verdict <> 'reference')
+    ORDER BY created_at DESC LIMIT 1`).get(workloadId);
+  if (!r) return null;
+  const plan = parseJson(r.plan_json);
+  const yardstick = r.yardstick === 'quality' ? 'quality' : 'agreement';
+  // before 25 Sep a test held answers to "at least as good" only where the original model varied too much for the same answer
+  const reason = plan?.judging?.reason ?? plan?.yardstick?.reason ?? (yardstick === 'quality' ? 'varied' : null);
+  const open = plan?.judging?.openEnded;
+  const closed = yardstick === 'agreement' && plan?.judging?.mode === 'auto' && open
+    ? (open.share === null ? 'facts' : 'requests') : null;
+  return { yardstick, reason, mode: plan?.judging?.mode ?? null, closed };
+}
+
+api.post('/workloads/:id/judging', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  const mode = String(req.body?.mode || '');
+  if (!JUDGE_MODES.includes(mode)) return fail(res, 400, 'That is not one of the choices.');
+  // answers with a shape (JSON, a tool call, a label) are compared field by field, as their fields decide
+  if (mode !== 'auto' && w.shape_kind && w.shape_kind !== 'free_text') {
+    return fail(res, 400, 'Only written answers can be judged another way. Answers with a set shape are compared field by field.');
+  }
+  await db.prepare('UPDATE workloads SET judge_mode = ?, updated_at = ? WHERE id = ?')
+    .run(mode === 'auto' ? null : mode, now(), w.id);
+  forgetPlan(w.id);
+  return res.json({ ok: true, mode });
+});
 api.post('/workloads/:id/speed', async (req, res) => {
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
     .get(req.params.id, req.workspace.id);

@@ -18,9 +18,9 @@ import { plainWay } from './way.js';
  * numbered list, one line). What only a reading can settle ("is it in German?", "is it polite?") is put to
  * Jev as a yes or no, beside the comparison it belongs to (judgeQuality in src/eval/judge.js). */
 
-const KINDS = new Set(['max_words', 'min_words', 'max_sentences', 'max_lines', 'max_chars', 'includes', 'excludes',
+const KINDS = new Set(['max_words', 'min_words', 'max_sentences', 'max_lines', 'min_lines', 'max_chars', 'includes', 'excludes',
   'starts_with', 'format', 'ask']);
-const COUNTS = new Set(['max_words', 'min_words', 'max_sentences', 'max_lines', 'max_chars']);
+const COUNTS = new Set(['max_words', 'min_words', 'max_sentences', 'max_lines', 'min_lines', 'max_chars']);
 const FORMATS = new Set(['json', 'bullets', 'numbered', 'one_line']);
 const LANGUAGES = { en: 'English', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch',
   sv: 'Swedish', da: 'Danish', no: 'Norwegian', fi: 'Finnish', pl: 'Polish', cs: 'Czech', tr: 'Turkish', ru: 'Russian',
@@ -98,7 +98,8 @@ const SYSTEM = [
   'what they all require, never a detail of one request (a name, a date, a topic).',
   'Reply with JSON only, in this shape: {"items":[...]}, at most 8 items. Each item is one of:',
   '{"kind":"max_words","n":N,"say":"..."}, {"kind":"min_words","n":N,"say":"..."}, {"kind":"max_sentences","n":N,"say":"..."},',
-  '{"kind":"max_lines","n":N,"say":"..."}, {"kind":"max_chars","n":N,"say":"..."},',
+  '{"kind":"max_lines","n":N,"say":"..."}, {"kind":"min_lines","n":N,"say":"..."}, {"kind":"max_chars","n":N,"say":"..."},',
+  'A range ("between four and six lines", "50 to 80 words") is two items, its least and its most.',
   '{"kind":"includes","text":"exact text every answer contains","say":"..."}, {"kind":"excludes","text":"exact text no answer contains","say":"..."},',
   '{"kind":"starts_with","text":"exact opening text of every answer","say":"..."},',
   '{"kind":"format","value":"json" or "bullets" or "numbered" or "one_line","say":"..."},',
@@ -117,7 +118,9 @@ export async function checklistFor(workload, bodies, { charge = () => {} } = {})
   if (!config.EVAL_CHECKLIST || !config.EVAL_JUDGE_MODEL || !workload?.id) return [];
   const variants = instructionOf(bodies);
   if (!variants) return [];
-  const h = hashOf(variants);
+  /* 2: read again since there is a least number of lines to list (min_lines), so a range of lines is kept whole;
+     the daily checks keep the newest list whatever it was read under (keptChecklist) */
+  const h = hashOf({ v: 2, variants });
   const kept = await db.prepare('SELECT items_json FROM workload_checklists WHERE workload_id = ? AND instruction_hash = ?').get(workload.id, h);
   if (kept) { try { return cleanItems(JSON.parse(kept.items_json)); } catch { return []; } }
   const shown = variants.length === 1 ? `<<<INSTRUCTION\n${variants[0]}\nINSTRUCTION>>>`
@@ -172,6 +175,7 @@ export function checkItem(item, text) {
     case 'min_words': return words(t) >= item.n;
     case 'max_sentences': return sentences(t) <= item.n;
     case 'max_lines': return lines(t) <= item.n;
+    case 'min_lines': return lines(t) >= item.n;
     case 'max_chars': return t.trim().length <= item.n;
     case 'includes': return has(t, item.text);
     case 'excludes': return !has(t, item.text);
@@ -217,6 +221,9 @@ export function breakOne(items, text) {
         const longer = Array(copies).fill(t).join('\n\n');
         if (checkItem(item, longer) === false) broken = longer;
       }
+    } else if (item.kind === 'min_lines') {
+      // cut short of the fewest lines it may have
+      broken = t.split('\n').filter((l) => l.trim()).slice(0, Math.max(1, item.n - 1)).join('\n');
     } else if (item.kind === 'includes') {
       const escaped = item.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       broken = t.replace(new RegExp(escaped, 'gi'), '').replace(/[ \t]{2,}/g, ' ').trim();
