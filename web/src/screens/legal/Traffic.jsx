@@ -132,10 +132,11 @@ export default function Traffic({ go }) {
             replayed on other models, and nothing is spent on measuring, until you press Measure now on a workload.</li>
           <li><b>No experiments on live calls.</b> On a workload&rsquo;s page, set its experiments to Off. Nothing is
             read in the background on a workload with no experiments.</li>
-          <li><b>Nothing switched without you.</b> New workspaces start on &ldquo;Ask me first&rdquo;: a cheaper model
-            is only recommended until you approve it. Settings sets it for new workloads and each workload&rsquo;s
-            page for that one. A switch can be undone from the workload&rsquo;s page, and one that starts working
-            less well than your own model is switched back by itself.</li>
+          <li><b>Switch only with your yes.</b> New workspaces start on &ldquo;Automatic&rdquo;: a cheaper setup that
+            passes twice is switched to, on a small share of calls first, checked against your own model every day, and
+            switched back by itself the moment it slips. In Settings, choose &ldquo;Ask me first&rdquo; to approve each
+            switch yourself, or &ldquo;Never switch&rdquo; to only measure and report. It is one choice for every
+            workload. A switch can be undone from the workload&rsquo;s page at any time.</li>
           <li><b>Cap what is spent.</b> In Settings, set a daily or monthly limit on calls, and an optimizing budget
             for measuring and everything else done to find a cheaper model.</li>
           <li><b>Keep providers that keep nothing.</b> Zero data retention starts on. Leave it on in Settings.</li>

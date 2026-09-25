@@ -42,7 +42,7 @@ const TRY = `COALESCE(check_json LIKE '%"by":"fell back"%' OR check_json LIKE '%
 /* What testing this workload cost from a moment on, our fee included: measurements, background answers,
    answers read in the background and answers checked against the customer's own model after a switch,
    the four things that are charged as optimizing. */
-async function optimizingSince(workloadId, since) {
+export async function optimizingSince(workloadId, since) {
   const spent = Number((await db.prepare(
     'SELECT COALESCE(SUM(spend_usd), 0) AS s FROM eval_runs WHERE workload_id = ? AND created_at >= ?').get(workloadId, since)).s);
   const background = Number((await db.prepare(

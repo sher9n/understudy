@@ -27,6 +27,7 @@ import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
 import { routingModeOf, ROUTING_MODES } from './eval/confidence.js';
 import { switchStory } from './eval/switch-story.js';
 import { valueOf } from './eval/value.js';
+import { pageOf, callsOf, runPageOf } from './workloadPage.js';
 import { enqueue, wakeJobs } from './jobs.js';
 import { routeOnce } from './proxy.js';
 import { forgetWorkspace } from './workspace.js';
@@ -880,6 +881,34 @@ api.get('/workloads/:id/value', async (req, res) => {
   res.json(await valueOf(w));
 });
 
+/* A workload's page, as its four questions (src/workloadPage.js): whether there is enough of its traffic to
+   optimize it, every measurement it has had, its calls, and once it is switched, what Understudy is doing for it.
+   Read beside the workload itself, whose figures the page's actions (measure, approve, switch back) still use. */
+api.get('/workloads/:id/page', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  res.json(await pageOf(w));
+});
+
+/* More of its calls, ten at a time, newest first. */
+api.get('/workloads/:id/page/calls', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  res.json(await callsOf(w, { page: Number.parseInt(req.query.page, 10) || 1 }));
+});
+
+/* One measurement opened on the page: what it found, in a sentence, and every setup it tried. */
+api.get('/workloads/:id/runs/:runId/page', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ? AND workload_id = ?').get(req.params.runId, w.id);
+  if (!run) return fail(res, 404, 'No such measurement.');
+  res.json(await runPageOf(w, run));
+});
+
 /* The calls in a workload, a page at a time, optionally narrowed by a search.
  *
  * Paged on the server because a workload can hold tens of thousands of calls and the only
@@ -1373,10 +1402,15 @@ api.post('/settings/default-mode', async (req, res) => {
     moved = (await db.prepare(`UPDATE workloads SET optimize_mode = ?, updated_at = ? WHERE workspace_id = ? AND merged_into IS NULL`)
       .run(mode, now(), req.workspace.id)).changes;
   }
-  const words = { ask: 'ask you before switching', auto: 'switch on their own once a model clears twice', off: 'never be switched' };
+  /* Settings makes it one choice for the whole workspace (applyToExisting), and says so; only an older caller
+     changes what new workloads get alone. */
+  const words = { ask: 'ask you before switching to a cheaper setup that passes', auto: 'switch to a cheaper setup that passes, watched every day',
+    off: 'never switch, only measure and report' };
+  const all = req.body?.applyToExisting === true;
   await addActivity(req.workspace.id, {
-    kind: 'connect', title: `New workloads will ${words[mode]}`,
-    detail: moved ? `And the ${moved} workloads you have now do the same.` : 'Workloads you have now keep their own setting.',
+    kind: 'connect', title: `${all ? 'Every workload' : 'New workloads'} will ${words[mode]}`,
+    detail: all ? (moved ? `All ${moved} of your workloads, and every new one.` : 'And every new one.')
+      : 'Workloads you have now keep their own setting.',
   });
   return res.json({ ok: true, mode, moved });
 });

@@ -417,11 +417,11 @@ test('Settings changes what it says: default switching, sharing, the budget, cac
     return { status: x.status, json: await x.json() };
   };
   let st = (await call('/settings')).json;
-  assert.equal(st.defaultOptimizeMode, 'ask', 'a new workspace asks before switching');
+  assert.equal(st.defaultOptimizeMode, 'auto', 'a new workspace switches by itself, watched every day');
   assert.equal(st.shareStats, false);
   assert.equal(st.cacheHints, true);
   assert.equal(st.limits.dailyUsd, null);
-  assert.equal((await call('/settings/default-mode', { mode: 'auto' })).status, 200);
+  assert.equal((await call('/settings/default-mode', { mode: 'ask' })).status, 200);
   assert.equal((await call('/settings/default-mode', { mode: 'sometimes' })).status, 400);
   assert.equal((await call('/settings/share-stats', { enabled: true })).status, 200);
   assert.equal((await call('/settings/optimize-budget', { amountUsd: 12.5 })).status, 200);
@@ -431,7 +431,7 @@ test('Settings changes what it says: default switching, sharing, the budget, cac
   assert.equal((await call('/settings/limits', { dailyUsd: 60, monthlyUsd: 50 })).status, 400, 'a day cannot allow more than a month');
   assert.equal((await call('/settings/notify', { kinds: { money: false } })).status, 200);
   st = (await call('/settings')).json;
-  assert.equal(st.defaultOptimizeMode, 'auto');
+  assert.equal(st.defaultOptimizeMode, 'ask');
   assert.equal(st.shareStats, true);
   assert.equal(st.optimizeBudget, 12.5);
   assert.equal(st.cacheHints, false);
@@ -441,7 +441,7 @@ test('Settings changes what it says: default switching, sharing, the budget, cac
   assert.equal(st.notify.switched, true);
   // new workloads follow the default
   const w = await workloadFor(s.workspace.id, request(1, { system: 'A brand new job.' }));
-  assert.equal(w.optimize_mode, 'auto');
+  assert.equal(w.optimize_mode, 'ask');
 });
 
 test('a long instruction is marked for caching only where calls come often enough, and what it saves is counted as ours', async () => {

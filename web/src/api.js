@@ -146,6 +146,10 @@ export const api = {
   learning: (id) => send('GET', `/workloads/${id}/learning`),
   // what Understudy is doing for a workload: cost, answers, speed, rescues, how requests flow, and its history
   workloadValue: (id) => send('GET', `/workloads/${id}/value`),
+  // a workload's page: enough data, every measurement, its calls, and once switched what Understudy is doing
+  workloadPage: (id) => send('GET', `/workloads/${id}/page`),
+  workloadPageCalls: (id, page) => send('GET', `/workloads/${id}/page/calls?page=${page}`),
+  workloadRunPage: (id, runId) => send('GET', `/workloads/${id}/runs/${runId}/page`),
   setExplore: (id, b) => send('POST', `/workloads/${id}/explore`, b),
   outcomes: (id) => send('GET', `/workloads/${id}/outcomes`),
   saveOutcomeDef: (id, def) => send('POST', `/workloads/${id}/outcomes/def`, def),

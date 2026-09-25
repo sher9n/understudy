@@ -278,9 +278,10 @@ export const config = {
   CACHE_HINTS: bool('CACHE_HINTS', true),
   CACHE_HINT_MIN_CHARS: num('CACHE_HINT_MIN_CHARS', 4400),
   CACHE_HINT_MIN_PER_HOUR: num('CACHE_HINT_MIN_PER_HOUR', 12),
-  /* How a new workload is switched in a workspace that has not chosen: 'ask' (a person approves each
-     switch), 'auto' or 'off'. Workspaces choose for themselves in Settings. */
-  DEFAULT_OPTIMIZE_MODE: ['ask', 'auto', 'off'].includes(str('DEFAULT_OPTIMIZE_MODE', 'ask')) ? str('DEFAULT_OPTIMIZE_MODE', 'ask') : 'ask',
+  /* What happens when a cheaper setup passes, in a workspace that has not chosen: 'auto' (switch to it, watched
+     every day and switched back the moment it slips), 'ask' (a person approves each switch) or 'off'. One choice
+     for the whole workspace, made in Settings. */
+  DEFAULT_OPTIMIZE_MODE: ['ask', 'auto', 'off'].includes(str('DEFAULT_OPTIMIZE_MODE', 'auto')) ? str('DEFAULT_OPTIMIZE_MODE', 'auto') : 'auto',
   /* A measurement nobody asked for waits until it has enough calls to show a cheaper model is as good
      as the customer's own at the bar it expects: the lowest bar for structured answers, and this one
      for written answers, whose own model varies more, until a measurement has set the real one. */
