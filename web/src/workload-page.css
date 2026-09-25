@@ -136,7 +136,7 @@
 .wp .wp-sub { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mut); margin: 0 0 8px; }
 
 /* What a column means: a small "i" beside its name, and the words it opens, floating above the page (Help in
-   WorkloadDetail.jsx). On a phone the column names are hidden, so one beside the table's name explains both. */
+   WorkloadDetail.jsx). On a phone the column names are hidden, so one beside the table's name explains it. */
 .wp .wp-help { display: inline-grid; place-items: center; width: 18px; height: 18px; margin: -4px -2px -4px 3px; padding: 0; border: 0;
   background: none; color: var(--mut); cursor: help; vertical-align: middle; border-radius: 50%; }
 .wp .wp-help svg { width: 13px; height: 13px; }
@@ -241,14 +241,13 @@
   .wp .wp-cands td[data-label]::before, .wp .wp-calls td[data-label]::before {
     content: attr(data-label); display: block; font-family: 'Schibsted Grotesk', system-ui, sans-serif; font-size: 11px; font-weight: 600;
     letter-spacing: 0.06em; text-transform: uppercase; color: var(--mut); margin-bottom: 1px; }
-  .wp .wp-cands tr { display: grid; grid-template-columns: 28px repeat(4, minmax(0, 1fr)); gap: 6px 8px; padding: 10px 0; border-top: 1px solid var(--line); align-items: start; }
+  .wp .wp-cands tr { display: grid; grid-template-columns: 28px repeat(3, minmax(0, 1fr)); gap: 6px 8px; padding: 10px 0; border-top: 1px solid var(--line); align-items: start; }
   .wp .wp-cands td:nth-child(1) { grid-column: 1; grid-row: 1 / span 2; }
   .wp .wp-cands td:nth-child(2) { grid-column: 2 / -1; grid-row: 1; overflow-wrap: anywhere; }
   .wp .wp-cands td:nth-child(3) { grid-column: 2 / -1; grid-row: 2; }
   .wp .wp-cands td:nth-child(4) { grid-column: 2; grid-row: 3; }
   .wp .wp-cands td:nth-child(5) { grid-column: 3; grid-row: 3; }
   .wp .wp-cands td:nth-child(6) { grid-column: 4; grid-row: 3; }
-  .wp .wp-cands td:nth-child(7) { grid-column: 5; grid-row: 3; }
   .wp .wp-calls tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 10px 0; border-top: 1px solid var(--line); align-items: center; }
   .wp .wp-calls td:nth-child(1) { grid-column: 1; grid-row: 1; }
   .wp .wp-calls td:nth-child(5) { grid-column: 2; grid-row: 1; justify-self: end; }

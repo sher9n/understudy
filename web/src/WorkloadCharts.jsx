@@ -188,8 +188,8 @@ const SHARE_TOPS = [0.08, 0.12, 0.2, 0.4, 0.6, 0.8, 1];
 
 /**
  * Every setup a measurement tried, by what a request costs on it (less to the left) against how often it answered
- * differently from the customer's own model, or worse: each with the range its count allows, the bar, the region
- * that is cheaper and as good, and the customer's own model. Numbered as the table under it.
+ * differently from the customer's own model, or worse: the bar, the region that is cheaper and as good, and the
+ * customer's own model. Numbered as the table under it.
  */
 export function CompareChart({ run }) {
   const [ref, W] = useWidthOf(600, 320);
@@ -204,7 +204,7 @@ export function CompareChart({ run }) {
   const llo = (lo + hi) / 2 - span / 2;
   const lhi = llo + span;
   const x = (v) => L + ((Math.log10(v) - llo) / (lhi - llo)) * w;
-  const want = Math.max(run.bar * 1.6, ...pts.map((c) => c.hi ?? c.gap));
+  const want = Math.max(run.bar * 1.6, ...pts.map((c) => c.gap));
   const ymax = SHARE_TOPS.find((v) => v >= want) ?? 1;
   const y = (v) => T + h - (Math.min(Math.max(v, 0), ymax) / ymax) * h;
   const yticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * ymax);
@@ -257,9 +257,7 @@ export function CompareChart({ run }) {
       )}
       {pts.map((c) => (
         <g key={c.key}>
-          <title>{`${c.no}. ${c.label}: ${Math.round(c.gap * 1000) / 10}%, up to ${Math.round((c.hi ?? c.gap) * 100)}%`}</title>
-          <line x1={x(c.perCall)} x2={x(c.perCall)} y1={y(c.lo ?? c.gap)} y2={y(c.hi ?? c.gap)} stroke={toneColor(c.tone)} strokeWidth="3"
-            strokeLinecap="round" opacity="0.35" />
+          <title>{`${c.no}. ${c.label}: ${String(run.axis).split(' ')[0].toLowerCase()} on ${(c.gap * 100).toFixed(1)}%`}</title>
           <circle cx={x(c.perCall)} cy={y(c.gap)} r="9.5" fill={toneColor(c.tone)} />
           <text x={x(c.perCall)} y={y(c.gap) + 3.8} textAnchor="middle" className="dotno">{c.no}</text>
         </g>
