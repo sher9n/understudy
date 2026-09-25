@@ -367,7 +367,7 @@ function Ready({ w, cand, busy, copiesOnly, act, go }) {
           <div className="wp-tile">
             <span className="wp-k">{rp?.yardstick === 'quality' ? 'Answers worse than yours' : 'Answers that differed from yours'}</span>
             <span className="wp-v">{cand.gap !== null && cand.gap !== undefined ? `${Number(cand.gap).toFixed(1)}%` : 'not judged'}</span>
-            <span className="wp-n">{rp?.bar ? `${row?.hi !== null && row?.hi !== undefined ? `up to ${pct0(row.hi)}, ` : ''}bar ${Math.round(rp.bar * 1000) / 10}%` : ''}</span>
+            <span className="wp-n">{rp?.bar ? `bar ${Math.round(rp.bar * 1000) / 10}%` : ''}</span>
           </div>
           {row?.p50 && (
             <div className="wp-tile">
@@ -584,36 +584,11 @@ function RunRow({ w, r, open, onToggle }) {
   );
 }
 
-/* What the two columns of a measurement's table mean, in the words its information bubbles say (see Help). The bar is
-   named with its figure, since passing is what both columns are read against. */
-function ColumnWords({ rp, which }) {
-  const bar = rp.bar > 0 ? `, ${Math.round(rp.bar * 1000) / 10}% here` : '';
-  if (which === 'upto') {
-    return (
-      <>
-        <p><b>Up to</b> is the highest the true figure could be. A test sees only some of your requests, so the figure it
-          measures could be off by chance. Understudy is 95% sure the true figure is no higher than this.</p>
-        <p>The fewer requests a setup answered, the higher it is: one stopped after three requests can show 0.0% and still be
-          up to 47%, because three matching answers prove little. A setup passes only when this figure is under the bar{bar}.</p>
-      </>
-    );
-  }
-  return rp.yardstick === 'quality' ? (
-    <>
-      <p><b>Worse</b> is how often this setup's answer was clearly worse than your own model's answer to the same request, out
-        of the requests it answered in this test. The judge read each pair twice, once in each order, and counted an answer as
-        worse only when both readings said so.</p>
-      <p>A setup passes when this stays under the bar{bar}. The bar comes from how often your own model's answer is clearly
-        worse than its own other answer to the same request.</p>
-    </>
-  ) : (
-    <>
-      <p><b>Differed</b> is how often this setup gave a different answer from your own model to the same request, out of the
-        requests it answered in this test.</p>
-      <p>A setup passes when this stays under the bar{bar}. The bar comes from how often your own model gives a different answer
-        when it is asked the same request twice.</p>
-    </>
-  );
+/* What the first figure in a measurement's table means, in the words its information bubble says (see Help). */
+function ColumnWords({ rp }) {
+  return rp.yardstick === 'quality'
+    ? <p>How often this model gave a clearly worse answer than the original model.</p>
+    : <p>How often this model answered differently from the original model.</p>;
 }
 
 /* A small "i" beside a name that says what it means: shown while the pointer or the keyboard is on it, and on a tap,
@@ -694,15 +669,14 @@ function RunDetail({ rp }) {
             <span><i style={{ background: 'var(--warn)' }} />close, or too few to be sure</span>
             <span><i style={{ background: 'var(--bad)' }} />missed</span>
             <span><i style={{ background: 'var(--mut)' }} />stopped early</span>
-            <span>faint line: the range the count allows</span>
           </div>
         </div>
       )}
       <div>
         <p className="wp-sub">
           Candidates tested
-          {/* a phone shows no column names, so both columns are explained here instead */}
-          <span className="wp-phonehelp"><Help label={`${axis.split(' ')[0]} and Up to`}><ColumnWords rp={rp} which="gap" /><ColumnWords rp={rp} which="upto" /></Help></span>
+          {/* a phone shows no column names, so the first figure is explained here instead */}
+          <span className="wp-phonehelp"><Help label={axis.split(' ')[0]}><ColumnWords rp={rp} /></Help></span>
         </p>
         <div className="wp-tablewrap">
           <table className="wp-cands">
@@ -711,8 +685,7 @@ function RunDetail({ rp }) {
                 <th aria-label="Number" />
                 <th>Setup</th>
                 <th>Result</th>
-                <th className="r">{axis.split(' ')[0]}<Help label={axis.split(' ')[0]}><ColumnWords rp={rp} which="gap" /></Help></th>
-                <th className="r">Up to<Help label="Up to"><ColumnWords rp={rp} which="upto" /></Help></th>
+                <th className="r">{axis.split(' ')[0]}<Help label={axis.split(' ')[0]}><ColumnWords rp={rp} /></Help></th>
                 <th className="r">Per call</th>
                 <th className="r">{rp.metric === 'ttft' ? 'First word' : 'Typical'}</th>
               </tr>
@@ -724,7 +697,6 @@ function RunDetail({ rp }) {
                   <td className="wp-mdl">{c.label}</td>
                   <td><span className={`wp-tag is-${c.tone}`}>{c.verdict}</span></td>
                   <td className={`r m${c.gap === null ? ' none' : ''}`} data-label={axis.split(' ')[0]}>{c.gap === null ? 'not judged' : pct1(c.gap)}</td>
-                  <td className={`r m${c.hi === null ? ' none' : ''}`} data-label="Up to">{c.hi === null ? '' : pct0(c.hi)}</td>
                   <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Per call">{c.perCall === null ? 'not priced' : perCall(c.perCall)}</td>
                   <td className={`r m${!c.p50 ? ' none' : ''}`} data-label={rp.metric === 'ttft' ? 'First word' : 'Typical'}>{c.p50 ? secs(c.p50) : 'not timed'}</td>
                 </tr>
