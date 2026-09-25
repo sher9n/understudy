@@ -188,6 +188,12 @@ async function allCatalogued(models) {
   return n === ids.length;
 }
 
+/* Every request and every copy names the model it is for (the owner's rule, 26 Sep 2026). That model is its workload's
+   own: what every cheaper one is tested against, and what answers until one is switched to. */
+export const MODEL_REQUIRED = 'Name the model this request is for in "model", for example "openai/gpt-4.1". Understudy tests '
+  + 'cheaper models against the one you name, so every request has to say which it is.';
+const namesModel = (x) => typeof x?.model === 'string' && x.model.trim().length > 0;
+
 /* Everything a routed call needs before it is sent, or the reason it cannot be, so the
    streaming path, the ordinary path and Connect's test call all answer the same way. */
 async function prepare(wsId, body, { classify = true, name = null, pinned = false } = {}) {
@@ -195,8 +201,11 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
   if (!Array.isArray(body.messages) || !body.messages.length) {
     return no(400, '"messages" is required.', 'invalid_request_error');
   }
+  /* Refused before it is grouped, so it leaves no workload behind. A call that named no model used to be answered by the
+     model of whatever workload its words looked most like, which could be another job's model. */
+  if (!namesModel(body)) return no(400, MODEL_REQUIRED, 'invalid_request_error');
   if (!canRoute()) return no(503, 'Routing is not configured on this deployment yet.', 'not_configured');
-  if (body.model) {
+  {
     const named = await canonicalModel(body.model);
     if (!named.known) {
       if (named.empty) return no(503, 'The list of models we route to is being read. Try again shortly.', 'not_ready');
@@ -229,17 +238,8 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
   /* A test call is not the customer's traffic, so it is never fingerprinted into a
      workload: it would leave a one-call workload in their list that nothing produced. */
   const workload = classify ? await workloadFor(wsId, body, { name }) : null;
-  const requested = body.model || workload?.reference_model || null;
-  /* A call that names no model goes to the model its workload was made with, which can be one that is not
-     routed (openrouter/auto, from copies sent to us): it is checked the same way a named one is. */
-  if (!body.model && requested) {
-    const k = await canonicalModel(requested);
-    if (!k.known) {
-      return no(k.empty ? 503 : 400, k.empty ? 'The list of models we route to is being read. Try again shortly.'
-        : `This call names no model, and its workload's model is not one we route to. ${unknownModelWords(requested)}`,
-        k.empty ? 'not_ready' : 'model_not_found');
-    }
-  }
+  // the model the call names, which every call now does (see MODEL_REQUIRED)
+  const requested = body.model;
   /* The strategy that serves this call: the one the workload was switched to (a model asked the
      way it was measured, or a cascade, or a pick made call by call), or, now and then and within
      the workload's limits, one being tried. None, and the call goes to the model it asked for. */
@@ -250,7 +250,6 @@ async function prepare(wsId, body, { classify = true, name = null, pinned = fals
   if (strategy && !(await allCatalogued(chainModels(strategy)))) strategy = null;
   const lead = strategy ? leadModel(strategy.spec) : null;
   const served = lead?.model || requested;
-  if (!served) return no(400, '"model" is required.', 'invalid_request_error');
   const recipe = lead?.recipe ?? null;
   const zdr = await zdrFor(wsId);
   return { workload, requested, served, recipe, strategy, zdr };
@@ -927,11 +926,22 @@ v1.post('/traces', async (req, res) => {
   }
   await grantStarterCredit(wsId);
   let accepted = 0;
-  for (const t of list) {
+  // why each copy that was not taken was not, said to whoever sent it
+  const reasons = [];
+  for (const [i, t] of list.entries()) {
     const request = t?.request;
-    if (!request || !Array.isArray(request.messages)) continue;
+    if (!request || !Array.isArray(request.messages)) {
+      reasons.push(`copy ${i + 1}: it has no "request" with "messages".`);
+      continue;
+    }
+    /* A copy names the model the customer's own call went to, which is its workload's own (see MODEL_REQUIRED): one that
+       named none made a workload no test could ever be run on. Refused before it is grouped, so it leaves none behind. */
+    if (!namesModel(request)) {
+      reasons.push(`copy ${i + 1}: ${MODEL_REQUIRED.replace('in "model"', 'in "request.model"')}`);
+      continue;
+    }
     // a copy names its model however the customer's SDK did; it is priced and grouped under the catalogue's name
-    if (request.model) request.model = (await canonicalModel(request.model)).model;
+    request.model = (await canonicalModel(request.model)).model;
     if (t?.response?.model && !String(t.response.model).includes('/')) {
       const named = await canonicalModel(t.response.model);
       if (named.model.includes('/')) t.response.model = named.model;
@@ -960,7 +970,7 @@ v1.post('/traces', async (req, res) => {
     await considerMeasuring(wsId, workload);
     accepted += 1;
   }
-  res.json({ accepted, rejected: list.length - accepted });
+  res.json({ accepted, rejected: list.length - accepted, ...(reasons.length ? { reasons: reasons.slice(0, 20) } : {}) });
 });
 
 /* How calls turned out, told to us afterwards: a ticket resolved, an email answered, a form a
