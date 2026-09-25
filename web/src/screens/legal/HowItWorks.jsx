@@ -2,24 +2,25 @@ import React, { useEffect, useId } from 'react';
 import { To } from './Public.jsx';
 import '../../how.css';
 
-/* How Understudy works, for somebody meeting it for the first time: the trip every request makes,
- * and the four things Understudy does behind the scenes, each told in a few sentences and one
- * picture. One example runs through the whole page (an app that answers "where is my order?" with
- * gpt-5.4), so every picture is about the same app.
+/* How Understudy works, for somebody meeting it for the first time, in the homepage's voice: the one thing you do
+ * (change two lines), then the four things Understudy does, each told in two or three short sentences beside one
+ * picture. The pictures follow one example (an app that answers "where is my order?"), and the figures in them are
+ * said to be an example.
  *
- * The pictures are drawn here rather than kept as images, so they take the page's colours in either
- * theme, and the numbered boxes on the map are links to the steps they stand for. */
+ * Built from the "Step by step" artboard (option 1 of 3) the owner chose on 26 Sep 2026. The pictures are drawn
+ * here rather than kept as images, so they take the page's colours in either theme. The sections keep the ids the
+ * page had before, so an old link to /how-it-works#testing still lands on testing. */
 
-// the four steps, as places on the page the map, and a shared link, can go straight to
-const STEPS = ['connect', 'workloads', 'testing', 'switching'];
+// the parts of the page a link can go straight to
+const STEPS = ['connect', 'workloads', 'testing', 'switching', 'learning'];
 
-/* Each drawing carries its own arrowheads, one for each colour an arrow can be, under ids that no
-   other drawing on the page shares. */
-const HEADS = { a: '', b: 'b', o: 'o', w: 'w', x: 'x' };
+/* Each drawing carries its own arrowheads, one for each colour an arrow can be, under ids that no other drawing on
+   the page shares. */
+const HEADS = { a: '', b: 'b', o: 'o', x: 'x' };
 
-/* What the drawings are made with: boxes with centred lines of text, arrows, labels that stand out
-   from the lines they sit on, and the numbered chips that match the steps. A tone is a letter:
-   b the brand colour, o passing, w a copy on the side, x failing, d dashed. */
+/* What the drawings are made with: boxes with lines of text, arrows, labels that stand out from the lines they sit
+   on, the numbered chips of a map, and the dots, ticks and crosses of a result. A tone is a letter: b the brand
+   colour, o passing, x failing, d dashed. */
 function pen(id) {
   const arrow = (k, dash) => `hwar${k === 'a' ? '' : ` ${k}`}${dash ? ' d' : ''}`;
   return {
@@ -34,6 +35,18 @@ function pen(id) {
         </>
       );
     },
+    // a box whose lines start at its left edge: a request, or an answer
+    lbox: (x, y, bw, bh, lines, tone = '') => {
+      const top = y + bh / 2 - ((lines.length - 1) * 18) / 2;
+      return (
+        <>
+          <rect x={x} y={y} width={bw} height={bh} rx="10" className={`hwbx ${tone}`} />
+          {lines.map(([t, c = 'hws'], i) => (
+            <text key={i} x={x + 14} y={top + i * 18 + 4.5} className={c}>{t}</text>
+          ))}
+        </>
+      );
+    },
     line: (x1, y1, x2, y2, k = 'a') => (
       <line x1={x1} y1={y1} x2={x2} y2={y2} className={arrow(k)} markerEnd={`url(#${id}${k})`} />
     ),
@@ -41,10 +54,21 @@ function pen(id) {
     label: (x, y, t, anchor = 'middle', tone = '') => (
       <text x={x} y={y} textAnchor={anchor} className={`hwl ${tone}`}>{t}</text>
     ),
+    text: (x, y, t, c = 'hws', anchor = 'start') => <text x={x} y={y} textAnchor={anchor} className={c}>{t}</text>,
     chip: (cx, cy, n) => (
       <>
         <circle cx={cx} cy={cy} r="11" className="hwchip" />
         <text x={cx} y={cy + 4} textAnchor="middle" className="hwchipt">{n}</text>
+      </>
+    ),
+    dot: (cx, cy, tone = '', r = 9) => <circle cx={cx} cy={cy} r={r} className={`hwdot ${tone}`} />,
+    tick: (cx, cy, s = 1) => (
+      <path d={`M${cx - 3.6 * s} ${cy + 0.2 * s} L${cx - s} ${cy + 2.8 * s} L${cx + 3.8 * s} ${cy - 2.6 * s}`} className="hwtick" />
+    ),
+    cross: (cx, cy, s = 5) => (
+      <>
+        <line x1={cx - s} y1={cy - s} x2={cx + s} y2={cy + s} className="hwxs" />
+        <line x1={cx + s} y1={cy - s} x2={cx - s} y2={cy + s} className="hwxs" />
       </>
     ),
   };
@@ -68,116 +92,27 @@ export function Drawing({ w, h, label, links = false, children }) {
   );
 }
 
-/* The map: the trip every request makes, along the top, and the work behind the scenes under it.
-   Two straight connectors join them: requests go down to be sorted, and a switch goes up to change
-   what answers. */
-function HeroMap() {
+/* The two lines of a client that change, lit the way the homepage lights them. The spaces that indent them are
+   written as strings, since JSX would drop them. */
+function CodeBox() {
   return (
-    <Drawing w={1000} h={400} links
-      label="Every request goes from your app through Understudy to one AI model and back. Behind the scenes, Understudy sorts requests into workloads, tests smarter, cheaper setups, switches when one passes, and keeps optimizing.">
-      {(p) => (
-        <>
-          <a href="#connect" aria-label="Step 1: you connect your app">
-            {p.box(20, 40, 180, 80, [['Your app'], ['asks for gpt-5.4', 'hws']])}
-            {p.chip(200, 40, 1)}
-          </a>
-          <rect x="300" y="18" width="400" height="124" rx="16" className="hwbx b" />
-          <text x="320" y="44" className="hwt">Understudy</text>
-          {p.box(320, 56, 360, 70, [['sends each request to the setup', 'hws'], ['that answers this workload now']])}
-          {p.box(800, 40, 180, 80, [['AI companies'], ['run the models', 'hws']])}
-          {p.line(200, 68, 297, 68)}{p.label(250, 60, 'request')}
-          {p.line(300, 98, 203, 98)}{p.label(250, 116, 'answer')}
-          {p.line(700, 68, 797, 68)}{p.label(750, 60, 'request')}
-          {p.line(800, 98, 703, 98)}{p.label(750, 116, 'answer')}
-          <a href="#workloads" aria-label="Step 2: it sorts your requests into workloads">
-            {p.box(150, 250, 190, 60, [['Sort into workloads']])}
-            {p.chip(150, 250, 2)}
-          </a>
-          <a href="#testing" aria-label="Step 3: it tests smarter, cheaper setups">
-            {p.box(400, 250, 190, 60, [['Test smarter,'], ['cheaper setups']])}
-            {p.chip(400, 250, 3)}
-          </a>
-          <a href="#switching" aria-label="Step 4: it switches, and continues to optimize">
-            {p.box(650, 250, 190, 60, [['Switch, then keep'], ['optimizing']], 'b')}
-            {p.chip(650, 250, 4)}
-          </a>
-          {p.line(340, 280, 397, 280)}
-          {p.line(590, 280, 647, 280, 'o')}{p.label(618, 271, 'passes', 'middle', 'o')}
-          {p.line(330, 128, 330, 247)}{p.label(320, 196, 'each request is sorted', 'end')}
-          {p.line(665, 248, 665, 129, 'b')}{p.label(677, 196, 'changes what answers', 'start', 'b')}
-          {p.path('M745 310 V360 H495 V313', 'a', true)}
-          {p.label(620, 382, 'keeps watching, trying runners-up and re-testing')}
-        </>
-      )}
-    </Drawing>
-  );
-}
-
-/* The same map for a narrow screen, as boxes and a list, so its words keep their size. */
-function PhoneMap() {
-  return (
-    <div className="hwmapphone">
-      <a className="hwhp" href="#connect">
-        <span className="hwhprow"><span className="hwnum">1</span>Your app</span>
-        <small>asks for gpt-5.4</small>
-      </a>
-      <span className="hwhpar">requests go down, answers come back up</span>
-      <div className="hwhp b">Understudy<small>sends each request to the setup that answers this workload now</small></div>
-      <span className="hwhpar">requests go down, answers come back up</span>
-      <div className="hwhp">AI companies<small>run the models</small></div>
-      <p className="hwhpnote">Behind the scenes, all the time:</p>
-      <ol className="hwloop">
-        <li><a href="#workloads"><span className="hwnum">2</span>Sort requests into workloads</a></li>
-        <li><a href="#testing"><span className="hwnum">3</span>Test smarter, cheaper setups</a></li>
-        <li><a href="#switching"><span className="hwnum">4</span>Switch when one passes, then keep optimizing</a></li>
-      </ol>
+    <div className="hwcode">
+      <div className="hwcodebar"><span>Two lines change</span></div>
+      <pre className="m hwcodepre">
+        <span>client = OpenAI(</span>
+        <span><span className="hwhl">{'  base_url="https://api.understudy.dev/v1",'}</span></span>
+        <span><span className="hwhl">{'  api_key=os.environ["UNDERSTUDY_KEY"],'}</span></span>
+        <span>)</span>
+      </pre>
     </div>
   );
 }
 
-function ConnectThrough() {
-  return (
-    <Drawing w={400} h={130}
-      label="Your app sends requests to Understudy, which sends them to an AI company. Answers come back the same way.">
-      {(p) => (
-        <>
-          {p.box(2, 35, 90, 60, [['Your app']])}
-          {p.box(155, 35, 90, 60, [['Understudy']], 'b')}
-          {p.box(308, 35, 90, 60, [['AI company']])}
-          {p.line(92, 55, 152, 55)}{p.label(123, 47, 'request')}
-          {p.line(155, 77, 95, 77)}{p.label(123, 93, 'answer')}
-          {p.line(245, 55, 305, 55)}{p.label(276, 47, 'request')}
-          {p.line(308, 77, 248, 77)}{p.label(276, 93, 'answer')}
-        </>
-      )}
-    </Drawing>
-  );
-}
-
-function ConnectCopies() {
-  return (
-    <Drawing w={400} h={185}
-      label="Your app sends requests straight to your own AI company and gets answers back. Afterwards it sends Understudy a copy.">
-      {(p) => (
-        <>
-          {p.box(2, 16, 90, 60, [['Your app']])}
-          {p.box(308, 16, 90, 60, [['Your AI'], ['company']])}
-          {p.line(92, 36, 305, 36)}{p.label(200, 29, 'request')}
-          {p.line(308, 58, 95, 58)}{p.label(200, 72, 'answer')}
-          {p.box(155, 118, 90, 56, [['Understudy']], 'b d')}
-          {p.path('M47 76 V146 H152', 'w')}
-          {p.label(100, 164, 'a copy, later', 'middle', 'w')}
-        </>
-      )}
-    </Drawing>
-  );
-}
-
-/* One request, the way the picture of sorting shows it: the instruction that stays the same, and
-   the detail that changes. */
+/* One request, the way the picture of sorting shows it: the instruction that stays the same, and the detail that
+   changes. */
 const card = (y, instruction, detail) => (
   <>
-    <rect x="2" y={y} width="236" height="62" rx="10" className="hwbx" />
+    <rect x="2" y={y} width="232" height="62" rx="10" className="hwbx" />
     <text x="14" y={y + 25} className="hws ins">{instruction}</text>
     <text x="14" y={y + 46} className="hws">{detail}</text>
   </>
@@ -186,68 +121,67 @@ const card = (y, instruction, detail) => (
 function Sorting() {
   return (
     <Drawing w={400} h={236}
-      label="Two requests with the same instruction and different details go to one workload. A request with a different instruction goes to another.">
+      label="Two requests with the same instructions and different details go to one workload, order questions. A request with different instructions goes to another workload, ticket summaries.">
       {(p) => (
         <>
           {card(6, 'Reply in one short sentence.', 'Where is order 2061?')}
           {card(84, 'Reply in one short sentence.', 'Has order 2062 shipped?')}
           {card(162, 'Summarize this ticket.', 'My printer won’t connect.')}
-          {p.box(286, 22, 112, 104, [['WORKLOAD', 'hwe'], ['order-status'], ['replies'], ['2 requests', 'hws']], 'b')}
-          {p.box(286, 146, 112, 84, [['WORKLOAD', 'hwe'], ['ticket'], ['summaries'], ['1 request', 'hws']])}
-          {p.line(238, 37, 283, 60)}{p.line(238, 115, 283, 92)}{p.line(238, 193, 283, 190)}
+          {p.box(284, 22, 114, 104, [['WORKLOAD', 'hwe b'], ['Order'], ['questions'], ['2 requests', 'hws']], 'b')}
+          {p.box(284, 146, 114, 84, [['WORKLOAD', 'hwe'], ['Ticket'], ['summaries'], ['1 request', 'hws']])}
+          {p.line(234, 37, 281, 60)}{p.line(234, 115, 281, 92)}{p.line(234, 193, 281, 190)}
         </>
       )}
     </Drawing>
   );
 }
 
-/* How often each setup's answers disagreed with gpt-5.4's, per 100 requests, against the pass mark:
-   what gpt-5.4 disagrees with itself, plus a quarter (src/eval/compare.js floorFrom). A setup passes
-   only when a sample makes Understudy sure it is under the mark, so the one that passes here is well
-   under it, and the example never shows a setup passing on the line. */
+/* How often each model's answers differed from your model's, per 100 requests, against the quality bar: what your
+   model differs from itself, plus a quarter (src/eval/compare.js floorFrom). The one that passes is well under the
+   bar, so the example never shows a model passing on the line. */
 const TRIED = [
-  ['gpt-5.4, against itself', 4, 'b', 'sets the pass mark'],
-  ['gemini-2.5-flash-lite', 1, 'o', 'passes'],
-  ['claude-haiku-4.5', 6, 'x', 'just over the mark'],
-  ['mistral-small-3.2', 12, 'x', 'doesn’t pass'],
+  ['Your model, asked twice', 4, 'b', 'sets the bar'],
+  ['Gemini 2.5 Flash Lite', 1, 'o', 'passes'],
+  ['Claude Haiku 4.5', 6, 'x', 'just misses'],
+  ['Mistral Small 3.2', 12, 'x', 'fails'],
 ];
 const MARK = 5;
-// the tracks run from 0 to 15 in 100, 12 units to each
-const PER = 12;
+// the tracks run from 0 to 15 in 100, 11 units to each, from x 156
+const PER = 11;
+const X0 = 156;
 
-function PassMark() {
+function QualityBar() {
   return (
-    <Drawing w={400} h={206}
-      label="gpt-5.4 disagrees with itself 4 times in 100, which with a small allowance sets the pass mark at 5 in 100. gemini-2.5-flash-lite disagrees once in 100 and passes. claude-haiku-4.5 disagrees 6 times and mistral-small-3.2 12 times, so neither passes.">
+    <Drawing w={400} h={212}
+      label="Your model gives a slightly different answer 4 times in 100 when asked the same thing twice, so the quality bar is 5 in 100. Gemini 2.5 Flash Lite differs once in 100 and passes. Claude Haiku 4.5 differs 6 times in 100 and just misses. Mistral Small 3.2 differs 12 times in 100 and fails.">
       {(p) => (
         <>
           {TRIED.map(([name, n, tone, verdict], i) => {
-            const y = 24 + i * 46;
+            const y = 26 + i * 46;
             return (
               <g key={name}>
-                <text x="0" y={y} className="hws">{name}</text>
+                {p.text(0, y, name, 'hws ink')}
                 {p.label(0, y + 17, verdict, 'start', tone)}
-                <rect x="150" y={y - 11} width={15 * PER} height="14" rx="4" className="hwtrack" />
-                <rect x="150" y={y - 11} width={n * PER} height="14" rx="4" className={`hwbar ${tone}`} />
-                {p.label(338, y, `${n} in 100`, 'start')}
+                <rect x={X0} y={y - 11} width={15 * PER} height="14" rx="4" className="hwtrack" />
+                <rect x={X0} y={y - 11} width={n * PER} height="14" rx="4" className={`hwbar ${tone}`} />
+                {p.label(X0 + 15 * PER + 8, y, `${n} in 100`, 'start')}
               </g>
             );
           })}
-          <line x1={150 + MARK * PER} y1="4" x2={150 + MARK * PER} y2="176" className="hwpmk" />
-          {p.label(150 + MARK * PER, 196, `pass mark: ${MARK} in 100`, 'middle', 'b')}
+          <line x1={X0 + MARK * PER} y1="6" x2={X0 + MARK * PER} y2="180" className="hwpmk" />
+          {p.label(X0 + MARK * PER, 202, `quality bar: ${MARK} in 100`, 'middle', 'b')}
         </>
       )}
     </Drawing>
   );
 }
 
-/* The switch, stage by stage: how much of the traffic the new setup answers, and for how long at
-   least. How long each stage lasts is set two lines high, under a tick where the stage ends, so the
-   three never read as one run of words. */
+/* The switch, stage by stage: how much of the traffic the new model answers, and for how long at least
+   (ROLLOUT_STAGES in src/config.js). */
 function Rollout() {
   return (
-    <Drawing w={400} h={206}
-      label="The new setup answers 5 in 100 requests for at least 2 hours, then 25 in 100 for at least 12 hours, then all requests.">
+    <Drawing w={400} h={226}
+      label="The new model answers 5 in 100 requests for at least 2 hours, then 25 in 100 for at least 12 hours, then all requests. If answers get worse at any step, requests go back.">
       {(p) => (
         <>
           <line x1="30" y1="160" x2="392" y2="160" className="hwbase" />
@@ -258,27 +192,89 @@ function Rollout() {
           {p.label(95, 143, '5 in 100', 'middle', 'b')}
           {p.label(210, 117, '25 in 100', 'middle', 'b')}
           {p.label(331, 20, 'all requests', 'middle', 'b')}
-          {p.label(95, 183, '2 hours')}{p.label(95, 198, 'or more')}
-          {p.label(210, 183, '12 hours')}{p.label(210, 198, 'or more')}
+          {p.label(95, 183, 'at least')}{p.label(95, 198, '2 hours')}
+          {p.label(210, 183, 'at least')}{p.label(210, 198, '12 hours')}
           {p.label(331, 183, 'from then on')}
+          {p.label(200, 222, 'worse at any step? requests go back', 'middle', 'x')}
         </>
       )}
     </Drawing>
   );
 }
 
-/** One step: its number, its title and the one line that says what it is, then the rest of it. */
-export function Step({ n, id, title, intro, children }) {
+/* After a switch: about 20 of the new model's answers a day are also sent to your model and compared
+   (src/learn/control.js), and here the difference stays well under the bar. The line is an example. */
+const DAYS = [1.5, 2.2, 1.2, 1.8, 1.4, 1.1, 1.6, 1.3, 1.0, 1.5, 1.2, 1.4, 1.1, 1.3, 1.0, 1.2, 1.4, 1.1, 1.2, 1.0,
+  1.3, 1.1, 1.2, 1.0, 1.1, 1.2, 1.0, 1.1];
+
+export function DailyChecks() {
+  const Y = (r) => 150 - r * 20;
+  const X = (d) => 44 + d * 12.2;
+  const line = DAYS.map((r, i) => `${X(i).toFixed(1)} ${Y(r).toFixed(1)}`).join(' L');
   return (
-    <section className="hwstep" id={id} aria-labelledby={`${id}-h`}>
-      <div className="hwstephead">
-        <span className="hwnum" aria-hidden="true">{n}</span>
-        <div className="hwcol">
+    <Drawing w={400} h={214}
+      label="After a switch, about 20 answers a day are also sent to your model and compared. Over four weeks the new model differs from your model about once in 100, under the quality bar of 5 in 100. If it got clearly worse, requests would go back to your model.">
+      {(p) => (
+        <>
+          <line x1="40" y1="150" x2="380" y2="150" className="hwbase" />
+          <line x1="40" y1={Y(5)} x2="380" y2={Y(5)} className="hwpmk" />
+          {p.label(380, Y(5) - 9, 'quality bar: 5 in 100', 'end', 'b')}
+          <path d={`M${line}`} className="hwline" />
+          {p.label(46, 84, 'differs about 1 in 100', 'start', 'o')}
+          {p.label(40, 170, 'day 1', 'start')}
+          {p.label(380, 170, 'day 28', 'end')}
+          {p.label(210, 196, 'about 20 answers compared each day', 'middle')}
+        </>
+      )}
+    </Drawing>
+  );
+}
+
+/** One step: its number and title over the few sentences that say what it is, with its picture beside them. */
+export function Step({ n, id, title, figure, top = false, children }) {
+  return (
+    <section className={`hwstep${top ? ' hwtop' : ''}`} id={id} aria-labelledby={`${id}-h`}>
+      <div className="hwwords">
+        <div className="hwhead">
+          <span className="hwnum" aria-hidden="true">{n}</span>
           <h2 id={`${id}-h`}><span className="hwsr">Step {n}: </span>{title}</h2>
-          <p className="hwintro">{intro}</p>
         </div>
+        {children}
       </div>
-      {children}
+      {figure}
+    </section>
+  );
+}
+
+/** A picture on its panel, with an optional line under it. */
+export function Figure({ caption, children }) {
+  return (
+    <figure>
+      <div className="hwfig">{children}</div>
+      {caption && <figcaption>{caption}</figcaption>}
+    </figure>
+  );
+}
+
+/** The way on from a guide, at its foot: signing up, or back into the app, and the other guide. */
+export function End({ me, go, title, line, other }) {
+  return (
+    <section className="hwend" aria-labelledby="hwend-h">
+      <h2 id="hwend-h">{title}</h2>
+      <p>{line}</p>
+      {/* until the account check answers, neither way in is offered, as in the header */}
+      {me && (
+        <div className="lp-cta">
+          {me.signedIn ? (
+            <To to={me.onboarded ? 'dash' : 'connect'} go={go} className="btn big">
+              {me.onboarded ? 'Open the dashboard' : 'Finish connecting'}
+            </To>
+          ) : (
+            <To to="signup" go={go} className="btn big">Get an API key</To>
+          )}
+          <To to={other[0]} go={go} className="btn sec big">{other[1]}</To>
+        </div>
+      )}
     </section>
   );
 }
@@ -293,161 +289,86 @@ export default function HowItWorks({ me, go, inApp = false }) {
   }, []);
 
   return (
-    <Root className="hw" id={inApp ? undefined : 'main'}>
+    <Root className="hw hwhow" id={inApp ? undefined : 'main'}>
       <header className="hwopen">
         <div>
           <div className="eyeb doceyeb">How it works</div>
           <h1>How Understudy works</h1>
           <p className="hwlede">
-            Understudy is a stand-in for the AI model your app uses. For each job your app gives that model,
-            Understudy tests smarter, cheaper ways to do it, using your own real requests. It switches only when
-            one answers as well as your model does, and it keeps optimizing after that.
+            Understudy sits between your app and the AI models it uses. It tests other models on your own requests,
+            and moves a job to a better one only when your answers stay as good.
           </p>
         </div>
-        <aside className="hwexample" aria-label="The example on this page">
-          <span className="hwkick">The example on this page</span>
-          <p>Your app uses <b>gpt-5.4</b> to answer customers who ask where their order is.</p>
-          <div className="hwnums"><span className="m">1,400 requests a day</span><span className="m">about $310 a month</span></div>
-          <p>Why the name? In a theater, an understudy learns the lead actor&rsquo;s part, ready to step in.</p>
+        <aside className="hwexample" aria-label="Why the name">
+          <span className="hwkick">Why the name?</span>
+          <p>In a theater, an understudy learns the lead actor’s part, so they can step in when needed.</p>
         </aside>
       </header>
 
-      <figure>
-        <div className="hwfig">
-          <div className="hwmapwide"><HeroMap /></div>
-          <PhoneMap />
+      <section className="hwstart" id="connect" aria-labelledby="connect-h">
+        <div>
+          <span className="hwkick">You do this once</span>
+          <h2 id="connect-h">Change two lines of code</h2>
+          <p>
+            Give your app Understudy’s address and your Understudy key. Your app keeps asking for the same model, and
+            every request goes to it until a better one is proven.
+          </p>
         </div>
-        <figcaption>
-          <b>Two things happen at the same time.</b> Every request makes the same trip, from your app through
-          Understudy to one AI model and back. Behind the scenes, Understudy sorts your requests into workloads,
-          tests smarter, cheaper setups, switches when one passes, and keeps optimizing. Only a switch changes
-          which setup answers your requests. Click or tap a numbered box to go to that step.
-        </figcaption>
-      </figure>
-
-      <Step n={1} id="connect" title="You connect your app"
-        intro="There are two ways to connect. The difference is whether your requests pass through Understudy.">
-        <div className="hwtwo">
-          <figure>
-            <div className="hwfig"><h3>Through Understudy</h3><ConnectThrough /></div>
-            <figcaption>
-              You change two lines in your code: the address your requests go to, and the key. Your app still asks
-              for gpt-5.4 and gets answers in the same format. From then on, Understudy can choose which setup
-              answers.
-            </figcaption>
-          </figure>
-          <figure>
-            <div className="hwfig"><h3>Copies only</h3><ConnectCopies /></div>
-            <figcaption>
-              Your app keeps sending requests to your own AI company and sends Understudy a copy afterwards.
-              Understudy tests on the copies and shows you what you&rsquo;d save, but nothing changes for your
-              app until its requests go through Understudy.
-            </figcaption>
-          </figure>
-        </div>
-      </Step>
-
-      <Step n={2} id="workloads" title="It sorts your requests into workloads"
-        intro="A workload is one kind of job your app does, such as answering order-status questions or summarizing support tickets.">
-        <div className="hwtwo hwwords">
-          <div className="hwcol">
-            <p>
-              Understudy recognizes a job by the parts of a request that stay the same every time: the
-              instructions, the model it asks for, the tools the model may use, and the format of the answer. It
-              ignores the parts that change, like a customer&rsquo;s name or an order number. This sorting uses
-              simple rules, not AI.
-            </p>
-            <p>
-              Each workload is tested and switched on its own, because a model that does one job well can do
-              another badly.
-            </p>
-          </div>
-          <figure>
-            <div className="hwfig"><Sorting /></div>
-            <figcaption>
-              The same instructions with different details are the same job. Different instructions are a
-              different job.
-            </figcaption>
-          </figure>
-        </div>
-      </Step>
-
-      <Step n={3} id="testing" title="It tests smarter, cheaper setups on your own requests"
-        intro="Once a workload has enough requests to test fairly, and a test would soon pay for itself, Understudy tests it on its own. You can also start a test yourself.">
-        <div className="hwtwo hwwords">
-          <div className="hwcol">
-            <p>
-              First, gpt-5.4 answers a sample of your real requests a second time. The same model doesn&rsquo;t
-              always answer the same way, so Understudy counts how often its two answers disagree. For written
-              answers, another AI model does the judging. That rate, plus a small allowance, is the pass mark.
-            </p>
-            <p>
-              Then the most promising setups answer the same requests, including smarter ones such as your own
-              model asked to think less, or a cheap model whose answers are checked, with doubtful ones sent to
-              your own model. A setup passes only if Understudy is confident it disagrees with gpt-5.4 no more
-              often than the pass mark. Setups that can&rsquo;t pass are stopped early to save money, and the
-              winner is tested again on new requests before it counts.
-            </p>
-            <p>
-              Which of the setups that pass is switched to, and how Understudy makes sure before and after, is
-              explained in <To to="routing" go={go}>How models are routed</To>.
-            </p>
-          </div>
-          <figure>
-            <div className="hwfig"><PassMark /></div>
-            <figcaption>
-              How often each setup&rsquo;s answers disagreed with gpt-5.4&rsquo;s, per 100 requests. The dashed
-              line is the pass mark. The models and numbers are an example.
-            </figcaption>
-          </figure>
-        </div>
-      </Step>
-
-      <Step n={4} id="switching" title="It switches, and continues to optimize"
-        intro="You choose once, for every workload, whether a setup that passes is switched to on its own, waits for your yes, or is never switched to. It switches on its own unless you choose otherwise.">
-        <div className="hwtwo hwwords">
-          <div className="hwcol">
-            <p>
-              A switch starts small. The new setup answers 5 in every 100 requests, then 25, then all of them. If
-              its answers get clearly worse at any step, the workload goes back to what it used before.
-            </p>
-            <p>
-              After that, Understudy keeps optimizing. It watches every answer and keeps trying the runners-up on
-              a few requests. It also re-tests the workload every 30 days. Each time a re-test finds nothing
-              better, the wait before the next one doubles, and a cheaper new model or a price change brings it
-              back to 30 days.
-            </p>
-          </div>
-          <figure>
-            <div className="hwfig"><Rollout /></div>
-            <figcaption>
-              The share of requests the new setup answers over time. Each step also waits until enough requests
-              have been answered to judge it.
-            </figcaption>
-          </figure>
-        </div>
-      </Step>
-
-      <section className="hwend" aria-labelledby="hwend-h">
-        <h2 id="hwend-h">Try it on your own requests</h2>
-        <p>
-          Every request keeps going to the model your app asks for until a smarter, cheaper setup passes on your
-          own requests.
-        </p>
-        {/* until the account check answers, neither way in is offered, as in the header */}
-        {me && (
-          <div className="lp-cta">
-            {me.signedIn ? (
-              <To to={me.onboarded ? 'dash' : 'connect'} go={go} className="btn big">
-                {me.onboarded ? 'Open the dashboard' : 'Finish connecting'}
-              </To>
-            ) : (
-              <To to="signup" go={go} className="btn big">Get an API key</To>
-            )}
-            <To to="pricing" go={go} className="btn sec big">See pricing</To>
-          </div>
-        )}
+        <CodeBox />
       </section>
+
+      <div className="hwthen"><span className="hwkick">Then Understudy does four things</span></div>
+
+      <div className="hwsteps">
+        <Step n={1} id="workloads" title="Understand your workloads" figure={<Figure><Sorting /></Figure>}>
+          <p>
+            Understudy groups your requests by the job they do, like answering order questions or summarizing support
+            tickets. Each job is called a <b className="hwterm">workload</b>.
+          </p>
+          <p className="hwsoft">
+            Each workload gets its own best model, because a model that is good at one job can be poor at another.
+          </p>
+        </Step>
+
+        <Step n={2} id="testing" title="Find better model options"
+          figure={<Figure caption="An example with four models."><QualityBar /></Figure>}>
+          <p>Other models answer a sample of your real requests, and each answer is compared with your model’s answer.</p>
+          <p>
+            Your model sets the <b className="hwterm">quality bar</b>. Ask it the same thing twice and its answers differ
+            a little. Another model passes only if it differs from your model no more than that, plus a small margin.
+          </p>
+          {/* open-ended writing, and answers too varied to match, are judged "at least as good" (judgeMode in src/eval/run.js) */}
+          <p className="hwsoft">
+            For open-ended writing like poems, or answers that vary a lot, a different answer is fine if it is at least
+            as good. A model has to pass twice, on different requests.
+          </p>
+        </Step>
+
+        <Step n={3} id="switching" title="Shift traffic gradually" figure={<Figure><Rollout /></Figure>}>
+          <p>
+            A model that passes starts with 5 in every 100 requests, then 25, then all of them. If answers get worse at
+            any step, requests go back.
+          </p>
+          <p className="hwsoft">
+            You choose what happens when a model passes: switch automatically (the default), ask you first, or never
+            switch.
+          </p>
+        </Step>
+
+        <Step n={4} id="learning" title="Learn from real outcomes" figure={<Figure><DailyChecks /></Figure>}>
+          <p>
+            After a switch, Understudy keeps checking. Every day it compares some answers with your model’s, and it
+            notices when an answer didn’t work, like a request sent again or a tool that failed.
+          </p>
+          <p className="hwsoft">
+            If quality slips, requests go back to your model. By default, it tests again after 30 days, looking for newer,
+            cheaper models.
+          </p>
+        </Step>
+      </div>
+
+      <End me={me} go={go} title="Try it on your own requests"
+        line="Nothing changes until a better model is proven on your requests." other={['routing', 'How models are routed']} />
     </Root>
   );
 }
