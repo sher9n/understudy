@@ -1,51 +1,99 @@
-/* How Understudy works (screens/legal/HowItWorks.jsx): the map of what happens to a request, then
-   the four steps, each with one picture. Every colour is a theme token, so dark mode follows without
-   a rule of its own, and every class starts with hw, so no rule written for another page reaches in. */
+/* The two guides: How Understudy works (screens/legal/HowItWorks.jsx) and How models are routed
+   (screens/legal/HowRouting.jsx), as the "Step by step" and "Five steps" artboards drew them. An opening, then numbered
+   steps, each a few short sentences beside one picture. Every colour is a theme token, so dark mode follows without a
+   rule of its own, and every class starts with hw, so no rule written for another page reaches in (the app styles short
+   names such as .top, .on and .wide globally). */
 
 .pubpage > .hw { flex: 1 0 auto; }
 .hw { width: 100%; max-width: 1080px; margin: 0 auto; padding: 56px 24px 96px; box-sizing: border-box;
   display: flex; flex-direction: column; gap: 72px;
   /* the warning colour darkened until it reads as words on a drawing's panel: on its own it is
      3.8 to 1 there in the light theme, too faint for small type */
-  --hw-warn-read: color-mix(in srgb, var(--warn) 72%, var(--ink)); }
+  --hw-warn-read: color-mix(in srgb, var(--warn) 72%, var(--ink));
+  --hw-shadow: 0 1px 2px rgba(13, 13, 18, 0.06), 0 12px 40px rgba(13, 13, 18, 0.08); }
+[data-mode='dark'] .hw { --hw-shadow: 0 1px 2px rgba(0, 0, 0, 0.6), 0 12px 40px rgba(0, 0, 0, 0.5); }
+/* Read inside the app, the frame's page already pads the guide, so the guide adds nothing at its sides: on a phone the
+   two together drew every picture a tenth smaller than on the public page. */
+.shellmain .hw { padding: 12px 0 32px; }
 .hw p { margin: 0; text-wrap: pretty; }
 .hw h1, .hw h2, .hw h3 { margin: 0; color: var(--ink); text-wrap: balance; }
 /* said to a screen reader, not shown: the step number the round badge shows */
 .hwsr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
-/* The opening: what Understudy is, beside the example the whole page follows. */
-.hwopen { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 36px; align-items: end; }
-.hwopen h1 { font-size: clamp(34px, 5vw, 52px); font-weight: 700; letter-spacing: -0.04em; line-height: 1.04;
-  margin: 10px 0 16px; }
-.hwlede { font-size: 18px; line-height: 1.6; color: var(--mut-read); max-width: 62ch; }
-.hwexample { display: flex; flex-direction: column; gap: 10px; padding: 18px 20px; border-radius: 14px;
+/* The opening: what the page is about, and on How it works why the name, beside it. */
+.hwopen { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 40px; align-items: end; }
+.hwopen.hwsolo { grid-template-columns: minmax(0, 1fr); max-width: 780px; }
+.hw .hwopen h1 { font-size: clamp(34px, 5vw, 52px); font-weight: 700; letter-spacing: -0.04em; line-height: 1.04;
+  margin: 12px 0 16px; }
+.hwlede { font-size: 18px; line-height: 1.6; color: var(--mut-read); max-width: 60ch; }
+.hwlede b { color: var(--ink); font-weight: 600; }
+.hwexample { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px; border-radius: 14px;
   border: 1px solid var(--line); background: var(--panel); }
-.hwexample p { font-size: 14.5px; line-height: 1.55; color: var(--mut-read); }
-.hwexample b { color: var(--ink); font-weight: 600; }
+.hw .hwexample p { font-size: 14.5px; line-height: 1.55; color: var(--mut-read); }
 .hwkick { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.1em;
   text-transform: uppercase; color: var(--mut); font-weight: 700; }
-.hwnums { display: flex; flex-wrap: wrap; gap: 8px; }
-.hwnums span { font-size: 12.5px; padding: 3px 9px; border-radius: 7px; background: var(--raise);
-  border: 1px solid var(--line); color: var(--ink); }
+
+/* The one thing the reader does: two lines, set apart on a panel of their own, beside the code box. */
+.hwstart { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 36px; align-items: center;
+  padding: 32px; border-radius: 18px; border: 1px solid var(--line); background: var(--panel); scroll-margin-top: 16px; }
+.hw .hwstart h2 { font-size: clamp(24px, 3vw, 30px); font-weight: 700; letter-spacing: -0.03em; line-height: 1.15;
+  margin-top: 8px; }
+.hw .hwstart p { font-size: 16px; line-height: 1.65; color: var(--ink); margin-top: 12px; max-width: 44ch; }
+
+/* The code box, as the homepage has it: the two lines that change, lit. */
+.hwcode { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden;
+  box-shadow: var(--hw-shadow); min-width: 0; }
+.hwcodebar { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line);
+  background: var(--panel); }
+.hwcodebar span { font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--mut); font-weight: 600; }
+.hwcodepre { margin: 0; padding: 20px; font-size: 13px; line-height: 1.85; color: var(--ink); background: var(--code);
+  overflow-x: auto; }
+.hwcodepre > span { display: block; }
+.hwhl { display: inline-block; color: var(--ok); border-radius: 4px; padding: 0 6px; font-weight: 600; background: var(--okq); }
+
+/* "Then Understudy does four things": a label with a rule after it, tucked close over the first step. */
+.hwthen { display: flex; align-items: center; gap: 14px; margin-bottom: -36px; }
+.hwthen::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+
+/* The numbered steps: a badge and a title over a few sentences, with the picture beside them. */
+.hwsteps { display: flex; flex-direction: column; gap: 64px; }
+.hwstep { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 44px; align-items: center;
+  scroll-margin-top: 16px; }
+.hwstep.hwtop { align-items: start; }
+.hwhead { display: flex; gap: 14px; align-items: center; }
+.hwhead .hwnum { width: 36px; height: 36px; font-size: 15px; }
+.hw .hwhead h2 { font-size: clamp(22px, 2.8vw, 28px); font-weight: 700; letter-spacing: -0.03em; line-height: 1.15; }
+.hwwords { display: flex; flex-direction: column; gap: 12px; max-width: 48ch; min-width: 0; }
+.hwhow .hwwords { max-width: 46ch; }
+.hw .hwwords p { font-size: 16px; line-height: 1.65; color: var(--ink); }
+.hw .hwwords p.hwsoft { color: var(--mut-read); }
+.hwterm { color: var(--ink); font-weight: 600; }
+.hwnum { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+  border-radius: 50%; background: var(--brand); color: var(--onbrand);
+  font: 700 12px 'JetBrains Mono', ui-monospace, monospace; }
 
 /* A picture: drawn on a panel, with what it shows said under it. */
-.hw figure { margin: 0; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.hwfig { padding: 20px; border-radius: 16px; border: 1px solid var(--line); background: var(--panel); }
-.hwfig h3 { font-size: 15px; font-weight: 650; letter-spacing: -0.015em; margin-bottom: 10px; }
-.hw figcaption { font-size: 14px; line-height: 1.6; color: var(--mut-read); max-width: 76ch; }
-.hw figcaption b { color: var(--ink); font-weight: 600; }
+.hw figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.hwfig { padding: 20px; border-radius: 16px; border: 1px solid var(--line); background: var(--panel); min-width: 0; }
+.hw figcaption { font-size: 13.5px; line-height: 1.55; color: var(--mut); }
 
-/* The drawings. Text is set in the page's own two faces; the labels on arrows carry a band of the
-   panel's colour around them, so a line passing behind never cuts through a word. */
+/* The drawings. Text is set in the page's own two faces; the labels on arrows carry a band of the panel's colour
+   around them, so a line passing behind never cuts through a word. */
 .hwdg { width: 100%; height: auto; display: block; overflow: visible; }
 .hwdg .hwbx { fill: var(--raise); stroke: var(--line-strong); stroke-width: 1.5; }
 .hwdg .hwbx.b { fill: var(--brandq); stroke: var(--brand); }
+.hwdg .hwbx.o { fill: var(--okq); stroke: var(--ok); }
+.hwdg .hwbx.x { fill: var(--badq); stroke: var(--bad); }
 .hwdg .hwbx.d { stroke-dasharray: 5 4; }
 .hwdg .hwt { fill: var(--ink); font: 600 14px 'Schibsted Grotesk', system-ui, sans-serif; }
+.hwdg .hwt.o { fill: var(--ok); }
+.hwdg .hwt.x { fill: var(--bad); }
 .hwdg .hws { fill: var(--mut-read); font: 400 12.5px 'Schibsted Grotesk', system-ui, sans-serif; }
 .hwdg .hws.ins { fill: var(--brand-read); font-weight: 600; }
-.hwdg .hwe { fill: var(--mut); font: 700 10px 'JetBrains Mono', ui-monospace, monospace; letter-spacing: 0.1em; }
+.hwdg .hws.ink { fill: var(--ink); }
+.hwdg .hwe { fill: var(--mut); font: 700 11px 'JetBrains Mono', ui-monospace, monospace; letter-spacing: 0.1em; }
+.hwdg .hwe.b { fill: var(--brand-read); }
 .hwdg .hwl { fill: var(--mut-read); font: 400 11.5px 'JetBrains Mono', ui-monospace, monospace; paint-order: stroke;
   stroke: var(--panel); stroke-width: 5px; stroke-linejoin: round; }
 .hwdg .hwl.b { fill: var(--brand-read); }
@@ -55,12 +103,11 @@
 .hwdg .hwar { stroke: var(--mut); stroke-width: 1.6; fill: none; }
 .hwdg .hwar.b { stroke: var(--brand); stroke-width: 2.2; }
 .hwdg .hwar.o { stroke: var(--ok); stroke-width: 2; }
-.hwdg .hwar.w { stroke: var(--warn); stroke-dasharray: 5 4; }
+.hwdg .hwar.x { stroke: var(--bad); stroke-width: 1.8; }
 .hwdg .hwar.d { stroke-dasharray: 5 4; }
 .hwdg .hwmk { fill: var(--mut); }
 .hwdg .hwmk.b { fill: var(--brand); }
 .hwdg .hwmk.o { fill: var(--ok); }
-.hwdg .hwmk.w { fill: var(--warn); }
 .hwdg .hwmk.x { fill: var(--bad); }
 .hwdg .hwchip { fill: var(--brand); }
 .hwdg .hwchipt { fill: var(--onbrand); font: 700 12px 'JetBrains Mono', ui-monospace, monospace; }
@@ -72,81 +119,77 @@
 .hwdg .hwbar.o { fill: var(--ok); }
 .hwdg .hwbar.x { fill: var(--bad); }
 .hwdg .hwpmk { stroke: var(--brand); stroke-width: 2; stroke-dasharray: 4 4; }
-/* How models are routed (screens/legal/HowRouting.jsx): setups as dots that pass or fail, a cross for a
-   failed second look, the range a background check narrows, and red arrows for the ways back. */
-.hwdg .hwar.x { stroke: var(--bad); stroke-width: 1.8; }
+.hwdg .hwline { fill: none; stroke: var(--ok); stroke-width: 2.4; stroke-linejoin: round; stroke-linecap: round; }
+/* results as dots: passing, failing, the one switched to, and one not tested yet */
 .hwdg .hwdot { fill: var(--raise); stroke: var(--line-strong); stroke-width: 1.5; }
 .hwdg .hwdot.o { fill: var(--ok); stroke: var(--ok); }
 .hwdg .hwdot.x { fill: var(--raise); stroke: var(--bad); stroke-width: 2; }
-.hwdg .hwdot.w { fill: var(--warn); stroke: var(--warn); }
-.hwdg .hwxs { stroke: var(--bad); stroke-width: 2.6; stroke-linecap: round; }
-.hwdg .hwband { fill: var(--brand); opacity: 0.2; }
-.hwlist { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
-.hwlist li { font-size: 16px; line-height: 1.6; color: var(--ink); }
-.hwlist b { color: var(--ink); font-weight: 600; }
-/* a model's name, kept on one line: a break after the hyphen in gpt-5.4 read as two words */
-.hwnw { white-space: nowrap; }
+.hwdg .hwdot.b { fill: var(--brand); stroke: var(--brand); }
+.hwdg .hwdot.m { fill: var(--grid); stroke: var(--line-strong); }
+.hwdg .hwtick { fill: none; stroke: var(--onbrand); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.hwdg .hwxs { stroke: var(--bad); stroke-width: 2.4; stroke-linecap: round; }
+.hwdg .hwring { fill: none; stroke: var(--brand); stroke-width: 1.5; opacity: 0.45; }
 .hwdg a { cursor: pointer; }
 .hwdg a:hover .hwbx, .hwdg a:focus-visible .hwbx { stroke: var(--brand); stroke-width: 2.4; }
 
-/* The map at the top: drawn across on a wide screen, as boxes and a list on a narrow one. */
+/* The funnel at the top of How models are routed: drawn across on a wide screen, as a list on a narrow one. */
 .hwmapwide { display: block; }
-.hwmapphone { display: none; flex-direction: column; gap: 12px; max-width: 560px; }
-.hwhp { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 12px;
-  border: 1px solid var(--line-strong); background: var(--raise); font-weight: 600; font-size: 15px; color: var(--ink); }
-a.hwhp:hover { text-decoration: none; border-color: var(--brand); }
-.hwhp small { font-weight: 400; font-size: 13px; line-height: 1.45; color: var(--mut-read); }
-.hwhp.b { border-color: var(--brand); background: var(--brandq); }
-.hwhprow { display: flex; gap: 10px; align-items: center; }
-.hwhpar { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; color: var(--mut-read);
-  padding-left: 16px; border-left: 2px solid var(--line-strong); margin-left: 18px; }
-.hw .hwhpnote { font-size: 14px; color: var(--mut-read); margin-top: 6px; }
+.hwmapphone { display: none; }
 .hwloop { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.hwloop a { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 10px;
+.hwloop a { display: flex; gap: 10px; align-items: center; padding: 11px 12px; border-radius: 10px;
   border: 1px solid var(--line-strong); background: var(--raise); color: var(--ink); font-weight: 600; font-size: 14.5px; }
 .hwloop a:hover { text-decoration: none; border-color: var(--brand); }
-.hwnum { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
-  border-radius: 50%; background: var(--brand); color: var(--onbrand);
-  font: 700 12px 'JetBrains Mono', ui-monospace, monospace; }
 
-/* The numbered steps: a heading, one line that says what the step is, then words beside a picture. */
-.hwstep { display: flex; flex-direction: column; gap: 22px; scroll-margin-top: 24px; }
-.hwstephead { display: flex; gap: 16px; align-items: flex-start; }
-.hwstephead .hwnum { width: 40px; height: 40px; font-size: 17px; margin-top: 1px; }
-.hwstephead h2 { font-size: clamp(24px, 3.2vw, 32px); font-weight: 700; letter-spacing: -0.03em; line-height: 1.15; }
-.hwcol { max-width: 68ch; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
-.hwcol p { font-size: 16px; line-height: 1.65; color: var(--ink); }
-.hwstephead .hwcol { gap: 8px; }
-.hw .hwintro { color: var(--mut-read); }
-.hwtwo { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.hwtwo.hwwords { gap: 36px; align-items: center; }
+/* The five kinds of option, one to a row with its icon. */
+.hwopts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; min-width: 0;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden; }
+.hwopts li { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 12px; padding: 12px 16px;
+  border-top: 1px solid var(--line); align-items: center; }
+.hwopts li:first-child { border-top: 0; }
+.hwic { width: 36px; height: 36px; border-radius: 10px; background: var(--brandq); color: var(--brand-read);
+  display: flex; align-items: center; justify-content: center; }
+.hwopts b { display: block; font-size: 14.5px; font-weight: 650; letter-spacing: -0.01em; color: var(--ink); }
+.hwoptd { display: block; font-size: 13.5px; line-height: 1.5; color: var(--mut-read); margin-top: 1px; }
+
+/* The three routing priorities, the default one lit. */
+.hwprio { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
+.hwprio > div { border: 1px solid var(--line); border-radius: 12px; background: var(--raise); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 6px; }
+.hwprio > div.hwprioon { border-color: var(--brand); background: var(--brandq); }
+.hwprio b { font-size: 15px; font-weight: 700; letter-spacing: -0.015em; color: var(--ink); display: flex; gap: 8px;
+  align-items: baseline; flex-wrap: wrap; }
+.hwprio small { font: 700 10px 'JetBrains Mono', ui-monospace, monospace; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--brand-read); }
+.hwprio span { font-size: 14px; line-height: 1.55; color: var(--mut-read); }
 
 /* The way on from here, at the foot of the page. */
 .hwend { border-top: 1px solid var(--line); padding-top: 56px; text-align: center; display: flex;
   flex-direction: column; align-items: center; gap: 12px; }
-.hwend h2 { font-size: clamp(26px, 3.4vw, 34px); font-weight: 700; letter-spacing: -0.035em; line-height: 1.15; }
-.hwend p { font-size: 15.5px; line-height: 1.6; color: var(--mut-read); max-width: 56ch; }
-.hwend .lp-cta { margin-top: 16px; }
+.hw .hwend h2 { font-size: clamp(26px, 3.4vw, 34px); font-weight: 700; letter-spacing: -0.035em; line-height: 1.15; }
+.hw .hwend p { font-size: 16px; line-height: 1.6; color: var(--mut-read); max-width: 52ch; }
+.hwend .lp-cta { margin-top: 14px; }
 
-/* Below this width the map's labels would shrink under ten pixels, so the list takes its place. */
+/* Below this width the funnel's labels would shrink under ten pixels, so the list takes its place. */
 @media (max-width: 960px) {
   .hwmapwide { display: none; }
-  .hwmapphone { display: flex; }
+  .hwmapphone { display: block; }
 }
-/* Side by side, a picture would be drawn too small to read: the words go above it, and the picture
-   keeps a size its labels can be read at. */
+/* Side by side, a picture would be drawn too small to read: the words go above it, and the picture keeps a size its
+   labels can be read at. */
 @media (max-width: 900px) {
-  .hwopen { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  .hwopen, .hwstart, .hwstep { grid-template-columns: minmax(0, 1fr); gap: 22px; }
   .hwexample { max-width: 620px; }
-  .hwtwo, .hwtwo.hwwords { grid-template-columns: minmax(0, 1fr); gap: 24px; }
-  .hwtwo > figure { max-width: 540px; }
+  .hwstep > figure, .hwstep > .hwopts, .hwstep > .hwprio { max-width: 560px; }
+  .hwstart { padding: 22px 18px; }
+  .hwthen { margin-bottom: -28px; }
 }
 @media (max-width: 720px) {
   .hw { padding: 34px 16px 64px; gap: 56px; }
   .hwlede { font-size: 17px; }
-  .hwstephead { gap: 12px; }
-  .hwstephead .hwnum { width: 32px; height: 32px; font-size: 14px; }
   /* every pixel of padding is a pixel the drawing, and so its words, cannot use */
   .hwfig { padding: 12px; }
   .hwend { padding-top: 44px; }
+  /* the code's lines wrap with their words rather than running off the box */
+  .hwcodepre { font-size: 12px; padding: 16px 14px; word-break: break-all; }
+  .hwhl { display: inline; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
 }
