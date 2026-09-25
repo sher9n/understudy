@@ -134,6 +134,22 @@
 .wp .wp-take svg { width: 16px; height: 16px; flex: none; margin-top: 2px; color: var(--brand-read); }
 .wp .wp-detailgrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
 .wp .wp-sub { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mut); margin: 0 0 8px; }
+
+/* What a column means: a small "i" beside its name, and the words it opens, floating above the page (Help in
+   WorkloadDetail.jsx). On a phone the column names are hidden, so one beside the table's name explains both. */
+.wp .wp-help { display: inline-grid; place-items: center; width: 18px; height: 18px; margin: -4px -2px -4px 3px; padding: 0; border: 0;
+  background: none; color: var(--mut); cursor: help; vertical-align: middle; border-radius: 50%; }
+.wp .wp-help svg { width: 13px; height: 13px; }
+.wp .wp-help:hover, .wp .wp-help[aria-expanded="true"] { color: var(--ink); }
+.wp .wp-help:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.wp .wp-phonehelp { display: none; }
+.wp-tipbox { position: fixed; z-index: 60; box-sizing: border-box; background: var(--raise); color: var(--ink); border: 1px solid var(--line-strong);
+  border-radius: 10px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14); padding: 10px 12px; font-family: 'Schibsted Grotesk', system-ui, sans-serif;
+  font-size: 12.5px; line-height: 1.5; font-weight: 400; letter-spacing: -0.006em; text-transform: none; text-align: left; white-space: normal;
+  max-height: calc(100vh - 24px); overflow-y: auto; overscroll-behavior: contain; }
+.wp-tipbox p { margin: 0; }
+.wp-tipbox p + p { margin-top: 6px; }
+.wp-tipbox b { font-weight: 700; }
 .wp .wp-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--mut-read); margin-top: 6px; }
 .wp .wp-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
 .wp .wp-empty { padding: 4px 20px 20px; color: var(--mut-read); font-size: 13.5px; }
@@ -220,6 +236,7 @@
      nothing a column showed is dropped (as every table in the app does, see phone.css). */
   .wp .wp-cands, .wp .wp-cands tbody, .wp .wp-calls, .wp .wp-calls tbody { display: block; }
   .wp .wp-cands thead, .wp .wp-calls thead { display: none; }
+  .wp .wp-phonehelp { display: inline; }
   .wp .wp-cands td, .wp .wp-calls td { border: 0; padding: 0; white-space: normal; text-align: left; }
   .wp .wp-cands td[data-label]::before, .wp .wp-calls td[data-label]::before {
     content: attr(data-label); display: block; font-family: 'Schibsted Grotesk', system-ui, sans-serif; font-size: 11px; font-weight: 600;

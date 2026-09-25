@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { href } from '../router.js';
 import { plainClick } from '../nav.jsx';
 import { api, num, timeIST } from '../api.js';
@@ -583,6 +584,101 @@ function RunRow({ w, r, open, onToggle }) {
   );
 }
 
+/* What the two columns of a measurement's table mean, in the words its information bubbles say (see Help). The bar is
+   named with its figure, since passing is what both columns are read against. */
+function ColumnWords({ rp, which }) {
+  const bar = rp.bar > 0 ? `, ${Math.round(rp.bar * 1000) / 10}% here` : '';
+  if (which === 'upto') {
+    return (
+      <>
+        <p><b>Up to</b> is the highest the true figure could be. A test sees only some of your requests, so the figure it
+          measures could be off by chance. Understudy is 95% sure the true figure is no higher than this.</p>
+        <p>The fewer requests a setup answered, the higher it is: one stopped after three requests can show 0.0% and still be
+          up to 47%, because three matching answers prove little. A setup passes only when this figure is under the bar{bar}.</p>
+      </>
+    );
+  }
+  return rp.yardstick === 'quality' ? (
+    <>
+      <p><b>Worse</b> is how often this setup's answer was clearly worse than your own model's answer to the same request, out
+        of the requests it answered in this test. The judge read each pair twice, once in each order, and counted an answer as
+        worse only when both readings said so.</p>
+      <p>A setup passes when this stays under the bar{bar}. The bar comes from how often your own model's answer is clearly
+        worse than its own other answer to the same request.</p>
+    </>
+  ) : (
+    <>
+      <p><b>Differed</b> is how often this setup gave a different answer from your own model to the same request, out of the
+        requests it answered in this test.</p>
+      <p>A setup passes when this stays under the bar{bar}. The bar comes from how often your own model gives a different answer
+        when it is asked the same request twice.</p>
+    </>
+  );
+}
+
+/* A small "i" beside a name that says what it means: shown while the pointer or the keyboard is on it, and on a tap,
+   which is all a phone has, until a tap elsewhere or Escape. The words float above the page rather than inside the
+   table, whose sideways-scrolling box would cut them off, or grow a scrollbar, on a measurement with a row or two. */
+function Help({ label, children }) {
+  const [hover, setHover] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [at, setAt] = useState(null);
+  const btn = useRef(null);
+  const box = useRef(null);
+  const id = `wp-help-${useId().replace(/[^A-Za-z0-9]/g, '')}`;
+  const shown = hover || pinned;
+  /* Under the "i", centred and kept on the screen; above it where below would run off the bottom; and where it fits
+     neither way (both columns' words on a phone), as low as it can sit while staying on the screen, scrolling in
+     itself if it is taller than the screen. */
+  const place = useCallback(() => {
+    const r = btn.current?.getBoundingClientRect();
+    if (!r) return;
+    const width = Math.min(300, window.innerWidth - 24);
+    const left = Math.max(12, Math.min(r.left + r.width / 2 - width / 2, window.innerWidth - width - 12));
+    const h = Math.min(box.current?.offsetHeight || 0, window.innerHeight - 24);
+    const below = r.bottom + 8;
+    const above = r.top - 8 - h;
+    const top = !h || below + h <= window.innerHeight - 12 ? below : above >= 12 ? above : Math.max(12, window.innerHeight - 12 - h);
+    setAt({ top, left, width });
+  }, []);
+  useLayoutEffect(() => {
+    if (!shown) { setAt(null); return undefined; }
+    place();
+    // placed again once it is drawn and its height is known, and whenever the page or the table moves under it
+    const raf = requestAnimationFrame(place);
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place); };
+  }, [shown, place]);
+  useEffect(() => {
+    if (!pinned) return undefined;
+    const away = (e) => { if (!btn.current?.contains(e.target) && !box.current?.contains(e.target)) setPinned(false); };
+    const esc = (e) => { if (e.key === 'Escape') { setPinned(false); setHover(false); } };
+    document.addEventListener('pointerdown', away);
+    document.addEventListener('keydown', esc);
+    return () => { document.removeEventListener('pointerdown', away); document.removeEventListener('keydown', esc); };
+  }, [pinned]);
+  return (
+    <>
+      <button ref={btn} type="button" className="wp-help" aria-label={`What ${label} means`} aria-expanded={pinned}
+        aria-describedby={shown ? id : undefined}
+        onPointerEnter={(e) => { if (e.pointerType === 'mouse') setHover(true); }}
+        onPointerLeave={(e) => { if (e.pointerType === 'mouse') setHover(false); }}
+        onFocus={(e) => { if (e.currentTarget.matches(':focus-visible')) setHover(true); }}
+        onBlur={() => setHover(false)}
+        onClick={() => setPinned((v) => !v)}
+        onKeyDown={(e) => { if (e.key === 'Escape') { setHover(false); setPinned(false); } }}>
+        {I.info}
+      </button>
+      {/* inside the app's own box, which carries the colours of the light or dark theme; the page's body has none */}
+      {shown && at && createPortal(
+        <div ref={box} id={id} role="tooltip" className="wp-tipbox" style={{ top: at.top, left: at.left, width: at.width }}>{children}</div>,
+        btn.current?.closest('[data-mode]') ?? document.body,
+      )}
+    </>
+  );
+}
+
 function RunDetail({ rp }) {
   const axis = rp.yardstick === 'quality' ? 'Worse than yours' : 'Differed from yours';
   const run = { ...rp, axis };
@@ -603,7 +699,11 @@ function RunDetail({ rp }) {
         </div>
       )}
       <div>
-        <p className="wp-sub">Candidates tested</p>
+        <p className="wp-sub">
+          Candidates tested
+          {/* a phone shows no column names, so both columns are explained here instead */}
+          <span className="wp-phonehelp"><Help label={`${axis.split(' ')[0]} and Up to`}><ColumnWords rp={rp} which="gap" /><ColumnWords rp={rp} which="upto" /></Help></span>
+        </p>
         <div className="wp-tablewrap">
           <table className="wp-cands">
             <thead>
@@ -611,8 +711,8 @@ function RunDetail({ rp }) {
                 <th aria-label="Number" />
                 <th>Setup</th>
                 <th>Result</th>
-                <th className="r">{axis.split(' ')[0]}</th>
-                <th className="r">Up to</th>
+                <th className="r">{axis.split(' ')[0]}<Help label={axis.split(' ')[0]}><ColumnWords rp={rp} which="gap" /></Help></th>
+                <th className="r">Up to<Help label="Up to"><ColumnWords rp={rp} which="upto" /></Help></th>
                 <th className="r">Per call</th>
                 <th className="r">{rp.metric === 'ttft' ? 'First word' : 'Typical'}</th>
               </tr>
