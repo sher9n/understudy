@@ -10,16 +10,18 @@ import '../workload-page.css';
 
 /* A workload's page, as the design artboard draws it: four answers at a glance, and once it is switched, what
  * Understudy is doing for it and what that saves.
- *   1. Is there enough of its traffic to optimize it? Counted the way a test counts it, and if not yet, how the
- *      rest can arrive and so the earliest a test can start (it starts by itself).
- *   2. What the workspace has chosen should happen when a cheaper setup passes, as a chip that opens Settings.
- *   3. Every measurement, each opening to the chart of how its candidates compared and the list of them.
- *   4. The calls, and who answered each.
- * Its actions: measuring now, with its progress and a way to stop; approving a switch a person has to say yes to;
+ *   1. Are there enough requests to test models? Counted the way a test counts them, and if not yet, how the rest
+ *      can arrive and so the earliest a test can start (it starts by itself).
+ *   2. What the workspace has chosen should happen when a cheaper model passes, as a chip that opens Settings.
+ *   3. Every model test, each opening to the chart of how its models compared and the list of them.
+ *   4. The recent requests, and which model answered each.
+ * Its words keep one noun for each thing: requests (never calls), a test (never a measurement), a model, the original
+ * model (the customer's own), and the allowed difference (never the bar); and every outcome says what it means.
+ * Its actions: testing now, with its progress and a way to stop; approving a switch a person has to say yes to;
  * switching back; giving a switch still taking over every request; and for a workload whose requests reach us only
  * as copies, the way to route them. The figures come from GET /api/workloads/:id/page (src/workloadPage.js); the
- * actions from the workload itself. Amounts are written as the design writes them: what a measurement or a month
- * cost to the cent, what one request costs to a hundredth of a cent. */
+ * actions from the workload itself. Amounts are written as the design writes them: what a test or a month cost to
+ * the cent, what one request costs to a hundredth of a cent. */
 
 const KIND = {
   json: ['braces', 'Structured answers'],
@@ -37,7 +39,7 @@ const secs = (ms) => (ms < 95 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(
 const withFee = (v, feePct) => (Number(v) || 0) * (1 + (Number(feePct) || 0) / 100);
 // a date as India tells it, without its year: "24 Oct"
 const dateShort = dayIST;
-/* Money to the cent: what a measurement, a month or thirty days of calls cost, "$0.14". A charge too small to reach a
+/* Money to the cent: what a test, a month or thirty days of requests cost, "$0.14". A charge too small to reach a
    cent says so rather than reading as nothing. */
 const cents = (v) => {
   const x = Number(v) || 0;
@@ -106,11 +108,12 @@ export default function WorkloadDetail({ id, onBack, onChanged, go }) {
   const d = pg.doing;
   const running = !!live.run;
 
-  const pill = running ? { tone: 'brand', text: live.run.queued ? 'Starting a measurement' : 'Measuring now' }
-    : switched && copiesOnly ? { tone: 'warn', text: 'Waiting for routing' }
+  // nothing is wrong with a workload still on its own model, so that is said as a fact, not a warning
+  const pill = running ? { tone: 'brand', text: live.run.queued ? 'Starting a test' : 'Testing now' }
+    : switched && copiesOnly ? { tone: 'warn', text: 'Switched, waiting for requests' }
       : switched ? { tone: 'ok', text: d?.less > 0 ? `Optimized, saving ${Math.round(d.less * 100)}%` : 'Optimized' }
-        : waitsForPerson ? { tone: 'brand', text: 'A cheaper setup passed' }
-          : { tone: 'warn', text: 'Not optimized yet' };
+        : waitsForPerson ? { tone: 'brand', text: 'A cheaper model passed' }
+          : { tone: 'mut', text: 'Original model still in use' };
   const toSettings = go ? plainClick(() => go('settings', null, { hash: 'optimize' })) : undefined;
 
   return (
@@ -123,9 +126,12 @@ export default function WorkloadDetail({ id, onBack, onChanged, go }) {
               <h1 className="wp-title">{w.name}</h1>
               <div className="wp-chips">
                 <span className="wp-chip">{I[kind[0]]}{kind[1]}</span>
-                <span className="wp-chip m" title="Your own model, which every cheaper setup is held to">{w.reference || 'no model named'}</span>
+                <span className="wp-chip" title="The model this workload uses now, which every other model is compared with">
+                  Original model: <span className="m">{w.reference || 'none named yet'}</span>
+                </span>
+                {/* what happens when a cheaper model passes; testing goes on whichever is chosen */}
                 <a className="wp-chip set" href={href('settings', null, 'optimize')} onClick={toSettings}
-                  title="The workspace's choice, in Settings">{I.gear}Optimizing: {MODE[w.optimizeMode] || MODE.auto}</a>
+                  title="What happens when a cheaper model passes: the workspace's choice, in Settings">{I.gear}Switching: {MODE[w.optimizeMode] || MODE.auto}</a>
               </div>
             </div>
             <div className="wp-headacts">
@@ -134,11 +140,11 @@ export default function WorkloadDetail({ id, onBack, onChanged, go }) {
                 <button type="button" className="wp-btn pri" disabled={busy} onClick={act(() => more.promote(w.id, cand.model))}>Switch to it</button>
               )}
               <button type="button" className="wp-btn" disabled={!m.canRun || busy || live.starting || running} onClick={live.start}>
-                {live.starting ? 'Starting…' : 'Measure now'}
+                {live.starting ? 'Starting…' : 'Test now'}
               </button>
             </div>
           </div>
-          {/* why Measure now cannot run, unless it is that there are too few requests yet, which card 1 shows */}
+          {/* why Test now cannot run, unless it is that there are too few requests yet, which card 1 shows */}
           {!running && !m.canRun && m.reason && pg.enough.yes && <p className="wp-why">{m.reason}</p>}
         </div>
 
@@ -237,11 +243,11 @@ function useLive(w, reload) {
   return { run, starting, start, stop, asking, setAsking, halting, notice, setNotice, err, setErr };
 }
 
-const STOPPED = 'Stopped. You were charged only for the calls it made, and nothing was switched.';
+const STOPPED = 'Stopped. You were charged only for what it had already run, and nothing was switched.';
 const FINISHED = 'It had already finished when the stop reached it, so it was not stopped. What it found is below.';
 const AFTER_STOP = { stopped: STOPPED, cancelled: 'Stopped before it started, so nothing was spent.', finished: FINISHED, idle: '' };
 
-/* What a stop came to, read from the run itself: a measurement can finish between the press and the stop arriving. */
+/* What a stop came to, read from the run itself: a test can finish between the press and the stop arriving. */
 async function stopOutcome(workloadId) {
   try {
     const { runs } = await api.workloadRuns(workloadId);
@@ -257,9 +263,10 @@ function Doing({ w, d, busy, copiesOnly, act, go }) {
   const waiting = d.waiting || copiesOnly;
   const refShort = short(d.reference);
   const c = d.checks;
-  const worseWord = c.yardstick === 'quality' ? 'Answers worse than yours' : 'Answers that differ from yours';
-  const checked = c.share !== null && c.share >= 0.01 ? `checked daily on ${pct0(c.share)} of calls`
-    : c.perDay > 0 ? `checked on about ${num(Math.round(c.perDay))} calls a day` : 'checked daily';
+  const worseWord = c.yardstick === 'quality' ? 'Worse than original model' : 'Different from original model';
+  const checked = c.share !== null && c.share >= 0.01 ? `checked daily on ${pct0(c.share)} of requests`
+    : c.perDay > 0 ? `checked on about ${num(Math.round(c.perDay))} requests a day` : 'checked daily';
+  const allowed = `allowed ${Math.round(c.bar * 1000) / 10}%`;
   const rollout = w.rollout;
   return (
     <section className="wp-card" aria-labelledby="wp-doing-h">
@@ -284,8 +291,8 @@ function Doing({ w, d, busy, copiesOnly, act, go }) {
         {rollout && (
           <div className="wp-rollout" role="status">
             {waiting
-              ? <span><b>Set to take over step by step, starting with {pct0(rollout.share)} of requests.</b> The rest stay on {rollout.from || `${refShort}, your own model`}, so the two can be compared fairly.</span>
-              : <span><b>Taking over step by step: {pct0(rollout.share)} of requests now.</b> The rest stay on {rollout.from || `${refShort}, your own model`}, so the two can be compared fairly.</span>}
+              ? <span><b>Set to take over step by step, starting with {pct0(rollout.share)} of requests.</b> The rest stay on {rollout.from || `the original model, ${refShort}`}, so the two can be compared fairly.</span>
+              : <span><b>Taking over step by step: {pct0(rollout.share)} of requests now.</b> The rest stay on {rollout.from || `the original model, ${refShort}`}, so the two can be compared fairly.</span>}
             <span className="wp-rollmeter" aria-hidden="true"><i style={{ width: `${Math.max(2, Math.round(rollout.share * 100))}%` }} /></span>
             <button type="button" className="wp-btn small" disabled={busy} onClick={act(() => more.finishRollout(w.id))}>Give it every request now</button>
           </div>
@@ -299,7 +306,7 @@ function Doing({ w, d, busy, copiesOnly, act, go }) {
               : d.onTrack > 0 ? `on track for ${money(d.onTrack)} a month` : 'at this pace, testing costs more than it saves'}</span>
           </div>
           <div className="wp-tile">
-            <span className="wp-k">Cost per call</span>
+            <span className="wp-k">Cost per request</span>
             {d.before > 0 && d.after > 0 ? <CostBars before={d.before} after={d.after} fmt={perCall} /> : <span className="wp-v">not yet</span>}
             <span className="wp-n">{d.less !== null ? `${Math.round(d.less * 100)}% less` : 'shown once requests have come through'}</span>
           </div>
@@ -307,12 +314,12 @@ function Doing({ w, d, busy, copiesOnly, act, go }) {
             <span className="wp-k">{worseWord}</span>
             <span className="wp-v">{c.n > 0 && c.rate !== null ? pct1(c.rate) : 'none yet'}</span>
             {c.daily.length > 0 && <QualitySpark daily={c.daily} bar={c.bar} />}
-            <span className="wp-n">{c.n > 0 ? `${checked}, bar ${Math.round(c.bar * 1000) / 10}%` : `checked daily once requests come through, bar ${Math.round(c.bar * 1000) / 10}%`}</span>
+            <span className="wp-n">{c.n > 0 ? `${checked}, ${allowed}` : `checked daily once requests come through, ${allowed}`}</span>
           </div>
           <div className="wp-tile">
             <span className="wp-k">{d.speed.metric === 'ttft' ? 'Time to first word' : 'Typical time'}</span>
             <span className="wp-v">{d.speed.now ? secs(d.speed.now) : 'not timed yet'}</span>
-            <span className="wp-n">{waiting ? `on ${refShort}, yours, until requests come through` : d.speed.before ? `was ${secs(d.speed.before)} on ${refShort}` : `on ${d.cheap}`}</span>
+            <span className="wp-n">{waiting ? `on the original model, ${refShort}, until requests come through` : d.speed.before ? `was ${secs(d.speed.before)} on ${refShort}` : `on ${d.cheap}`}</span>
           </div>
           <div className="wp-tile">
             <span className="wp-k">If it slips</span>
@@ -327,7 +334,7 @@ function Doing({ w, d, busy, copiesOnly, act, go }) {
   );
 }
 
-/* A cheaper setup that passed and is waiting for a person's yes: what it is, what a request would cost on it, how
+/* A cheaper model that passed and is waiting for a person's yes: what it is, what a request would cost on it, how
    often it answered differently, how fast it is, why it has not switched by itself, and the two ways to say yes. */
 function Ready({ w, cand, busy, copiesOnly, act, go }) {
   const [rp, setRp] = useState(null);
@@ -345,29 +352,29 @@ function Ready({ w, cand, busy, copiesOnly, act, go }) {
   const why = w.optimizeMode === 'ask' ? 'Your workspace asks first, so nothing switches until you say yes. It starts on a small share of requests and takes more while they hold up.'
     : w.optimizeMode === 'off' ? 'Your workspace never switches by itself. You can still switch to it here.'
       : cand.heldBack ? 'It was switched back from before, so it does not switch by itself again. You can still switch to it here.'
-        : 'It cleared once, and has not yet held up on requests it had never seen, so it does not switch by itself. The next measurement looks again.';
+        : "It passed once, but hasn't yet passed again on new requests it had never seen, so it doesn't switch by itself. The next test checks again.";
   return (
     <section className="wp-card" aria-labelledby="wp-ready-h">
       <div className="wp-cardhead">
-        <h3 id="wp-ready-h">A cheaper setup passed</h3>
+        <h3 id="wp-ready-h">A cheaper model passed</h3>
         <span className="wp-s">{confirmedLook(cand.confirm) ? 'passed twice, waiting for your yes' : 'passed once, waiting for your yes'}</span>
       </div>
       <div className="wp-cardbody wp-doing">
         <div className="wp-tiles">
           <div className="wp-tile">
-            <span className="wp-k">The setup</span>
+            <span className="wp-k">The model</span>
             <span className="wp-v words wp-mdl" style={{ fontSize: 13.5 }}>{name}</span>
             <span className="wp-n">instead of {short(w.reference)}</span>
           </div>
           <div className="wp-tile">
-            <span className="wp-k">Cost per call</span>
+            <span className="wp-k">Cost per request</span>
             {before > 0 && after > 0 ? <CostBars before={before} after={after} fmt={perCall} /> : <span className="wp-v">{cand.costMonth ? cents(cand.costMonth) : 'not priced'}</span>}
             <span className="wp-n">{before > 0 && after > 0 ? `${Math.round(Math.max(0, 1 - after / before) * 100)}% less` : cand.costMonth ? 'a month at your volume' : ''}</span>
           </div>
           <div className="wp-tile">
-            <span className="wp-k">{rp?.yardstick === 'quality' ? 'Answers worse than yours' : 'Answers that differed from yours'}</span>
+            <span className="wp-k">{rp?.yardstick === 'quality' ? 'Worse than original model' : 'Different from original model'}</span>
             <span className="wp-v">{cand.gap !== null && cand.gap !== undefined ? `${Number(cand.gap).toFixed(1)}%` : 'not judged'}</span>
-            <span className="wp-n">{rp?.bar ? `bar ${Math.round(rp.bar * 1000) / 10}%` : ''}</span>
+            <span className="wp-n">{rp?.bar ? `allowed ${Math.round(rp.bar * 1000) / 10}%` : ''}</span>
           </div>
           {row?.p50 && (
             <div className="wp-tile">
@@ -396,7 +403,7 @@ function Ready({ w, cand, busy, copiesOnly, act, go }) {
   );
 }
 
-/* 1. Enough data to optimize? */
+/* 1. Enough requests to test models? */
 function Enough({ e }) {
   const daily = e.daily || [];
   const busyDays = daily.filter((x) => x.n > 0);
@@ -407,21 +414,21 @@ function Enough({ e }) {
     const one = busyDays[0];
     arrived = one.n > e.perDay ? `All ${num(one.n)} arrived on ${dayLabel(one.d)}, and ${e.perDay} of them count.` : `All ${num(one.n)} arrived on ${dayLabel(one.d)}.`;
   } else arrived = `${num(e.total)} arrived on ${busyDays.length} of the last 30 days.`;
-  if (past && busyDays.length > 1) arrived += ' The faint part of a bar arrived but does not count.';
+  if (past && busyDays.length > 1) arrived += " The faint part of a bar arrived but doesn't count towards a test.";
 
   if (e.yes) {
-    const next = e.nextAt ? (e.nextAt <= Date.now() ? 'next re-test soon' : `next re-test ${dateShort(e.nextAt)}`) : 're-tested when you ask';
+    const next = e.nextAt ? (e.nextAt <= Date.now() ? 'next test soon' : `next test ${dateShort(e.nextAt)}`) : 'tested when you ask';
     return (
       <section className="wp-card" aria-labelledby="wp-enough-h">
-        <div className="wp-cardhead"><h3 id="wp-enough-h"><span className="wp-q">1</span>Enough data to optimize?</h3><span className="wp-s">{next}</span></div>
+        <div className="wp-cardhead"><h3 id="wp-enough-h"><span className="wp-q">1</span>Enough requests to test models?</h3><span className="wp-s">{next}</span></div>
         <div className="wp-cardbody wp-enough">
           <div>
-            <div className="wp-answer"><span className="wp-big">{num(e.total)}<small>requests, 30 days</small></span><span className="wp-pill is-ok"><span className="wp-pd" />Yes</span></div>
+            <div className="wp-answer"><span className="wp-big">{num(e.total)}<small>requests in the last 30 days</small></span><span className="wp-pill is-ok">{I.check}Enough</span></div>
             <p className="wp-lead">
-              A test uses <b>{num(e.sample)}</b>.{' '}
+              Each test uses <b>{num(e.sample)}</b> recent requests.{' '}
               {e.everyDays > 0
-                ? <>Re-tested every <b>{e.everyDays === 1 ? 'day' : `${e.everyDays} days`}</b>, and sooner when a new model could matter.</>
-                : <>Your workspace tests <b>only when you ask</b>: press Measure now.</>}
+                ? <>We test again every <b>{e.everyDays === 1 ? 'day' : `${e.everyDays} days`}</b>, or sooner when a relevant new model becomes available.</>
+                : <>Your workspace tests <b>only when you ask</b>: press Test now.</>}
             </p>
           </div>
           <div><DailyChart days={daily} /></div>
@@ -432,15 +439,15 @@ function Enough({ e }) {
   const auto = e.everyDays > 0;
   return (
     <section className="wp-card" aria-labelledby="wp-enough-h">
-      <div className="wp-cardhead"><h3 id="wp-enough-h"><span className="wp-q">1</span>Enough data to optimize?</h3><span className="wp-s">counted the way the test counts them</span></div>
+      <div className="wp-cardhead"><h3 id="wp-enough-h"><span className="wp-q">1</span>Enough requests to test models?</h3><span className="wp-s">counted the way a test counts them</span></div>
       <div className="wp-cardbody wp-enough">
         <div>
-          <div className="wp-answer"><span className="wp-big">{num(e.have)}<small>of {num(e.need)}</small></span><span className="wp-pill is-warn"><span className="wp-pd" />Not yet</span></div>
+          <div className="wp-answer"><span className="wp-big">{num(e.have)}<small>of {num(e.need)} requests</small></span><span className="wp-pill is-warn"><span className="wp-pd" />Not enough yet</span></div>
           <Meter have={e.have} need={e.need} perDay={e.perDay} steps={e.steps} auto={auto} />
           <p className="wp-lead">
-            At most <b>{e.perDay} a day</b> count, so the earliest {auto ? 'start' : 'a full test can run'} is{' '}
+            At most <b>{e.perDay} requests a day</b> count towards a test, so the earliest {auto ? 'a test can start' : 'a full test can run'} is{' '}
             <b>{e.earliest === null ? 'soon' : e.steps.length === 1 && e.steps[0].today ? 'today' : dayLabel(e.earliest)}</b>.{' '}
-            {auto ? 'It starts by itself, no need to wait here.' : 'Your workspace tests only when you ask: press Measure now once they are in.'}
+            {auto ? "It starts by itself, so there's no need to wait here." : 'Your workspace tests only when you ask: press Test now once they are in.'}
           </p>
         </div>
         <div><DailyChart days={daily} cap={e.perDay} /><p className="wp-lead">{arrived}</p></div>
@@ -449,12 +456,12 @@ function Enough({ e }) {
   );
 }
 
-/* 2. Every measurement: a measurement running now first, with its progress and Stop, then each one there has been,
-   newest first, the newest open. */
+/* 2. Model tests: a test running now first, with its progress and Stop, then each one there has been, newest first,
+   the newest open. */
 function Measurements({ w, pg, live }) {
   const rows = pg.measurements.filter((r) => !r.live);
   const [open, setOpen] = useState(() => new Set(rows.length ? [rows[0].id] : []));
-  // a measurement that has just finished opens, as the newest one does when the page is first read
+  // a test that has just finished opens, as the newest one does when the page is first read
   const newest = rows[0]?.id ?? null;
   const seen = useRef(newest);
   useEffect(() => {
@@ -466,15 +473,15 @@ function Measurements({ w, pg, live }) {
   return (
     <section className="wp-card" aria-labelledby="wp-runs-h">
       <div className="wp-cardhead">
-        <h3 id="wp-runs-h"><span className="wp-q">2</span>Every measurement</h3>
-        <span className="wp-s">{count ? `${count} so far, click one to open it` : 'none yet'}</span>
+        <h3 id="wp-runs-h"><span className="wp-q">2</span>Model tests</h3>
+        <span className="wp-s">{count ? `${count} ${count === 1 ? 'test' : 'tests'} so far` : 'none yet'}</span>
       </div>
       {live.notice && !live.run && <p className="wp-empty" style={{ paddingTop: 10, paddingBottom: 0 }}>{live.notice}</p>}
       {!count ? (
         <p className="wp-empty" style={{ paddingTop: 12 }}>
           {pg.enough.everyDays > 0
-            ? 'The first starts by itself once there are enough requests. You can also press Measure now.'
-            : 'Your workspace tests only when you ask. Press Measure now to run the first.'}
+            ? 'The first test starts by itself once there are enough requests. You can also press Test now.'
+            : 'Your workspace tests only when you ask. Press Test now to run the first test.'}
         </p>
       ) : (
         <div className="wp-runs">
@@ -486,20 +493,20 @@ function Measurements({ w, pg, live }) {
   );
 }
 
-/* The measurement running now, as the first line of the list. */
+/* The test running now, as the first line of the list. */
 function LiveRun({ w, live, feePct }) {
   const r = live.run;
   const stopping = !!r.stopping;
   const queued = !!r.queued;
   const pct = r.total ? Math.min(100, Math.round((r.done / r.total) * 100)) : 0;
-  /* The bar never goes back while a run lasts: the calls still to come are counted afresh as models are dropped
-     and replaced, and grow when the second look starts. The time left says what is coming. */
+  /* The progress bar never goes back while a test lasts: the answers still to come are counted afresh as models are
+     dropped and replaced, and grow when the second look starts. The time left says what is coming. */
   const most = useRef({ id: null, pct: 0 });
   if (most.current.id !== (r.id ?? null)) most.current = { id: r.id ?? null, pct: 0 };
   most.current.pct = Math.max(most.current.pct, pct);
-  const title = stopping ? stoppingLine(r) : queued ? (r.planning ? 'Choosing which models to try' : waitingLine(r.startsAt)) : (r.phase || 'Measuring');
+  const title = stopping ? stoppingLine(r) : queued ? (r.planning ? 'Choosing which models to try' : waitingLine(r.startsAt)) : (r.phase || 'Testing');
   const sub = queued ? (r.planning ? 'Asking which of the models switched on fit your requests. None tried yet.' : 'Nothing has been sent yet, so nothing has been spent.')
-    : `${num(r.done)} of ${num(r.total)} model calls`;
+    : `${num(r.done)} of ${num(r.total)} model answers`;
   return (
     <div className="wp-run">
       <div className="wp-runbtn">
@@ -508,19 +515,19 @@ function LiveRun({ w, live, feePct }) {
         <span className="wp-num">{r.sample ? `${num(r.sample)} requests` : ''}</span>
         <span className="wp-num">{queued ? '' : leftLine(r.leftMs)}</span>
         <span className="wp-num">{queued ? '' : cents(withFee(r.spend, feePct))}</span>
-        <span className={`wp-tag ${stopping ? 'is-mut' : 'is-brand'}`}>{stopping ? 'Stopping' : queued ? 'Waiting to start' : 'Measuring now'}</span>
+        <span className={`wp-tag ${stopping ? 'is-mut' : 'is-brand'}`}>{stopping ? 'Stopping' : queued ? 'Waiting to start' : 'Testing now'}</span>
       </div>
       <div className="wp-liverow">
         <div className="wp-livebar" aria-hidden="true"><i style={{ width: `${most.current.pct}%` }} /></div>
         {live.asking && !stopping ? (
-          <div className="wp-take" role="group" aria-label="Stop this measurement" style={{ display: 'grid', gap: 10 }}>
+          <div className="wp-take" role="group" aria-label="Stop this test" style={{ display: 'grid', gap: 10 }}>
             <span>
               {queued
-                ? `Stop measuring ${w.name}? It has not started, so nothing has been spent and nothing will be.`
-                : `Stop measuring ${w.name}? You are charged only for the calls it has already made. Any setup that has answered every request keeps its result, and nothing is switched.`}
+                ? `Stop testing ${w.name}? It hasn't started, so nothing has been spent and nothing will be.`
+                : `Stop testing ${w.name}? You're charged only for what it has already run. Any model that has answered every request keeps its result, and nothing is switched.`}
             </span>
             <span className="wp-acts">
-              <button type="button" className="wp-btn pri small" disabled={live.halting} onClick={live.stop}>{live.halting ? 'Stopping…' : 'Stop measuring'}</button>
+              <button type="button" className="wp-btn pri small" disabled={live.halting} onClick={live.stop}>{live.halting ? 'Stopping…' : 'Stop testing'}</button>
               <button type="button" className="wp-btn small" disabled={live.halting} onClick={() => live.setAsking(false)}>Keep going</button>
             </span>
           </div>
@@ -528,7 +535,7 @@ function LiveRun({ w, live, feePct }) {
           <div className="wp-acts" style={{ justifyContent: 'space-between' }}>
             <p className="wp-livenote">
               {stopping
-                ? `Nothing more is sent after the call in flight. It is charged like the rest, and nothing is switched.${quietFor(r) >= 60000 ? ` If nothing is running it any more, it is closed ${num(r.staleMin || 15)} minutes after it was last heard from.` : ''}`
+                ? `Nothing more is sent after the request in progress. It is charged like the rest, and nothing is switched.${quietFor(r) >= 60000 ? ` If nothing is running it any more, it is closed ${num(r.staleMin || 15)} minutes after it was last heard from.` : ''}`
                 : 'You can leave this page, it keeps going.'}
             </p>
             {!stopping && <button type="button" className="wp-btn small" onClick={() => live.setAsking(true)}>Stop</button>}
@@ -539,7 +546,7 @@ function LiveRun({ w, live, feePct }) {
   );
 }
 
-/* One measurement: its line, and opened, what it found and every setup it tried. */
+/* One test: its line, and opened, what it found and every model it tried. The line's tag says what it means when hovered. */
 function RunRow({ w, r, open, onToggle }) {
   const [rp, setRp] = useState(null);
   const [err, setErr] = useState(null);
@@ -561,19 +568,19 @@ function RunRow({ w, r, open, onToggle }) {
         <span className="wp-num">{num(r.n)} requests</span>
         <span className="wp-num">{r.mins ? `${num(r.mins)} min` : ''}</span>
         <span className="wp-num">{cents(r.usd)}</span>
-        <span className={`wp-tag is-${r.tag.tone}`}>{r.tag.text}</span>
+        <span className={`wp-tag is-${r.tag.tone}`} title={r.tag.why || undefined}>{r.tag.text}</span>
       </button>
       <div className="wp-rundetail" id={did} hidden={!open}>
         {open && (err ? (
-          <p className="wp-loadline">This measurement could not be read: {err}{' '}<button type="button" className="wp-textbtn" onClick={read}>Try again</button></p>
+          <p className="wp-loadline">This test could not be read: {err}{' '}<button type="button" className="wp-textbtn" onClick={read}>Try again</button></p>
         ) : !rp ? (
-          <p className="wp-loadline">Reading this measurement…</p>
+          <p className="wp-loadline">Reading this test…</p>
         ) : (
           <>
             <div className="wp-take">{I.info}<span>{rp.take}</span></div>
             {rp.cands.length > 0 ? <RunDetail rp={rp} /> : rp.self && (
               <div className="wp-chartbox wp-selfbox">
-                <p className="wp-sub">{rp.self.noise !== null ? `${short(rp.reference)} against itself` : 'How far it got'}</p>
+                <p className="wp-sub">{rp.self.noise !== null ? 'Original model against itself' : 'How far it got'}</p>
                 <SelfPic self={rp.self} yardstick={rp.yardstick} />
               </div>
             )}
@@ -584,17 +591,47 @@ function RunRow({ w, r, open, onToggle }) {
   );
 }
 
-/* What the first figure in a measurement's table means, in the words its information bubble says (see Help). */
+/* What the first figure in a test's table means, in the words its information bubble says (see Help). */
 function ColumnWords({ rp }) {
-  return rp.yardstick === 'quality'
-    ? <p>How often this model gave a clearly worse answer than the original model.</p>
-    : <p>How often this model answered differently from the original model.</p>;
+  return rp.yardstick === 'quality' ? (
+    <>
+      <p><b>Worse than original model</b></p>
+      <p>How often this model gave a clearly worse answer than the original model on the requests tested.</p>
+      <p>For example, 10% means its answer was clearly worse on 10% of those requests.</p>
+    </>
+  ) : (
+    <>
+      <p><b>Different from original model</b></p>
+      <p>How often this model gave a different answer from the original model on the requests tested.</p>
+      <p>For example, 45% means the two models gave different answers on 45% of those requests.</p>
+    </>
+  );
+}
+
+/* What the dashed line is: the most another model may differ from the original model, set from how often the original
+   model differs from itself, with a little more allowed because a variation measured on one test moves by chance. */
+function AllowedWords({ rp }) {
+  const f = (x) => `${Math.round(x * 1000) / 10}%`;
+  const has = rp.noise !== null && rp.noise !== undefined;
+  return rp.yardstick === 'quality' ? (
+    <>
+      <p><b>Allowed difference</b></p>
+      <p>The original model's answers aren't always as good as each other.{has ? ` In this test, one of its two answers to the same request was clearly worse on ${f(rp.noise)} of requests.` : ''}</p>
+      <p>Another model counts as a close enough match when its answer is clearly worse than the original model's on at most {f(rp.bar)} of requests{has ? ', a little more than that, because the figure one test measures moves by chance' : ''}.</p>
+    </>
+  ) : (
+    <>
+      <p><b>Allowed difference</b></p>
+      <p>The original model doesn't always give the same answer when the same request is run again.{has ? ` In this test it answered differently from itself on ${f(rp.noise)} of requests.` : ''}</p>
+      <p>Another model counts as a close enough match when it answers differently from the original model on at most {f(rp.bar)} of requests{has ? ', a little more than that, because the figure one test measures moves by chance' : ''}.</p>
+    </>
+  );
 }
 
 /* A small "i" beside a name that says what it means: shown while the pointer or the keyboard is on it, and on a tap,
    which is all a phone has, until a tap elsewhere or Escape. The words float above the page rather than inside the
    table, whose sideways-scrolling box would cut them off, or grow a scrollbar, on a measurement with a row or two. */
-function Help({ label, children }) {
+function Help({ label, children, trigger = null }) {
   const [hover, setHover] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [at, setAt] = useState(null);
@@ -635,7 +672,7 @@ function Help({ label, children }) {
   }, [pinned]);
   return (
     <>
-      <button ref={btn} type="button" className="wp-help" aria-label={`What ${label} means`} aria-expanded={pinned}
+      <button ref={btn} type="button" className={trigger ? 'wp-helptag' : 'wp-help'} aria-label={trigger ? `${label}: what this means` : `What ${label} means`} aria-expanded={pinned}
         aria-describedby={shown ? id : undefined}
         onPointerEnter={(e) => { if (e.pointerType === 'mouse') setHover(true); }}
         onPointerLeave={(e) => { if (e.pointerType === 'mouse') setHover(false); }}
@@ -643,7 +680,7 @@ function Help({ label, children }) {
         onBlur={() => setHover(false)}
         onClick={() => setPinned((v) => !v)}
         onKeyDown={(e) => { if (e.key === 'Escape') { setHover(false); setPinned(false); } }}>
-        {I.info}
+        {trigger ?? I.info}
       </button>
       {/* inside the app's own box, which carries the colours of the light or dark theme; the page's body has none */}
       {shown && at && createPortal(
@@ -655,62 +692,68 @@ function Help({ label, children }) {
 }
 
 function RunDetail({ rp }) {
-  const axis = rp.yardstick === 'quality' ? 'Worse than yours' : 'Differed from yours';
+  const quality = rp.yardstick === 'quality';
+  const axis = quality ? 'Worse than original model' : 'Different from original model';
+  const col = quality ? 'Worse' : 'Different';
+  const time = rp.metric === 'ttft' ? 'Time to first word' : 'Typical time';
   const run = { ...rp, axis };
   const chart = rp.cands.some(plotted);
+  const barWords = `${Math.round(rp.bar * 1000) / 10}%`;
   return (
     <div className="wp-detailgrid">
+      {/* one heading over the chart and the table under it, which show the same models two ways */}
+      <p className="wp-sub wp-detailhead">
+        Models tested
+        {/* a phone shows no column names, so the first figure is explained here instead */}
+        <span className="wp-phonehelp"><Help label={axis}><ColumnWords rp={rp} /></Help></span>
+      </p>
       {chart && (
         <div className="wp-chartbox">
-          <p className="wp-sub">How the candidates compare</p>
           <CompareChart run={run} />
           <div className="wp-legend">
             <span><i style={{ background: 'var(--ok)' }} />passed</span>
-            <span><i style={{ background: 'var(--warn)' }} />close, or too few to be sure</span>
-            <span><i style={{ background: 'var(--bad)' }} />missed</span>
+            <span><i style={{ background: 'var(--warn)' }} />close match, slower, or too few to be sure</span>
+            <span><i style={{ background: 'var(--bad)' }} />not a match</span>
             <span><i style={{ background: 'var(--mut)' }} />stopped early</span>
+            {rp.bar > 0 && <span><i className="wp-dash" />allowed difference, {barWords}<Help label="the allowed difference"><AllowedWords rp={rp} /></Help></span>}
           </div>
         </div>
       )}
-      <div>
-        <p className="wp-sub">
-          Candidates tested
-          {/* a phone shows no column names, so the first figure is explained here instead */}
-          <span className="wp-phonehelp"><Help label={axis.split(' ')[0]}><ColumnWords rp={rp} /></Help></span>
-        </p>
-        <div className="wp-tablewrap">
-          <table className="wp-cands">
-            <thead>
-              <tr>
-                <th aria-label="Number" />
-                <th>Setup</th>
-                <th>Result</th>
-                <th className="r">{axis.split(' ')[0]}<Help label={axis.split(' ')[0]}><ColumnWords rp={rp} /></Help></th>
-                <th className="r">Per call</th>
-                <th className="r">{rp.metric === 'ttft' ? 'First word' : 'Typical'}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rp.cands.map((c, i) => (
+      <div className="wp-tablewrap">
+        <table className="wp-cands">
+          <thead>
+            <tr>
+              <th aria-label="Number" />
+              <th>Model</th>
+              <th>Outcome</th>
+              <th className="r">{col}<Help label={axis}><ColumnWords rp={rp} /></Help></th>
+              <th className="r">Cost / request</th>
+              <th className="r">{time}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rp.cands.map((c, i) => {
+              const tag = <span className={`wp-tag is-${c.tone}`}>{c.verdict}</span>;
+              return (
                 <tr key={c.key}>
                   <td><span className="wp-no" style={{ background: toneColor(c.tone) }}>{i + 1}</span></td>
                   <td className="wp-mdl">{c.label}</td>
-                  <td><span className={`wp-tag is-${c.tone}`}>{c.verdict}</span></td>
-                  <td className={`r m${c.gap === null ? ' none' : ''}`} data-label={axis.split(' ')[0]}>{c.gap === null ? 'not judged' : pct1(c.gap)}</td>
-                  <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Per call">{c.perCall === null ? 'not priced' : perCall(c.perCall)}</td>
-                  <td className={`r m${!c.p50 ? ' none' : ''}`} data-label={rp.metric === 'ttft' ? 'First word' : 'Typical'}>{c.p50 ? secs(c.p50) : 'not timed'}</td>
+                  <td>{c.why ? <Help label={c.verdict} trigger={tag}><p>{c.why}</p></Help> : tag}</td>
+                  <td className={`r m${c.gap === null ? ' none' : ''}`} data-label={col}>{c.gap === null ? 'not judged' : pct1(c.gap)}</td>
+                  <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Cost / request">{c.perCall === null ? 'not priced' : perCall(c.perCall)}</td>
+                  <td className={`r m${!c.p50 ? ' none' : ''}`} data-label={time}>{c.p50 ? secs(c.p50) : 'not timed'}</td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );
 }
 
-/* 3. The calls: when, who answered (the cheaper setup in green, the customer's own model in ink), how long it took,
-   what it cost and how it went, ten at a time. A row opens to what was asked and what came back. */
+/* 3. Recent requests: when, which model answered (the cheaper model in green, the original model in ink), how long it
+   took, what it cost and how it went, ten at a time. A row opens to what was asked and what came back. */
 function Calls({ w, pg }) {
   const [c, setC] = useState(pg.calls);
   const [busy, setBusy] = useState(false);
@@ -721,20 +764,21 @@ function Calls({ w, pg }) {
     try { setC(await api.workloadPageCalls(w.id, n)); setOpenId(null); } catch { /* the rows shown stay */ } finally { setBusy(false); }
   };
   const copiesOnly = !!w.traffic && !w.traffic.carries;
+  const inMonth = `${num(c.total)} ${c.total === 1 ? 'request' : 'requests'} in the last 30 days`;
   const summary = !c.total ? 'none in the last 30 days'
-    : w.promotedAt && copiesOnly ? `${num(c.total)} calls in 30 days, copies your own model answered`
-      : w.promotedAt ? `${num(c.total)} calls in 30 days, ${pct0(c.cheapShare)} answered by the cheaper setup${c.cheapSince ? ' since the switch' : ''}`
-        : `${num(c.total)} calls in 30 days, ${cents(c.cost)}${c.ownOnly ? ', all on your own model' : ''}`;
+    : w.promotedAt && copiesOnly ? `${inMonth} · copies the original model answered`
+      : w.promotedAt ? `${inMonth} · ${pct0(c.cheapShare)} answered by the cheaper model${c.cheapSince ? ' since the switch' : ''}`
+        : `${inMonth} · ${cents(c.cost)} total${c.ownOnly ? ' · all answered by the original model' : ''}`;
   return (
     <section className="wp-card" aria-labelledby="wp-calls-h">
-      <div className="wp-cardhead"><h3 id="wp-calls-h"><span className="wp-q">3</span>The calls</h3><span className="wp-s">{summary}</span></div>
+      <div className="wp-cardhead"><h3 id="wp-calls-h"><span className="wp-q">3</span>Recent requests</h3><span className="wp-s">{summary}</span></div>
       <div className="wp-cardbody">
         {!c.rows.length ? (
-          <p className="wp-lead" style={{ margin: 0 }}>No calls yet.</p>
+          <p className="wp-lead" style={{ margin: 0 }}>No requests yet.</p>
         ) : (
           <div className="wp-tablewrap">
             <table className="wp-calls">
-              <thead><tr><th>When</th><th>Answered by</th><th className="r">Took</th><th className="r">Cost</th><th>Result</th></tr></thead>
+              <thead><tr><th>When</th><th>Model</th><th className="r">Response time</th><th className="r">Cost</th><th>Status</th></tr></thead>
               <tbody>
                 {c.rows.map((x) => (
                   <CallRow key={x.id} w={w} x={x} open={openId === x.id} onToggle={() => setOpenId((o) => (o === x.id ? null : x.id))} />
@@ -745,8 +789,8 @@ function Calls({ w, pg }) {
         )}
         {(c.page > 1 || c.more) && (
           <div className="wp-pager">
-            {c.page > 1 && <button type="button" className="wp-textbtn" disabled={busy} onClick={() => page(c.page - 1)}>Newer calls</button>}
-            {c.more && <button type="button" className="wp-textbtn" disabled={busy} onClick={() => page(c.page + 1)}>Older calls</button>}
+            {c.page > 1 && <button type="button" className="wp-textbtn" disabled={busy} onClick={() => page(c.page - 1)}>Newer requests</button>}
+            {c.more && <button type="button" className="wp-textbtn" disabled={busy} onClick={() => page(c.page + 1)}>Older requests</button>}
           </div>
         )}
       </div>
@@ -770,19 +814,19 @@ function CallRow({ w, x, open, onToggle }) {
   return (
     <>
       <tr className="open-able" onClick={onToggle} aria-expanded={open} tabIndex={0}
-        aria-label={`Call at ${timeIST(x.at)} IST, ${open ? 'showing' : 'show'} what was asked and answered`}
+        aria-label={`Request at ${timeIST(x.at)} IST, ${open ? 'showing' : 'show'} what was asked and answered`}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}>
         <td className="m">{timeIST(x.at)} IST</td>
         <td><span className="wp-srv"><i style={{ background: who }} /><span className="wp-mdl">{x.model || 'no model named'}{how}</span></span></td>
-        <td className={`r m${x.ms === null ? ' none' : ''}`} data-label="Took">{x.ms === null ? 'not timed' : secs(x.ms)}</td>
+        <td className={`r m${x.ms === null ? ' none' : ''}`} data-label="Response time">{x.ms === null ? 'not timed' : secs(x.ms)}</td>
         <td className="r m" data-label="Cost">{perCall(x.cost)}</td>
         <td><span className={`wp-tag is-${tag[0]}`} title={failed ? `The provider answered ${x.status}` : undefined}>{tag[1]}</span></td>
       </tr>
       {open && (
         <tr className="saidrow">
           <td className="said" colSpan={5}>
-            {!said ? <span className="wp-loadline">Reading this call…</span>
-              : said.err ? <span className="wp-loadline">This call could not be read: {said.err}</span>
+            {!said ? <span className="wp-loadline">Reading this request…</span>
+              : said.err ? <span className="wp-loadline">This request could not be read: {said.err}</span>
                 : said.purged && !said.asked && !said.answered ? <span className="wp-loadline">What was asked and answered is no longer kept, as your retention setting says.</span>
                   : (
                     <div className="wp-said">
@@ -797,17 +841,17 @@ function CallRow({ w, x, open, onToggle }) {
   );
 }
 
-/* How long since a running measurement was last heard from, as the server measured it. */
+/* How long since a running test was last heard from, as the server measured it. */
 const quietFor = (r) => Math.max(0, Number(r?.quietMs) || 0);
 
 const stoppingLine = (r) => {
   const quiet = quietFor(r);
-  if (quiet < 60000) return 'Stopping once the call in flight comes back';
+  if (quiet < 60000) return 'Stopping once the request in progress comes back';
   const mins = Math.max(1, Math.round(quiet / 60000));
   return `Stopping. It has not been heard from for ${num(mins)} ${mins === 1 ? 'minute' : 'minutes'}`;
 };
 
-/* About how long a running measurement has left, at the pace it has kept so far (leftOf in src/api.js). */
+/* About how long a running test has left, at the pace it has kept so far (leftOf in src/api.js). */
 const leftLine = (ms) => {
   if (ms == null) return 'working out time left';
   if (ms < 60000) return 'under a minute left';
@@ -815,7 +859,7 @@ const leftLine = (ms) => {
   return `about ${num(mins)} min left`;
 };
 
-/* A measurement waiting its turn; one held back for a while says until when, in IST. */
+/* A test waiting its turn; one held back for a while says until when, in IST. */
 const waitingLine = (startsAt) => (startsAt && startsAt > Date.now() + 60000
   ? `Waiting until ${timeIST(startsAt)} IST to start`
   : 'Waiting for its turn to start');

@@ -261,7 +261,7 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
     return plan;
   }
   if (!workload.reference_model) {
-    plan.reason = 'We do not know which model this workload runs on yet, so there is nothing to measure against.';
+    plan.reason = "We don't know which model this workload runs on yet, so there is nothing to compare other models with.";
     return plan;
   }
   if (pool < config.EVAL_MIN_CALLS) {
@@ -410,9 +410,9 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
        checked: said as that where they are what the measurement tests, rather than advice that cannot help. */
     const forced = plan.routerParts > 0 && plan.models <= plan.routerParts;
     plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)}, over the $`
-      + `${plan.ceilingUsd.toFixed(2)} one measurement of this workload may spend. `
+      + `${plan.ceilingUsd.toFixed(2)} one test of this workload may spend. `
       + (forced
-        ? `It checks all ${plan.routerParts} setups of the router serving it now, however few models you test in Settings. `
+        ? `It checks all ${plan.routerParts} models of the router serving it now, however few models you test in Settings. `
           + `Its live requests are still watched${config.CONTROL_ENABLED ? `, and, within your optimization budget, a few a day are checked against ${short(workload.reference_model)} in the background` : ''}.`
         : 'Testing fewer models in Settings brings it down.');
     return plan;

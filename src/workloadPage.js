@@ -2,6 +2,7 @@ import { db, now, round8 } from './db/index.js';
 import config from './config.js';
 import { withFee } from './billing.js';
 import { barNeed, usableCalls, sampleSizeFor } from './eval/plan.js';
+import { callsToClear } from './eval/compare.js';
 import { valueOf, optimizingSince } from './eval/value.js';
 import { routedSavings } from './eval/actual.js';
 import { cadenceOf } from './eval/schedule.js';
@@ -20,9 +21,11 @@ import { nameOfResult, armById, labelOf } from './learn/arms.js';
  * and once it is switched,
  *   doing         what Understudy does with each of its requests now, and what that saves, costs, keeps and
  *                 risks, read from the record (src/eval/value.js, the daily checks in src/learn/control.js).
- * One measurement opened (runPageOf) is the sentence of what it found and every setup it tried, placed by what
- * it costs a call against how often it answered differently from the customer's own model, or worse.
- * The page only draws: every figure is worked out here, the way the rest of the app counts it. */
+ * One test opened (runPageOf) is the sentence of what it found and every model it tried, placed by what a request
+ * costs on it against how often it answered differently from the original model, or worse.
+ * The page only draws: every figure is worked out here, the way the rest of the app counts it. Its words keep one
+ * noun for each thing, as the page does: requests (never calls), a test (never a measurement), a model (whatever
+ * way of serving it is), the original model (the customer's own), and the allowed difference (never the bar). */
 
 const DAY = 86400000;
 const IST = 5.5 * 3600000;
@@ -100,7 +103,7 @@ function shortSetup(spec, reference) {
   if (!spec) return null;
   if (spec.kind === 'cascade') return short(spec.first?.model);
   if (spec.kind === 'router' && Array.isArray(spec.options)) {
-    return spec.options.length === 1 ? short(spec.options[0].model) : `${spec.options.length} setups`;
+    return spec.options.length === 1 ? short(spec.options[0].model) : `${spec.options.length} models`;
   }
   if (spec.kind === 'router') return short(spec.cheap?.model);
   if (spec.model === reference && spec.recipe?.reasoning) return `${short(spec.model)}, lighter`;
@@ -184,30 +187,60 @@ async function doingOf(w, v, t) {
   };
 }
 
-// how many of the answers planted to test a measurement's judge it got wrong
+// how many of the answers planted to test a test's judge it got wrong
 const judgeErrors = (run) => {
   try { return Number(JSON.parse(run.judge_check_json || 'null')?.errors) || 0; } catch { return 0; }
 };
 
-/* A measurement as a line in the list: what started it, and what it found, in a word. */
+// a test whose requests were too few for any model to be shown close enough, however well it matched
+const tooSmall = (run) => {
+  const n = Number(run.sample_size) || 0;
+  const bar = Number(run.floor_pct) || 0;
+  return n > 0 && bar > 0 && (z2 / (n + z2)) * 100 > bar;
+};
+
+/* A test as a line in the list: what it found, in a few words, and what that means, said when the tag is hovered.
+   A test that ends without comparing anything says which way it ended, rather than "could not measure". */
 function tagOf(r, sum, w) {
   const outcome = outcomeOf(r);
-  if (r.status === 'running') return { tone: 'brand', text: 'Measuring now' };
-  if (r.status === 'queued') return { tone: 'brand', text: 'Waiting to start' };
-  if (outcome === 'stopped') return { tone: 'mut', text: 'Stopped' };
-  if (outcome === 'interrupted') return { tone: 'mut', text: 'Interrupted' };
-  if (outcome === 'unmeasurable') return { tone: 'bad', text: 'Could not measure' };
-  if (outcome === 'refused') return { tone: 'bad', text: 'Your model could not answer' };
-  if (outcome === 'no_balance') return { tone: 'warn', text: 'Balance ran out' };
-  if (w.routed_model && w.promoted_run_id === r.id) return { tone: 'brand', text: 'Passed, switched' };
-  if (Number(sum?.kept) > 0) return { tone: 'ok', text: 'Still as good' };
-  if (Number(sum?.twice) > 0) return { tone: 'ok', text: 'Passed twice' };
+  const tag = (tone, text, why) => ({ tone, text, why });
+  if (r.status === 'running') return tag('brand', 'Testing now', 'This test is running now.');
+  if (r.status === 'queued') return tag('brand', 'Waiting to start', 'This test is waiting for its turn to start.');
+  if (outcome === 'stopped') return tag('mut', 'Stopped', 'This test was stopped before it finished, so nothing was switched.');
+  if (outcome === 'interrupted') {
+    return tag('mut', 'Test incomplete', 'This test stopped partway, because a provider was too busy or something failed on our side. '
+      + 'It tries again by itself, and nothing was switched.');
+  }
+  if (outcome === 'unmeasurable') {
+    return tag('bad', "Couldn't compare models", 'The original model gave a different answer to the same request so often that there was '
+      + 'no steady standard to compare other models with.');
+  }
+  if (outcome === 'refused') {
+    return tag('bad', 'Not enough valid results', "The original model couldn't answer most of this test's requests when they were run "
+      + 'again, so there were too few valid answers to compare other models with.');
+  }
+  if (outcome === 'no_balance') return tag('warn', 'Balance ran out', "The balance ran out partway, so the test couldn't finish. Add credit and it can run again.");
+  if (w.routed_model && w.promoted_run_id === r.id) return tag('brand', 'Passed, switched', 'A cheaper model passed, and Understudy switched to it.');
+  if (Number(sum?.kept) > 0) return tag('ok', 'Still passing', 'The model in use was tested again and is still within the allowed difference.');
+  if (Number(sum?.twice) > 0) {
+    return tag('ok', 'Passed twice', "A cheaper model passed on this test's requests, and again on new requests it had never seen.");
+  }
   const cleared = Number(sum?.cleared) || 0;
-  if (cleared > 0) return { tone: 'ok', text: `${cleared} ${cleared === 1 ? 'setup' : 'setups'} cleared` };
+  if (cleared > 0) {
+    return tag('ok', `${cleared} ${cleared === 1 ? 'model' : 'models'} passed`,
+      'A model that passes is tested again on new requests before anything switches.');
+  }
   // held back only because the judge got answers planted to test it wrong (see candOf)
-  if (Number(sum?.within) > 0 && judgeErrors(r) > 0) return { tone: 'warn', text: 'Passed, judge unsure' };
-  if (Number(sum?.close) > 0) return { tone: 'warn', text: 'Close' };
-  return { tone: 'mut', text: 'Nothing cleared yet' };
+  if (Number(sum?.within) > 0 && judgeErrors(r) > 0) {
+    return tag('warn', 'Passed, judge unsure', 'A model passed as the judge read it, but the judge got some answers wrong when it was '
+      + 'checked, so nothing switches on its word.');
+  }
+  if (Number(sum?.close) > 0) return tag('warn', 'Close match', "A model came close, but the test isn't yet sure it stays within the allowed difference.");
+  if (tooSmall(r)) {
+    return tag('warn', 'Too few to decide', 'This test had too few requests to show that any model is close enough. The full test '
+      + 'starts by itself once there are enough.');
+  }
+  return tag('mut', 'No match yet', 'No cheaper model came close enough to the original model in this test.');
 }
 
 /* 2. Every measurement, newest first. */
@@ -235,7 +268,7 @@ async function measurementsOf(w) {
     return {
       id: r.id,
       at: start,
-      what: r.trigger === 'manual' ? 'Started by you' : (r.trigger === 'first' || r.id === first?.id) ? 'First test' : 'Regular re-test',
+      what: r.trigger === 'manual' ? 'Started manually' : (r.trigger === 'first' || r.id === first?.id) ? 'First test' : 'Regular re-test',
       n: Number(r.sample_size) || 0,
       mins: r.finished_at ? Math.max(1, Math.round((Number(r.finished_at) - start) / 60000)) : null,
       // what it cost the customer, our fee included, as they were charged for it (chargeEval)
@@ -311,41 +344,72 @@ export async function pageOf(w) {
   };
 }
 
-/* One setup in a measurement, as its row: what it is called, how many requests it answered, how often it answered
-   differently (or worse), the range that could be, what a request costs on it, how fast it answered, and its result. */
-function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = false, floorPct = null }) {
+/* One model in a test, as its row: what it is called, how many requests it answered, how often it answered differently
+   (or worse), what a request costs on it, how fast it answered, and its outcome, in the words of why it did or did not
+   qualify, with a sentence that says so (why). `said` is how a sentence names it: a model by the name people know it by. */
+const TOO_FEW = "It answered too few requests for the test to be sure whether it stays within the allowed difference. It's tested again once there are more.";
+function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = false, floorPct = null, quality = false, names = new Map() }) {
   const name = nameOfResult(r);
   const n = Number(r.runs) || 0;
   const isServing = !!serving && r.model_id === serving;
-  let tone;
-  let verdict;
-  if (r.verdict === 'failed') [tone, verdict] = ['bad', 'Could not answer'];
-  else if (r.verdict === 'slower') [tone, verdict] = ['warn', 'Slower than yours'];
-  // what serves, checked again; in the measurement that switched to it, it was a candidate like the rest
-  else if (isServing && !switchRun && r.verdict === 'cleared') [tone, verdict] = ['ok', 'Keeps serving'];
-  else if (r.stopped && n < sample) [tone, verdict] = ['mut', 'Stopped early'];
-  else if (r.verdict === 'cleared' && (r.confirm_verdict === 'cleared' || r.confirm_verdict === 'live')) [tone, verdict] = ['ok', 'Passed twice'];
-  else if (r.verdict === 'cleared') [tone, verdict] = ['ok', 'Cleared'];
-  /* Held back only because the judge missed an answer planted as clearly worse (see chooseJudge in src/eval/run.js):
-     it kept the bar as the judge read it, which is not "close". */
-  else if (r.verdict === 'review' && unsure && floorPct !== null && Number(r.gap_hi ?? r.gap_pct) <= floorPct) {
-    [tone, verdict] = ['warn', 'Passed, judge unsure'];
+  const differs = quality ? "gave clearly worse answers than the original model's" : 'answered differently from the original model';
+  let out;
+  if (r.verdict === 'failed') {
+    out = ['bad', 'Failed requests', "The model's provider refused or failed some of this test's requests, so it can't be relied on for this workload."];
+  } else if (r.verdict === 'slower') {
+    out = ['warn', 'Slower than original', 'It answered more slowly than the original model, by more than this workload allows.'];
+  } else if (isServing && !switchRun && r.verdict === 'cleared') {
+    // what serves, checked again; in the test that switched to it, it was a model like the rest
+    out = ['ok', 'Still passing', 'This is the model answering this workload now. It was tested again and is still within the allowed difference.'];
+  } else if (r.stopped && n < sample) {
+    out = r.stopped === 'bar'
+      ? ['bad', 'Clearly not a match', 'Testing stopped early because the model was already different enough that more requests were very unlikely to change the result.']
+      : r.stopped === 'budget'
+        ? ['mut', 'Stopped early', 'The test reached the most it may spend before this model had answered every request.']
+        : ['mut', 'Stopped early', 'The test was stopped before this model had answered every request.'];
+  } else if (r.verdict === 'cleared' && (r.confirm_verdict === 'cleared' || r.confirm_verdict === 'live')) {
+    out = ['ok', 'Passed twice', "It stayed within the allowed difference on this test's requests, and again on new requests it had never seen."];
+  } else if (r.verdict === 'cleared') {
+    out = ['ok', 'Passed once', "It stayed within the allowed difference on this test's requests. It's tested again on new requests before anything switches."];
+  } else if (r.verdict === 'review' && unsure && floorPct !== null && Number(r.gap_hi ?? r.gap_pct) <= floorPct) {
+    /* Held back only because the judge missed an answer planted as clearly worse (see chooseJudge in src/eval/run.js):
+       it stayed within the allowed difference as the judge read it, which is not "close". */
+    out = ['warn', 'Passed, judge unsure', 'It stayed within the allowed difference as the judge read it, but the judge got some answers wrong when it was checked, so nothing switches on its word.'];
+  } else if (r.verdict === 'review' && Number(r.calls_needed) > n) {
+    out = ['warn', 'Too few to be sure', TOO_FEW];
   } else if (r.verdict === 'review') {
-    [tone, verdict] = Number(r.calls_needed) > n ? ['warn', 'Too few to be sure'] : ['warn', isServing && !switchRun ? 'Close, still serving' : 'Close'];
-  } else if (r.verdict === 'insufficient') [tone, verdict] = ['warn', 'Too few to be sure'];
-  else [tone, verdict] = ['bad', 'Missed'];
+    out = ['warn', isServing && !switchRun ? 'Close match, still in use' : 'Close match',
+      "This model came closest to meeting the requirement, but the test isn't yet confident that it stays within the allowed difference."];
+  } else if (r.verdict === 'insufficient') {
+    out = ['warn', 'Too few to be sure', TOO_FEW];
+  } else {
+    out = ['bad', 'Not a match', `It ${differs} more often than allowed.`];
+  }
+  const [tone, verdict, why] = out;
   const ratio = r.cost_ratio === null || r.cost_ratio === undefined ? null : Number(r.cost_ratio);
   const perCall = ratio !== null && refPer ? ratio * refPer : (name.kind === 'model' ? avg.get(r.model_id) ?? null : null);
   const ms = metric === 'ttft' ? Number(r.ttft_p50) || null : Number(r.latency_p50) || null;
   const pct = (x) => (x === null || x === undefined ? null : round8(Number(x) / 100));
   const judged = r.verdict !== 'failed' && r.gap_pct !== null && r.gap_pct !== undefined && n > 0;
+  const label = name.kind === 'model' ? r.model_id
+    : name.kind === 'cascade' ? `${name.first}, checked`
+      : name.kind === 'router' && name.version === 2 ? name.short
+        : name.kind === 'router' ? `${name.first}, picked per request` : name.label;
+  const known = (id) => names.get(id) || String(id).split('/').pop();
+  // how a sentence names it: a model the way people know it, a way of serving by what it does
+  const opts = Array.isArray(name.options) ? name.options : [];
+  const said = name.kind === 'model' ? known(r.model_id)
+    : name.kind === 'cascade' ? `${known(name.first)} (with a check on each answer)`
+      : name.kind === 'router' && name.version === 2
+        ? `${known(opts[0] ?? name.first)}${opts.length > 1 ? ` and ${opts.length - 1} more` : ''} (by kind of request)`
+        : name.kind === 'router' ? `${known(name.first)} (picked for each request)`
+          : name.kind === 'lighter' ? `${known(name.first)} with lighter thinking`
+            : name.kind === 'cheapest' ? `${known(name.first)} from its cheapest provider` : label;
   return {
     key: r.model_id,
     // a model by its full name, a way of serving by what it does
-    label: name.kind === 'model' ? r.model_id
-      : name.kind === 'cascade' ? `${name.first}, checked`
-        : name.kind === 'router' && name.version === 2 ? name.short
-          : name.kind === 'router' ? `${name.first}, picked per call` : name.label,
+    label,
+    said,
     kind: name.kind,
     n,
     gap: judged ? pct(r.gap_pct) : null,
@@ -353,7 +417,7 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
     hi: judged ? pct(r.gap_hi ?? r.gap_pct) : null,
     perCall: perCall === null ? null : round8(perCall),
     p50: ms,
-    tone, verdict,
+    tone, verdict, why,
     serving: isServing,
     twice: verdict === 'Passed twice',
     confirmRuns: Number(r.confirm_runs) || 0,
@@ -364,90 +428,129 @@ const TONE_ORDER = { ok: 0, warn: 1, bad: 2, mut: 3 };
 const z2 = 1.6449 ** 2;
 const pctWords = (x) => `${Math.round(x * 1000) / 10}%`;
 
-/* The sentence at the top of an opened measurement: what it found, and what happens because of it. Where answers were
-   held to "at least as good" rather than "the same", or the judge was not trusted, a sentence more says so. */
-function takeOf(run, cands, w, { reachNeed, check }) {
-  const main = mainTake(run, cands, w, { reachNeed });
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// a day as a test counts it (a UTC day), in words: "27 Sep"
+const dayWords = (d) => { const x = new Date(Number(d) * DAY); return `${x.getUTCDate()} ${MONTHS[x.getUTCMonth()]}`; };
+
+/* The sentences at the top of an opened test: what it found, and what happens because of it. Where answers were
+   compared on "at least as good" rather than "the same", or the judge was not trusted, a sentence more says so. */
+function takeOf(run, cands, w, opts) {
+  const main = mainTake(run, cands, w, opts);
   const outcome = outcomeOf(run);
   const compared = !['unmeasurable', 'refused', 'no_balance'].includes(outcome) && !(run.status === 'running' || run.status === 'queued');
   const notes = [];
+  const check = opts.check;
   if (compared && run.yardstick === 'quality' && cands.length) {
-    notes.push(`Because ${short(run.reference_model)} answers the same request differently each time, each setup was held to answers `
-      + 'at least as good as yours rather than to the same answers.');
+    notes.push('Because the original model answers the same request differently each time, each model was checked for answers at '
+      + "least as good as the original model's, rather than the same answers.");
   }
   if (compared && Number(check?.errors) > 0 && cands.length) {
     const planted = Number(check.planted) || Number(check.errors);
     notes.push(`The judge was first tested on ${planted} answers whose right verdict is already known, and it got ${check.errors} wrong, `
-      + 'so nothing is switched on its word. The next measurement tests the judge again.');
+      + 'so nothing is switched on its word. The next test checks the judge again.');
   }
   return [main, ...notes].join(' ');
 }
 
-function mainTake(run, cands, w, { reachNeed }) {
-  const ref = short(run.reference_model);
+function mainTake(run, cands, w, { small = null, refName }) {
   const outcome = outcomeOf(run);
   const n = Number(run.sample_size) || 0;
-  if (run.status === 'running' || run.status === 'queued') return 'Still running. Each setup appears here once it has answered its requests.';
+  const quality = run.yardstick === 'quality';
+  if (run.status === 'running' || run.status === 'queued') return 'Still running. Each model appears here once it has answered its requests.';
   if (outcome === 'unmeasurable') {
-    return `${ref} gave a different answer to the same request ${Math.round(Number(run.noise_pct) || 0)}% of the time when asked each of ${n} twice, `
-      + 'so there was no steady bar to hold a cheaper setup to. Nothing was tried, and nothing switched.'
+    return `The original model, ${refName}, gave a different answer to the same request ${Math.round(Number(run.noise_pct) || 0)}% of the time `
+      + `when each of ${n} requests was run twice, so there was no steady standard to compare other models with. `
+      + 'No other model was tried, and nothing switched.'
       + (canJudge() && config.EVAL_QUALITY_YARDSTICK
-        ? ' Workloads like this are now held to answers at least as good as yours instead, so the next measurement compares setups.' : '');
+        ? " Workloads like this are now compared on whether answers are at least as good as the original model's, so the next test compares models." : '');
   }
-  if (outcome === 'refused') return `${ref} could not answer most of these requests, so there was no bar to hold a cheaper setup to. Nothing switched.`;
-  if (outcome === 'no_balance') return 'The balance ran out once the bar was set, so nothing was tried. Add credit and it can run again.';
+  if (outcome === 'refused') {
+    return `The original model, ${refName}, couldn't answer most of this test's requests when they were run again, so there was `
+      + 'nothing to compare other models with. Nothing switched.';
+  }
+  if (outcome === 'no_balance') return 'The balance ran out before any other model was tried. Add credit and the test can run again.';
   const stopped = outcome === 'stopped' || outcome === 'interrupted';
   if (stopped && !cands.length) {
-    return `${outcome === 'stopped' ? 'Stopped' : 'Interrupted'} before any setup had answered all of its requests, so there is nothing to compare. Nothing switched.`;
+    return outcome === 'stopped'
+      ? 'This test was stopped before any model had answered all of its requests, so there is nothing to compare. Nothing switched.'
+      : 'This test stopped partway, before any model had answered all of its requests, so there is nothing to compare. It tries again by itself, and nothing switched.';
   }
-  const said = stopped ? `${outcome === 'stopped' ? 'Stopped' : 'Interrupted'} before it finished, so nothing switched. ` : '';
+  const said = !stopped ? '' : outcome === 'stopped' ? 'This test was stopped before it finished, so nothing switched. '
+    : 'This test stopped partway, so nothing switched. ';
   if (w.routed_model && w.promoted_run_id === run.id) {
     // the one it switched to is the one serving now, not merely the first that passed
     const won = cands.find((c) => c.serving) || cands.find((c) => c.twice) || cands.find((c) => c.tone === 'ok');
     if (won) {
       return won.confirmRuns
-        ? `Asked again on ${won.confirmRuns} requests it had never seen, ${won.label} held up. Understudy switched to it.`
-        : `${won.label} cleared the bar, and Understudy switched to it.`;
+        ? `${won.said} passed, then passed again on ${won.confirmRuns} new requests it had never seen, so Understudy switched to it.`
+        : `${won.said} passed, and Understudy switched to it.`;
     }
   }
   const kept = cands.find((c) => c.serving && c.tone === 'ok');
   if (kept) {
     const cheaper = cands.filter((c) => !c.serving && c.tone === 'ok').length;
-    return `${said}The setup serving still answers at least as well as ${ref}.`
-      + (cheaper ? ` ${cheaper === 1 ? 'A cheaper one' : `${cheaper} cheaper ones`} cleared too.` : ' Nothing cheaper passed, so nothing changes.');
+    return `${said}The model in use is still within the allowed difference of the original model, ${refName}.`
+      + (cheaper ? ` ${cheaper === 1 ? 'A cheaper model' : `${cheaper} cheaper models`} passed too.` : ' No cheaper model passed, so nothing changes.');
   }
   const twice = cands.find((c) => c.twice);
-  if (twice) return `${said}${twice.label} passed twice, on these requests and on new ones it had never seen.`;
+  if (twice) return `${said}${twice.said} passed twice: on this test's requests, and on new ones it had never seen.`;
   const cleared = cands.filter((c) => c.tone === 'ok');
   if (cleared.length) {
-    return `${said}${cleared.length === 1 ? 'One setup' : `${cleared.length} setups`} cleared the bar. `
-      + 'A setup is asked again on new requests before anything switches.';
+    return `${said}${cleared.length === 1 ? 'One model' : `${cleared.length} models`} passed. `
+      + 'A model is tested again on new requests before anything switches.';
   }
   const bar = Number(run.floor_pct) || 0;
-  // the closest a count this size can get a setup to showing it keeps the bar, with every answer matching
-  const reach = n > 0 ? (z2 / (n + z2)) * 100 : 100;
-  if (n > 0 && bar > 0 && reach > bar) {
-    return `${said}${n} requests can show a setup is within about ${Math.round(reach)}% of yours, not within ${Math.round(bar)}%.`
-      + (reachNeed ? ` The full test starts by itself at ${reachNeed}.` : '');
+  const barWords = `${Math.round(bar * 10) / 10}%`;
+  // too few requests for any model to be shown close enough, however well it matched
+  if (small) {
+    const what = quality ? "gives clearly worse answers than the original model's" : 'answers differently from the original model';
+    const wait = small.calls
+      ? ` The full test needs ${small.calls} recent requests, so the result can be checked again on new ones, and starts by itself when they're in`
+        + (small.have !== null ? `: you have ${small.have} so far${small.earliest ? `, so the earliest is ${small.earliest}` : ''}` : '') + '.'
+      : '';
+    return `${said}This test used ${n} requests, too few to switch anything. Showing that a model ${what} on under ${barWords} of `
+      + `requests takes at least ${small.need}.${wait}`;
   }
-  // kept the bar as the judge read it, and held back only because the judge was not trusted (see candOf)
+  // stayed within the allowed difference as the judge read it, and held back only because the judge was not trusted
   const unsure = cands.find((c) => c.verdict === 'Passed, judge unsure' && c.gap !== null);
   if (unsure) {
-    return `${said}${unsure.label} kept the bar as the judge read it: ${run.yardstick === 'quality' ? 'worse' : 'different'} on `
-      + `${pctWords(unsure.gap)} of them, against a bar of ${Math.round(bar * 10) / 10}%.`;
+    return `${said}${unsure.said} stayed within the allowed difference as the judge read it: ${quality ? 'clearly worse' : 'different'} on `
+      + `${pctWords(unsure.gap)} of the requests tested, where at most ${barWords} is allowed.`;
   }
   const close = cands.find((c) => c.tone === 'warn' && c.gap !== null);
   if (close) {
-    const how = run.yardstick === 'quality' ? 'gave a worse answer' : 'answered differently';
-    return `${said}The closest, ${close.label}, ${how} on ${pctWords(close.gap)} of them, against a bar of ${Math.round(bar * 10) / 10}%.`
-      + ' It is looked at again next time.';
+    const did = quality
+      ? `Its answer was clearly worse than the original model's on ${pctWords(close.gap)} of the requests tested.`
+      : `It answered differently from the original model on ${pctWords(close.gap)} of the requests tested.`;
+    // the allowed difference, and where it comes from: the original model's own variation, and a little more
+    const noise = run.noise_pct === null || run.noise_pct === undefined ? null : pctWords(Number(run.noise_pct) / 100);
+    const allowed = noise === null ? `At most ${barWords} is allowed`
+      : quality ? `The original model's own answers are clearly worse than each other on ${noise} of requests, so at most ${barWords} is allowed`
+        : `The original model answers differently from itself on ${noise} of requests, so at most ${barWords} is allowed`;
+    const within = close.gap * 100 <= bar;
+    const but = !within ? ", and this model wasn't close enough to replace it yet"
+      : close.verdict === 'Slower than original' ? ', but it answered more slowly than this workload allows'
+        : close.verdict === 'Too few to be sure' ? ', but it answered too few requests for the test to be sure'
+          : ", but the test isn't yet sure it stays within that";
+    return `${said}${close.said} was the closest match. ${did} ${allowed}${but}. It will be tested again next time.`;
   }
-  return `${said}No cheaper setup answered as well as ${ref} on these ${n} requests.`;
+  return `${said}No cheaper model came close enough to the original model, ${refName}, on these ${n} requests.`;
 }
 
-/** One measurement opened: what it found, in a sentence, and every setup it tried. */
+/** One test opened: what it found, in a few sentences, and every model it tried. */
 export async function runPageOf(w, run) {
   const results = await db.prepare(`SELECT * FROM eval_results WHERE run_id = ? AND verdict <> 'reference'`).all(run.id);
+  /* The names people know models by, from the catalogue without its maker ("ByteDance Seed: Seed 2.0 Mini" is "Seed 2.0
+     Mini"), for the sentences; the table keeps each model's full id. */
+  const ids = new Set([run.reference_model]);
+  for (const r of results) {
+    const nm = nameOfResult(r);
+    ids.add(r.model_id);
+    if (nm.first) ids.add(nm.first);
+    for (const o of Array.isArray(nm.options) ? nm.options : []) ids.add(o);
+  }
+  const named = await db.prepare('SELECT model_id, name FROM models_catalog WHERE model_id = ANY(?::text[])').all([...ids].filter(Boolean));
+  const names = new Map(named.filter((x) => x.name).map((x) => [x.model_id, String(x.name).replace(/^[^:]{1,40}:\s*/, '').trim()]));
   // what a request cost on each model in this measurement, from its own answers, reused ones left out
   const costs = await db.prepare(
     `SELECT model_id, AVG(cost_usd) AS per FROM eval_replays WHERE run_id = ? AND reused = 0 AND cost_usd > 0
@@ -472,14 +575,22 @@ export async function runPageOf(w, run) {
   try { check = run.judge_check_json ? JSON.parse(run.judge_check_json) : null; } catch { check = null; }
   const unsure = Number(check?.errors) > 0;
   const floorPct = run.floor_pct === null || run.floor_pct === undefined ? null : Number(run.floor_pct);
-  const cands = results.map((r) => candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure, floorPct }))
+  const quality = run.yardstick === 'quality';
+  const cands = results.map((r) => candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure, floorPct, quality, names }))
     .sort((a, b) => (TONE_ORDER[a.tone] - TONE_ORDER[b.tone])
       || ((a.gap ?? 2) - (b.gap ?? 2)) || ((a.perCall ?? 1) - (b.perCall ?? 1)));
-  // for a measurement too small to show anything, the count the full test waits for
-  const reachNeed = !w.routed_model && Number(w.measure_at_calls) > 0 ? Number(w.measure_at_calls) : null;
+  /* A test too small to show anything: what it would have taken, the count the full test waits for where the workload
+     still waits for it, and how many it has and the earliest they can be in (card 1's figures). */
+  let small = null;
+  if (floorPct && sample && (z2 / (sample + z2)) * 100 > floorPct) {
+    const calls = !w.routed_model && Number(w.measure_at_calls) > 0 ? Number(w.measure_at_calls) : null;
+    const e = calls ? await enoughOf(w, now()) : null;
+    small = { need: callsToClear(floorPct), calls, have: e ? e.have : null, earliest: e?.earliest !== null && e?.earliest !== undefined ? dayWords(e.earliest) : null };
+  }
+  const refName = names.get(run.reference_model) || short(run.reference_model);
   return {
     id: run.id,
-    take: takeOf(run, cands, w, { reachNeed, check }),
+    take: takeOf(run, cands, w, { small, refName, check }),
     bar: round8((Number(run.floor_pct) || 0) / 100),
     yardstick: run.yardstick === 'quality' ? 'quality' : 'agreement',
     metric,
@@ -488,12 +599,14 @@ export async function runPageOf(w, run) {
       perCall: refPer === null ? null : round8(refPer),
       p50: metric === 'ttft' ? Number(run.ref_ttft_p50) || null : Number(run.ref_latency_p50) || null,
     },
-    cands: cands.map(({ twice, confirmRuns, ...c }) => c),
+    cands: cands.map(({ twice, confirmRuns, said, ...c }) => c),
+    // how often the original model differed from itself (or was clearly worse than itself): the allowed difference is set from it
+    noise: run.noise_pct === null || run.noise_pct === undefined ? null : round8(Number(run.noise_pct) / 100),
     self: selfOf(run, plan),
   };
 }
 
-/* What a measurement that compared nothing can still be drawn from: how often the customer's own model's two answers
+/* What a test that compared nothing can still be drawn from: how often the customer's own model's two answers
    to one request differed (or, held to "at least as good", how often one was clearly worse), against the pass mark it
    set, or against the most a bar could be set from where it could not set one; and how far it got. */
 function selfOf(run, plan) {

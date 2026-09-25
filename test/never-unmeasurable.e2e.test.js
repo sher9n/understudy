@@ -409,9 +409,9 @@ test('B: where neither judge gets the planted answers right, nothing switches on
   const page = await runPageOf(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id), run);
   const row = page.cands.find((c) => c.key === 'vendor/good-poet');
   assert.equal(row.verdict, 'Passed, judge unsure');
-  assert.match(page.take, /^vendor\/good-poet kept the bar as the judge read it: worse on /,
+  assert.match(page.take, /^good-poet stayed within the allowed difference as the judge read it: clearly worse on /,
     JSON.stringify(page.cands.map((c) => [c.key, c.kind, c.verdict, c.tone])));
-  assert.match(page.take, /The judge was first tested on \d+ answers whose right verdict is already known, and it got \d+ wrong, so nothing is switched on its word\. The next measurement tests the judge again\.$/);
+  assert.match(page.take, /The judge was first tested on \d+ answers whose right verdict is already known, and it got \d+ wrong, so nothing is switched on its word\. The next test checks the judge again\.$/);
   const line = (await pageOf(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id))).measurements.find((r) => r.id === run.id);
   assert.equal(line.tag.text, 'Passed, judge unsure', 'the line in the list says what the setup\'s own row says');
 });
@@ -490,7 +490,7 @@ test('the page says how a measurement was judged, and draws one that compared no
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id);
   const page = await runPageOf(w, run);
   assert.equal(page.yardstick, 'quality');
-  assert.match(page.take, /Because gpt-5\.4 answers the same request differently each time, each setup was held to answers at least as good as yours rather than to the same answers\./);
+  assert.match(page.take, /Because the original model answers the same request differently each time, each model was checked for answers at least as good as the original model's, rather than the same answers\./);
   assert.ok(page.self, 'every measurement carries what to draw');
   // a measurement from before, that could not be measured, drawn against the most a bar could be set from
   const old = { ...run, id: `run_old_${process.pid}`, outcome: 'unmeasurable', noise_pct: 47, floor_pct: 58.75, yardstick: 'agreement',
@@ -503,7 +503,7 @@ test('the page says how a measurement was judged, and draws one that compared no
   assert.equal(oldPage.self.noise, 0.47);
   assert.equal(oldPage.self.most, 0.4);
   assert.equal(oldPage.self.bar, null);
-  assert.match(oldPage.take, /now held to answers at least as good as yours instead, so the next measurement compares setups/);
+  assert.match(oldPage.take, /Workloads like this are now compared on whether answers are at least as good as the original model's, so the next test compares models\./);
 });
 
 // last, because the judge refusing everything leaves nothing in a state the other tests would read

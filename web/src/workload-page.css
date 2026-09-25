@@ -34,6 +34,9 @@
 .wp .wp-pill.is-ok { background: var(--okq); color: var(--ok); }
 .wp .wp-pill.is-warn { background: var(--warnq); color: var(--warn); }
 .wp .wp-pill.is-brand { background: var(--brandq); color: var(--brand-read); }
+/* a fact, not a warning: a workload still on its own model has nothing wrong with it */
+.wp .wp-pill.is-mut { background: var(--grid); color: var(--mut-read); }
+.wp .wp-pill svg { width: 13px; height: 13px; flex: none; }
 .wp .wp-pill .wp-pd { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .wp .wp-btn { padding: 9px 16px; border-radius: 9px; font-size: 13.5px; font-weight: 600; line-height: 1.5; border: 1px solid var(--line-strong);
   background: var(--raise); color: var(--ink); cursor: pointer; white-space: nowrap; }
@@ -72,6 +75,8 @@
 .wp .wp-sv .t-ok { fill: var(--ok); }
 .wp .wp-sv .t-warn { fill: var(--warn); }
 .wp .wp-sv .t-bold { font-weight: 700; }
+/* a label a line may cross: a thin border in the card's own colour keeps the words whole */
+.wp .wp-sv .halo { paint-order: stroke; stroke: var(--raise); stroke-width: 4px; stroke-linejoin: round; }
 .wp .wp-sv .ui { font-family: 'Schibsted Grotesk', system-ui, sans-serif; font-size: 12.5px; }
 .wp .wp-sv .dotno { fill: var(--wp-dot-ink); font-weight: 700; font-size: 10.5px; }
 
@@ -142,6 +147,9 @@
 .wp .wp-help svg { width: 13px; height: 13px; }
 .wp .wp-help:hover, .wp .wp-help[aria-expanded="true"] { color: var(--ink); }
 .wp .wp-help:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+/* an outcome's tag that says what it means when hovered or tapped: the tag itself is the button */
+.wp .wp-helptag { padding: 0; margin: 0; border: 0; background: none; font: inherit; color: inherit; cursor: help; border-radius: 999px; line-height: normal; }
+.wp .wp-helptag:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .wp .wp-phonehelp { display: none; }
 .wp-tipbox { position: fixed; z-index: 60; box-sizing: border-box; background: var(--raise); color: var(--ink); border: 1px solid var(--line-strong);
   border-radius: 10px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14); padding: 10px 12px; font-family: 'Schibsted Grotesk', system-ui, sans-serif;
@@ -152,6 +160,10 @@
 .wp-tipbox b { font-weight: 700; }
 .wp .wp-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--mut-read); margin-top: 6px; }
 .wp .wp-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.wp .wp-legend i.wp-dash { width: 16px; height: 0; border-radius: 0; border-top: 2px dashed var(--ok); vertical-align: 3px; }
+.wp .wp-legend .wp-help { margin-left: 2px; }
+/* one heading over a test's chart and table, which show the same models two ways */
+.wp .wp-detailhead { margin: 0 0 -8px; }
 .wp .wp-empty { padding: 4px 20px 20px; color: var(--mut-read); font-size: 13.5px; }
 .wp .wp-loadline { font-size: 13px; color: var(--mut); }
 

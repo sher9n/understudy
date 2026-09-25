@@ -367,7 +367,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     id: id('run'), workspace_id: workload.workspace_id, workload_id: workloadId,
     status: 'running', shape_kind: shape, reference_model: reference,
     sample_size: samples.length, created_at: now(), started_at: now(),
-    steps_total: nominal, steps_done: 0, phase: `Setting your bar on ${reference}`,
+    steps_total: nominal, steps_done: 0, phase: `Checking how much ${reference}'s answers vary`,
     trigger: automatic ? 'automatic' : 'manual',
     models_planned: Math.min(want, queue.length), heartbeat_at: now(),
     plan_json: JSON.stringify(planRecord), judge: plan.judge, job_id: jobId,
@@ -636,7 +636,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
          look dearer, and the saving smaller than it is). */
       refCost: had && !(paid(ra) > 0) ? paid(rb) : (paid(ra) + paid(rb)) / 2,
     });
-    if (await step(had ? 1 : 2, `Setting your bar on ${reference}, ${bar.length} of ${samples.length} calls`)) stopped = true;
+    if (await step(had ? 1 : 2, `Checking how much ${reference}'s answers vary, ${bar.length} of ${samples.length} requests`)) stopped = true;
     /* When the customer's own model cannot answer the first few calls at all, the rest will not
        go differently, and every further call would be paid for to learn nothing. Only what was asked
        of it now counts: a recorded answer says it could answer then, not that it can today. */
@@ -777,7 +777,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        short, another request's, in the wrong language, ignoring the instruction) and one that is not (only its spacing
        changed). Jev reads them first; where it misses one, the language model reads them too, and the one that got
        them all right reads this run. Where both miss, nothing either settles is switched to on its word alone. */
-    if (await step(0, 'Testing the judge on answers planted as clearly worse')) return await endStopped();
+    if (await step(0, 'Checking the judge on answers whose right verdict is known')) return await endStopped();
     const chosen = await chooseJudge(kept, { scope: workload.workspace_id, addJudge, checklist, shape });
     judgePrefer = chosen.prefer;
     judgeCheck = chosen.check;
@@ -1134,7 +1134,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
           /* The replay has come back and is counted before the judgement is asked for, so a stop
              that lands between the two still counts the call that ran and was paid for. */
           answered.set(key, st.runs);
-          if (await step(1, `Trying ${cand.label || cand.model}, ${st.runs} of ${kept.length} calls`)) {
+          if (await step(1, `Trying ${cand.label || cand.model}, ${st.runs} of ${kept.length} requests`)) {
             counted = true;
             halt = halt || 'stopped';
             st.stopped = 'user';
@@ -1212,7 +1212,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       // a judgement that went out is a model call too, and is counted like one
       const judgeCalls = judged && judged.cost > 0 ? 1 : 0;
       answered.set(key, st.stopped ? kept.length : st.runs);
-      if (await step((counted ? 0 : 1) + judgeCalls, `Trying ${cand.label || cand.model}, ${st.runs} of ${kept.length} calls`)) {
+      if (await step((counted ? 0 : 1) + judgeCalls, `Trying ${cand.label || cand.model}, ${st.runs} of ${kept.length} requests`)) {
         halt = halt || 'stopped';
         if (!st.stopped) st.stopped = 'user';
         return 'quit';
@@ -1493,7 +1493,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         if (a.score !== null && a.score !== undefined) scores.push(a.score);
         if (Number.isFinite(a.latency)) lat.push(a.latency);
         if (Number.isFinite(a.ttft)) ttft.push(a.ttft);
-        if (await step(got.sent + (a.sent || 0), `Looking again at ${label} on calls it has not seen, ${scores.length} of ${picks.length}`)) {
+        if (await step(got.sent + (a.sent || 0), `Testing ${label} again on new requests, ${scores.length} of ${picks.length}`)) {
           halt = 'stopped';
           over = true;
         }

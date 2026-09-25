@@ -48,8 +48,8 @@ export function labelOf(spec, reference = null) {
     return `${[...names, `${short(spec.strong?.model)} (yours)`].join(', ').replace(/, ([^,]*)$/, ' or $1')}, picked by kind of request`;
   }
   if (spec.kind === 'router') {
-    if (same(spec.cheap, spec.strong)) return `${short(spec.cheap.model)} thinking less or fully, picked call by call`;
-    return `${short(spec.cheap.model)} or ${short(spec.strong.model)}, picked call by call`;
+    if (same(spec.cheap, spec.strong)) return `${short(spec.cheap.model)} thinking less or fully, picked request by request`;
+    return `${short(spec.cheap.model)} or ${short(spec.strong.model)}, picked request by request`;
   }
   // any way of thinking set on the customer's own model is a lighter one: the lightest it offers can be "medium"
   if (reference && spec.model === reference && spec.recipe?.reasoning) return `${short(spec.model)}, thinking less`;
@@ -135,7 +135,7 @@ export function nameOfResult(row) {
       yours: { kinds: table.filter((t) => t < 0).length, share: shareOf((t) => t < 0) } };
   }
   if (spec.kind === 'router') {
-    return { kind: 'router', label: labelOf(spec), short: `${short(spec.cheap.model)}, picked per call`,
+    return { kind: 'router', label: labelOf(spec), short: `${short(spec.cheap.model)}, picked per request`,
       first: spec.cheap.model, fallback: spec.strong.model, threshold: spec.threshold ?? null };
   }
   /* Read the way the key was made (keyOfSpec in src/eval/promote.js): a way of thinking is "#lighter"
