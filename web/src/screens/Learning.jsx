@@ -24,7 +24,8 @@ const modesFor = (shares) => [
 ];
 
 // what each way of switching is called where it is chosen, so a line about it names the one this workload has
-const SWITCHING = { auto: '“Optimize automatically”', ask: '“Ask me first”', off: '“Never switch”' };
+// the workspace's choice of what happens when a cheaper setup passes, by the names Settings gives it
+const SWITCHING = { auto: '“Automatic”', ask: '“Ask me first”', off: '“Never switch”' };
 
 const TONE = { serving: 'serving', yardstick: 'yours', 'runner-up': 'runner', 'set aside': 'aside' };
 const ROLE = { serving: 'Serving now', yardstick: 'Your own model', 'runner-up': 'Runner-up', 'set aside': 'Set aside' };
@@ -122,7 +123,7 @@ export default function Learning({ w, d, err: loadErr, onReload, onSwitched }) {
   const livePicked = picked === 'careful' || picked === 'normal';
   const liveNote = !livePicked ? ''
     : w.optimizeMode === 'ask' ? ' Switches still wait for your approval, but these experimental calls are answered another way without asking.'
-      : w.optimizeMode === 'off' ? ' This workload never switches on its own, but these experimental calls are answered another way without asking.'
+      : w.optimizeMode === 'off' ? ' Your workspace never switches by itself, but these experimental calls are answered another way without asking.'
         : '';
 
   return (
