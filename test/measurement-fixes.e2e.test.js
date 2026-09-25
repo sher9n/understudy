@@ -362,9 +362,10 @@ test('the measurement that tries again after one was cut short uses the bar it b
   assert.match(cut.error, /account/);
   const again = await runEvaluation(workload.id);
   assert.equal(again.ok, true, JSON.stringify(again));
-  // the bar's answers this run paid for, rather than read from the call or from what the cut-short one bought
-  const bought = Number((await db.prepare(`SELECT COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND model_id = ? AND reused = 0`)
-    .get(again.runId, REF)).n);
+  /* the bar's answers this run paid for, rather than read from the call or from what the cut-short one bought: the first
+     look's, since the customer's model's answers to a second look's new requests are kept too (look 2), and are always new */
+  const bought = Number((await db.prepare(`SELECT COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND model_id = ? AND reused = 0
+      AND look IS DISTINCT FROM 2`).get(again.runId, REF)).n);
   // counted as a finished measurement's calls, they were steered away from, and a whole new bar was paid for
   assert.ok(bought < 30, `the customer's model was paid for ${bought} of the bar's answers, on ${cut.sample_size} calls`);
 });

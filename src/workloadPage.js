@@ -2,7 +2,9 @@ import { db, now, round8 } from './db/index.js';
 import config from './config.js';
 import { withFee } from './billing.js';
 import { barNeed, usableCalls, sampleSizeFor } from './eval/plan.js';
-import { callsToClear } from './eval/compare.js';
+import { callsToClear, extract, differingFields } from './eval/compare.js';
+import { LASTING_STATUSES } from './eval/replay.js';
+import { lastAsked, messagesText, responseText } from './callText.js';
 import { valueOf, optimizingSince } from './eval/value.js';
 import { routedSavings } from './eval/actual.js';
 import { cadenceOf } from './eval/schedule.js';
@@ -445,6 +447,8 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
     serving: isServing,
     twice: verdict === 'Passed twice',
     confirmRuns: Number(r.confirm_runs) || 0,
+    // the new requests its second look was read on, which decided its outcome as well (lookAgain in src/eval/run.js)
+    second: Number(r.confirm_runs) || 0,
   };
 }
 
@@ -571,10 +575,10 @@ export async function runPageOf(w, run) {
   }
   const named = await db.prepare('SELECT model_id, name FROM models_catalog WHERE model_id = ANY(?::text[])').all([...ids].filter(Boolean));
   const names = new Map(named.filter((x) => x.name).map((x) => [x.model_id, String(x.name).replace(/^[^:]{1,40}:\s*/, '').trim()]));
-  // what a request cost on each model in this measurement, from its own answers, reused ones left out
+  // what a request cost on each model in this measurement, from its own answers to its first look, reused ones left out
   const costs = await db.prepare(
     `SELECT model_id, AVG(cost_usd) AS per FROM eval_replays WHERE run_id = ? AND reused = 0 AND cost_usd > 0
-        AND (status IS NULL OR status < 400) GROUP BY model_id`).all(run.id);
+        AND (status IS NULL OR status < 400) AND look IS DISTINCT FROM 2 GROUP BY model_id`).all(run.id);
   const avg = new Map(costs.map((c) => [c.model_id, Number(c.per)]));
   // the customer's own model's, from this measurement, or from its real requests in the month before it
   let refPer = avg.get(run.reference_model) ?? null;
@@ -616,6 +620,7 @@ export async function runPageOf(w, run) {
     const rows = await db.prepare(
       `SELECT model_id, COUNT(*) AS n, COUNT(*) FILTER (WHERE ${t} > ?) AS over FROM eval_replays
         WHERE run_id = ? AND model_id = ANY(?::text[]) AND error IS NULL AND (status IS NULL OR status < 400) AND ${t} > 0
+          AND look IS DISTINCT FROM 2
         GROUP BY model_id`).all(speed.limits.p90, run.id, slow);
     for (const x of rows) speed.over.set(x.model_id, { n: Number(x.n), over: Number(x.over) });
   }
@@ -643,9 +648,275 @@ export async function runPageOf(w, run) {
       p50: metric === 'ttft' ? Number(run.ref_ttft_p50) || null : Number(run.ref_latency_p50) || null,
     },
     cands: cands.map(({ twice, confirmRuns, said, ...c }) => c),
+    // how many requests the test sampled, which each model's count of answered ones is read against
+    sample,
     // how often the original model differed from itself (or was clearly worse than itself): the allowed difference is set from it
     noise: run.noise_pct === null || run.noise_pct === undefined ? null : round8(Number(run.noise_pct) / 100),
     self: selfOf(run, plan),
+  };
+}
+
+const ANSWERS_PER_PAGE = 10;
+const clip = (s, n) => (s === null || s === undefined ? null : String(s).length > n ? `${String(s).slice(0, n)}…` : String(s));
+const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
+
+/* A model's answer kept by a test (keepReplay in src/eval/run.js keeps its words, or the tools it called as JSON), as a
+   response again, so it is read exactly as the test read it (extract in src/eval/compare.js). */
+function asResponse(answer, shape) {
+  if (answer === null || answer === undefined) return null;
+  if (shape === 'tool_call') {
+    const calls = parse(answer);
+    if (Array.isArray(calls)) return { choices: [{ message: { tool_calls: calls.map((c) => ({ function: { name: c?.name, arguments: c?.arguments } })) } }] };
+  }
+  return { choices: [{ message: { content: String(answer) } }] };
+}
+
+/* How an answer that was scored above 0 differed, as the judge said it did (the kinds keepReplay keeps; KIND_WORDS in
+   src/eval/run.js says the same of a model's answers as a whole). */
+const DIFF_WORDS = {
+  wording: 'only the wording differs', omission: 'it leaves something out', fact: 'a fact or a figure differs',
+  decision: 'it reaches a different decision', refusal: 'it refuses to answer', 'cut off': 'it stops part way through',
+  worse: 'it is a worse answer', unrelated: 'it answers something else', truncated: 'it ran out of room',
+  instruction: "it doesn't follow the instructions in the request", empty: 'it is empty',
+  'unparseable json': "it isn't valid JSON", 'no tool call': 'it calls no tool', 'unparseable arguments': "its tool's arguments aren't valid JSON",
+  refused: 'its provider refused or failed it',
+};
+
+// how a model's second look ended (confirm_verdict, written by lookAgain in src/eval/run.js)
+const CONFIRM_WORDS = {
+  cleared: 'it passed', missed: "it didn't pass", review: "it came close, but didn't pass", slower: 'it was too slow on them',
+  insufficient: "there weren't yet enough new requests to look again", not_reached: "it wasn't reached, because another model passed first",
+  live: 'it passed on live requests',
+};
+
+/* Whether an answer counted towards the model's figure, as the test wrote down, or for an answer kept before it did,
+   unless it is a refusal from a provider that was only busy (see LASTING_STATUSES), the one it can still be told from. */
+const countedOf = (row) => (row.scored === null || row.scored === undefined
+  ? row.score !== null && row.score !== undefined && !(row.failure === 'refused' && !LASTING_STATUSES.includes(Number(row.status) || 0))
+  : Number(row.scored) === 1);
+
+/* How the test compared an answer with the original model's, from what it wrote down: the same text, a field at a time
+   (nothing to judge), a judge model reading them, or the rules in the request's own instructions. */
+function comparedWords(by, shape, scored) {
+  const b = String(by || '');
+  if (b === 'same text') return 'The text was identical';
+  if (b === 'checklist') return "Checked against the instructions in the request";
+  if (b) return 'Read by a judge model';
+  return scored && shape !== 'free_text' ? 'Compared field by field' : null;
+}
+
+/* How one request's answer was read, in words: the score the test gave it (0 the same as the original model, 1 a
+   different answer, or clearly worse where answers are held to "at least as good"), or why there was none. */
+function answerVerdict(row, quality) {
+  const counted = countedOf(row);
+  if (!counted && row.failure === 'refused') return { tone: 'mut', text: "Provider busy, so it doesn't count" };
+  if (row.failure || row.error) {
+    const why = row.failure === 'refused' ? 'the provider refused or failed it'
+      : row.failure === 'truncated' ? 'the answer was cut off'
+        : row.failure === 'unparseable json' ? "the answer wasn't valid JSON"
+          : row.failure === 'unparseable arguments' ? "the tool's arguments weren't valid JSON"
+            : row.failure === 'no tool call' ? 'it called no tool'
+              : row.failure === 'empty' ? 'the answer was empty' : String(row.failure || row.error).slice(0, 80);
+    return { tone: 'bad', text: `Failed: ${why}` };
+  }
+  if (row.score === null || row.score === undefined) return { tone: 'mut', text: "Not judged, so it doesn't count" };
+  if (!counted) return { tone: 'mut', text: "Couldn't be judged, so it doesn't count" };
+  const s = Number(row.score);
+  if (s <= 0) return { tone: 'ok', text: quality ? 'At least as good' : 'Same answer' };
+  if (s >= 0.999) return { tone: 'bad', text: quality ? 'Clearly worse' : 'Different' };
+  return { tone: 'warn', text: quality ? 'Worse in one of two readings' : 'Different from one of the two answers' };
+}
+
+/* One model in one test, request by request: what was asked, the original model's two answers (the two the test held
+   this model's answer against), this model's answer, and how it was read: its score, the fields that differed, its
+   time and its cost beside the original model's. A way of serving built on a model (a check on each answer, a model
+   picked by kind of request) keeps no answers of its own, so its lead model's are shown and it says so. Content goes
+   with the workspace's retention window, and then says so rather than showing nothing. Null for a model the test did
+   not try. */
+export async function runAnswersOf(w, run, key, { page = 1, per = ANSWERS_PER_PAGE, look = 1 } = {}) {
+  const r = await db.prepare(`SELECT * FROM eval_results WHERE run_id = ? AND model_id = ? AND verdict <> 'reference'`).get(run.id, key);
+  if (!r) return null;
+  const name = nameOfResult(r);
+  const built = name.kind === 'cascade' || name.kind === 'router';
+  // whose answers: the model's own, or for a way of serving built on one, its lead model's (under its own name or a variant of it)
+  let from = r.model_id;
+  if (built) {
+    const kept = await db.prepare(`SELECT model_id, COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND slot = 0 AND (model_id = ? OR model_id LIKE ?)
+        AND look IS DISTINCT FROM 2 GROUP BY model_id ORDER BY (model_id = ?) DESC, COUNT(*) DESC`).all(run.id, name.first, `${name.first}#%`, name.first);
+    from = kept[0]?.model_id ?? name.first;
+  }
+  const quality = run.yardstick === 'quality';
+  const shape = run.shape_kind || w.shape_kind;
+  const p = Math.max(1, Math.min(1000, Math.round(Number(page) || 1)));
+  /* Its second look, on new requests it had never seen (lookAgain in src/eval/run.js), for a model on its own: a way of
+     serving built on one keeps no answers to it. How many it was read on, and how many of its answers were kept, which a
+     test from before they were keeps none of. */
+  const second = Number(look) === 2 && !built;
+  const keptSecond = built ? 0 : Number((await db.prepare(
+    'SELECT COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND model_id = ? AND slot = 0 AND look = 2').get(run.id, r.model_id))?.n) || 0;
+  /* The answers its row was read from. A model dropped part way can be finished later in the same test for a way of
+     serving built on it (the strategies in src/eval/run.js), and its row still counts only the requests it answered
+     before it was dropped: its first `runs` answers, in the order it gave them. A way of serving built on a model reads
+     every request its lead model answered, once each, the last reading of it (a test from before a finished model went
+     on from where it stopped answered its first requests twice, and the strategy read the second). A second look is
+     every answer to it. */
+  const mine = built
+    ? `SELECT DISTINCT ON (call_id) * FROM eval_replays WHERE run_id = ? AND model_id = ? AND slot = 0 AND look IS DISTINCT FROM 2
+         ORDER BY call_id, created_at DESC, id DESC`
+    : second
+      ? 'SELECT * FROM eval_replays WHERE run_id = ? AND model_id = ? AND slot = 0 AND look = 2 ORDER BY created_at, id'
+      : 'SELECT * FROM eval_replays WHERE run_id = ? AND model_id = ? AND slot = 0 AND look IS DISTINCT FROM 2 ORDER BY created_at, id LIMIT ?';
+  const mineArgs = built || second ? [run.id, from] : [run.id, from, Number(r.runs) > 0 ? Number(r.runs) : null];
+  /* 0 the same (or at least as good), 1 different (or clearly worse), and between, the same as one of the original
+     model's two answers, over the answers that counted: the test leaves out a judgement that did not come back, and a
+     refusal from a provider that was only busy or timed out, which say nothing about the model's answers (tryModel in
+     src/eval/run.js), and writes down which (`scored`). An answer kept before it did counts unless it is such a refusal
+     (the one it can still be told from: a refusal counts only where it would be refused again, LASTING_STATUSES). */
+  // (a missing failure is not a refusal: compared as it is, it would make the whole test unknown and drop the row)
+  const counts = await db.prepare(
+    `WITH mine AS (${mine}),
+          read AS (SELECT *, COALESCE(scored = 1, score IS NOT NULL
+                     AND NOT (COALESCE(failure, '') = 'refused' AND NOT (COALESCE(status, 0) = ANY(?::int[])))) AS counts FROM mine)
+     SELECT COUNT(*) AS n,
+            COUNT(*) FILTER (WHERE counts AND failure IS NULL AND error IS NULL AND score <= 0) AS same,
+            COUNT(*) FILTER (WHERE counts AND failure IS NULL AND error IS NULL AND score > 0 AND score < 0.999) AS partly,
+            COUNT(*) FILTER (WHERE counts AND failure IS NULL AND error IS NULL AND score >= 0.999) AS differ,
+            COUNT(*) FILTER (WHERE counts AND (failure IS NOT NULL OR error IS NOT NULL)) AS failed,
+            COUNT(*) FILTER (WHERE NOT counts AND COALESCE(failure, '') = 'refused') AS busy,
+            COUNT(*) FILTER (WHERE NOT counts AND COALESCE(failure, '') <> 'refused') AS unjudged,
+            AVG(score) FILTER (WHERE counts) AS average,
+            COUNT(*) FILTER (WHERE scored IS NULL) AS unmarked
+       FROM read`).get(...mineArgs, LASTING_STATUSES);
+  const rows = await db.prepare(
+    `WITH mine AS (${mine})
+     SELECT call_id, answer, score, scored, difference, failure, error, status, latency_ms, ttft_ms, cost_usd, judged_by, reused, created_at
+       FROM mine ORDER BY created_at, id LIMIT ? OFFSET ?`)
+    .all(...mineArgs, per + 1, (p - 1) * per);
+  const page1 = rows.slice(0, per);
+  const ids = page1.map((x) => x.call_id).filter(Boolean);
+  const [calls, samples, refs] = ids.length ? await Promise.all([
+    db.prepare(`SELECT id, request_json, content_purged_at, created_at, served_model, cost_usd, latency_ms, ttft_ms
+        FROM calls WHERE id = ANY(?::text[])`).all(ids),
+    db.prepare('SELECT call_id, ref_a_json, ref_b_json, content_purged_at FROM eval_samples WHERE run_id = ? AND call_id = ANY(?::text[])').all(run.id, ids),
+    db.prepare(`SELECT call_id, slot, latency_ms, ttft_ms, cost_usd, status, failure FROM eval_replays WHERE run_id = ? AND model_id = ?
+        AND call_id = ANY(?::text[])`).all(run.id, run.reference_model, ids),
+  ]) : [[], [], []];
+  const callOf = new Map(calls.map((c) => [c.id, c]));
+  const sampleOf = new Map(samples.map((s) => [s.call_id, s]));
+  const refOf = new Map();
+  for (const x of refs) { if (!refOf.has(x.call_id)) refOf.set(x.call_id, []); refOf.get(x.call_id).push(x); }
+  const plan = parse(run.plan_json);
+  const ttft = plan?.speed?.metric === 'ttft' && Number(run.ref_ttft_p50) > 0;
+  const named = await db.prepare('SELECT model_id, name FROM models_catalog WHERE model_id = ANY(?::text[])')
+    .all([run.reference_model, from, name.first, name.fallback].filter(Boolean));
+  const names = new Map(named.filter((x) => x.name).map((x) => [x.model_id, String(x.name).replace(/^[^:]{1,40}:\s*/, '').trim()]));
+  const known = (id) => names.get(String(id).split('#')[0]) || String(id).split('/').pop();
+  // what a way of serving built on a model does, and so whose answers these are
+  const lead = known(from);
+  const how = name.kind === 'cascade'
+    ? `This setup answers with ${lead} and checks each answer, sending any that fail the check on to ${known(name.fallback)}.`
+    : name.kind === 'router' && name.version === 2
+      ? `This setup sends each kind of request to the model that did best on that kind, starting from ${lead}.`
+      : `This setup picks, for each request, between ${lead} and ${known(name.fallback)}.`;
+  return {
+    key: r.model_id,
+    from: !built ? null : {
+      model: from,
+      name: lead,
+      why: `${how} It keeps no answers of its own, so these are the answers ${lead} gave. Its figures in the table also count what happened to the requests it sent on.`,
+    },
+    reference: run.reference_model,
+    referenceName: known(run.reference_model),
+    yardstick: quality ? 'quality' : 'agreement',
+    shape,
+    metric: ttft ? 'ttft' : 'latency',
+    sample: Number(run.sample_size) || 0,
+    total: Number(counts.n) || 0,
+    counts: {
+      same: Number(counts.same) || 0, partly: Number(counts.partly) || 0, different: Number(counts.differ) || 0,
+      failed: Number(counts.failed) || 0, busy: Number(counts.busy) || 0, unjudged: Number(counts.unjudged) || 0,
+    },
+    // the average of the scores that count, which for a model on its own is the figure its row in the table shows
+    average: counts.average === null || counts.average === undefined ? null : round8(Number(counts.average)),
+    // the figure these answers make: its row's, or its second look's (lookAgain), with the most that look allowed
+    figure: second
+      ? (r.confirm_gap === null || r.confirm_gap === undefined ? null : round8(Number(r.confirm_gap) / 100))
+      : (r.gap_pct === null || r.gap_pct === undefined ? null : round8(Number(r.gap_pct) / 100)),
+    bar: second && r.confirm_floor !== null && r.confirm_floor !== undefined ? round8(Number(r.confirm_floor) / 100) : null,
+    look: second ? 2 : 1,
+    // its two looks: how many requests each was read on, how many answers to the second were kept, and how it ended
+    looks: {
+      first: Number(r.runs) || 0,
+      second: Number(r.confirm_runs) || 0,
+      kept: keptSecond,
+      ended: r.confirm_verdict ? (CONFIRM_WORDS[r.confirm_verdict] ?? null) : null,
+    },
+    /* Answers kept before the test wrote down which counted: a judgement of one that did not come back can't be told
+       from one that did, so where the average and the figure differ, the page says why rather than leaving it. */
+    unmarked: Number(counts.unmarked) || 0,
+    page: p,
+    per,
+    more: rows.length > per,
+    rows: page1.map((x, k) => {
+      const c = callOf.get(x.call_id);
+      const s = sampleOf.get(x.call_id);
+      // content goes by the workspace's retention window: the request's, and the answers the test kept
+      const purged = !c || !!c.content_purged_at || !!s?.content_purged_at;
+      const req = purged ? null : parse(c.request_json);
+      const refs2 = purged ? [null, null] : [parse(s?.ref_a_json), parse(s?.ref_b_json)];
+      const theirs = (refOf.get(x.call_id) || []).sort((a, b) => a.slot - b.slot);
+      /* How long the original model took on it: its first timed answer in the test, or the real request's where the
+         original model answered it (the answer a test takes from the real request carries no time of its own). */
+      const timeOf = (t) => Number(ttft ? (t?.ttft_ms ?? t?.latency_ms) : t?.latency_ms) || 0;
+      const refTimed = theirs.find((t) => Number(t.status || 200) < 400 && !t.failure && timeOf(t) > 0);
+      const refMs = refTimed ? timeOf(refTimed) : c && c.served_model === run.reference_model && timeOf(c) > 0 ? timeOf(c) : null;
+      /* What this model's answer was held to, as the test held it: each of the original model's two answers on its own
+         and the score their average, or, held to "at least as good", the first of the two it could read. */
+      const readRefs = refs2.map((j) => (j ? extract(j, shape) : { ok: false }));
+      const heldTo = quality
+        ? (readRefs[0].ok ? [true, false] : [false, readRefs[1].ok])
+        : readRefs.map((e) => e.ok);
+      // the fields that differed from each of them, read the way the test read them (a structured answer only)
+      const got = !purged && x.answer !== null && !x.failure ? extract(asResponse(x.answer, shape), shape) : null;
+      const fields = readRefs.map((e, i) => (shape !== 'free_text' && got?.ok && e.ok && heldTo[i] ? differingFields(got.value, e.value, shape) : null));
+      /* A structured answer as the test read it, so a page can lay it out and mark the very fields named above; left
+         out where it is too long to send whole, and the words are shown instead. */
+      const whole = (e) => (shape !== 'free_text' && e?.ok && JSON.stringify(e.value ?? null).length <= 12000 ? e.value : undefined);
+      const values = { answer: whole(got), original: readRefs.map(whole) };
+      /* What the original model was paid for this request in the test: its answers' own costs (an answer reused from an
+         earlier test is kept at no cost), or the real request's where the original model answered it. */
+      const paidRef = theirs.map((t) => Number(t.cost_usd)).filter((v) => v > 0);
+      const refCost = paidRef.length ? paidRef.reduce((a, b) => a + b, 0) / paidRef.length
+        : c && c.served_model === run.reference_model && Number(c.cost_usd) > 0 ? Number(c.cost_usd) : null;
+      const msgs = Array.isArray(req?.messages) ? req.messages.length : 0;
+      return {
+        n: (p - 1) * per + k + 1,
+        callId: x.call_id,
+        at: Number(c?.created_at) || null,
+        purged,
+        asked: clip(req ? lastAsked(req) : null, 2400),
+        // the whole request, where it says more than what was asked last
+        request: msgs > 1 ? clip(messagesText(req), 12000) : null,
+        messages: msgs,
+        original: refs2.map((j) => clip(j ? responseText(j) : null, 4000)),
+        heldTo,
+        // read back the way the test read it: a tool call as the tool it called and what it sent
+        answer: purged || x.answer === null ? null : clip(responseText(asResponse(x.answer, shape)) ?? x.answer, 4000),
+        score: x.score === null || x.score === undefined ? null : round8(Number(x.score)),
+        // whether its score is one of those the model's figure averages
+        counted: countedOf(x),
+        verdict: answerVerdict(x, quality),
+        difference: x.difference ? (DIFF_WORDS[x.difference] || String(x.difference)) : null,
+        fields,
+        values,
+        compared: x.failure || x.error || !countedOf(x) ? null : comparedWords(x.judged_by, shape, true),
+        ms: Number(ttft ? (x.ttft_ms ?? x.latency_ms) : x.latency_ms) || null,
+        cost: x.cost_usd === null || x.cost_usd === undefined ? null : round8(Number(x.cost_usd)),
+        reused: Number(x.reused) === 1,
+        original_ms: refMs,
+        original_cost: refCost === null ? null : round8(refCost),
+      };
+    }),
   };
 }
 

@@ -150,19 +150,23 @@ function answerText(json) {
   return typeof m.content === 'string' ? m.content.slice(0, 4000) : null;
 }
 
-async function keepReplay(runId, callId, model, slot, r, { score = null, judged = null, failure = null } = {}) {
+/* `scored` is whether the answer counted towards the model's figure: false for a judgement that did not come back, or a
+   refusal from a provider that was only busy, which are kept with a score all the same. `look` is 2 for an answer to a
+   model's second look, on new requests (lookAgain), and null for its first (see 032-answers-as-read.sql). */
+async function keepReplay(runId, callId, model, slot, r, { score = null, judged = null, failure = null, scored = null, look = null } = {}) {
   await db.prepare(
     `INSERT INTO eval_replays (id, run_id, call_id, model_id, slot, cache_key, reused, status, error, failure, answer,
-            latency_ms, ttft_ms, completion_tokens, reasoning_tokens, cost_usd, score, judged_by, difference, created_at)
+            latency_ms, ttft_ms, completion_tokens, reasoning_tokens, cost_usd, score, judged_by, difference, scored, look, created_at)
      VALUES (@id, @run_id, @call_id, @model_id, @slot, @cache_key, @reused, @status, @error, @failure, @answer,
             @latency_ms, @ttft_ms, @completion_tokens, @reasoning_tokens, @cost_usd, @score, @judged_by, @difference,
-            @created_at)`).run({
+            @scored, @look, @created_at)`).run({
     id: id('rpl'), run_id: runId, call_id: callId, model_id: model, slot, cache_key: r.key ?? null,
     reused: r.reused ? 1 : 0, status: r.status ?? null, error: r.error ?? null, failure,
     answer: answerText(r.json), latency_ms: r.latencyMs ?? null, ttft_ms: r.ttftMs ?? null,
     completion_tokens: r.completionTokens ?? null, reasoning_tokens: r.reasoningTokens ?? null,
     cost_usd: round8(r.cost || 0), score, judged_by: judged?.judgedBy ?? null,
-    difference: score > 0 ? (judged?.detail?.kind ?? failure ?? null) : null, created_at: now(),
+    difference: score > 0 ? (judged?.detail?.kind ?? failure ?? null) : null,
+    scored: scored === null ? null : (scored ? 1 : 0), look, created_at: now(),
   });
 }
 
@@ -1149,7 +1153,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
           if (!st.stopped && await halted()) { halt = halt || 'stopped'; st.stopped = 'user'; }
           counted = true;
           if (st.stopped === 'user') {
-            await keepReplay(run.id, p.s.id, key, 0, r, { score: null, judged: null, failure: null });
+            await keepReplay(run.id, p.s.id, key, 0, r, { score: null, judged: null, failure: null, scored: false });
             return 'quit';
           }
           judged = yardstick === 'quality'
@@ -1205,7 +1209,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         settled: settled === undefined ? score : settled,
         json: r.ok ? r.json : null, cost: r.ok ? paid(r) : 0, latency: r.latencyMs ?? null, ttft: r.ttftMs ?? r.latencyMs ?? null,
       });
-      await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure });
+      await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure, scored });
       /* The best it could still do is get every remaining call right. When even that leaves it
          outside the review band, it cannot win, and every further call would be money spent on
          nothing. Never the one serving: that is a point estimate on part of the calls, and for what
@@ -1366,6 +1370,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
                 VALUES (?, ?, ?, ?, ?, ?, 0)`)
       .run(id('smp'), run.id, c.id, c.quartile ?? 0,
            ra.json ? JSON.stringify(ra.json) : null, rb.json ? JSON.stringify(rb.json) : null);
+    // their times and costs too, as the first look keeps them, so a model's answers on these calls are set beside them
+    await keepReplay(run.id, c.id, reference, 0, ra, { failure: ra.ok ? null : 'refused', look: 2 });
+    await keepReplay(run.id, c.id, reference, 1, rb, { failure: rb.ok ? null : 'refused', look: 2 });
   };
   let lookCalls = null;
   // each looked-at call's two answers from the customer's model, how far they were from each other, and how long it took
@@ -1548,6 +1555,13 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         note(got);
         if (got.account) return { account: { ...got, model: cand.model } };
         const s = await scoreReply(body, got, seen.refs);
+        /* Kept like an answer to its first look, as the second look, so its page can show the calls this look was
+           decided on: counted where it has a score, which is what the look's figure averages (lookAgain). */
+        const read = got.ok ? extract(got.json, shape) : null;
+        await keepReplay(run.id, c.id, r.model_id, 0, got, {
+          score: s.score, scored: s.score !== null && s.score !== undefined, look: 2,
+          failure: !got.ok ? 'refused' : !read.ok ? read.reason : null,
+        });
         return { score: s.score, sent: 1 + s.judged, latency: got.ok ? got.latencyMs : null, ttft: got.ok ? (got.ttftMs ?? got.latencyMs) : null };
       },
     });

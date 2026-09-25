@@ -80,8 +80,11 @@ export function replayKey(workspaceId, body, model, recipe = null, slot = 0) {
 }
 
 /* Refusals that will be refused again: the model cannot be reached this way, or the request is
-   one it will not take. Being busy, rate limited or timing out is not one of them. */
-const lasting = (status) => [400, 403, 404, 405, 413, 422].includes(status);
+   one it will not take. Being busy, rate limited or timing out is not one of them. A test counts
+   only these against a model's answers, which is how a page reads them back (runAnswersOf in
+   src/workloadPage.js). */
+export const LASTING_STATUSES = [400, 403, 404, 405, 413, 422];
+const lasting = (status) => LASTING_STATUSES.includes(status);
 
 /* Not about the model at all: our own account with the provider needs attention, a key it no
    longer takes or credit that has run out. That is true of every model at once and passes the
