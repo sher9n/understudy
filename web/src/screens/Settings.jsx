@@ -462,7 +462,7 @@ function Optimizing({ data, busy, run }) {
                 onClick={run(() => api.setDefaultRouting(r.mode, applyRouting))}>{r.label}</button>
             ))}
           </span>
-          <span className="segnote">{routing.note} A workload can choose its own on its page.</span>
+          <span className="segnote">{routing.note}</span>
           <label className="segnote" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input type="checkbox" checked={applyRouting} onChange={(e) => setApplyRouting(e.target.checked)} />
             Make the workloads that chose their own follow it too, the next time you choose
