@@ -427,7 +427,9 @@ function Enough({ e }) {
             <p className="wp-lead">
               Each test uses <b>{num(e.sample)}</b> recent requests.{' '}
               {e.everyDays > 0
-                ? <>We test again every <b>{e.everyDays === 1 ? 'day' : `${e.everyDays} days`}</b>, or sooner when a relevant new model becomes available.</>
+                /* At most this often (see src/eval/schedule.js): tests that keep finding the same thing are spaced out,
+                   and a relevant new model or price change brings a spaced-out one back, never sooner than this. */
+                ? <>We test again at most every <b>{e.everyDays === 1 ? 'day' : `${e.everyDays} days`}</b>, and a relevant new model or price change brings the next test forward.</>
                 : <>Your workspace tests <b>only when you ask</b>: press Test now.</>}
             </p>
           </div>
