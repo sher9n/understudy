@@ -45,14 +45,17 @@ export async function takeSlot(model, pace) {
   await new Promise((resolve) => { p.queue.push(resolve); drain(p); });
   return p;
 }
-/** A paced call is over: `refused` when the provider turned it away for coming too fast. Says whether that refusal came
-    while the model was already given the longest wait between calls (MODEL_BACKOFF_MAX_MS): a provider that turns calls
-    away even then cannot keep up, which a test counts against the model (EVAL_KEEP_UP_REFUSALS in src/config.js). */
+/** Whether a paced call is being sent while its model is already given the longest wait between calls
+    (MODEL_BACKOFF_MAX_MS). A provider that turns a call away even then cannot keep up, which a test counts against the
+    model (EVAL_KEEP_UP_REFUSALS in src/config.js). Read as the call is sent, never when its refusal comes back: calls
+    already out when another's refusal raised the gap were not sent at the longest wait, and counted as if they had been,
+    a few calls out at once could reach the whole limit on one refusal that was. */
+export const atLongestWait = (p) => !!p && config.MODEL_BACKOFF_MAX_MS > 0 && p.gap >= config.MODEL_BACKOFF_MAX_MS;
+
+/** A paced call is over: `refused` when the provider turned it away for coming too fast. */
 export function giveBack(p, { refused = false } = {}) {
-  if (!p) return false;
+  if (!p) return;
   p.out = Math.max(0, p.out - 1);
-  // read before the gap moves: a refusal that only brought it up to the longest wait is not one at it
-  const atLongest = refused && p.gap >= config.MODEL_BACKOFF_MAX_MS;
   if (refused) {
     p.gap = Math.min(config.MODEL_BACKOFF_MAX_MS, Math.max(config.MODEL_BACKOFF_START_MS, p.gap * 2));
     p.easy = 0;
@@ -65,11 +68,10 @@ export function giveBack(p, { refused = false } = {}) {
     }
   }
   drain(p);
-  return atLongest;
 }
 
-/* How many of one call's tries were turned away at the longest wait (see giveBack), carried on what the call answers or
-   throws, so a test can hold it against the model it asked. */
+/* How many of one call's tries were sent at the longest wait and turned away all the same (see atLongestWait), carried on
+   what the call answers or throws, so a test can hold it against the model it asked. */
 const counted = (err, refusedAtLongest) => Object.assign(err, { refusedAtLongest });
 /** How one model is being paced, for tests and the page. */
 export const paceNow = (model) => {
@@ -221,10 +223,11 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
   priceCaps = null } = {}) {
   if (!canRoute()) throw new UpstreamError(503, { error: { message: 'No OPENROUTER_API_KEY is set.' } });
   const payload = buildUpstream(body, model, recipe, { zdr, cacheHint, priceCaps });
-  // this call's tries turned away at the longest wait (see giveBack)
+  // this call's tries sent at the longest wait and turned away all the same (see atLongestWait)
   let atLongest = 0;
   for (let attempt = 0; ; attempt += 1) {
     const slot = await takeSlot(model, pace);
+    const sentAtLongest = atLongestWait(slot);
     const started = Date.now();
     let res;
     try {
@@ -243,7 +246,8 @@ export async function chat(body, model, { signal, retries = 3, recipe = null, pa
       text = await res.text();
     } finally {
       // the turn is over once the answer is in; one turned away for coming too fast slows this model down
-      if (giveBack(slot, { refused: res.status === 429 })) atLongest += 1;
+      giveBack(slot, { refused: res.status === 429 });
+      if (res.status === 429 && sentAtLongest) atLongest += 1;
     }
     let json = null;
     try { json = JSON.parse(text); } catch { /* upstream sent something unparseable */ }
@@ -273,13 +277,19 @@ export async function chatStream(body, model, { signal, recipe = null, retries =
   const payload = buildUpstream(body, model, recipe, { zdr, cacheHint, priceCaps });
   payload.stream = true;
   payload.stream_options = { include_usage: true };
-  // this call's tries turned away at the longest wait (see giveBack)
+  // this call's tries sent at the longest wait and turned away all the same (see atLongestWait)
   let atLongest = 0;
   for (let attempt = 0; ; attempt += 1) {
     const slot = await takeSlot(model, pace);
+    const sentAtLongest = atLongestWait(slot);
     // given back exactly once, however this try ends (letGo is reached from every ending)
     let freed = false;
-    const free = (refused = false) => { if (!freed) { freed = true; if (giveBack(slot, { refused })) atLongest += 1; } };
+    const free = (refused = false) => {
+      if (freed) return;
+      freed = true;
+      giveBack(slot, { refused });
+      if (refused && sentAtLongest) atLongest += 1;
+    };
     const sentAt = Date.now();
     const ctl = new AbortController();
     const stop = (why) => { if (!ctl.signal.aborted) ctl.abort(why); };

@@ -9,7 +9,7 @@ import http from 'node:http';
 
 process.env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || 'stand-in';
 const { default: config } = await import('../src/config.js');
-const { takeSlot, giveBack, paceNow, chat, streamCollect, UpstreamError } = await import('../src/openrouter.js');
+const { takeSlot, giveBack, paceNow, chat, streamCollect, UpstreamError, atLongestWait } = await import('../src/openrouter.js');
 
 let seq = 0;
 const model = () => `pace/model-${process.pid}-${(seq += 1)}`;
@@ -135,16 +135,40 @@ test('a measurement call turned away for coming too fast is tried again, and slo
    test holds against it (EVAL_KEEP_UP_REFUSALS, the owner's rule of 26 Sep 2026), so giveBack says which ones those are,
    and a call carries how many of its tries were, answered or not. */
 
-test('a refusal counts against a model only once it is already given the longest wait', async () => {
+test('a call counts as sent at the longest wait only once its model is already given it, read as the call is sent', async () => {
   const undo = set({ MODEL_MAX_IN_FLIGHT: 4, MODEL_MIN_GAP_MS: 0, MODEL_BACKOFF_START_MS: 10, MODEL_BACKOFF_MAX_MS: 40, MODEL_BACKOFF_EASE_AFTER: 2 });
   try {
     const m = model();
-    const said = [];
-    for (let k = 0; k < 5; k += 1) said.push(giveBack(await takeSlot(m, true), { refused: true }));
-    // the gap goes 10, 20, 40: only the refusals that find it already at 40 count
-    assert.deepEqual(said, [false, false, false, true, true]);
-    assert.equal(giveBack(await takeSlot(m, true)), false, 'a call it takes is no refusal');
-    assert.equal(giveBack(null, { refused: true }), false, "nor is a call that was never paced, such as a customer's own");
+    const sent = [];
+    for (let k = 0; k < 5; k += 1) {
+      const slot = await takeSlot(m, true);
+      sent.push(atLongestWait(slot));
+      giveBack(slot, { refused: true });
+    }
+    // the gap goes 10, 20, 40: only the calls sent once it is at 40 are sent at the longest wait
+    assert.deepEqual(sent, [false, false, false, true, true]);
+    assert.equal(atLongestWait(null), false, "a call that is never paced, such as a customer's own, never is");
+
+    /* Two calls out at once, both sent while the gap was still growing: the first's refusal takes the gap to the longest
+       wait while the second is still out, and the second was not sent at it, however its refusal comes back. */
+    const n = model();
+    giveBack(await takeSlot(n, true), { refused: true });
+    giveBack(await takeSlot(n, true), { refused: true });
+    assert.equal(paceNow(n).gap, 20);
+    const c = await takeSlot(n, true);
+    const d = await takeSlot(n, true);
+    const [cSent, dSent] = [atLongestWait(c), atLongestWait(d)];
+    giveBack(c, { refused: true });
+    assert.equal(paceNow(n).gap, 40, "the first refusal brought the gap to the longest wait");
+    giveBack(d, { refused: true });
+    assert.deepEqual([cSent, dSent], [false, false], 'neither was sent at it, so neither refusal counts');
+  } finally { undo(); }
+});
+
+test('a limit of none switches the longest wait off, and with it any count', () => {
+  const undo = set({ MODEL_BACKOFF_MAX_MS: 0 });
+  try {
+    assert.equal(atLongestWait({ gap: 0 }), false, 'no longest wait to be sent at');
   } finally { undo(); }
 });
 

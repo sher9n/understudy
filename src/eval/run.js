@@ -21,7 +21,7 @@ import { featuresOf, predict } from '../learn/router.js';
 import { featuresRaw, crossFitRouter, simulateRoutes, routeOf, ROUTER_VERSION } from '../learn/kinds.js';
 import { chanceWithin, safeSaving, rankCleared, routingModeOf } from './confidence.js';
 import { askOf } from './ask.js';
-import { labelOf, armById, leadModel, nameOfResult } from '../learn/arms.js';
+import { labelOf, armById, leadModel, nameOfResult, armsFor, setStatus } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
 import { markTrying } from '../learn/explore.js';
 import { forgetBar } from '../learn/control.js';
@@ -1002,6 +1002,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   /* Whether a model is held to keeping up with this workload's requests (EVAL_KEEP_UP_REFUSALS): never what serves, which
      is carrying the workload now, nor the customer's own model asked another way, whose provider carries it today. */
   const heldToKeepUp = (cand) => cand.model !== reference && !serves(cand);
+  // refusals at the longest wait enough to fail it; a limit of 0 switches the rule off rather than failing every model
+  const keepUpFailed = (n) => config.EVAL_KEEP_UP_REFUSALS > 0 && n >= config.EVAL_KEEP_UP_REFUSALS;
   const isLighter = (cand) => String(cand.key || '').endsWith('#lighter');
   let reasked = false;
   let droppedLighter = false;
@@ -1205,7 +1207,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
            provider's, like having no provider that keeps nothing. Two of the passing kind, busy or
            timing out, end it too, because a model that cannot be reached reliably in a test will
            not be in production either. */
-        if (!r.transient || st.errors >= 2) st.stopped = r.transient ? 'errors' : 'refused';
+        // never over a model already found unable to keep up, which is the failure that keeps it out for good
+        if ((!r.transient || st.errors >= 2) && st.stopped !== 'busy') st.stopped = r.transient ? 'errors' : 'refused';
       } else {
         if (r.latencyMs) st.lat.push(r.latencyMs);
         if (r.provider) st.providers.set(String(r.provider), (st.providers.get(String(r.provider)) || 0) + 1);
@@ -1293,8 +1296,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
          longest wait between them: it cannot keep up with this workload's traffic, so it has failed, before anything is
          said about its answers or its speed, and no later test of this workload tries it again (cantKeepUpOn in
          src/eval/history.js). Only slowed, it held the test at the longest wait for every one of its requests. It takes
-         the place of a stop for errors, which is what those same refusals end in once its tries run out. */
-      if (heldToKeepUp(cand) && st.tooFast >= config.EVAL_KEEP_UP_REFUSALS && (!st.stopped || st.stopped === 'errors')) st.stopped = 'busy';
+         the place of any other reason it was stopped for (its answers, its speed, its errors or a refusal), so the ban is
+         never lost to whichever came back first; never of a stop that was ours (a person, or the spending limit). */
+      if (heldToKeepUp(cand) && keepUpFailed(st.tooFast) && st.stopped !== 'user' && st.stopped !== 'budget') st.stopped = 'busy';
       /* The best it could still do is get every remaining call right. When even that leaves it
          outside the review band, it cannot win, and every further call would be money spent on
          nothing. Never the one serving: that is a point estimate on part of the calls, and for what
@@ -1426,6 +1430,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       row.keep = { verdict: asServed.verdict, gap: round8(asServed.gap) };
     }
     await insertResult(row);
+    // failed as unable to keep up: out of this workload's live experiments at once, as well as its tests (restBusyArms)
+    if (row.stopped === 'busy') await restBusyArms(row.model_id);
     return finished;
   };
 
@@ -1654,11 +1660,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        answered it the first time, and never with a cascade's leave to fall back on others. Asked the way it
        happened to be asked before, a second look could be answered by providers a switch would never use. */
     const served = servedRecipe(cand, st);
-    // its requests on this look turned away at the longest wait (see heldToKeepUp)
-    let tooFast = 0;
+    /* its requests turned away at the longest wait in this whole test, its first look's included (see heldToKeepUp): the
+       rule is three in a test, and counted afresh on each look, two and two never added up to it */
+    let tooFast = Number(st?.tooFast) || 0;
     return lookAgain(r, freshCalls, {
       label: cand.label || cand.model,
-      busy: () => (heldToKeepUp(cand) && tooFast >= config.EVAL_KEEP_UP_REFUSALS ? r.model_id : null),
+      busy: () => (heldToKeepUp(cand) && keepUpFailed(tooFast) ? r.model_id : null),
       answer: async (c, body, seen) => {
         const got = await replayOnce({ body, callId: c.id, model: cand.model, recipe: served, slot: 0, workload });
         note(got);
@@ -1685,16 +1692,18 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     let spec = null;
     try { spec = JSON.parse(r.arm_json); } catch { spec = null; }
     if (!spec || !['cascade', 'router'].includes(spec.kind)) return { verdict: 'unconfirmed', runs: 0, note: 'there was nothing to look again with' };
-    // each of its models' requests on this look turned away at the longest wait, and the first that could not keep up
+    /* each of its models' requests turned away at the longest wait in this whole test, from its own first look on (the
+       rule is three in a test), and the first of them that could not keep up */
     const tooFast = new Map();
     let busyPart = null;
     const ask = async (part, c, body) => {
       const got = await replayOnce({ body, callId: c.id, model: part.model, recipe: part.recipe ?? null, slot: 0, workload });
       note(got);
       const k = partKey(part);
-      const n = (tooFast.get(k) || 0) + (Number(got.refusedAtLongest) || 0);
+      const had = tooFast.has(k) ? tooFast.get(k) : Number(stats.get(k)?.st?.tooFast) || 0;
+      const n = had + (Number(got.refusedAtLongest) || 0);
       tooFast.set(k, n);
-      if (!busyPart && heldToKeepUp({ model: part.model, key: k }) && n >= config.EVAL_KEEP_UP_REFUSALS) busyPart = k;
+      if (!busyPart && heldToKeepUp({ model: part.model, key: k }) && keepUpFailed(n)) busyPart = k;
       return got;
     };
     // what the customer's own model gives the call: as far from its other answer as it is here, as long as it took
@@ -1758,8 +1767,30 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      its row says so from then on, as the failure it is, so its page shows why and no later test of this workload tries
      it again (cantKeepUpOn in src/eval/history.js). */
   const failBusy = async (modelKey) => {
+    failedBusy.add(modelKey);
     await db.prepare(`UPDATE eval_results SET verdict = 'failed', stopped = 'busy' WHERE run_id = ? AND model_id = ?`).run(run.id, modelKey);
     for (const x of results) if (x.model_id === modelKey) Object.assign(x, { verdict: 'failed', stopped: 'busy' });
+    await restBusyArms(modelKey);
+  };
+  /* A runner-up this workload's live experiments were trying that is, or sends calls to, a model found unable to keep up
+     is set aside at once. The end of a measurement does that too (markTrying), but a measurement cut short never gets
+     there, and live calls went on reaching a model this one had failed. */
+  const restBusyArms = async (modelKey) => {
+    const uses = (spec) => (spec?.kind === 'cascade' ? [spec.first] : spec?.kind === 'router' ? (spec.options || [spec.cheap]) : [spec])
+      .some((p) => p?.model && (p.key || partKey(p)) === modelKey);
+    for (const a of await armsFor(workloadId)) if (a.status === 'trying' && uses(a.spec)) await setStatus(a.id, 'resting');
+  };
+  // every model this run has found cannot keep up since its row was written (failBusy)
+  const failedBusy = new Set();
+  /* The models a row sends calls to, by the names their own rows carry: the model itself, or a strategy's parts, less the
+     customer's own model, which is never held to keeping up. */
+  const partsOfRow = (r) => {
+    if (plainResult(r)) return [r.model_id];
+    let spec = null;
+    try { spec = JSON.parse(r.arm_json); } catch { spec = null; }
+    const parts = spec?.kind === 'cascade' ? [spec.first]
+      : spec?.kind === 'router' ? (Array.isArray(spec.options) ? spec.options : [spec.cheap, spec.strong]) : [];
+    return parts.filter((p) => p?.model && p.model !== reference).map((p) => p.key || partKey(p));
   };
 
   /* The race. Several models at once, each in its own lane, the next in line starting as soon
@@ -2310,6 +2341,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     for (const r of order) {
       if (halt) break;
       if (r.model_id === servingNow) { best = r; confirmations.push({ r, c: { verdict: 'cleared', runs: 0, serving: true } }); break; }
+      /* One this run has since found cannot keep up, on another's look (a router's look asks each of its models), or one
+         that sends calls to such a model, has failed: it is never looked at again, and never switched to, whatever order
+         it was ranked in before any look. It takes none of the looks either. A strategy found out this way says so on its
+         row: left as it was, it read as cleared and never reached, and live experiments went on trying it. */
+      if (r.verdict !== 'cleared') continue;
+      if (partsOfRow(r).some((k) => failedBusy.has(k))) { await failBusy(r.model_id); continue; }
       if (tries >= config.EVAL_CONFIRM_TRIES) continue;
       tries += 1;
       // the looks that could still come after this one, each reusing the customer's answers this one asks for
@@ -2440,7 +2477,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   choice.chosen = best ? best.model_id : null;
   choice.chosenKept = stillServing;
   await db.prepare('UPDATE eval_runs SET choice_json = ? WHERE id = ?').run(JSON.stringify(choice), run.id);
-  const second = !best && confirmations.length && !confirmations[0].c.serving ? confirmations[0] : null;
+  /* The first looked at again that did not hold up: never what serves, and never one that could not keep up, which has
+     failed for good, is never looked at again, and is no candidate a person could approve. Taken as it was, such a one was
+     reported as "cleared once and needs a second look", with a way to approve it that could not work. */
+  const second = !best ? confirmations.find((x) => !x.c.serving && x.c.verdict !== 'busy') || null : null;
   // one that cleared, and that the run ended before it could look at again: never read as confirmed
   // one in the order the run looked at, that is: never one dearer than what serves, which was not in line at all
   const unlooked = !best && !second ? cleared.find((r) => r.model_id !== servingNow && r.confirm_verdict === 'not_reached' && order.includes(r)) : null;

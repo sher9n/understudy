@@ -53,7 +53,7 @@ process.env.STARTER_CREDIT_USD = '0';
 process.env.MEASURE_READY_CHECK_MS = '0';
 process.env.CONTROL_ENABLED = 'false';
 
-const { db, now } = await import('../src/db/index.js');
+const { db, now, id } = await import('../src/db/index.js');
 const { default: migrate } = await import('../src/db/migrate.js');
 const auth = await import('../src/auth.js');
 const { move } = await import('../src/billing.js');
@@ -63,6 +63,7 @@ const { runPageOf } = await import('../src/workloadPage.js');
 const { runEvaluation } = await import('../src/eval/run.js');
 const { planFor } = await import('../src/eval/plan.js');
 const { forgetFleet } = await import('../src/eval/history.js');
+const { default: config } = await import('../src/config.js');
 
 await migrate({ quiet: true });
 
@@ -77,9 +78,17 @@ const SLOWPOKE = 'vendor/slowpoke-small';
 const JITTERY = 'vendor/jittery-small';
 // answers every request of its first look, then cannot keep up on its second
 const FADING = 'vendor/fading-small';
+// turned away twice at the longest wait on its first look, and once more on its second: three in the test
+const TWICE = 'vendor/twice-small';
+// right on every request, and cannot keep up once its first look is done
+const ABLE = 'vendor/able-small';
+// right on the short requests only, so a router sends it those and ABLE the long ones
+const TINY = 'vendor/tiny-small';
 const JUDGE = 'judge/small';
-const MODELS = [STEADY, CROWDED, SLOWPOKE, JITTERY, FADING];
+const MODELS = [STEADY, CROWDED, SLOWPOKE, JITTERY, FADING, TWICE, ABLE, TINY];
 const DAY = 86400000;
+// the long requests, one in eight: told apart before they are sent, which is what a router needs
+const hard = (i) => i % 8 === 3;
 
 /* The provider. The customer's model and every model that answers give the same JSON for a request, so every model that
    answers matches; what differs is only whether and when each is turned away for coming too fast. */
@@ -89,8 +98,14 @@ const asked = new Map();
 const answered = new Map();
 const tries = (m) => asked.get(m) || 0;
 const got = (m) => answered.get(m) || 0;
-// the workload FADING's first look is read on, whose running test says how many requests that look has
+// the workload each of these is tested on, whose running test says how many requests its first look has
 let fadingOn = null;
+let twiceOn = null;
+let ableOn = null;
+// TWICE's tries once its first look is done
+let twiceLater = 0;
+const firstLookSize = async (wid) => Number((await db.prepare(`SELECT sample_size FROM eval_runs WHERE workload_id = ? AND status = 'running'
+    ORDER BY created_at DESC LIMIT 1`).get(wid))?.sample_size ?? Infinity);
 const provider = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
@@ -114,13 +129,22 @@ const provider = http.createServer((req, res) => {
     if (m === CROWDED) return refuse();
     if (m === SLOWPOKE && tries(m) % 3 !== 0) return refuse();
     if (m === JITTERY && tries(m) <= 2) return refuse();
-    if (m === FADING && fadingOn) {
-      const run = await db.prepare(`SELECT sample_size FROM eval_runs WHERE workload_id = ? AND status = 'running'
-          ORDER BY created_at DESC LIMIT 1`).get(fadingOn);
-      if (run && got(m) >= Number(run.sample_size)) return refuse();
+    if (m === FADING && fadingOn && got(m) >= await firstLookSize(fadingOn)) return refuse();
+    if (m === ABLE && ableOn && got(m) >= await firstLookSize(ableOn)) return refuse();
+    if (m === TWICE && twiceOn) {
+      if (got(m) >= await firstLookSize(twiceOn)) {
+        // its second look: three refusals in a row, of which only the last is sent at the longest wait
+        twiceLater += 1;
+        if (twiceLater <= 3) return refuse();
+      } else if ([1, 2, 4, 5].includes(tries(m))) {
+        // its first look, asked one request at a time: the first two raise its wait to the longest, the next two are refused at it
+        return refuse();
+      }
     }
-    const cost = m === REF ? 0.002 : m === FADING ? 0.0001 : 0.0002;
-    return send(JSON.stringify(right(indexOf(user))), cost);
+    const i = indexOf(user);
+    if (m === TINY) return send(JSON.stringify(hard(i) ? { total: 0, currency: 'EUR', lines: 0 } : right(i)), 0.00005);
+    const cost = m === REF ? 0.002 : m === ABLE ? 0.0006 : [FADING, TWICE].includes(m) ? 0.0001 : 0.0002;
+    return send(JSON.stringify(right(i)), cost);
   });
 });
 
@@ -133,6 +157,9 @@ test.before(async () => {
     { model_id: SLOWPOKE, name: 'Vendor: Slowpoke Small', context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 0, zdr: 1 },
     { model_id: JITTERY, name: 'Vendor: Jittery Small', context_len: 128000, price_in: 0.15e-6, price_out: 0.4e-6, open_weights: 0, zdr: 1 },
     { model_id: FADING, name: 'Vendor: Fading Small', context_len: 128000, price_in: 0.05e-6, price_out: 0.15e-6, open_weights: 0, zdr: 1 },
+    { model_id: TWICE, name: 'Vendor: Twice Small', context_len: 128000, price_in: 0.05e-6, price_out: 0.15e-6, open_weights: 0, zdr: 1 },
+    { model_id: ABLE, name: 'Vendor: Able Small', context_len: 128000, price_in: 0.6e-6, price_out: 1.8e-6, open_weights: 0, zdr: 1 },
+    { model_id: TINY, name: 'Vendor: Tiny Small', context_len: 128000, price_in: 0.02e-6, price_out: 0.06e-6, open_weights: 0, zdr: 1 },
     { model_id: JUDGE, name: 'judge', context_len: 128000, price_in: 0.05e-6, price_out: 0.1e-6, open_weights: 0, zdr: 1 },
   ]);
 });
@@ -151,17 +178,19 @@ const load = (wid) => db.prepare('SELECT * FROM workloads WHERE id = ?').get(wid
 const rowsOf = async (runId) => new Map((await db.prepare('SELECT * FROM eval_results WHERE run_id = ?').all(runId)).map((r) => [r.model_id, r]));
 
 /* A workspace with one workload of `n` requests, recorded the way the customer's own model answered them, trying only
-   `models`: every other model in the catalogue is switched off for it. */
+   `models`: every other model in the catalogue is switched off for it. `long` makes the hard requests look different
+   before they are sent, which a router needs; `mode` is what happens when a model passes ('ask' unless said). */
 let seq = 0;
-async function seeded({ n = 300, models }) {
+async function seeded({ n = 300, models, long = false, mode = 'ask' }) {
   seq += 1;
   const { workspace } = await auth.createAccount({ email: `keepup-${seq}-${process.pid}@example.test`, password: 'correct-horse', name: `k${seq}` });
   await move(workspace.id, { kind: 'credit', amountUsd: 50, note: 'test' });
-  await db.prepare('UPDATE workspaces SET default_optimize_mode = ? WHERE id = ?').run('ask', workspace.id);
+  await db.prepare('UPDATE workspaces SET default_optimize_mode = ? WHERE id = ?').run(mode, workspace.id);
   let wl = null;
   for (let i = 0; i < n; i += 1) {
     const request = { model: REF, messages: [{ role: 'system', content: `Extract the totals from invoice ${900000 + i}, set ${seq}.` },
-      { role: 'user', content: `document #${i}` }], response_format: { type: 'json_object' } };
+      { role: 'user', content: `document #${String(i).padStart(4, '0')}${long && hard(i) ? ` ${'with a long table of line items, '.repeat(24)}` : ''}` }],
+      response_format: { type: 'json_object' } };
     wl = wl || await workloadFor(workspace.id, request);
     await recordCall({
       workspaceId: workspace.id, workloadId: wl.id, source: 'trace', requestedModel: REF, servedModel: REF, statusCode: 200,
@@ -246,6 +275,18 @@ test("the test's page says a model could not keep up, and why", async () => {
   assert.notEqual(jittery.verdict, "Couldn't keep up");
 });
 
+// an earlier test of the workload, finished, that found `model` could not keep up, as the app writes one down
+async function busyOnRecord(w, model) {
+  const rid = id('run');
+  const at = now() - DAY;
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model, sample_size, floor_pct, noise_pct,
+      spend_usd, started_at, finished_at, created_at, trigger, outcome, yardstick)
+    VALUES (?, ?, ?, 'done', ?, ?, 100, 3, 1, 0.1, ?, ?, ?, 'manual', 'compared', 'agreement')`)
+    .run(rid, w.workspace_id, w.id, w.shape_kind, REF, at - 600000, at, at - 600000);
+  await db.prepare(`INSERT INTO eval_results (id, run_id, model_id, runs, gap_pct, cost_month_usd, verdict, stopped, created_at)
+    VALUES (?, ?, ?, 3, 0, 30, 'failed', 'busy', ?)`).run(id('res'), rid, model, at);
+}
+
 test('the model serving a workload is never held to keeping up: it is carrying the workload now', async () => {
   const { workload: w0 } = await seeded({ models: [STEADY, CROWDED] });
   await db.prepare('UPDATE workloads SET routed_model = ? WHERE id = ?').run(CROWDED, w0.id);
@@ -254,9 +295,93 @@ test('the model serving a workload is never held to keeping up: it is carrying t
   const row = (await rowsOf(out.runId)).get(CROWDED);
   assert.ok(row, 'what serves is checked again');
   assert.notEqual(row.stopped, 'busy', `it may fail for its errors, never as unable to keep up: ${row.stopped}`);
+  // even with a test of this workload on record that found it could not keep up, what serves is re-checked, never left out
+  await db.prepare('UPDATE workloads SET routed_model = ? WHERE id = ?').run(CROWDED, w0.id);
+  await busyOnRecord(await load(w0.id), CROWDED);
   forgetFleet();
   const plan = await planFor(await load(w0.id), { canRoute: true });
-  assert.equal(plan.excluded.some((e) => e.model === CROWDED && e.step === 'busy'), false, 'and it is never left out for it');
+  assert.equal(plan.excluded.some((e) => e.model === CROWDED && e.step === 'busy'), false, 'what serves is never left out for it');
+  assert.ok(plan.order.some((o) => o.model === CROWDED), `it is checked again as ever: ${plan.order.map((o) => o.model).join(', ')}`);
+  // and once it no longer serves, the same record keeps it out
+  await db.prepare('UPDATE workloads SET routed_model = NULL WHERE id = ?').run(w0.id);
+  const later = await planFor(await load(w0.id), { canRoute: true });
+  assert.equal(later.excluded.find((e) => e.model === CROWDED)?.step, 'busy');
+});
+
+test('a limit of none switches the rule off: a model its provider cannot keep up with is only slowed, as before', async () => {
+  const was = config.EVAL_KEEP_UP_REFUSALS;
+  config.EVAL_KEEP_UP_REFUSALS = 0;
+  try {
+    const { workload: w } = await seeded({ models: [STEADY, CROWDED] });
+    const out = await runEvaluation(w.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const rows = await rowsOf(out.runId);
+    assert.notEqual(rows.get(CROWDED).stopped, 'busy', `never failed as unable to keep up: ${rows.get(CROWDED).stopped}`);
+    // read as "none needed", a limit of zero failed every model after its first request, this one included
+    assert.equal(rows.get(STEADY).stopped, null, 'and a model that answers is never failed for it');
+    assert.equal(rows.get(STEADY).verdict, 'cleared');
+    forgetFleet();
+    const plan = await planFor(await load(w.id), { canRoute: true });
+    assert.equal(plan.excluded.some((e) => e.step === 'busy'), false);
+  } finally {
+    config.EVAL_KEEP_UP_REFUSALS = was;
+  }
+});
+
+test('the refusals are counted over the whole test: two at the longest wait on its first look and one on its second fail it', async () => {
+  const width = config.EVAL_CALLS_PER_MODEL;
+  // one request at a time, so which of its tries are sent at the longest wait is fixed
+  config.EVAL_CALLS_PER_MODEL = 1;
+  const { workload: w } = await seeded({ models: [STEADY, TWICE] });
+  twiceOn = w.id;
+  try {
+    const out = await runEvaluation(w.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const rows = await rowsOf(out.runId);
+    const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(out.runId);
+    const twice = rows.get(TWICE);
+    assert.equal(Number(twice.runs), Number(run.sample_size), `its first look finished, two not being three: ${twice.runs}`);
+    assert.equal(twice.confirm_verdict, 'busy', `the one on its second look made three, and failed it: ${twice.confirm_verdict}`);
+    assert.equal(twice.stopped, 'busy');
+    assert.equal(twice.verdict, 'failed');
+    assert.equal(rows.get(STEADY).confirm_verdict, 'cleared', 'and the next in line got its look');
+  } finally {
+    twiceOn = null;
+    config.EVAL_CALLS_PER_MODEL = width;
+  }
+});
+
+test('a router whose look finds one of its models cannot keep up fails with it, and that model is never looked at or switched to', async () => {
+  const { workload: w } = await seeded({ models: [ABLE, TINY], long: true, mode: 'auto' });
+  ableOn = w.id;
+  try {
+    const out = await runEvaluation(w.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const rows = await rowsOf(out.runId);
+    const said = [...rows.values()].map((r) => `${r.model_id} ${r.verdict} ${r.stopped ?? ''} ${r.confirm_verdict ?? ''}`).join('; ');
+    const router = [...rows.values()].find((r) => String(r.model_id).startsWith('router:'));
+    assert.ok(router, `a router was worked out: ${said}`);
+    assert.ok(JSON.parse(router.arm_json).options.some((o) => o.model === ABLE), `it sends ABLE the long requests: ${router.arm_json}`);
+    const able = rows.get(ABLE);
+    assert.equal(able.stopped, 'busy', said);
+    assert.equal(able.verdict, 'failed');
+    assert.equal(router.stopped, 'busy', `the router fails with the model it sends calls to: ${said}`);
+    assert.equal(router.verdict, 'failed');
+    // whichever was looked at first found ABLE out, and the other was never looked at: before, it was, and could be switched to
+    const looked = [router, able].filter((r) => r.confirm_verdict !== null);
+    assert.equal(looked.length, 1, `one look, not two: ${said}`);
+    assert.equal(looked[0].confirm_verdict, 'busy');
+    const after = await load(w.id);
+    assert.equal(after.routed_model, null, 'nothing was switched to');
+    // nor is either said to have cleared once and to be waiting for a look, with a way to approve it that could not work
+    assert.notEqual(after.status_note, 'A candidate cleared once and needs a second look', `${after.status}: ${after.status_note}`);
+    const said2 = await db.prepare(`SELECT title FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(w.id);
+    assert.doesNotMatch(String(said2?.title ?? ''), /cleared your bar .* once/, `what the run said: ${said2?.title}`);
+    const trying = await db.prepare(`SELECT key FROM arms WHERE workload_id = ? AND status = 'trying'`).all(w.id);
+    assert.deepEqual(trying, [], 'and live experiments try neither');
+  } finally {
+    ableOn = null;
+  }
 });
 
 test('a model that cannot keep up on its second look fails there, and the next in line gets its look', async () => {
