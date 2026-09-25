@@ -91,7 +91,12 @@ test('a judgement is priced at what it costs: two calls for a candidate without 
   const pair = 1e-6 * (200 + 800 + 2 * 60) + 2e-6 * 6;
   assert.ok(Math.abs(p.bar - pair) < 1e-12, `${p.bar}`);
   assert.ok(Math.abs(p.candidate - 2 * pair) < 1e-12, `${p.candidate}`);
-  assert.ok(Math.abs(p.quality - pair) < 1e-12, `${p.quality}`);
+  // "at least as good" is read both ways round, so a judgement is two calls
+  assert.ok(Math.abs(p.quality - 2 * pair) < 1e-12, `${p.quality}`);
+  assert.ok(Math.abs(p.llmQuality - 2 * pair) < 1e-12, `${p.llmQuality}`);
+  // an answer put into another language for a planted check, and the instruction read once as a checklist
+  assert.ok(Math.abs(p.translate - (1e-6 * (80 + 60) + 2e-6 * (60 + 50))) < 1e-12, `${p.translate}`);
+  assert.ok(Math.abs(p.checklist - (1e-6 * (500 + 800) + 2e-6 * 300)) < 1e-12, `${p.checklist}`);
   // long requests and answers are cut the way the judges cut them
   const long = judgePrices(50000, 9000, llm);
   assert.ok(Math.abs(long.bar - (1e-6 * (200 + 1000 + 2000) + 2e-6 * 6)) < 1e-12);

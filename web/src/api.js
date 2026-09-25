@@ -192,23 +192,8 @@ export function ago(ms) {
 }
 
 /** Times we show as a date are shown in IST, labelled, so the zone is never ambiguous. */
-export const dateIST = (ms) => new Date(ms).toLocaleDateString('en-GB', {
-  day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata',
-});
-
-/* A moment, to the minute, in IST. The calls in a workload arrive minutes apart, so a date
-   alone would print the same string down the whole table. */
-export const timeIST = (ms) => new Date(ms).toLocaleString('en-GB', {
-  day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
-  hour12: false, timeZone: 'Asia/Kolkata',
-});
-
-/* A moment in full, with its year and its zone named, for a page that may be read long after:
-   "23 Sept 2026, 14:05 IST". */
-export const stampIST = (ms) => `${new Date(ms).toLocaleString('en-GB', {
-  day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
-  hour12: false, timeZone: 'Asia/Kolkata',
-})} IST`;
+// dates as India tells them, the month always in three letters (see dates.js)
+export { dateIST, timeIST, stampIST, dayIST, weekdayIST, dayOf } from './dates.js';
 
 export const feedDot = { ok: 'ok', bad: 'bad', run: 'on', connect: 'ok', floor: 'mut', revert: 'bad',
   bill: 'mut', call: 'call', copy: 'copy', test: 'test' };

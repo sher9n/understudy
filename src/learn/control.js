@@ -4,6 +4,7 @@ import { chargeEval, account, backgroundLeft } from '../billing.js';
 import { extract, disagreement, structuredCompare, proseText } from '../eval/compare.js';
 import { judgeCandidate, judgeBarPair, judgeQuality } from '../eval/judge.js';
 import { askOf } from '../eval/ask.js';
+import { keptChecklist } from '../eval/checklist.js';
 import { OUTCOME_OF } from '../eval/outcome.js';
 import { zdrFor } from '../workspace.js';
 import { serveWith } from './serve.js';
@@ -46,19 +47,23 @@ const short = (m) => String(m || '').split('/').pop();
  * such calls out too), or when no judge answered; what was spent finding that out is still in `cost`. Nor
  * when a difference stands only because Jev's reading of which answer serves better did not come back
  * (unsettled): that counts against a setup being switched to, never towards switching back one that serves,
- * which a judge failing the same way on every check would otherwise do on no evidence at all.
+ * which a judge failing the same way on every check would otherwise do on no evidence at all. Held to "at least as
+ * good", written or structured, it is read as the measurement read it: by the judge its planted answers chose
+ * (`prefer`), held to the workload's own instruction (`checklist`), a structured answer as its JSON.
  */
-export async function scoreServed(body, served, ref, shape, { scope = null, yardstick = 'agreement' } = {}) {
+export async function scoreServed(body, served, ref, shape, { scope = null, yardstick = 'agreement', prefer = null, checklist = null } = {}) {
   const a = extract(served, shape);
   const b = extract(ref, shape);
   if (!b.ok) return { score: null, better: 0, judgedBy: null, cost: 0, kind: null };
   if (!a.ok) return { score: 1, better: 0, judgedBy: 'no answer', cost: 0, kind: a.reason || 'no answer' };
+  if (yardstick === 'quality') {
+    const text = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+    const j = await judgeQuality(askOf(body), text(a.value), text(b.value), { scope, prefer, checklist });
+    if (j.transient || j.score === null || j.score === undefined) return { score: null, better: 0, judgedBy: null, cost: j.cost || 0, kind: null };
+    return { score: j.score, better: j.detail?.candBetter ? 1 : 0, judgedBy: j.judgedBy, cost: j.cost || 0,
+      kind: j.score > 0 ? (j.detail?.kind || 'worse') : null };
+  }
   if (shape === 'free_text') {
-    if (yardstick === 'quality') {
-      const j = await judgeQuality(askOf(body), a.value, b.value, { scope });
-      if (j.transient || j.score === null || j.score === undefined) return { score: null, better: 0, judgedBy: null, cost: j.cost || 0, kind: null };
-      return { score: j.score, better: j.detail?.candBetter ? 1 : 0, judgedBy: j.judgedBy, cost: j.cost || 0, kind: j.score > 0 ? 'worse' : null };
-    }
     const j = await judgeCandidate(askOf(body), a.value, b.value, null, { scope });
     // what serves is read without differences a reading left unsettled (see judgeCandidate): with one answer to hold it to, none
     const score = j.unsettled ? (j.settled ?? null) : j.score;
@@ -96,16 +101,21 @@ async function perDayOf(workloadId) {
    switch went back in a day and a half; and one that could not set a mark at all ("refused") left the mark
    at the 3% floor for a workload whose own was ten. Never one that found the customer's model too unsteady to
    measure: it writes the mark it worked out (half its calls or more, often) before it gives up, and read as
-   the bar, that mark let the checks find nothing, however far a setup slipped. */
+   the bar, that mark let the checks find nothing, however far a setup slipped. Under "at least as good", with the judge
+   that measurement's planted answers chose (prefer), so the checks read answers as the measurement did. */
 const bars = new Map();
 export async function barOf(workload) {
   const hit = bars.get(workload.id);
   if (hit && Date.now() - hit.at < 10 * 60000) return hit.bar;
-  const row = await db.prepare(`SELECT yardstick, floor_pct FROM eval_runs WHERE workload_id = ? AND status = 'done'
+  const row = await db.prepare(`SELECT yardstick, floor_pct, judge_check_json FROM eval_runs WHERE workload_id = ? AND status = 'done'
         AND floor_pct IS NOT NULL AND ${OUTCOME_OF()} <> 'unmeasurable' ORDER BY created_at DESC LIMIT 1`).get(workload.id)
-    ?? (workload.promoted_run_id ? await db.prepare('SELECT yardstick, floor_pct FROM eval_runs WHERE id = ?').get(workload.promoted_run_id) : null);
+    ?? (workload.promoted_run_id ? await db.prepare('SELECT yardstick, floor_pct, judge_check_json FROM eval_runs WHERE id = ?')
+      .get(workload.promoted_run_id) : null);
+  let check = null;
+  try { check = row?.judge_check_json ? JSON.parse(row.judge_check_json) : null; } catch { check = null; }
   const bar = {
     yardstick: row?.yardstick === 'quality' ? 'quality' : 'agreement',
+    prefer: check?.prefer === 'llm' ? 'llm' : null,
     floorPct: Number(row?.floor_pct) > 0 ? Number(row.floor_pct)
       : Number(workload.floor_pct) > 0 ? Number(workload.floor_pct) : config.EVAL_FLOOR_MIN_PCT,
   };
@@ -165,7 +175,8 @@ async function control(workload, { body, response, callId, decision }, { serve }
   if (!(Number(acct?.balance_usd) > 0.05)) return null;
 
   // judged by the yardstick of the bar it is held to, and marked with it (see controlRecord)
-  const { yardstick } = await barOf(workload);
+  const { yardstick, prefer } = await barOf(workload);
+  const checklist = yardstick === 'quality' && workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null;
   const row = {
     id: id('ctl'), workspace_id: workload.workspace_id, workload_id: workload.id, arm_id: workload.routed_arm_id,
     call_id: callId, score: null, better: 0, judged_by: null, yardstick, detail_json: null, cost_usd: 0, latency_ms: null,
@@ -188,7 +199,7 @@ async function control(workload, { body, response, callId, decision }, { serve }
     row.cost_usd += Number(own.cost) || 0;
     let s = null;
     try {
-      s = await scoreServed(body, response, own.json, workload.shape_kind, { scope: workload.workspace_id, yardstick });
+      s = await scoreServed(body, response, own.json, workload.shape_kind, { scope: workload.workspace_id, yardstick, prefer, checklist });
     } catch {
       s = null;
     }

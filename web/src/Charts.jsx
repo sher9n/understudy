@@ -1,5 +1,6 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { usd } from './money.js';
+import { dayIST, weekdayIST } from './dates.js';
 
 /* The charts are drawn at the width they are given.
  *
@@ -41,16 +42,14 @@ function spendFrame(width) {
   };
 }
 
-// en-GB already abbreviates September as Sept, so appending one gave "Septt"
-const dlab = (ms) => new Date(ms).toLocaleDateString('en-GB',
-  { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
+// the day as India tells it, the month in three letters: "25 Sep" (see dates.js)
+const dlab = dayIST;
 
 
 /* The day the pointer is over, as a whole date. The axis only labels four days, so the
    tooltip has to say which one this is rather than leaving somebody counting gridlines.
    Named in IST, because which day a call lands on depends on the clock you read it by. */
-const dfull = (ms) => new Date(ms).toLocaleDateString('en-GB',
-  { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
+const dfull = weekdayIST;
 
 /* Which days get a date under the axis: the first, the last and one or two between, fewer on a
    narrow chart so the dates never run into each other. */

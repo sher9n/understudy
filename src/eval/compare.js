@@ -172,6 +172,21 @@ export function floorFrom(noisePct, { multiple, minPct }) {
 /** A bar is only meaningful while the reference agrees with itself most of the time. */
 export const barIsMeaningful = (noisePct, maxPct) => noisePct <= maxPct;
 
+/* The bar under "at least as good": no more often clearly worse than the customer's own model is against its own
+   other answer, plus a margin in points. A multiple of that rate had to be cut off somewhere, since a customer's
+   model clearly worse than itself on half its calls made a bar no answer could miss, and the cut-off was where a
+   written workload "could not be measured" at all. Plus a margin, a varied workload's bar is simply wide, and
+   showing a setup keeps it takes more calls, which the verdict counts (verdictWith) rather than giving up.
+
+   Never past half, plus the margin. Two answers from one model can each be the clearly better one only half the
+   time, so a model is clearly worse than its own other answer on half its calls at most. More than that says the
+   answers it was held against (the ones it gave the customer, recorded) are better than what it gives now, and a
+   bar read from it would pass a setup clearly worse on every call: a model replayed today clearly worse on all of
+   them made a bar of 105%. Capped, a setup is held to answers like the recorded ones, most of the time. */
+export function marginFloor(noisePct, { marginPct, minPct }) {
+  return Math.min(Math.max(noisePct + marginPct, minPct), 50 + marginPct);
+}
+
 /* A verdict is a claim about a rate seen on a sample, so it carries how sure the sample can make
  * anybody: nineteen times in twenty the true rate is under the upper bound (Wilson's, one-sided).
  * The bound is worked out from the mean score, which for scores between 0 and 1 is conservative,

@@ -127,6 +127,8 @@
 .wp .wp-rundetail[hidden] { display: none; }
 .wp .wp-rundetail > *, .wp .wp-detailgrid > * { min-width: 0; }
 .wp .wp-chartbox { max-width: 760px; }
+/* a measurement that compared nothing: its one drawing at the size it was drawn, never scaled up to the box */
+.wp .wp-selfbox .wp-sv { max-width: 520px; }
 .wp .wp-take { display: flex; gap: 10px; align-items: flex-start; font-size: 13.5px; color: var(--mut-read); background: var(--panel); border: 1px solid var(--line);
   border-radius: 10px; padding: 10px 12px; }
 .wp .wp-take svg { width: 16px; height: 16px; flex: none; margin-top: 2px; color: var(--brand-read); }
@@ -168,12 +170,6 @@
 .wp .wp-pager { display: flex; gap: 16px; justify-content: flex-end; margin-top: 10px; }
 
 /* the rest of the workload, out of the way until asked for */
-.wp .wp-morebtn { width: 100%; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 14px 20px; cursor: pointer; font-size: 15.5px; font-weight: 700; letter-spacing: -0.02em;
-  text-align: left; color: inherit; flex-wrap: wrap; }
-.wp .wp-morebtn .wp-chev { width: 14px; height: 14px; color: var(--mut); transition: transform 0.15s; }
-.wp .wp-morebtn[aria-expanded="true"] .wp-chev { transform: rotate(90deg); }
-.wp .wp-morebtn .wp-s { font-size: 13px; color: var(--mut); font-weight: 400; letter-spacing: -0.006em; margin-left: auto; }
-.wp-morebody { display: grid; gap: 18px; padding: 0 0 4px; }
 
 /* Settings: what happens when a cheaper setup passes */
 .wp .wp-opts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
@@ -208,7 +204,7 @@
   .wp .wp-runbtn .wp-what.narrow { display: block; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; }
   .wp .wp-rundetail, .wp .wp-liverow { padding: 4px 16px 18px; }
   .wp .wp-cardhead, .wp .wp-cardbody { padding-left: 16px; padding-right: 16px; }
-  .wp .wp-runbtn, .wp .wp-morebtn { padding-left: 16px; padding-right: 16px; }
+  .wp .wp-runbtn { padding-left: 16px; padding-right: 16px; }
   .wp .wp-empty { padding-left: 16px; padding-right: 16px; }
   .wp .wp-tiles { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .wp .wp-big { font-size: 34px; }
@@ -248,7 +244,7 @@
   .wp .wp-calls .wp-srv i { margin-top: 5px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .wp .wp-runbtn .wp-chev, .wp .wp-morebtn .wp-chev { transition: none; }
+  .wp .wp-runbtn .wp-chev { transition: none; }
   .wp .wp-spin { animation: none; }
   .wp .wp-livebar i { transition: none; }
 }
