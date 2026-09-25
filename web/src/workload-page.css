@@ -206,6 +206,56 @@
 .wp .wp-said > div { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13px; color: var(--ink);
   max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .wp .wp-said .wp-sub { margin-bottom: 4px; }
+/* A test's models, each opening to every request the test ran through it (CandRow, ModelAnswers, AnswerCard) */
+.wp .wp-candhint { margin: 0 0 8px; }
+/* its own ground says it is open, so a phone's flash of blue across the whole row on a tap is left out */
+.wp .wp-cands tbody tr.open-able { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+/* the row and what it opens to read as one piece: the same ground under both */
+.wp .wp-cands tbody tr.open-able:hover, .wp .wp-cands tbody tr.open-able.is-open { background: var(--panel); }
+.wp .wp-mdlbtn { display: inline-flex; align-items: center; gap: 6px; padding: 0; margin: 0; border: 0; background: none; font: inherit; color: inherit;
+  cursor: pointer; text-align: left; border-radius: 4px; }
+.wp .wp-mdlbtn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.wp .wp-mdlbtn .wp-chev { width: 12px; height: 12px; color: var(--mut); flex: none; transition: transform 0.15s; }
+.wp .wp-mdlbtn[aria-expanded="true"] .wp-chev { transform: rotate(90deg); }
+.wp .wp-cands tr.wp-ansrow > td { white-space: normal; padding: 0 0 18px; border-top: 0; }
+.wp .wp-cands tr.wp-ansrow[hidden] { display: none; }
+.wp .wp-answers { display: grid; gap: 14px; scroll-margin-top: 12px; background: var(--panel); border-radius: 0 0 12px 12px; padding: 12px 16px 16px; }
+.wp .wp-anssum { display: grid; gap: 6px; font-size: 13.5px; line-height: 1.55; color: var(--ink); }
+.wp .wp-anssum p { margin: 0; }
+.wp .wp-anssum .wp-ansrule { color: var(--mut-read); font-size: 13px; }
+.wp .wp-anslist { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.wp .wp-ans { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 14px; display: grid; gap: 12px; background: var(--raise); }
+.wp .wp-ans.is-left { border-style: dashed; }
+.wp .wp-anshead { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
+.wp .wp-ansno { font-weight: 700; font-size: 13.5px; }
+.wp .wp-answhen { font-size: 12.5px; color: var(--mut-read); }
+.wp .wp-anshead .wp-tag { margin-left: auto; }
+.wp .wp-ansblock { min-width: 0; }
+.wp .wp-ansblock .wp-sub { margin-bottom: 6px; overflow-wrap: anywhere; }
+.wp .wp-anstext { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font-size: 13px; line-height: 1.5;
+  color: var(--ink); max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wp .wp-anstext.is-long { max-height: 360px; margin-top: 8px; }
+.wp .wp-anstoggle { margin-top: 8px; }
+.wp .wp-anspair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.wp .wp-ansone + .wp-ansone { margin-top: 10px; }
+.wp .wp-ansmini { font-size: 12px; font-weight: 600; color: var(--mut-read); margin: 0 0 4px; }
+.wp .wp-ansnote { font-size: 12.5px; color: var(--mut-read); margin: 6px 0 0; overflow-wrap: anywhere; }
+.wp .wp-ansnote.is-ok { color: var(--ok); }
+.wp .wp-ansnote.is-decide { color: var(--bad); }
+.wp .wp-ansnote.is-written { color: var(--warn); }
+/* a structured answer written out, its differing fields marked where they stand (JsonView) */
+.wp .wp-anstext.is-json { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.6; white-space: normal; }
+.wp .wp-jline { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 5px; margin: 0 -5px; border-radius: 4px; }
+.wp .wp-jline.is-decide { background: var(--badq); color: var(--bad); font-weight: 600; }
+.wp .wp-jline.is-written { background: var(--warnq); color: var(--warn); }
+.wp .wp-ansfacts { margin: 0; display: flex; flex-wrap: wrap; gap: 8px 28px; }
+.wp .wp-ansfacts dt { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mut); }
+.wp .wp-ansfacts dd { margin: 2px 0 0; font-size: 13px; color: var(--ink); }
+.wp .wp-anspager { align-items: center; flex-wrap: wrap; margin-top: 0; }
+/* a model's first look and its second, as a choice (the app's own .seg) */
+.wp .wp-looks { justify-self: start; }
+.wp .wp-looks .segb:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.wp .wp-anspager .wp-loadline { margin-right: auto; }
 .wp .wp-srv { display: inline-flex; align-items: center; gap: 7px; }
 .wp .wp-srv i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .wp .wp-pager { display: flex; gap: 16px; justify-content: flex-end; margin-top: 10px; }
@@ -250,6 +300,7 @@
   .wp .wp-tiles { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .wp .wp-big { font-size: 34px; }
   .wp .wp-said { grid-template-columns: minmax(0, 1fr); }
+  .wp .wp-anspair { grid-template-columns: minmax(0, 1fr); }
   .wp.wp-setbody { padding-left: 16px; padding-right: 16px; }
 }
 @media (max-width: 640px) {
@@ -266,13 +317,24 @@
   .wp .wp-cands td[data-label]::before, .wp .wp-calls td[data-label]::before {
     content: attr(data-label); display: block; font-family: 'Schibsted Grotesk', system-ui, sans-serif; font-size: 11px; font-weight: 600;
     letter-spacing: 0.06em; text-transform: uppercase; color: var(--mut); margin-bottom: 1px; }
-  .wp .wp-cands tr { display: grid; grid-template-columns: 28px repeat(3, minmax(0, 1fr)); gap: 6px 8px; padding: 10px 0; border-top: 1px solid var(--line); align-items: start; }
+  /* four figures, two to a line: each keeps room for its name over it */
+  .wp .wp-cands tr { display: grid; grid-template-columns: 28px repeat(2, minmax(0, 1fr)); gap: 6px 8px; padding: 10px 0; border-top: 1px solid var(--line); align-items: start; }
   .wp .wp-cands td:nth-child(1) { grid-column: 1; grid-row: 1 / span 2; }
   .wp .wp-cands td:nth-child(2) { grid-column: 2 / -1; grid-row: 1; overflow-wrap: anywhere; }
   .wp .wp-cands td:nth-child(3) { grid-column: 2 / -1; grid-row: 2; }
   .wp .wp-cands td:nth-child(4) { grid-column: 2; grid-row: 3; }
   .wp .wp-cands td:nth-child(5) { grid-column: 3; grid-row: 3; }
-  .wp .wp-cands td:nth-child(6) { grid-column: 4; grid-row: 3; }
+  .wp .wp-cands td:nth-child(6) { grid-column: 2; grid-row: 4; }
+  .wp .wp-cands td:nth-child(7) { grid-column: 3; grid-row: 4; }
+  .wp .wp-cands .wp-mdlbtn { align-items: flex-start; }
+  .wp .wp-cands .wp-mdlbtn .wp-chev { margin-top: 2px; }
+  /* a model's requests, opened under it: the whole width, not a cell of the grid */
+  .wp .wp-cands tr.wp-ansrow { display: block; padding: 0 0 12px; border-top: 0; }
+  .wp .wp-cands tr.wp-ansrow[hidden] { display: none; }
+  .wp .wp-cands tr.wp-ansrow > td { display: block; padding: 0; }
+  .wp .wp-answers { padding: 10px 8px 12px; }
+  .wp .wp-ans { padding: 10px 12px 12px; }
+  .wp .wp-ansfacts { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 12px; }
   .wp .wp-calls tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 10px 0; border-top: 1px solid var(--line); align-items: center; }
   .wp .wp-calls td:nth-child(1) { grid-column: 1; grid-row: 1; }
   .wp .wp-calls td:nth-child(5) { grid-column: 2; grid-row: 1; justify-self: end; }
@@ -285,7 +347,7 @@
   .wp .wp-calls .wp-srv i { margin-top: 5px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .wp .wp-runbtn .wp-chev { transition: none; }
+  .wp .wp-runbtn .wp-chev, .wp .wp-mdlbtn .wp-chev { transition: none; }
   .wp .wp-spin { animation: none; }
   .wp .wp-livebar i { transition: none; }
 }

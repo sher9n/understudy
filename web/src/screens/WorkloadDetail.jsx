@@ -578,7 +578,7 @@ function RunRow({ w, r, open, onToggle }) {
         ) : (
           <>
             <div className="wp-take">{I.info}<span>{rp.take}</span></div>
-            {rp.cands.length > 0 ? <RunDetail rp={rp} /> : rp.self && (
+            {rp.cands.length > 0 ? <RunDetail rp={rp} wid={w.id} /> : rp.self && (
               <div className="wp-chartbox wp-selfbox">
                 <p className="wp-sub">{rp.self.noise !== null ? 'Original model against itself' : 'How far it got'}</p>
                 <SelfPic self={rp.self} yardstick={rp.yardstick} />
@@ -717,7 +717,20 @@ function Help({ label, children, trigger = null }) {
   );
 }
 
-function RunDetail({ rp }) {
+/* What a test's "Requests sampled" column counts, in the words its information bubble says (see Help). */
+function SampledWords({ rp }) {
+  return (
+    <>
+      <p><b>Requests sampled</b></p>
+      <p>How many of this test's requests each model answered. The test took {num(rp.sample)} of this workload's real requests, ran each one through every model, and compared each model's answers with the original model's.</p>
+      <p>A model answers fewer when testing stops early, for example once it's already clearly not a match.</p>
+      <p>A model that passes is tested again on new requests it has never seen, before anything switches to it. Those show as, for example, "+ 88 new".</p>
+      <p>Select a model to see every request it answered.</p>
+    </>
+  );
+}
+
+function RunDetail({ rp, wid }) {
   const quality = rp.yardstick === 'quality';
   const axis = quality ? 'Worse than original model' : 'Different from original model';
   const col = quality ? 'Worse' : 'Different';
@@ -725,6 +738,8 @@ function RunDetail({ rp }) {
   const run = { ...rp, axis };
   const chart = rp.cands.some(plotted);
   const barWords = `${Math.round(rp.bar * 1000) / 10}%`;
+  // the one model opened to its requests, if any
+  const [openKey, setOpenKey] = useState(null);
   return (
     <div className="wp-detailgrid">
       {/* one heading over the chart and the table under it, which show the same models two ways */}
@@ -746,6 +761,7 @@ function RunDetail({ rp }) {
         </div>
       )}
       <div className="wp-tablewrap">
+        <p className="wp-loadline wp-candhint">Select a model to see each request it answered, beside the original model's answer.</p>
         <table className="wp-cands">
           <thead>
             <tr>
@@ -753,28 +769,312 @@ function RunDetail({ rp }) {
               <th>Model</th>
               <th>Outcome</th>
               <th className="r">{col}<Help label={axis}><ColumnWords rp={rp} /></Help></th>
+              <th className="r">Requests sampled<Help label="Requests sampled"><SampledWords rp={rp} /></Help></th>
               <th className="r">Cost / request</th>
               <th className="r">{time}</th>
             </tr>
           </thead>
           <tbody>
-            {rp.cands.map((c, i) => {
-              const tag = <span className={`wp-tag is-${c.tone}`}>{c.verdict}</span>;
-              return (
-                <tr key={c.key}>
-                  <td><span className="wp-no" style={{ background: toneColor(c.tone) }}>{i + 1}</span></td>
-                  <td className="wp-mdl">{c.label}</td>
-                  <td>{c.why ? <Help label={c.verdict} trigger={tag}><p>{c.why}</p></Help> : tag}</td>
-                  <td className={`r m${c.gap === null ? ' none' : ''}`} data-label={col}>{c.gap === null ? 'not judged' : pct1(c.gap)}</td>
-                  <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Cost / request">{c.perCall === null ? 'not priced' : perCall(c.perCall)}</td>
-                  <td className={`r m${!c.p50 ? ' none' : ''}`} data-label={time}>{c.p50 ? secs(c.p50) : 'not timed'}</td>
-                </tr>
-              );
-            })}
+            {rp.cands.map((c, i) => (
+              <CandRow key={c.key} c={c} i={i} rp={rp} wid={wid} col={col} time={time}
+                open={openKey === c.key} onToggle={() => setOpenKey((k) => (k === c.key ? null : c.key))} />
+            ))}
           </tbody>
         </table>
       </div>
     </div>
+  );
+}
+
+/* One model in a test's table: its row, which opens to every request the test ran through it (ModelAnswers). The whole
+   row answers a click; the model's name is the button, for the keyboard and for a screen reader. Once opened, what it
+   read is kept while the row is closed, so opening it again shows the same page of requests at once. */
+function CandRow({ c, i, rp, wid, col, time, open, onToggle }) {
+  const [seen, setSeen] = useState(false);
+  useEffect(() => { if (open) setSeen(true); }, [open]);
+  const tag = <span className={`wp-tag is-${c.tone}`}>{c.verdict}</span>;
+  const aid = `wp-ans-${rp.id}-${i}`;
+  // the test's own requests, and the new ones a second look read it on
+  const sampled = `${!rp.sample || c.n >= rp.sample ? num(c.n) : `${num(c.n)} of ${num(rp.sample)}`}${c.second > 0 ? ` + ${num(c.second)} new` : ''}`;
+  return (
+    <>
+      {/* a click on another button in the row (the outcome's words), or inside words it floats above the page, is its own */}
+      <tr className={`open-able${open ? ' is-open' : ''}`}
+        onClick={(e) => { if (e.currentTarget.contains(e.target) && !e.target.closest('button')) onToggle(); }}>
+        <td><span className="wp-no" style={{ background: toneColor(c.tone) }}>{i + 1}</span></td>
+        <td className="wp-mdl">
+          {/* its name, and what it opens to; whether it is open is said by aria-expanded */}
+          <button type="button" className="wp-mdlbtn" aria-expanded={open} aria-controls={aid} onClick={onToggle}
+            aria-label={`${c.label}, each request it answered`}>
+            {I.chev}<span>{c.label}</span>
+          </button>
+        </td>
+        <td>{c.why ? <Help label={c.verdict} trigger={tag}><p>{c.why}</p></Help> : tag}</td>
+        <td className={`r m${c.gap === null ? ' none' : ''}`} data-label={col}>{c.gap === null ? 'not judged' : pct1(c.gap)}</td>
+        <td className="r m" data-label="Requests sampled">{sampled}</td>
+        <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Cost / request">{c.perCall === null ? 'not priced' : perCall(c.perCall)}</td>
+        <td className={`r m${!c.p50 ? ' none' : ''}`} data-label={time}>{c.p50 ? secs(c.p50) : 'not timed'}</td>
+      </tr>
+      <tr className="wp-ansrow" id={aid} hidden={!open}>
+        <td colSpan={7}>{seen && <ModelAnswers wid={wid} rp={rp} c={c} col={col} />}</td>
+      </tr>
+    </>
+  );
+}
+
+// a list in a sentence: "a", "a and b", "a, b and c"
+const inWords = (xs) => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+// a score as the test gave it: 0, 0.5 or 1
+const scoreWords = (s) => String(Math.round(Number(s) * 100) / 100);
+
+/* One model's answers in one test, ten requests at a time (runAnswersOf in src/workloadPage.js): how they came out,
+   how a request is scored and how the scores make the figure in its row, and each request with what was asked, the
+   original model's answers beside this model's, its score, and its time and cost beside the original model's. A model
+   that passed was tested again on new requests, its second look, which is shown the same way at a choice. */
+function ModelAnswers({ wid, rp, c, col }) {
+  const [got, setGot] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [look, setLook] = useState(1);
+  const top = useRef(null);
+  // the page last asked for: an answer to one asked before it, arriving late, is not shown over it
+  const want = useRef('');
+  const read = useCallback((n, { scroll = false, lk = 1 } = {}) => {
+    const key = `${lk}:${n}`;
+    want.current = key;
+    setBusy(true);
+    setErr(null);
+    api.runAnswers(wid, rp.id, c.key, n, lk)
+      .then((x) => {
+        if (want.current !== key) return;
+        setGot(x);
+        setLook(lk);
+        /* A new page starts at its first request, not at the foot of the last one, where its buttons are: brought back
+           into view where it has scrolled out of it, above the bar a phone keeps at the top (its scroll padding). */
+        const el = top.current;
+        const pad = parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop) || 0;
+        if (scroll && el && el.getBoundingClientRect().top < pad) el.scrollIntoView({ block: 'start' });
+      })
+      .catch((e) => { if (want.current === key) setErr(e.message); })
+      .finally(() => { if (want.current === key) setBusy(false); });
+  }, [wid, rp.id, c.key]);
+  useEffect(() => { read(1); }, [read]);
+  if (!got) {
+    return err
+      ? <p className="wp-loadline">This model's answers could not be read: {err}{' '}<button type="button" className="wp-textbtn" onClick={() => read(1)}>Try again</button></p>
+      : <p className="wp-loadline">Reading this model's answers…</p>;
+  }
+  const second = look === 2;
+  // the choice of look, for a model with a second one; a way of serving built on a model shows its lead model's first
+  const looks = !got.from && (got.looks.second > 0 || got.looks.kept > 0) ? (
+    <div className="seg wp-looks" role="group" aria-label="Which of its tests to show">
+      <button type="button" className={second ? 'segb' : 'segb on'} aria-pressed={!second} disabled={busy} onClick={() => { if (second) read(1, { lk: 1 }); }}>
+        First look, {num(got.looks.first)} {got.looks.first === 1 ? 'request' : 'requests'}
+      </button>
+      <button type="button" className={second ? 'segb on' : 'segb'} aria-pressed={second} disabled={busy} onClick={() => { if (!second) read(1, { lk: 2 }); }}>
+        Second look, {num(got.looks.second || got.looks.kept)} new {(got.looks.second || got.looks.kept) === 1 ? 'request' : 'requests'}
+      </button>
+    </div>
+  ) : null;
+  if (second && !got.total) {
+    return (
+      <div className="wp-answers" ref={top}>
+        {looks}
+        <p className="wp-anssum">
+          This model was tested again on {num(got.looks.second)} new {got.looks.second === 1 ? 'request' : 'requests'} before anything could switch to it{got.looks.ended ? `, and ${got.looks.ended}` : ''}.
+          {' '}This test ran before Understudy kept the answers to a second look, so only its result is shown here.
+        </p>
+      </div>
+    );
+  }
+  const quality = got.yardstick === 'quality';
+  const k = got.counts;
+  const on = (n, words) => `on ${num(n)} ${words}`;
+  const outcomes = [
+    k.same && on(k.same, quality ? "its answer was at least as good as the original model's" : 'it gave the same answer as the original model'),
+    k.partly && on(k.partly, quality ? 'one of the two readings found it worse' : "it matched only one of the original model's two answers"),
+    k.different && on(k.different, quality ? 'its answer was clearly worse' : 'it gave a different answer'),
+    k.failed && on(k.failed, 'it failed'),
+  ].filter(Boolean);
+  const left = [
+    k.busy && `${num(k.busy)} ${k.busy === 1 ? 'was' : 'were'} left out because its provider was busy`,
+    k.unjudged && `${num(k.unjudged)} couldn't be judged and ${k.unjudged === 1 ? "doesn't" : "don't"} count`,
+  ].filter(Boolean);
+  const said = outcomes.length ? `${inWords(outcomes)}.` : '';
+  // the scores' average is its figure in the table for a model on its own; a way of serving built on one works its own out
+  const matches = got.average !== null && got.figure !== null && Math.abs(got.average - got.figure) < 0.0005;
+  const first = (got.page - 1) * got.per + 1;
+  // what the average is: its row's figure, or on a second look, that look's, held to the most it allowed
+  const figureWords = second
+    ? ` The average score is ${pct1(got.average)}, the figure its second look found.${got.bar !== null ? ` The test had to be confident it stays within ${pct1(got.bar)} to pass${got.looks.ended ? `, and ${got.looks.ended}` : ''}.` : ''}`
+    : ` The average score is ${pct1(got.average)}, which is the ${col} figure in the table.`;
+  return (
+    <div className="wp-answers" ref={top}>
+      {got.from && <div className="wp-take">{I.info}<span>{got.from.why}</span></div>}
+      {looks}
+      {!got.total ? (
+        <p className="wp-loadline">No answers were kept for this model in this test.</p>
+      ) : (
+        <>
+          <div className="wp-anssum">
+            <p>
+              {second
+                ? `On its second look, the test ran ${num(got.total)} new ${got.total === 1 ? 'request' : 'requests'} through this model, ones it had never seen.`
+                : `The test ran ${num(got.total)} ${got.total === 1 ? 'request' : 'requests'} through ${got.from ? got.from.name : 'this model'}${c.n < got.sample && !got.from ? `, of the ${num(got.sample)} it took` : ''}.`}
+              {said && ` ${said.charAt(0).toUpperCase()}${said.slice(1)}`}
+              {left.length > 0 && ` ${inWords(left).charAt(0).toUpperCase()}${inWords(left).slice(1)}.`}
+            </p>
+            <p className="wp-ansrule">
+              {quality
+                ? "How each request is scored: a judge reads this model's answer beside the original model's twice, once in each order. It scores 0 when this model's answer is at least as good, and 1 when both readings find it clearly worse or it breaks a rule the request's instructions set."
+                : "How each request is scored: the original model answered every request twice, because it doesn't always give the same answer. This model's answer is compared with each of those two answers. It scores 0 when it matches both, 0.5 when it matches one of them, and 1 when it matches neither."}
+              {' '}A request it failed to answer scores 1.
+              {!got.from && got.average !== null && (matches
+                ? figureWords
+                : got.unmarked > 0 && !second
+                  ? ` The ${col} figure in the table, ${pct1(got.figure)}, leaves out answers the judge couldn't read at the time. This test ran before Understudy marked which those were, so some shown here as different may not count.`
+                  : ` The average score is ${pct1(got.average)}.`)}
+            </p>
+          </div>
+          <ol className="wp-anslist" start={first}>
+            {got.rows.map((x) => <AnswerCard key={`${look}-${x.callId}-${x.n}`} x={x} got={got} />)}
+          </ol>
+          {(got.page > 1 || got.more) && (
+            <div className="wp-pager wp-anspager">
+              <span className="wp-loadline">Requests {num(first)} to {num(first + got.rows.length - 1)} of {num(got.total)}</span>
+              {got.page > 1 && <button type="button" className="wp-textbtn" disabled={busy} onClick={() => read(got.page - 1, { scroll: true, lk: look })}>Previous {got.per}</button>}
+              {got.more && <button type="button" className="wp-textbtn" disabled={busy} onClick={() => read(got.page + 1, { scroll: true, lk: look })}>Next {got.per}</button>}
+            </div>
+          )}
+          {err && <p className="wp-loadline">That page could not be read: {err}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* A structured answer laid out as JSON is written out, two spaces to a level, with the fields a test found different marked
+   where they stand: a field that decides something in red, a written one that differs only in its words in amber. A
+   field is named as the test names it (leaves in src/eval/compare.js): "total", "items[0].price", and for a tool call
+   its arguments under "[0]"; "the answer" is a whole answer of one value, and "the tool called" the tool's name. */
+function JsonView({ value, shape, decide, written }) {
+  const lines = [];
+  const markOf = (path) => (decide.has(path) || decide.has('the answer') ? 'is-decide' : written.has(path) ? 'is-written' : '');
+  const walk = (v, path, depth, key, last) => {
+    const pad = '  '.repeat(depth);
+    const name = key === null ? '' : `${JSON.stringify(key)}: `;
+    const comma = last ? '' : ',';
+    if (v === null || typeof v !== 'object') {
+      lines.push({ text: `${pad}${name}${JSON.stringify(v)}${comma}`, mark: markOf(path || '$') });
+      return;
+    }
+    const list = Array.isArray(v);
+    const kids = list ? v.map((x, i) => [i, x]) : Object.entries(v);
+    if (!kids.length) { lines.push({ text: `${pad}${name}${list ? '[]' : '{}'}${comma}`, mark: '' }); return; }
+    lines.push({ text: `${pad}${name}${list ? '[' : '{'}`, mark: '' });
+    kids.forEach(([k, x], i) => walk(x, list ? `${path}[${k}]` : (path ? `${path}.${k}` : k), depth + 1, list ? null : k, i === kids.length - 1));
+    lines.push({ text: `${pad}${list ? ']' : '}'}${comma}`, mark: '' });
+  };
+  if (shape === 'tool_call' && Array.isArray(value)) {
+    value.forEach((call, i) => {
+      if (i) lines.push({ text: '', mark: '' });
+      lines.push({ text: `CALLED ${call?.name ?? 'a tool'}`, mark: decide.has('the tool called') ? 'is-decide' : '' });
+      walk(call?.args ?? {}, `[${i}]`, 0, null, true);
+    });
+  } else walk(value, '', 0, null, true);
+  return lines.map((l, i) => <span key={i} className={l.mark ? `wp-jline ${l.mark}` : 'wp-jline'}>{l.text || ' '}</span>);
+}
+
+/* One request a model answered in a test: when it was first sent, what was asked (and the whole request on asking), the
+   original model's answers beside this model's, where a structured answer differed from each, and the score, how it was
+   compared, and the time and cost beside the original model's. Kept content goes with the workspace's retention window,
+   and then it says so, keeping everything else. */
+function AnswerCard({ x, got }) {
+  const [whole, setWhole] = useState(false);
+  const quality = got.yardstick === 'quality';
+  const [a, b] = x.original;
+  // the original model's two answers are shown once when they were the same
+  const twice = a !== null && a === b;
+  const differs = (i) => {
+    const f = x.fields?.[i];
+    if (!f) return null;
+    if (!f.decide.length && !f.written.length) return <p className="wp-ansnote is-ok">Matches this model's answer</p>;
+    return (
+      <>
+        {f.decide.length > 0 && <p className="wp-ansnote is-decide">Differs from this model's answer in <span className="wp-mdl">{f.decide.join(', ')}</span></p>}
+        {f.written.length > 0 && (
+          <p className="wp-ansnote is-written">Worded differently in <span className="wp-mdl">{f.written.join(', ')}</span>, which a judge reads for meaning</p>
+        )}
+      </>
+    );
+  };
+  // the fields to mark: in one of the original model's answers, where it differs from this model's; in this model's, where
+  // it differs from any it was compared with
+  const setOf = (pick, only = null) => new Set((x.fields || []).flatMap((f, i) => (f && (only === null || only === i) ? f[pick] : [])));
+  const shown = (text, value, i = null) => (value !== undefined && value !== null
+    ? <div className="wp-anstext is-json"><JsonView value={value} shape={got.shape} decide={setOf('decide', i)} written={setOf('written', i)} /></div>
+    : <div className="wp-anstext">{text ?? 'No answer came back.'}</div>);
+  const mine = got.from ? got.from.name : null;
+  return (
+    <li className={`wp-ans${x.counted ? '' : ' is-left'}`}>
+      <div className="wp-anshead">
+        <span className="wp-ansno">Request {num(x.n)}</span>
+        {x.at && <span className="wp-answhen">sent {timeIST(x.at)} IST</span>}
+        <span className={`wp-tag is-${x.verdict.tone}`}>{x.verdict.text}</span>
+      </div>
+      {x.purged ? (
+        <p className="wp-loadline">What was asked and answered is no longer kept, as your retention setting says. How it was scored is still here.</p>
+      ) : (
+        <>
+          <div className="wp-ansblock">
+            <p className="wp-sub">Asked</p>
+            <div className="wp-anstext">{x.asked || 'Nothing written was asked.'}</div>
+            {x.request && (
+              <>
+                <button type="button" className="wp-textbtn wp-anstoggle" aria-expanded={whole} onClick={() => setWhole((v) => !v)}>
+                  {whole ? 'Hide the whole request' : `Show the whole request, all ${num(x.messages)} messages`}
+                </button>
+                {whole && <div className="wp-anstext is-long">{x.request}</div>}
+              </>
+            )}
+          </div>
+          <div className="wp-anspair">
+            <div className="wp-ansblock">
+              <p className="wp-sub">Original model{got.referenceName ? `, ${got.referenceName}` : ''}</p>
+              {twice ? (
+                <>
+                  {shown(a, x.values?.original?.[0], 0)}
+                  <p className="wp-ansnote">It gave this answer both times.</p>
+                  {differs(0)}
+                </>
+              ) : [a, b].map((o, i) => (
+                // a second answer "at least as good" was not held to is left out
+                (quality && !x.heldTo[i] && i === 1) ? null : (
+                  <div key={i} className="wp-ansone">
+                    <p className="wp-ansmini">{i === 0 ? 'First answer' : 'Second answer'}{!x.heldTo[i] && o !== null ? ', not compared' : ''}</p>
+                    {shown(o, x.values?.original?.[i], i)}
+                    {differs(i)}
+                  </div>
+                )
+              ))}
+            </div>
+            <div className="wp-ansblock">
+              <p className="wp-sub">This model{mine ? `, ${mine}` : ''}</p>
+              {shown(x.answer, x.values?.answer)}
+              {x.difference && <p className="wp-ansnote">How it differs: {x.difference}</p>}
+            </div>
+          </div>
+        </>
+      )}
+      <dl className="wp-ansfacts">
+        <div><dt>Score</dt><dd>{x.score === null ? 'none' : scoreWords(x.score)}{!x.counted && x.score !== null ? ", doesn't count" : ''}</dd></div>
+        {x.compared && <div><dt>Compared</dt><dd>{x.compared}</dd></div>}
+        <div><dt>{got.metric === 'ttft' ? 'Time to first word' : 'Time'}</dt>
+          <dd>{x.ms ? secs(x.ms) : 'not timed'}{x.original_ms ? `, the original model ${secs(x.original_ms)}` : ''}</dd></div>
+        <div><dt>Cost</dt>
+          <dd>{x.reused ? 'nothing new, reused from an earlier test' : x.cost === null ? 'not priced' : perCall(x.cost)}{x.original_cost ? `, the original model ${perCall(x.original_cost)}` : ''}</dd></div>
+      </dl>
+    </li>
   );
 }
 

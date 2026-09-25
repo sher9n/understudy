@@ -27,7 +27,8 @@ import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
 import { routingModeOf, ROUTING_MODES } from './eval/confidence.js';
 import { switchStory } from './eval/switch-story.js';
 import { valueOf } from './eval/value.js';
-import { pageOf, callsOf, runPageOf } from './workloadPage.js';
+import { pageOf, callsOf, runPageOf, runAnswersOf } from './workloadPage.js';
+import { contentText, askedFull, answeredFull } from './callText.js';
 import { enqueue, wakeJobs } from './jobs.js';
 import { routeOnce } from './proxy.js';
 import { forgetWorkspace } from './workspace.js';
@@ -264,47 +265,7 @@ const shapeLabel = { tool_call: 'tool call', json: 'json', enum: 'enum', free_te
    at the top of the page as the shape. Content is cleared after the retention window, so
    this is often legitimately absent and says so rather than showing an empty cell. */
 const CELL = 160;
-
-/** The text of a message, whether it came as a string or as parts. */
-function contentText(content) {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content.map((p) => (typeof p?.text === 'string' ? p.text
-      : (p?.type ? `[${String(p.type).replace('_', ' ')}]` : ''))).join('\n');
-  }
-  return '';
-}
-
-/** The whole of what was asked: every message in the request, in the order it was sent. */
-function askedFull(c) {
-  if (c.content_purged_at) return null;
-  try {
-    const req = JSON.parse(c.request_json || 'null');
-    const msgs = Array.isArray(req?.messages) ? req.messages : [];
-    if (!msgs.length) return null;
-    return msgs.map((m) => {
-      const body = contentText(m.content)
-        || (m.tool_calls ? JSON.stringify(m.tool_calls, null, 2) : '');
-      return `${String(m.role || 'message').toUpperCase()}\n${body}`;
-    }).join('\n\n');
-  } catch { return null; }
-}
-
-/** The whole of what came back. */
-function answeredFull(c) {
-  if (c.content_purged_at) return null;
-  try {
-    const res = JSON.parse(c.response_json || 'null');
-    if (res?.error?.message) return String(res.error.message);
-    const msg = res?.choices?.[0]?.message;
-    if (!msg) return null;
-    const text = contentText(msg.content);
-    if (text.trim()) return text;
-    const tools = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
-    if (!tools.length) return null;
-    return tools.map((t) => `CALLED ${t?.function?.name || 'a tool'}\n${t?.function?.arguments ?? ''}`).join('\n\n');
-  } catch { return null; }
-}
+// contentText, askedFull and answeredFull: what a call asked and answered, as text (src/callText.js)
 
 /* One line for the table, plus whether there is more of it than fits. A cell that already
    shows everything has nothing to open, so it is left alone rather than given a hover that
@@ -907,6 +868,23 @@ api.get('/workloads/:id/runs/:runId/page', async (req, res) => {
   const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ? AND workload_id = ?').get(req.params.runId, w.id);
   if (!run) return fail(res, 404, 'No such measurement.');
   res.json(await runPageOf(w, run));
+});
+
+/* One model in one test, request by request: what was asked, what the original model and this model answered, and
+   how each answer was read (runAnswersOf), ten at a time. The model is named in the query, since its name can hold
+   a slash. The workload's owner only, like everything about it. */
+api.get('/workloads/:id/runs/:runId/answers', async (req, res) => {
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
+    .get(req.params.id, req.workspace.id);
+  if (!w) return fail(res, 404, 'No such workload.');
+  const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ? AND workload_id = ?').get(req.params.runId, w.id);
+  if (!run) return fail(res, 404, 'No such measurement.');
+  // its first look, or with look=2 its second, on new requests
+  const out = await runAnswersOf(w, run, String(req.query.model || ''), {
+    page: Number.parseInt(req.query.page, 10) || 1, look: req.query.look === '2' ? 2 : 1,
+  });
+  if (!out) return fail(res, 404, 'No such model in this test.');
+  res.json(out);
 });
 
 /* The calls in a workload, a page at a time, optionally narrowed by a search.

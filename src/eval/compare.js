@@ -121,6 +121,34 @@ export function structuredCompare(av, bv, shapeKind) {
   return { decision: differ > 0 ? 1 : 0, fields: decided, differ, prose };
 }
 
+/** Which fields two structured answers differ in, by the rules structuredCompare counts with: the deciding fields
+    whose values differ, and the written ones worded differently, which a judge reads for meaning rather than counts.
+    What a person opening one request of a test is shown beside the two answers. */
+export function differingFields(av, bv, shapeKind) {
+  let x = av;
+  let y = bv;
+  if (shapeKind === 'tool_call') {
+    const names = (calls) => (Array.isArray(calls) ? calls.map((c) => c?.name ?? '').join(', ') : '');
+    if (names(x) !== names(y)) return { decide: ['the tool called'], written: [] };
+    x = (x || []).map((c) => c?.args);
+    y = (y || []).map((c) => c?.args);
+  }
+  if (shapeKind === 'enum' && (x === null || typeof x !== 'object') && (y === null || typeof y !== 'object')) {
+    return { decide: sameValue(x, y) ? [] : ['the answer'], written: [] };
+  }
+  const la = leaves(x);
+  const lb = leaves(y);
+  const decide = [];
+  const written = [];
+  for (const k of new Set([...la.keys(), ...lb.keys()])) {
+    const p = la.has(k) ? la.get(k) : undefined;
+    const q = lb.has(k) ? lb.get(k) : undefined;
+    if (isProse(p) && isProse(q)) { if (p.trim() !== q.trim()) written.push(k); continue; }
+    if (!sameValue(p, q)) decide.push(k);
+  }
+  return { decide, written };
+}
+
 /** The written fields of a structured answer, as one text a judge can read. */
 export function proseText(pairs, side) {
   return pairs.map((p) => `${p.path}: ${p[side]}`).join('\n');
