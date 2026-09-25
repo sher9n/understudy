@@ -2,7 +2,9 @@ import React, { useEffect } from 'react';
 import { href } from '../router.js';
 import Board from '../Board.jsx';
 import { SkipLink } from '../nav.jsx';
+import { startHomeMotion } from '../homeMotion.js';
 import html from './home.html?raw';
+import '../home.css';
 
 /* The board's sample address. It never existed, so the one line the page asks somebody to
    change pointed at nowhere; the real address is this deployment's own, which is where they
@@ -21,6 +23,8 @@ export default function Home({ go, dark, setDark }) {
   useEffect(() => {
     if (window.location.hash === '#how') document.getElementById('how')?.scrollIntoView({ block: 'start' });
   }, []);
+  // the drawings move once the page is drawn, and stop, and are taken away again, when it goes (homeMotion.js)
+  useEffect(() => startHomeMotion(document.querySelector('.lifted .hm')), []);
 
   return (
     <>
