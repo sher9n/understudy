@@ -5,17 +5,19 @@ import { plainClick } from '../nav.jsx';
 import { api, num, timeIST } from '../api.js';
 import { more } from '../moreApi.js';
 import { dayIST } from '../dates.js';
-import { I, dayLabel, toneColor, plotted, DailyChart, Meter, CompareChart, FlowSvg, CostBars, QualitySpark, SelfPic } from '../WorkloadCharts.jsx';
+import { I, toneColor, plotted, Meter, CompareChart, FlowSvg, CostBars, SelfPic } from '../WorkloadCharts.jsx';
 import '../workload-page.css';
 
-/* A workload's page, as the design artboard draws it: four answers at a glance, and once it is switched, what
- * Understudy is doing for it and what that saves.
- *   1. Are there enough requests to test models? Counted the way a test counts them, by count alone however many
- *      arrive in a day, and if not yet, how many more a test needs (it starts by itself once they are in).
- *   2. What the workspace has chosen should happen when a cheaper model passes, as a chip that opens Settings; and for
- *      written answers, how another model's are judged against the original model's, as a chip that opens the choices.
- *   3. Every model test, each opening to the chart of how its models compared and the list of them.
+/* A workload's page, as the approved artboard (version 2, 26 Sep 2026) draws it, with as few words as it can:
+ *   1. What Understudy is doing for it, whatever its state: one sentence; the drawing of where its requests go now,
+ *      which moves only while they arrive; a switch's takeover as one strip; and a few figures, each a label and a
+ *      number. Before its first test, how many more requests a test needs, counted the way a test counts them.
+ *   2. What needs a person: a cheaper model waiting for a yes, or one calm line when nothing does.
+ *   3. Every model test, each opening to the chart of how its models compared, across the full width, and the list of
+ *      them, each opening its own page; and when the next test comes.
  *   4. The recent requests, and which model answered each.
+ * Under the name, what the workspace has chosen should happen when a cheaper model passes, as a chip that opens
+ * Settings; and for written answers, how another model's are judged against the original model's.
  * Its words keep one noun for each thing: requests (never calls), a test (never a measurement), a model, the original
  * model (the customer's own), and the allowed difference (never the bar); and every outcome says what it means.
  * Its actions: testing now, with its progress and a way to stop; approving a switch a person has to say yes to;
@@ -64,8 +66,6 @@ const cents = (v) => {
   if (x !== 0 && Math.abs(x) < 0.005) return x < 0 ? 'under -$0.01' : 'under $0.01';
   return `${x < 0 ? '-' : ''}$${Math.abs(x).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
-// a whole-dollar figure where it is large enough to read that way
-const money = (v) => (Math.abs(v) >= 10 ? `${v < 0 ? '-' : ''}$${Math.round(Math.abs(v)).toLocaleString('en-US')}` : cents(v));
 /* What one request costs, to a hundredth of a cent, where the cost of a model call lives: "$0.0038". From a dollar up
    to the cent, and one too small for a hundredth of a cent says so. */
 const perCall = (v) => {
@@ -99,6 +99,20 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
 
   const live = useLive(w, async () => { await load(); onChanged?.(); });
 
+  /* The drawing moves only while requests arrive: whether they are is read again every half minute, and the page's
+     figures every few minutes while it is on the screen, so a drawing never goes on moving after they stop. */
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setClock(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') api.workloadPage(id).then(setPg).catch(() => { /* the figures shown stay */ });
+    }, 180000);
+    return () => clearInterval(t);
+  }, [id]);
+
   if (err && !(w && pg)) {
     return (
       <div className="errbox" role="alert">
@@ -125,14 +139,13 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
   // its requests reach us as copies, after the customer's own provider has answered them
   const copiesOnly = !!w.traffic && !w.traffic.carries;
   const kind = KIND[pg.kind] || ['text', w.shape || 'Requests'];
-  const d = pg.doing;
   const running = !!live.run;
 
   // nothing is wrong with a workload still on its own model, so that is said as a fact, not a warning
   const pill = running ? { tone: 'brand', text: live.run.queued ? 'Starting a test' : 'Testing now' }
     : switched && copiesOnly ? { tone: 'warn', text: 'Switched, waiting for requests' }
-      : switched ? { tone: 'ok', text: d?.less > 0 ? `Optimized, saving ${Math.round(d.less * 100)}%` : 'Optimized' }
-        : waitsForPerson ? { tone: 'brand', text: 'A cheaper model passed' }
+      : switched ? { tone: 'ok', text: 'Switched' }
+        : waitsForPerson ? { tone: 'brand', text: 'Waiting for your yes' }
           : { tone: 'mut', text: 'Original model still in use' };
   const toSettings = go ? plainClick(() => go('settings', null, { hash: 'optimize' })) : undefined;
 
@@ -147,7 +160,7 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
               <div className="wp-chips">
                 <span className="wp-chip">{I[kind[0]]}{kind[1]}</span>
                 <span className="wp-chip" title="The model this workload uses now, which every other model is compared with">
-                  Original model: <span className="m">{w.reference || 'none named yet'}</span>
+                  Original: <span className="m">{w.reference || 'none named yet'}</span>
                 </span>
                 {/* what happens when a cheaper model passes; testing goes on whichever is chosen */}
                 <a className="wp-chip set" href={href('settings', null, 'optimize')} onClick={toSettings}
@@ -164,9 +177,6 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
             </div>
             <div className="wp-headacts">
               <span className={`wp-pill is-${pill.tone}`}><span className="wp-pd" />{pill.text}</span>
-              {waitsForPerson && (
-                <button type="button" className="wp-btn pri" disabled={busy} onClick={act(() => more.promote(w.id, cand.model))}>Switch to it</button>
-              )}
               <button type="button" className="wp-btn" disabled={!m.canRun || busy || live.starting || running} onClick={live.start}>
                 {live.starting ? 'Starting…' : 'Test now'}
               </button>
@@ -185,10 +195,12 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
           </div>
         )}
 
-        {switched && d && <Doing w={w} d={d} busy={busy} copiesOnly={copiesOnly} act={act} go={go} />}
-        {waitsForPerson && <Ready w={w} cand={cand} busy={busy} copiesOnly={copiesOnly} act={act} go={go} />}
-
-        <Enough e={pg.enough} />
+        {/* what Understudy is doing, then what needs you, then the tests and the requests */}
+        <Summary w={w} pg={pg} cand={cand} waitsForPerson={waitsForPerson} copiesOnly={copiesOnly} running={running}
+          busy={busy} act={act} go={go} clock={clock} />
+        {waitsForPerson
+          ? <Waiting w={w} cand={cand} busy={busy} copiesOnly={copiesOnly} act={act} go={go} goTo={goTo} />
+          : <div className="wp-calm">{I.check}<b>Nothing needs you.</b></div>}
         <Measurements w={w} pg={pg} live={live} goTo={goTo} />
         <Calls w={w} pg={pg} />
       </div>
@@ -286,87 +298,190 @@ async function stopOutcome(workloadId) {
   return STOPPED;
 }
 
-/* What Understudy is doing, once a workload is switched: its requests flowing live, and five tiles of what that
-   means. A switch still taking over says so, with the way to give it every request; one waiting for its first
-   request through Understudy says that instead of drawing a flow that is not happening. */
-function Doing({ w, d, busy, copiesOnly, act, go }) {
-  const waiting = d.waiting || copiesOnly;
-  const refShort = short(d.reference);
-  const c = d.checks;
-  const worseWord = c.yardstick === 'quality' ? 'Worse than original model' : 'Different from original model';
-  const checked = c.share !== null && c.share >= 0.01 ? `checked daily on ${pct0(c.share)} of requests`
-    : c.perDay > 0 ? `checked on about ${num(Math.round(c.perDay))} requests a day` : 'checked daily';
-  const allowed = `allowed ${Math.round(c.bar * 1000) / 10}%`;
-  const rollout = w.rollout;
+/* When a workload is next tested, in a few words: a date, soon, when a person asks, or once it has the requests a test
+   needs. */
+const nextWords = (e) => {
+  if (!e.yes) return `after ${num(e.need - e.have)} more ${e.need - e.have === 1 ? 'request' : 'requests'}`;
+  if (!(e.everyDays > 0)) return 'when you ask';
+  if (!e.nextAt || e.nextAt <= Date.now()) return 'soon';
+  return dateShort(e.nextAt);
+};
+// what a thousand requests cost, to the cent: "$0.11"
+const perK = (v) => cents((Number(v) || 0) * 1000);
+
+/* What Understudy is doing for a workload, at the top of its page whatever its state: one sentence, the drawing of where
+   its requests go now, moving only while they arrive, a switch's takeover as one strip with what moves it on, and a few
+   figures, each a label and a number. Before its first test it says how many more requests a test needs; after, the
+   tests say when the next one comes. */
+function Summary({ w, pg, cand, waitsForPerson, copiesOnly, running, busy, act, go, clock }) {
+  const d = pg.doing;
+  const f = pg.flow || {};
+  const e = pg.enough;
+  const refShort = short(w.reference);
+  const switched = !!w.promotedAt && !!d;
+  // set up and switched, but its requests reach us only as copies: nothing is answered here until one comes through
+  const setUp = switched && (d.waiting || copiesOnly);
+  const tested = pg.measurements.some((r) => !r.live);
+  const lastAt = f.lastAt ?? null;
+  const arriving = !!lastAt && clock - lastAt <= (f.liveMs || 15 * 60000);
+  const passed = w.certificate?.passedCheaper ?? 0;
+  const candName = cand ? (cand.name && cand.name.kind !== 'model' ? cand.name.label : cand.model) : null;
+  const auto = e.everyDays > 0;
+  const toConnect = go ? plainClick(() => go('connect')) : undefined;
+
+  // the one sentence
+  let line;
+  let sub = null;
+  if (setUp) {
+    line = <><span className="m">{d.cheap}</span> is ready, and starts with the first request sent through Understudy.</>;
+  } else if (switched) {
+    const taking = !!w.rollout && Number(w.rollout.share) < 1;
+    // the original model set up another way ("gpt-5.4, cheaper") reads as its whole name, set off by commas
+    const who = String(d.cheap || '').includes(',') ? <>{d.label},</> : <span className="m">{d.cheap}</span>;
+    line = <>{who} {taking ? 'is taking over.' : 'answers your requests.'}{d.less > 0 ? ` ${pct0(d.less)} cheaper.` : ''}</>;
+  } else if (cand) {
+    line = <><span className="m">{refShort}</span> answers every request.{passed > 0 ? ` ${num(passed)} cheaper ${passed === 1 ? 'model' : 'models'} passed.` : ''}</>;
+  } else if (running) {
+    line = <>Testing cheaper models now. <span className="m">{refShort}</span> answers every request meanwhile.</>;
+  } else if (!tested && !e.yes) {
+    line = `Collecting requests for its first test: ${num(e.have)} of ${num(e.need)}.`;
+    sub = auto ? "It starts by itself once they're in." : "Press Test now once they're in.";
+  } else if (!tested) {
+    line = 'Ready for its first test.';
+    sub = auto ? 'It starts by itself soon. You can also press Test now.' : 'Press Test now to run it.';
+  } else {
+    line = <><span className="m">{refShort}</span> answers every request. No cheaper model has passed yet.</>;
+  }
+
+  // the drawing: where its requests go now; a workload whose requests reach us only as copies has none to draw
+  const drawn = switched || !copiesOnly;
+  const flowD = switched ? d : { kind: 'model', reference: w.reference, perDay: f.perDay, rollout: null, share: 0, label: w.reference };
+  const state = switched ? 'switched' : cand ? 'yes' : 'original';
+  const pending = cand ? { name: candName, sub: waitsForPerson ? 'waiting for your yes' : 'passed' }
+    : { sub: running ? 'testing now' : tested ? 'none passed yet' : 'tested soon' };
+  const cap = setUp ? 'Waiting for requests sent through Understudy'
+    : arriving ? 'Live' : lastAt ? `No requests since ${timeIST(lastAt)} IST` : 'No requests yet';
+
+  // a switch still taking over: its steps, the one it is on, and what moves it to the next
+  const r = switched && !setUp ? w.rollout : null;
+  const stages = r ? [...(r.stages || []), 1] : [];
+  const at = r ? Math.min(Number(r.stage) || 0, stages.length - 1) : 0;
+  const next = r ? stages[at + 1] : undefined;
+  const hours = r ? ((r.stageHours || [])[at] ?? (r.stageHours || []).slice(-1)[0] ?? 0) : 0;
+
+  const quality = d?.checks?.yardstick === 'quality';
+  const slipNote = d?.checks?.n > 0 && d.checks.rate !== null
+    ? `Checked daily: ${pct1(d.checks.rate)} ${quality ? 'worse' : 'different'}, ${Math.round(d.checks.bar * 1000) / 10}% allowed.`
+    : null;
+  const couldSave = cand && w.certificate?.referenceCostMonth > 0 && cand.costMonth !== null && cand.costMonth !== undefined
+    ? w.certificate.referenceCostMonth - cand.costMonth : null;
+  const spent = (
+    <div className="wp-tile">
+      <span className="wp-k">Spent on testing</span>
+      <span className="wp-v">{cents(pg.spentMonth)}<small>this month</small></span>
+    </div>
+  );
+  const nextTile = (
+    <div className="wp-tile">
+      <span className="wp-k">Next test</span>
+      <span className="wp-v words">{nextWords(e)}</span>
+    </div>
+  );
+
   return (
-    <section className="wp-card" aria-labelledby="wp-doing-h">
-      <div className="wp-cardhead">
-        <h3 id="wp-doing-h">What Understudy is doing</h3>
-        {d.switchedAt && <span className="wp-s">switched {timeIST(d.switchedAt)} IST</span>}
-      </div>
-      <div className="wp-cardbody wp-doing">
+    <section className="wp-card wp-sum" aria-labelledby="wp-sum-h">
+      <h2 id="wp-sum-h" className="wp-headline">{line}</h2>
+      {sub && <p className="wp-sumline">{sub}</p>}
+      {!tested && !e.yes && !running && <Meter have={e.have} need={e.need} auto={auto} />}
+
+      {drawn ? (
         <div className="wp-flowwrap">
-          <div className="wp-flowcap">
-            <span className={`wp-live${waiting ? ' idle' : ''}`} aria-hidden="true" />
-            {waiting ? 'Set up, and waiting: your requests reach Understudy only as copies, so nothing is answered here yet' : 'Live: every request, as it arrives'}
-          </div>
-          <FlowSvg d={d} still={waiting} waiting={waiting} />
+          <div className="wp-flowcap"><span className={`wp-live${arriving && !setUp ? '' : ' idle'}`} aria-hidden="true" />{cap}</div>
+          <FlowSvg d={flowD} state={state} pending={pending} waiting={setUp} still={setUp} idle={!setUp && !arriving} />
         </div>
-        {waiting && (
-          <p className="wp-lead" style={{ margin: 0 }}>
-            The switch starts with the first request your code sends through Understudy, which is one change of base URL.{' '}
-            <a className="wp-link" href={href('connect')} onClick={go ? plainClick(() => go('connect')) : undefined}>Send requests through Understudy</a>
-          </p>
-        )}
-        {rollout && (
-          <div className="wp-rollout" role="status">
-            {waiting
-              ? <span><b>Set to take over step by step, starting with {pct0(rollout.share)} of requests.</b> The rest stay on {rollout.from || `the original model, ${refShort}`}, so the two can be compared fairly.</span>
-              : <span><b>Taking over step by step: {pct0(rollout.share)} of requests now.</b> The rest stay on {rollout.from || `the original model, ${refShort}`}, so the two can be compared fairly.</span>}
-            <span className="wp-rollmeter" aria-hidden="true"><i style={{ width: `${Math.max(2, Math.round(rollout.share * 100))}%` }} /></span>
+      ) : (
+        <p className="wp-sumline">
+          Your requests reach Understudy as copies, after your provider has answered them.{' '}
+          <a className="wp-link" href={href('connect')} onClick={toConnect}>Send requests through Understudy</a>
+        </p>
+      )}
+      {setUp && (
+        <p className="wp-sumline">
+          It takes one change of base URL.{' '}
+          <a className="wp-link" href={href('connect')} onClick={toConnect}>Send requests through Understudy</a>
+        </p>
+      )}
+
+      {r && (
+        <div className="wp-steppart">
+          <div className="wp-steps" style={{ '--n': stages.length }} role="img"
+            aria-label={`Step ${at + 1} of ${stages.length}: ${pct0(stages[at])} of requests now`}>
+            {stages.map((s, i) => (
+              <span key={s} className={i === at ? 'on' : i < at ? 'done' : ''}>{s >= 1 ? 'All' : pct0(s)}{i === at ? ' now' : ''}</span>
+            ))}
+          </div>
+          <div className="wp-stepline">
+            <span>{next !== undefined
+              ? `Moves to ${next >= 1 ? 'every request' : pct0(next)} after it answers ${num(r.minCalls)} requests, ${num(hours)} ${hours === 1 ? 'hour' : 'hours'} at least.`
+              : ''}</span>
             <button type="button" className="wp-btn small" disabled={busy} onClick={act(() => more.finishRollout(w.id))}>Give it every request now</button>
           </div>
-        )}
-        <div className="wp-tiles">
-          {/* green only when it is a saving: testing that cost more than the switch saved is said plainly, in ink */}
-          <div className={`wp-tile${d.savedMonth > 0 ? ' hero' : ''}`}>
-            <span className="wp-k">Saved this month</span>
-            <span className="wp-v">{cents(d.savedMonth)}</span>
-            <span className="wp-n">{waiting ? 'starts once requests come through Understudy'
-              : d.onTrack > 0 ? `on track for ${money(d.onTrack)} a month` : 'at this pace, testing costs more than it saves'}</span>
-          </div>
-          <div className="wp-tile">
-            <span className="wp-k">Cost per request</span>
-            {d.before > 0 && d.after > 0 ? <CostBars before={d.before} after={d.after} fmt={perCall} /> : <span className="wp-v">not yet</span>}
-            <span className="wp-n">{d.less !== null ? `${Math.round(d.less * 100)}% less` : 'shown once requests have come through'}</span>
-          </div>
-          <div className="wp-tile">
-            <span className="wp-k">{worseWord}</span>
-            <span className="wp-v">{c.n > 0 && c.rate !== null ? pct1(c.rate) : 'none yet'}</span>
-            {c.daily.length > 0 && <QualitySpark daily={c.daily} bar={c.bar} />}
-            <span className="wp-n">{c.n > 0 ? `${checked}, ${allowed}` : `checked daily once requests come through, ${allowed}`}</span>
-          </div>
-          <div className="wp-tile">
-            <span className="wp-k">{d.speed.metric === 'ttft' ? 'Time to first word' : 'Typical time'}</span>
-            <span className="wp-v">{d.speed.now ? secs(d.speed.now) : 'not timed yet'}</span>
-            <span className="wp-n">{waiting ? `on the original model, ${refShort}, until requests come through` : d.speed.before ? `was ${secs(d.speed.before)} on ${refShort}` : `on ${d.cheap}`}</span>
-          </div>
-          <div className="wp-tile">
-            <span className="wp-k">If it slips</span>
-            <span className="wp-v words">Back to {refShort}</span>
-            <span className="wp-n">at once, by itself.{' '}
-              <button type="button" className="wp-textbtn" disabled={busy} onClick={act(() => api.revert(w.id))}>Switch back now</button>
-            </span>
-          </div>
         </div>
+      )}
+
+      <div className="wp-tiles">
+        {switched ? (
+          <>
+            {d.expectedMonth !== null && d.expectedMonth !== undefined ? (
+              <div className={`wp-tile${d.expectedMonth > 0 ? ' hero' : ''}`}>
+                <span className="wp-k">Expected saving</span>
+                <span className="wp-v">{cents(d.expectedMonth)}<small>a month</small></span>
+              </div>
+            ) : (
+              <div className={`wp-tile${d.savedMonth > 0 ? ' hero' : ''}`}>
+                <span className="wp-k">Saved this month</span>
+                <span className="wp-v">{cents(d.savedMonth)}</span>
+              </div>
+            )}
+            <div className="wp-tile">
+              <span className="wp-k">Per 1,000 requests</span>
+              <span className="wp-v">{d.after > 0 ? perK(d.after) : 'not yet'}</span>
+              {d.before > 0 && d.after > 0 && <CostBars before={d.before * 1000} after={d.after * 1000} fmt={cents} />}
+              {d.less !== null && d.less !== undefined && <span className="wp-n">{pct0(d.less)} less than {refShort}</span>}
+            </div>
+            {spent}
+            <div className="wp-tile">
+              <span className="wp-k">If it slips</span>
+              <span className="wp-v words">Back to {refShort}, by itself</span>
+              {slipNote && <span className="wp-n">{slipNote}</span>}
+              <span><button type="button" className="wp-btn small" disabled={busy} onClick={act(() => api.revert(w.id))}>Switch back now</button></span>
+            </div>
+          </>
+        ) : cand ? (
+          <>
+            {couldSave !== null && (
+              <div className={`wp-tile${couldSave > 0 ? ' hero' : ''}`}>
+                <span className="wp-k">Could save</span>
+                <span className="wp-v">{cents(couldSave)}<small>a month</small></span>
+              </div>
+            )}
+            {spent}
+            {nextTile}
+          </>
+        ) : (
+          <>
+            {spent}
+            {nextTile}
+          </>
+        )}
       </div>
     </section>
   );
 }
 
-/* A cheaper model that passed and is waiting for a person's yes: what it is, what a request would cost on it, how
-   often it answered differently, how fast it is, why it has not switched by itself, and the two ways to say yes. */
-function Ready({ w, cand, busy, copiesOnly, act, go }) {
+/* A cheaper model that passed and is waiting for a person's yes: one question, why it has not switched by itself, its
+   three figures, and the way to say yes; its own page shows each request it answered. */
+function Waiting({ w, cand, busy, copiesOnly, act, go, goTo }) {
   const [rp, setRp] = useState(null);
   const runId = w.certificate?.runId;
   useEffect(() => {
@@ -379,55 +494,49 @@ function Ready({ w, cand, busy, copiesOnly, act, go }) {
   const before = rp?.yours?.perCall ?? null;
   const after = row?.perCall ?? null;
   const name = cand.name && cand.name.kind !== 'model' ? cand.name.label : cand.model;
-  const why = w.optimizeMode === 'ask' ? 'Your workspace asks first, so nothing switches until you say yes. It starts on a small share of requests and takes more while they hold up.'
-    : w.optimizeMode === 'off' ? 'Your workspace never switches by itself. You can still switch to it here.'
-      : cand.heldBack ? 'It was switched back from before, so it does not switch by itself again. You can still switch to it here.'
-        : "It passed once, but hasn't yet passed again on new requests it had never seen, so it doesn't switch by itself. The next test checks again.";
+  const refShort = short(w.reference);
+  const quality = rp?.yardstick === 'quality';
+  const why = w.optimizeMode === 'ask' ? 'Your workspace asks first, so nothing switches until you say yes.'
+    : w.optimizeMode === 'off' ? 'Your workspace never switches by itself.'
+      : cand.heldBack ? "It was switched back before, so it won't switch by itself again."
+        : 'It needs a second look on new requests before it can switch by itself.';
+  const to = runId ? modelHref(w.id, runId, cand.model) : null;
+  const open = () => { if (goTo) goTo(to); else window.location.assign(to); };
   return (
-    <section className="wp-card" aria-labelledby="wp-ready-h">
-      <div className="wp-cardhead">
-        <h3 id="wp-ready-h">A cheaper model passed</h3>
-        <span className="wp-s">{confirmedLook(cand.confirm) ? 'passed twice, waiting for your yes' : 'passed once, waiting for your yes'}</span>
-      </div>
-      <div className="wp-cardbody wp-doing">
-        <div className="wp-tiles">
-          <div className="wp-tile">
-            <span className="wp-k">The model</span>
-            <span className="wp-v words wp-mdl" style={{ fontSize: 13.5 }}>{name}</span>
-            <span className="wp-n">instead of {short(w.reference)}</span>
-          </div>
-          <div className="wp-tile">
-            <span className="wp-k">Cost per request</span>
-            {before > 0 && after > 0 ? <CostBars before={before} after={after} fmt={perCall} /> : <span className="wp-v">{cand.costMonth ? cents(cand.costMonth) : 'not priced'}</span>}
-            <span className="wp-n">{before > 0 && after > 0 ? `${Math.round(Math.max(0, 1 - after / before) * 100)}% less` : cand.costMonth ? 'a month at your volume' : ''}</span>
-          </div>
-          <div className="wp-tile">
-            <span className="wp-k">{rp?.yardstick === 'quality' ? 'Worse than original model' : 'Different from original model'}</span>
-            <span className="wp-v">{cand.gap !== null && cand.gap !== undefined ? `${Number(cand.gap).toFixed(1)}%` : 'not judged'}</span>
-            <span className="wp-n">{rp?.bar ? `allowed ${Math.round(rp.bar * 1000) / 10}%` : ''}</span>
-          </div>
-          {row?.p50 && (
-            <div className="wp-tile">
-              <span className="wp-k">{rp.metric === 'ttft' ? 'Time to first word' : 'Typical time'}</span>
-              <span className="wp-v">{secs(row.p50)}</span>
-              <span className="wp-n">{rp.yours?.p50 ? `${secs(rp.yours.p50)} on ${short(w.reference)}` : ''}</span>
-            </div>
-          )}
+    <section className="wp-att" aria-labelledby="wp-att-h">
+      <p className="wp-attlabel"><i aria-hidden="true" />Waiting for your yes</p>
+      <h2 id="wp-att-h">Switch to <span className="m">{name}</span>?</h2>
+      <p className="wp-one">{why}</p>
+      {copiesOnly && (
+        <p className="wp-one">
+          Your requests reach Understudy only as copies, so a switch waits for the first request sent through Understudy.{' '}
+          <a className="wp-link" href={href('connect')} onClick={go ? plainClick(() => go('connect')) : undefined}>Send requests through Understudy</a>
+        </p>
+      )}
+      <dl className="wp-inline">
+        <div>
+          <dt>{quality ? 'Worse' : 'Different'}</dt>
+          <dd className="m">{cand.gap !== null && cand.gap !== undefined ? `${Number(cand.gap).toFixed(1)}%` : 'not judged'}
+            {rp?.bar > 0 && <span>{Math.round(rp.bar * 1000) / 10}% allowed</span>}</dd>
         </div>
-        <p className="wp-lead" style={{ margin: 0 }}>{why}</p>
-        {copiesOnly && (
-          <p className="wp-lead" style={{ margin: 0 }}>
-            Your requests reach Understudy only as copies, so a switch here is set up and waits for the first request sent through Understudy.{' '}
-            <a className="wp-link" href={href('connect')} onClick={go ? plainClick(() => go('connect')) : undefined}>Send requests through Understudy</a>
-          </p>
+        <div>
+          <dt>Per 1,000 requests</dt>
+          <dd className="m">{after > 0 ? perK(after) : 'not priced'}
+            {before > 0 && after > 0 && <span>{Math.round(Math.max(0, 1 - after / before) * 100)}% less</span>}</dd>
+        </div>
+        {row?.p50 > 0 && (
+          <div>
+            <dt>{rp.metric === 'ttft' ? 'First word' : 'Time'}</dt>
+            <dd className="m">{secs(row.p50)}{rp.yours?.p50 > 0 && <span>{refShort} {secs(rp.yours.p50)}</span>}</dd>
+          </div>
         )}
-        <div className="wp-acts">
-          <button type="button" className="wp-btn pri" disabled={busy} onClick={act(() => more.promote(w.id, cand.model))}>Switch to it</button>
-          <button type="button" className="wp-btn" disabled={busy} onClick={act(() => more.promote(w.id, cand.model, { rollout: false }))}>Switch every request at once</button>
-          {copiesOnly && (!cand.name || cand.name.kind === 'model') && (
-            <button type="button" className="wp-btn" onClick={() => { navigator.clipboard?.writeText(cand.model).catch(() => {}); }}>Copy the model name</button>
-          )}
-        </div>
+      </dl>
+      <div className="wp-acts">
+        <button type="button" className="wp-btn pri" disabled={busy} onClick={act(() => more.promote(w.id, cand.model))}>Switch to it</button>
+        {to && <a className="wp-link" href={to} onClick={plainClick(open)}>See its answers</a>}
+        {copiesOnly && (!cand.name || cand.name.kind === 'model') && (
+          <button type="button" className="wp-btn" onClick={() => { navigator.clipboard?.writeText(cand.model).catch(() => {}); }}>Copy the model name</button>
+        )}
       </div>
     </section>
   );
@@ -485,59 +594,6 @@ function Judging({ w, busy, act, onClose }) {
   );
 }
 
-/* 1. Enough requests to test models? */
-function Enough({ e }) {
-  const daily = e.daily || [];
-  const busyDays = daily.filter((x) => x.n > 0);
-  // what arrived but no test can use: it failed, or its text was not kept (every other request counts, whatever the day)
-  const unusable = daily.some((x) => x.n > x.counted);
-  let arrived = '';
-  if (!busyDays.length) arrived = 'None have arrived in the last 30 days.';
-  else if (busyDays.length === 1) arrived = `All ${num(busyDays[0].n)} arrived on ${dayLabel(busyDays[0].d)}.`;
-  else arrived = `${num(e.total)} arrived on ${busyDays.length} of the last 30 days.`;
-  if (unusable) arrived += " The faint part of a bar arrived but can't be used in a test: it failed, or its text wasn't kept.";
-
-  if (e.yes) {
-    const next = e.nextAt ? (e.nextAt <= Date.now() ? 'next test soon' : `next test ${dateShort(e.nextAt)}`) : 'tested when you ask';
-    return (
-      <section className="wp-card" aria-labelledby="wp-enough-h">
-        <div className="wp-cardhead"><h3 id="wp-enough-h"><span className="wp-q">1</span>Enough requests to test models?</h3><span className="wp-s">{next}</span></div>
-        <div className="wp-cardbody wp-enough">
-          <div>
-            <div className="wp-answer"><span className="wp-big">{num(e.total)}<small>requests in the last 30 days</small></span><span className="wp-pill is-ok">{I.check}Enough</span></div>
-            <p className="wp-lead">
-              Each test uses <b>{num(e.sample)}</b> recent requests.{' '}
-              {e.everyDays > 0
-                /* At most this often (see src/eval/schedule.js): tests that keep finding the same thing are spaced out,
-                   and a relevant new model or price change brings a spaced-out one back, never sooner than this. */
-                ? <>We test again at most every <b>{e.everyDays === 1 ? 'day' : `${e.everyDays} days`}</b>, and a relevant new model or price change brings the next test forward.</>
-                : <>Your workspace tests <b>only when you ask</b>: press Test now.</>}
-            </p>
-          </div>
-          <div><DailyChart days={daily} /></div>
-        </div>
-      </section>
-    );
-  }
-  const auto = e.everyDays > 0;
-  return (
-    <section className="wp-card" aria-labelledby="wp-enough-h">
-      <div className="wp-cardhead"><h3 id="wp-enough-h"><span className="wp-q">1</span>Enough requests to test models?</h3><span className="wp-s">counted the way a test counts them</span></div>
-      <div className="wp-cardbody wp-enough">
-        <div>
-          <div className="wp-answer"><span className="wp-big">{num(e.have)}<small>of {num(e.need)} requests</small></span><span className="wp-pill is-warn"><span className="wp-pd" />Not enough yet</span></div>
-          <Meter have={e.have} need={e.need} auto={auto} />
-          <p className="wp-lead">
-            A test needs <b>{num(e.need - e.have)} more {e.need - e.have === 1 ? 'request' : 'requests'}</b>, however many arrive in a day.{' '}
-            {auto ? "It starts by itself as soon as they're in, so there's no need to wait here." : 'Your workspace tests only when you ask: press Test now once they are in.'}
-          </p>
-        </div>
-        <div><DailyChart days={daily} /><p className="wp-lead">{arrived}</p></div>
-      </div>
-    </section>
-  );
-}
-
 /* 2. Model tests: a test running now first, with its progress and Stop, then each one there has been, newest first,
    the newest open. */
 function Measurements({ w, pg, live, goTo }) {
@@ -565,16 +621,12 @@ function Measurements({ w, pg, live, goTo }) {
   return (
     <section className="wp-card" aria-labelledby="wp-runs-h">
       <div className="wp-cardhead">
-        <h3 id="wp-runs-h"><span className="wp-q">2</span>Model tests</h3>
-        <span className="wp-s">{count ? `${count} ${count === 1 ? 'test' : 'tests'} so far` : 'none yet'}</span>
+        <h3 id="wp-runs-h">Tests</h3>
+        <span className="wp-s">Next: {nextWords(pg.enough)}</span>
       </div>
       {live.notice && !live.run && <p className="wp-empty" style={{ paddingTop: 10, paddingBottom: 0 }}>{live.notice}</p>}
       {!count ? (
-        <p className="wp-empty" style={{ paddingTop: 12 }}>
-          {pg.enough.everyDays > 0
-            ? 'The first test starts by itself once there are enough requests. You can also press Test now.'
-            : 'Your workspace tests only when you ask. Press Test now to run the first test.'}
-        </p>
+        <p className="wp-empty" style={{ paddingTop: 12 }}>No tests yet.</p>
       ) : (
         <div className="wp-runs">
           {live.run && <LiveRun w={w} live={live} feePct={pg.feePct} />}
@@ -708,8 +760,8 @@ function DotWords({ c, rp }) {
   const ref = rp.yours || {};
   // a saving short of the whole cost is never rounded up to all of it: 99.5% less is "99% less", not "100% less"
   const less = (x) => `${Math.min(99, Math.round(x * 100))}%`;
-  const vs = !(ref.perCall > 0) ? '' : Math.abs(c.perCall / ref.perCall - 1) < 0.005 ? `, about the same as the original model's ${perCall(ref.perCall)}`
-    : `, ${c.perCall < ref.perCall ? `${less(1 - c.perCall / ref.perCall)} less` : `${pct0(c.perCall / ref.perCall - 1)} more`} than the original model's ${perCall(ref.perCall)}`;
+  const vs = !(ref.perCall > 0) ? '' : Math.abs(c.perCall / ref.perCall - 1) < 0.005 ? `, about the same as the original model's ${perK(ref.perCall)}`
+    : `, ${c.perCall < ref.perCall ? `${less(1 - c.perCall / ref.perCall)} less` : `${pct0(c.perCall / ref.perCall - 1)} more`} than the original model's ${perK(ref.perCall)}`;
   return (
     <>
       <p className="wp-dt-head"><span className="wp-dt-no" style={{ background: toneColor(c.tone) }}>{c.no}</span><span>{c.label}</span></p>
@@ -717,7 +769,7 @@ function DotWords({ c, rp }) {
       <dl>
         <div><dt>{quality ? 'Worse than original model' : 'Different from original model'}</dt>
           <dd>{pct1(c.gap)} of requests{rp.bar > 0 ? `, at most ${pct1(rp.bar)} allowed` : ''}</dd></div>
-        <div><dt>Cost per request</dt><dd>{perCall(c.perCall)}{vs}</dd></div>
+        <div><dt>Per 1,000 requests</dt><dd>{perK(c.perCall)}{vs}</dd></div>
         <div><dt>{rp.metric === 'ttft' ? 'Time to first word' : 'Typical time'}</dt>
           <dd>{c.p50 ? `${secs(c.p50)}${ref.p50 ? `, the original model ${secs(ref.p50)}` : ''}` : 'not timed'}</dd></div>
         <div><dt>Requests answered</dt><dd>{num(c.n)}</dd></div>
@@ -849,7 +901,7 @@ function RunDetail({ rp, wid, goTo }) {
         </div>
       )}
       <div className="wp-tablewrap">
-        <p className="wp-loadline wp-candhint">Select a model to open its page, with each request it answered beside the original model's answer.</p>
+        <p className="wp-loadline wp-candhint">Select a model to see its answers.</p>
         <table className="wp-cands">
           <thead>
             <tr>
@@ -858,7 +910,7 @@ function RunDetail({ rp, wid, goTo }) {
               <th>Outcome</th>
               <th className="r">{col}<Help label={axis}><ColumnWords rp={rp} /></Help></th>
               <th className="r">Requests sampled<Help label="Requests sampled"><SampledWords /></Help></th>
-              <th className="r">Cost / request</th>
+              <th className="r">Per 1,000</th>
               <th className="r">{time}</th>
             </tr>
           </thead>
@@ -897,7 +949,7 @@ function CandRow({ c, i, rp, wid, col, time, goTo }) {
       <td>{c.why ? <Help label={c.verdict} trigger={tag}><p>{c.why}</p></Help> : tag}</td>
       <td className={`r m${c.gap === null ? ' none' : ''}`} data-label={col}>{c.gap === null ? 'not judged' : pct1(c.gap)}</td>
       <td className="r m" data-label="Requests sampled">{sampled}</td>
-      <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Cost / request">{c.perCall === null ? 'not priced' : perCall(c.perCall)}</td>
+      <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Per 1,000 requests">{c.perCall === null ? 'not priced' : perK(c.perCall)}</td>
       <td className={`r m${!c.p50 ? ' none' : ''}`} data-label={time}>{c.p50 ? secs(c.p50) : 'not timed'}</td>
     </tr>
   );
@@ -915,21 +967,21 @@ function Calls({ w, pg }) {
     try { setC(await api.workloadPageCalls(w.id, n)); setOpenId(null); } catch { /* the rows shown stay */ } finally { setBusy(false); }
   };
   const copiesOnly = !!w.traffic && !w.traffic.carries;
-  const inMonth = `${num(c.total)} ${c.total === 1 ? 'request' : 'requests'} in the last 30 days`;
-  const summary = !c.total ? 'none in the last 30 days'
-    : w.promotedAt && copiesOnly ? `${inMonth} · copies the original model answered`
-      : w.promotedAt ? `${inMonth} · ${pct0(c.cheapShare)} answered by the cheaper model${c.cheapSince ? ' since the switch' : ''}`
-        : `${inMonth} · ${cents(c.cost)} total${c.ownOnly ? ' · all answered by the original model' : ''}`;
+  const inMonth = `${num(c.total)} in 30 days, ${cents(c.cost)}`;
+  const summary = !c.total ? 'none in 30 days'
+    : w.promotedAt && copiesOnly ? `${inMonth}, copies the original model answered`
+      : w.promotedAt ? `${inMonth}, ${pct0(c.cheapShare)} by the cheaper model${c.cheapSince ? ' since the switch' : ''}`
+        : inMonth;
   return (
     <section className="wp-card" aria-labelledby="wp-calls-h">
-      <div className="wp-cardhead"><h3 id="wp-calls-h"><span className="wp-q">3</span>Recent requests</h3><span className="wp-s">{summary}</span></div>
+      <div className="wp-cardhead"><h3 id="wp-calls-h">Requests</h3><span className="wp-s">{summary}</span></div>
       <div className="wp-cardbody">
         {!c.rows.length ? (
           <p className="wp-lead" style={{ margin: 0 }}>No requests yet.</p>
         ) : (
           <div className="wp-tablewrap">
             <table className="wp-calls">
-              <thead><tr><th>When</th><th>Model</th><th className="r">Response time</th><th className="r">Cost</th><th>Status</th></tr></thead>
+              <thead><tr><th>Sent</th><th>Answered by</th><th className="r">Time</th><th className="r">Cost</th><th>Status</th></tr></thead>
               <tbody>
                 {c.rows.map((x) => (
                   <CallRow key={x.id} w={w} x={x} open={openId === x.id} onToggle={() => setOpenId((o) => (o === x.id ? null : x.id))} />
@@ -969,7 +1021,7 @@ function CallRow({ w, x, open, onToggle }) {
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}>
         <td className="m">{timeIST(x.at)} IST</td>
         <td><span className="wp-srv"><i style={{ background: who }} /><span className="wp-mdl">{x.model || 'no model named'}{how}</span></span></td>
-        <td className={`r m${x.ms === null ? ' none' : ''}`} data-label="Response time">{x.ms === null ? 'not timed' : secs(x.ms)}</td>
+        <td className={`r m${x.ms === null ? ' none' : ''}`} data-label="Time">{x.ms === null ? 'not timed' : secs(x.ms)}</td>
         <td className="r m" data-label="Cost">{perCall(x.cost)}</td>
         <td><span className={`wp-tag is-${tag[0]}`} title={failed ? `The provider answered ${x.status}` : undefined}>{tag[1]}</span></td>
       </tr>

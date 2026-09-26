@@ -125,6 +125,20 @@ async function labelOfKey(workloadId, key, reference) {
   return short(key);
 }
 
+/* A workload's pace over the last week: the requests routed through Understudy a day, and the copies a day, over the days
+   since the first of them, a day at least and a week at most. The one way a workload's requests a day are counted, for
+   what a switch is worth here and for the drawing on its page (flowOf in src/workloadPage.js). */
+export async function paceOf(workloadId, t = now()) {
+  const allWeek = await db.prepare(`SELECT COUNT(*) FILTER (WHERE source = 'routed') AS n,
+        COUNT(*) FILTER (WHERE source = 'trace') AS copies, MIN(created_at) AS first FROM calls
+      WHERE workload_id = ? AND source IN ('routed', 'trace') AND created_at >= ? AND NOT ${TRY}`).get(workloadId, t - 7 * DAY);
+  const weekDays = Number(allWeek.n) + Number(allWeek.copies) > 0 ? Math.max(1, Math.min(7, (t - Number(allWeek.first)) / DAY)) : 7;
+  return {
+    perDay: Number(allWeek.n) > 0 ? round8(Number(allWeek.n) / weekDays) : 0,
+    copiesPerDay: Number(allWeek.copies) > 0 ? round8(Number(allWeek.copies) / weekDays) : 0,
+  };
+}
+
 export async function valueOf(w) {
   const t = now();
   const since = t - 30 * DAY;
@@ -181,10 +195,7 @@ export async function valueOf(w) {
         COALESCE(SUM(charged_usd) FILTER (WHERE escalated = 1), 0) AS long_paid
       FROM calls WHERE workload_id = ? AND source = 'routed' AND created_at >= ? AND status_code = 200 AND ${serving.sql}`)
     .get(w.id, weekFrom, ...serving.args);
-  const allWeek = await db.prepare(`SELECT COUNT(*) FILTER (WHERE source = 'routed') AS n,
-        COUNT(*) FILTER (WHERE source = 'trace') AS copies, MIN(created_at) AS first FROM calls
-      WHERE workload_id = ? AND source IN ('routed', 'trace') AND created_at >= ? AND NOT ${TRY}`).get(w.id, t - 7 * DAY);
-  const weekDays = Number(allWeek.n) + Number(allWeek.copies) > 0 ? Math.max(1, Math.min(7, (t - Number(allWeek.first)) / DAY)) : 7;
+  const pace = await paceOf(w.id, t);
   const n = Number(week.n);
   const sentOn = Number(week.sent_on);
   const kind = arm?.spec?.kind ?? (switched ? 'model' : 'reference');
@@ -209,9 +220,9 @@ export async function valueOf(w) {
   }
   const paths = {
     kind,
-    perDay: Number(allWeek.n) > 0 ? round8(Number(allWeek.n) / weekDays) : 0,
+    perDay: pace.perDay,
     // requests that reach us only as copies, after the customer's own provider has answered them
-    copiesPerDay: Number(allWeek.copies) > 0 ? round8(Number(allWeek.copies) / weekDays) : 0,
+    copiesPerDay: pace.copiesPerDay,
     // while a switch is still taking over, the share of requests it answers; the rest go to the customer's own model
     rolloutShare: w.rollout_share === null || w.rollout_share === undefined ? null : Number(w.rollout_share),
     calls: n,

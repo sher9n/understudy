@@ -171,8 +171,11 @@ export function SelfPic({ self, yardstick }) {
   );
 }
 
-/* A dollar amount on the cost axis, with as many places as it takes: $0.0001, $0.005. */
-const tickUsd = (v) => `$${v >= 1 ? v.toFixed(v % 1 ? 1 : 0) : v.toFixed(Math.max(0, -Math.floor(Math.log10(v) + 1e-9)))}`;
+/* What a thousand requests cost at a request's cost, on the cost axis, as the page's figures say it: $0.10, $1, $10. */
+const tickK = (perCall) => {
+  const k = perCall * 1000;
+  return `$${k >= 1 ? k.toFixed(k % 1 ? 1 : 0) : k.toFixed(Math.max(2, -Math.floor(Math.log10(k) + 1e-9)))}`;
+};
 
 /** Whether a setup can be placed on the chart: it was judged, what a request costs on it is known, and it did not fail
     for something other than its answers (a model that answered everything right and could not keep up is no "not a
@@ -188,7 +191,9 @@ const SHARE_TOPS = [0.08, 0.12, 0.2, 0.4, 0.6, 0.8, 1];
  * customer's own model. Numbered as the table under it.
  */
 export function CompareChart({ run, tip = null }) {
-  const [ref, W] = useWidthOf(600, 320);
+  // laid out for the width it has, so it runs the row's full width with its words at the size they are written at
+  const [ref, , room] = useWidthOf(600, 320);
+  const W = Math.max(320, Math.round(room));
   /* A model's details, from `tip`, while its circle is pointed at or focused, and after a click or a tap (all a phone
      has) until a tap elsewhere or Escape: floating above the page, in the app's own box, which carries the theme's
      colours, as the page's other bubbles do (Help in web/src/screens/WorkloadDetail.jsx). */
@@ -280,10 +285,10 @@ export function CompareChart({ run, tip = null }) {
       {xticks.map((v) => (
         <g key={v}>
           <line x1={x(v)} x2={x(v)} y1={T} y2={T + h} stroke="var(--grid)" />
-          <text x={x(v)} y={T + h + 16} textAnchor="middle">{tickUsd(v)}</text>
+          <text x={x(v)} y={T + h + 16} textAnchor="middle">{tickK(v)}</text>
         </g>
       ))}
-      <text x={L + w / 2} y={H - 6} textAnchor="middle" className="ui">Cost per request, less to the left</text>
+      <text x={L + w / 2} y={H - 6} textAnchor="middle" className="ui">Cost per 1,000 requests, less to the left</text>
       <text x="14" y={T + h / 2} textAnchor="middle" className="ui" transform={`rotate(-90 14 ${T + h / 2})`}>{run.axis}</text>
       {run.bar > 0 && (
         <g>
@@ -296,7 +301,7 @@ export function CompareChart({ run, tip = null }) {
          Only what it costs is marked, as the edge of "cheaper". */}
       {yours && (
         <g>
-          <title>{`The original model, ${run.reference}: ${tickUsd(yours)} a request`}</title>
+          <title>{`The original model, ${run.reference}: ${tickK(yours)} per 1,000 requests`}</title>
           <line x1={x(yours)} x2={x(yours)} y1={T} y2={T + h} stroke="var(--ink)" strokeWidth="1.2" strokeDasharray="2 3" opacity="0.55" />
           <text x={x(yours) > L + 150 ? x(yours) - 5 : x(yours) + 5} y={T + 11} textAnchor={x(yours) > L + 150 ? 'end' : 'start'} className="t-ink ui halo">original model's cost</text>
         </g>
@@ -345,6 +350,9 @@ export function CompareChart({ run, tip = null }) {
 
 const reducedMotion = () => typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
+// a model's name without its maker, as a box has room for: "openai/gpt-5.4" is "gpt-5.4"
+const short = (m) => String(m || '').split('/').pop();
+
 /* A setup's name where there is room for about eighteen letters: whole words of it, never cut in the middle. */
 const fitName = (s, room = 18) => {
   const t = String(s || '');
@@ -367,29 +375,47 @@ const TALL = {
 };
 
 /**
- * What Understudy does with each request of a switched workload, live: requests from the customer's app, most
- * answered by the cheaper setup, the rest sent on to the customer's own model, in the share the record shows.
- * Still, with a few dots placed, for a reader who asked for less motion, and for a switch still waiting for its
- * first request through Understudy.
+ * Where a workload's requests go now, drawn live: from the customer's app through Understudy, to the cheaper setup it
+ * switched to and on to the customer's own model in the share the record shows; or, before any switch, every one on to
+ * the customer's own model, with a model that passed and waits for a yes, or the cheaper models still to be found, drawn
+ * dashed beside it with nothing sent there.
+ *   state   'switched' (the default), 'yes' (a model that passed waits for a person's yes, named in pending.name) or
+ *           'original' (none has passed, pending.sub says where testing stands)
+ *   idle    no request is arriving now: nothing moves and no dot is drawn, since none is flowing
+ *   still   a reader who asked for less motion, or a switch waiting for its first request through Understudy: a few
+ *           dots placed where they would be, and nothing moving
  */
-export function FlowSvg({ d, still = false, waiting = false }) {
+export function FlowSvg({ d, still = false, waiting = false, idle = false, state = 'switched', pending = null }) {
   const [ref, , box] = useWidthOf(640, 280);
   const G = box < 520 ? TALL : WIDE;
-  // waiting for its first request through Understudy, the customer's own model answers every one, at their provider
-  const share = waiting ? 0 : d.share ?? (d.rollout ?? 1);
+  const switched = state === 'switched';
+  /* Before a switch the customer's own model answers every one; waiting for its first request through Understudy, a
+     switch has the customer's own model answer every one too, at their provider. */
+  const share = !switched || waiting ? 0 : d.share ?? (d.rollout ?? 1);
   const cheapPct = Math.round(share * 100);
   const toYours = Math.max(0, Math.min(1, 1 - share));
   const refShort = String(d.reference || '').split('/').pop();
-  const middle = d.kind === 'cascade' ? ['checks each answer', 'with Jev']
-    : d.kind === 'sorted' ? ['sorts each request', 'by its kind']
-      : d.kind === 'router' ? ['picks for each', 'request']
-        : ['sends each request', 'to the cheaper model'];
-  const top = waiting ? `will start at ${Math.round((d.rollout ?? 1) * 100)}%` : `${cheapPct}% answered here`;
-  const bottom = waiting ? 'answers all, for now'
-    : d.kind === 'cascade' ? `${100 - cheapPct}% sent on, unsure`
-      : d.kind === 'model' && d.rollout !== null && d.rollout < 1 ? `${100 - cheapPct}% still here`
-        : d.kind === 'model' ? (100 - cheapPct > 0 ? `${100 - cheapPct}% here, as back-up` : 'standing by')
-          : `${100 - cheapPct}% sent here`;
+  // still taking over: the share it is set to take now, not every request
+  const taking = switched && d.kind === 'model' && d.rollout !== null && d.rollout !== undefined && d.rollout < 1;
+  const middle = !switched ? ['sends every request', `to ${fitName(refShort)}`]
+    : d.kind === 'cascade' ? ['checks each answer', 'with Jev']
+      : d.kind === 'sorted' ? ['sorts each request', 'by its kind']
+        : d.kind === 'router' ? ['picks for each', 'request']
+          : taking ? [`sends ${Math.round(d.rollout * 100)}% to the`, 'cheaper model']
+            : ['sends each request', 'to the cheaper model'];
+  const top = state === 'yes' ? 'waiting for your yes' : state === 'original' ? (pending?.sub || 'none passed yet')
+    : waiting ? `will start at ${Math.round((d.rollout ?? 1) * 100)}%` : `${cheapPct}% answered here`;
+  const bottom = !switched ? (state === 'yes' ? 'answers all, for now' : 'answers every one')
+    : waiting ? 'answers all, for now'
+      : d.kind === 'cascade' ? `${100 - cheapPct}% sent on, unsure`
+        : taking ? `${100 - cheapPct}% still here`
+          : d.kind === 'model' ? (100 - cheapPct > 0 ? `${100 - cheapPct}% here, as back-up` : 'standing by')
+            : `${100 - cheapPct}% sent here`;
+  /* A model's whole name where it fits a box once its letters are drawn a little closer, up to 26 of them: cut at a hyphen
+     it could read as another model ("gemini-2.5-flash-lite" as "gemini-2.5-flash"), so it is cut only past that. */
+  const cheapName = state === 'yes' ? short(pending?.name) : state === 'original' ? 'cheaper models' : String(d.cheap || '');
+  const cheapTitle = cheapName.length <= 26 ? cheapName : fitName(cheapName, 26);
+  const squeeze = cheapTitle.length > 18 ? { textLength: G.cheap[2] - 18, lengthAdjust: 'spacingAndGlyphs' } : {};
   const perDay = Math.round(d.perDay || 0);
 
   useEffect(() => {
@@ -399,6 +425,8 @@ export function FlowSvg({ d, still = false, waiting = false }) {
     const layer = svg.querySelector('[data-dots]');
     if (!P.A || !layer || typeof P.A.getTotalLength !== 'function') return undefined;
     while (layer.firstChild) layer.removeChild(layer.firstChild);
+    // nothing arriving: no dot, since none is flowing
+    if (idle) return undefined;
     const len = { A: P.A.getTotalLength(), C: P.C.getTotalLength(), Y: P.Y.getTotalLength() };
     const NS = 'http://www.w3.org/2000/svg';
     const put = (seg, f, route) => {
@@ -450,18 +478,26 @@ export function FlowSvg({ d, still = false, waiting = false }) {
     };
     raf = requestAnimationFrame(step);
     return () => { cancelAnimationFrame(raf); while (layer.firstChild) layer.removeChild(layer.firstChild); };
-  }, [share, toYours, still, G]);
+  }, [share, toYours, still, idle, G]);
 
   const box4 = (b) => ({ x: b[0], y: b[1], width: b[2], height: b[3] });
   const mid = (b) => b[0] + b[2] / 2;
+  const said = state === 'yes' ? `Every request answered by ${d.reference}; ${pending?.name} passed${pending?.sub === 'passed' ? '' : ' and waits for your yes'}`
+    : state === 'original' ? `Every request answered by ${d.reference}`
+      : waiting ? `Set up to answer requests with ${d.label} once they come through Understudy; ${d.reference} answers them until then`
+        : `${cheapPct}% of requests answered by ${d.label}, the rest sent on to ${d.reference}`;
+  // the model a request is not sent to yet: dashed, in the brand's colour while it waits for a yes
+  const ahead = state === 'yes' ? 'var(--brand)' : 'var(--line-strong)';
   return (
-    <svg ref={ref} className="wp-sv" viewBox={G.vb} role="img"
-      aria-label={waiting ? `Set up to answer requests with ${d.label} once they come through Understudy; ${d.reference} answers them until then`
-        : `${cheapPct}% of requests answered by ${d.label}, the rest sent on to ${d.reference}`}>
+    <svg ref={ref} className="wp-sv" viewBox={G.vb} role="img" aria-label={`${said}${idle ? '. No requests are arriving now' : ''}`}>
       <defs><marker id="wpah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8Z" fill="var(--line-strong)" /></marker></defs>
       <path data-p="A" d={G.A} fill="none" stroke="var(--line-strong)" strokeWidth="2" markerEnd="url(#wpah)" />
-      <path data-p="C" d={G.C} fill="none" stroke="var(--ok)" strokeWidth="2.4" markerEnd="url(#wpah)" />
-      <path data-p="Y" d={G.Y} fill="none" stroke="var(--line-strong)" strokeWidth="1.6" strokeDasharray="4 4" markerEnd="url(#wpah)" />
+      {switched
+        ? <path data-p="C" d={G.C} fill="none" stroke="var(--ok)" strokeWidth="2.4" markerEnd="url(#wpah)" />
+        : <path data-p="C" d={G.C} fill="none" stroke="var(--line-strong)" strokeWidth="1.4" strokeDasharray="2 5" markerEnd="url(#wpah)" />}
+      {switched
+        ? <path data-p="Y" d={G.Y} fill="none" stroke="var(--line-strong)" strokeWidth="1.6" strokeDasharray="4 4" markerEnd="url(#wpah)" />
+        : <path data-p="Y" d={G.Y} fill="none" stroke="var(--line-strong)" strokeWidth="2" markerEnd="url(#wpah)" />}
       <rect {...box4(G.app)} rx="12" fill="var(--raise)" stroke="var(--line)" />
       <text x={mid(G.app)} y={G.app[1] + 21} textAnchor="middle" className="t-ink ui t-bold">Your app</text>
       <text x={mid(G.app)} y={G.app[1] + 37} textAnchor="middle">{perDay.toLocaleString('en-US')} a day</text>
@@ -469,9 +505,13 @@ export function FlowSvg({ d, still = false, waiting = false }) {
       <text x={mid(G.us)} y={G.us[1] + 28} textAnchor="middle" className="t-brand ui t-bold">Understudy</text>
       <text x={mid(G.us)} y={G.us[1] + 46} textAnchor="middle">{middle[0]}</text>
       <text x={mid(G.us)} y={G.us[1] + 62} textAnchor="middle">{middle[1]}</text>
-      <rect {...box4(G.cheap)} rx="12" fill="var(--okq)" stroke="var(--ok)" strokeWidth="1.4" />
-      <text x={mid(G.cheap)} y={G.cheap[1] + 22} textAnchor="middle" className="t-ok ui t-bold"><title>{d.label}</title>{fitName(d.cheap)}</text>
-      <text x={mid(G.cheap)} y={G.cheap[1] + 40} textAnchor="middle" className="t-ok">{top}</text>
+      {switched
+        ? <rect {...box4(G.cheap)} rx="12" fill="var(--okq)" stroke="var(--ok)" strokeWidth="1.4" />
+        : <rect {...box4(G.cheap)} rx="12" fill="var(--raise)" stroke={ahead} strokeWidth="1.3" strokeDasharray="5 4" />}
+      <text x={mid(G.cheap)} y={G.cheap[1] + 22} textAnchor="middle" className={`${switched ? 't-ok' : state === 'yes' ? 't-brand' : ''} ui t-bold`} {...squeeze}>
+        <title>{switched ? d.label : state === 'yes' ? pending?.name : 'Cheaper models'}</title>{cheapTitle}
+      </text>
+      <text x={mid(G.cheap)} y={G.cheap[1] + 40} textAnchor="middle" className={switched ? 't-ok' : state === 'yes' ? 't-brand' : ''}>{top}</text>
       <rect {...box4(G.yours)} rx="12" fill="var(--raise)" stroke="var(--line)" />
       <text x={mid(G.yours)} y={G.yours[1] + 22} textAnchor="middle" className="t-ink ui t-bold">{refShort}, original</text>
       <text x={mid(G.yours)} y={G.yours[1] + 40} textAnchor="middle">{bottom}</text>

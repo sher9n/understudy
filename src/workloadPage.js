@@ -5,7 +5,7 @@ import { barNeed, usableCalls, sampleSizeFor } from './eval/plan.js';
 import { callsToClear, extract, differingFields } from './eval/compare.js';
 import { LASTING_STATUSES } from './eval/replay.js';
 import { lastAsked, messagesText, responseText } from './callText.js';
-import { valueOf, optimizingSince } from './eval/value.js';
+import { valueOf, optimizingSince, paceOf } from './eval/value.js';
 import { routedSavings } from './eval/actual.js';
 import { cadenceOf } from './eval/schedule.js';
 import { outcomeOf } from './eval/outcome.js';
@@ -76,6 +76,24 @@ async function enoughOf(w, t) {
   };
 }
 
+/* Where a workload's requests go now, for the drawing at the top of its page, whatever its state: how many come a day
+   (paceOf, the way what a switch is worth counts them), and when the last one came, routed through Understudy or as a
+   copy. The drawing moves only while they are arriving, the last within LIVE_MS; otherwise it stands still and says when
+   the last one came, so a page never shows requests flowing that are not. */
+const LIVE_MS = 15 * 60000;
+async function flowOf(w, t) {
+  const pace = await paceOf(w.id, t);
+  const last = await db.prepare(`SELECT MAX(created_at) AS at FROM calls
+      WHERE workload_id = ? AND source IN ('routed', 'trace') AND NOT ${TRY}`).get(w.id);
+  return { perDay: pace.perDay, copiesPerDay: pace.copiesPerDay, lastAt: last?.at ? Number(last.at) : null, liveMs: LIVE_MS };
+}
+
+// the first moment of this month, as India's calendar has it
+const monthStartIST = (t) => {
+  const ist = new Date(t + IST);
+  return Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), 1) - IST;
+};
+
 /* What a setup is called where there is room for a few words: the flow's box. */
 function shortSetup(spec, reference) {
   if (!spec) return null;
@@ -114,8 +132,7 @@ async function doingOf(w, v, t) {
   /* Saved this month, in India's calendar, testing taken off. And what a month comes to at the pace of the whole days
      since the switch (a week at most), less what testing cost over the last thirty days: testing comes in lumps, a
      measurement every few weeks, and a lump inside a week's window read as four of them a month. */
-  const ist = new Date(t + IST);
-  const monthStart = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), 1) - IST;
+  const monthStart = monthStartIST(t);
   const mdays = Math.max(1, Math.ceil((t - monthStart) / DAY));
   const month = await routedSavings({ workspaceId: w.workspace_id, workloadId: w.id, days: mdays, at: monthStart + mdays * DAY });
   const savedMonth = month.would - month.paid - await optimizingSince(w.id, monthStart);
@@ -135,7 +152,18 @@ async function doingOf(w, v, t) {
   const perDay = Number(v.paths.perDay) || 0;
 
   const before = v.paths.ownPerCall;
-  const after = v.paths.perCall;
+  /* What the test that switched it found a month would cost at this workload's volume, on the original model and on what
+     serves it now: the saving it expected. Before any request has come through since the switch, what a request costs on
+     it is read from that same test, as its share of what one costs on the original model. */
+  const serving = await servingKey(w);
+  const months = w.promoted_run_id ? await db.prepare(`SELECT model_id, verdict, cost_month_usd FROM eval_results
+      WHERE run_id = ? AND (verdict = 'reference' OR model_id = ?)`).all(w.promoted_run_id, serving ?? '') : [];
+  const refRow = months.find((r) => r.verdict === 'reference');
+  const itsRow = months.find((r) => r.verdict !== 'reference' && r.model_id === serving);
+  const refMonth = refRow && Number(refRow.cost_month_usd) > 0 ? Number(refRow.cost_month_usd) : null;
+  const itsMonth = itsRow && itsRow.cost_month_usd !== null && itsRow.cost_month_usd !== undefined ? Number(itsRow.cost_month_usd) : null;
+  const seen = v.paths.perCall === null || v.paths.perCall === undefined ? null : v.paths.perCall;
+  const after = seen ?? (refMonth !== null && itsMonth !== null && before > 0 ? round8(before * (itsMonth / refMonth)) : null);
   return {
     kind,
     label: labelOf(spec, ref),
@@ -151,7 +179,11 @@ async function doingOf(w, v, t) {
     savedMonth: round8(savedMonth),
     onTrack: round8(onTrack),
     before, after,
+    // where what a request costs on it now was read: its own requests since the switch, or the test that switched it
+    afterFrom: seen !== null ? 'requests' : after !== null ? 'test' : null,
     less: before > 0 && after !== null && after !== undefined ? round8(Math.max(0, 1 - after / before)) : null,
+    // what that test expected a month to save at this workload's volume
+    expectedMonth: refMonth !== null && itsMonth !== null ? round8(refMonth - itsMonth) : null,
     checks: {
       yardstick: bar.yardstick,
       bar: round8(bar.floorPct / 100),
@@ -314,6 +346,11 @@ export async function pageOf(w) {
   return {
     kind: w.shape_kind,
     enough: await enoughOf(w, t),
+    // where its requests go now, for the drawing at the top of the page, whatever its state
+    flow: await flowOf(w, t),
+    /* what testing it has cost this month, in India's calendar, our fee included: its tests, and the background answers,
+       answers read in the background and daily checks against the original model (optimizingSince) */
+    spentMonth: await optimizingSince(w.id, monthStartIST(t)),
     doing: v ? await doingOf(w, v, t) : null,
     measurements: await measurementsOf(w),
     calls: await callsOf(w),
