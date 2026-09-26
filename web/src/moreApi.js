@@ -13,7 +13,8 @@ export const more = {
   // whether your results (never your content) help other workspaces choose
   setShareStats: (enabled) => send('POST', '/settings/share-stats', { enabled }),
   // the most optimizing may spend over thirty days; null for no budget
-  setOptimizeBudget: (amountUsd) => send('POST', '/settings/optimize-budget', { amountUsd }),
+  // the testing limit: an amount, null for the default, or { none: true } for no limit at all
+  setOptimizeBudget: (amountUsd, { none = false } = {}) => send('POST', '/settings/optimize-budget', none ? { none: true } : { amountUsd }),
   // marking long instructions for caching where that pays
   setCacheHints: (enabled) => send('POST', '/settings/cache-hints', { enabled }),
   // the most calls may cost through us in a day and a month; null for none

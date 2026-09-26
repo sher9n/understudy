@@ -172,6 +172,21 @@ export const config = {
   EVAL_RUN_CAP_USD: num('EVAL_RUN_CAP_USD', 20),
   EVAL_PAYBACK_MONTHS: num('EVAL_PAYBACK_MONTHS', 2),
   EVAL_PROTECT_SHARE: num('EVAL_PROTECT_SHARE', 0.5),
+  /* A test's quote as people see it (quoteFor in src/eval/plan.js). The raw estimate runs short (tests cost 1.17 times it
+     at the median, and up to twice it, over the thirty days to 26 Sep 2026), so it is corrected by how far the tests of
+     the last QUOTE_WINDOW_DAYS ran over theirs: "about" by the median, "at most" by the 90th percentile and never less
+     than QUOTE_MOST_OVER_ABOUT times the about, which is where a test stops. Until QUOTE_MIN_TESTS have finished, the
+     defaults stand. */
+  QUOTE_WINDOW_DAYS: num('QUOTE_WINDOW_DAYS', 60),
+  QUOTE_MIN_TESTS: num('QUOTE_MIN_TESTS', 10),
+  QUOTE_ABOUT_DEFAULT: num('QUOTE_ABOUT_DEFAULT', 1.2),
+  QUOTE_MOST_DEFAULT: num('QUOTE_MOST_DEFAULT', 2),
+  QUOTE_MOST_OVER_ABOUT: num('QUOTE_MOST_OVER_ABOUT', 1.5),
+  /* Money a running test sets aside on the balance (hold in src/billing.js): kept this long and renewed at every charge,
+     so it lapses on its own only for a test nothing is running any more. A running test also reads the balance itself
+     every TEST_BALANCE_CHECK_MS, and stops rather than take it below zero when live requests have used what it held. */
+  TEST_HOLD_TTL_MIN: num('TEST_HOLD_TTL_MIN', 240),
+  TEST_BALANCE_CHECK_MS: num('TEST_BALANCE_CHECK_MS', 20000),
   EVAL_JUDGE_MODEL: str('EVAL_JUDGE_MODEL', 'openai/gpt-5.4-mini'),
   /* The calls a measurement draws on: at most this many from the last thirty days, taken from each day in
      turn (every day's first, then every day's second, and so on), so a busy workload is still sampled across
@@ -242,6 +257,9 @@ export const config = {
      CONTROL_MIN_CHECKS, a setup whose rate of worse or different answers is clearly past the pass mark, at
      every hourly look (a confidence sequence), is switched back. Paid for as optimizing. */
   CONTROL_ENABLED: bool('CONTROL_ENABLED', true),
+  /* The testing limit a workspace has until it chooses one (Settings, Billing): the most tests and the checks after a
+     switch may spend in any thirty days, our fee included. A workspace may choose another amount, or no limit. */
+  TESTING_LIMIT_DEFAULT_USD: num('TESTING_LIMIT_DEFAULT_USD', 20),
   /* The share of a workspace's optimization budget kept for measurements, which decide what serves: work in the
      background (the control group's checks, background answers, live experiments, answers read in the
      background) stops before it (backgroundLeft in src/billing.js), so it can never leave a re-check nothing. */

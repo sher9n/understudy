@@ -2,7 +2,7 @@ import { db, id, now, round8 } from '../db/index.js';
 import config, { canRoute } from '../config.js';
 import { priceCall } from '../openrouter.js';
 import { addActivity } from '../traffic.js';
-import { gateEval, chargeEval } from '../billing.js';
+import { gateEval, chargeEval, hold, release as releaseHold, allowanceLeft, withFee } from '../billing.js';
 import { planFor, ownArmKey, barNeed } from './plan.js';
 import { judgeBarPair, judgeCandidate, judgeQuality, canJudge, translated, openEndedOf, numbersDiffer, numbersOf } from './judge.js';
 import { checklistFor, breakOne } from './checklist.js';
@@ -255,7 +255,41 @@ const measuringAlready = (trigger) => (trigger === 'automatic' || trigger === 'f
   ? { ok: false, reason: 'another measurement of this workload is running' }
   : { snoozeMs: config.EVAL_STALE_MIN * 60000, note: 'another measurement of this workload is running' });
 
-export async function runEvaluation(workloadId, { trigger = 'manual', jobId = null } = {}) {
+/* Why the last test nobody asked for did not run, kept on the workload for its page ("Next: paused at your testing limit"),
+   and said on the workspace's activity the first time in a day that one stops for the testing limit, the balance, or the
+   most one test may spend. One that waits for requests, or would not pay for itself yet, is only kept for the page. */
+const SKIP_SHORT = {
+  limit: 'paused at your testing limit',
+  balance: 'paused until credit is added',
+  ceiling: 'over what one test may spend',
+};
+async function noteSkip(workload, plan) {
+  const reason = plan.limitReached ? 'limit' : plan.lowBalance ? 'balance' : plan.needCalls > plan.pool ? 'calls'
+    : plan.notWorth ? 'worth' : /one test of this workload may spend/.test(plan.reason || '') ? 'ceiling' : 'other';
+  let prev = null;
+  try { prev = JSON.parse(workload.test_skip_json || 'null'); } catch { prev = null; }
+  const short = SKIP_SHORT[reason] ?? null;
+  await db.prepare('UPDATE workloads SET test_skip_json = ? WHERE id = ?')
+    .run(JSON.stringify({ reason, short, text: plan.reason ?? null, at: now() }), workload.id);
+  if (!short || (prev?.reason === reason && now() - Number(prev.at || 0) < 86400000)) return;
+  await addActivity(workload.workspace_id, {
+    kind: 'floor', title: `A test of ${workload.slug} did not run by itself`, detail: plan.reason, workloadId: workload.id,
+  });
+}
+
+/* A measurement, and the money it set aside given back however it ends: finished, stopped, cut short, turned away or
+   thrown. One whose process dies has it given back by the closer of runs nothing is running (closeRun), or when the hold
+   lapses on its own. */
+export async function runEvaluation(workloadId, opts = {}) {
+  const box = { holdId: null };
+  try {
+    return await measure(workloadId, opts, box);
+  } finally {
+    if (box.holdId) await releaseHold(box.holdId).catch(() => {});
+  }
+}
+
+async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, box = { holdId: null }) {
   const workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
   if (!workload) return { ok: false, reason: 'gone' };
   if (!canRoute()) return { snoozeMs: 15 * 60000, note: 'no OPENROUTER_API_KEY' };
@@ -298,6 +332,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       // and only for a count it has not reached, so what could start it again never turns it down again
       if (plan.needCalls > plan.pool) await waitForCalls(workloadId, plan.needCalls);
       else await deferAutomatic(workloadId, { waitMs: plan.notWorth ? null : 6 * 3600000 });
+      await noteSkip(workload, plan);
     }
     /* Back to what its last measurement found, not to "new": a workload that has been measured
        before still has that result, and forgetting it here would put "Not optimized yet" over a
@@ -368,6 +403,24 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        asked for waits six hours, since a balance that is empty now is rarely full half an hour later. */
     return { snoozeMs: (automatic ? 6 * 60 : 30) * 60000, note: gate.code };
   }
+  /* The most it may spend, set aside on the balance before anything is sent, less what the plan's allowance covers: no
+     other test can count the same money, and this one can never take the balance below zero. It is given back as the
+     test is charged, and whatever is left once it ends. A customer's own requests may still use it (see available in
+     src/billing.js); the test notices, and stops. */
+  const toHold = round8(Math.max(0, (Number(plan.atMostUsd) || 0) - (Number(gate.allowance) || 0)));
+  if (toHold > 0) {
+    const held = await hold(workload.workspace_id, toHold, 'test');
+    if (!held.ok) {
+      await addActivity(workload.workspace_id, {
+        kind: 'floor', title: `Testing ${workload.slug} is waiting`,
+        detail: `It may spend up to $${toHold.toFixed(2)}, and only $${Math.max(0, Number(held.free) || 0).toFixed(2)} of your balance `
+          + 'is free right now. Add credit in Settings and it starts again on its own.',
+        workloadId,
+      });
+      return { snoozeMs: (automatic ? 6 * 60 : 30) * 60000, note: 'no_balance' };
+    }
+    box.holdId = held.holdId;
+  }
 
   const planRecord = {
     funnel: plan.funnel,
@@ -402,6 +455,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     trigger: automatic ? 'automatic' : 'manual',
     models_planned: Math.min(want, queue.length), heartbeat_at: now(),
     plan_json: JSON.stringify(planRecord), judge: plan.judge, job_id: jobId,
+    // the quote as it was shown, our fee included: about what it would cost, and the most it may spend
+    quote_about_usd: plan.aboutUsd ?? null, cap_usd: plan.atMostUsd ?? null, hold_id: box.holdId,
   };
   /* That nothing else is measuring this workload, and this run's own row, in one step under a lock
      on the workload: two jobs of it that reach this point together both passed the check made before
@@ -411,16 +466,17 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     if (await tx.prepare(`SELECT 1 FROM eval_runs WHERE workload_id = ? AND status = 'running' LIMIT 1`).get(workloadId)) return false;
     await tx.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
               sample_size, created_at, started_at, steps_total, steps_done, phase, trigger, models_planned,
-              heartbeat_at, plan_json, judge, job_id)
+              heartbeat_at, plan_json, judge, job_id, quote_about_usd, cap_usd, hold_id)
               VALUES (@id, @workspace_id, @workload_id, @status, @shape_kind, @reference_model,
               @sample_size, @created_at, @started_at, @steps_total, @steps_done, @phase, @trigger,
-              @models_planned, @heartbeat_at, @plan_json, @judge, @job_id)`).run(run);
+              @models_planned, @heartbeat_at, @plan_json, @judge, @job_id, @quote_about_usd, @cap_usd, @hold_id)`).run(run);
     return true;
   });
   if (!began) return measuringAlready(trigger);
   /* Whatever started it, a workload being measured says so from the moment the run exists, and waits for no
      more calls: this measurement is what it was waiting for. */
-  await db.prepare(`UPDATE workloads SET status = 'measuring', measure_at_calls = NULL, updated_at = ? WHERE id = ?`).run(now(), workloadId);
+  await db.prepare(`UPDATE workloads SET status = 'measuring', measure_at_calls = NULL, test_skip_json = NULL, updated_at = ?
+      WHERE id = ?`).run(now(), workloadId);
   if (trigger === 'first') {
     await addActivity(workload.workspace_id, {
       kind: 'run', title: `Measuring ${workload.slug}`,
@@ -459,8 +515,21 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const halted = async () => {
     const r = await db.prepare(`UPDATE eval_runs SET heartbeat_at = ? WHERE id = ?
                   RETURNING status, stop_requested_at`).run(now(), run.id);
+    await readRoom();
     return ended(r.rows[0]);
   };
+  /* The balance itself, read at most every TEST_BALANCE_CHECK_MS on the way to a call: a customer's own requests may use
+     the money this test set aside (they come first), so once the balance no longer covers what the test has run and not
+     been charged for yet, it stops, rather than take the balance below zero. */
+  let lowBalance = false;
+  let roomReadAt = 0;
+  async function readRoom() {
+    if (lowBalance || Date.now() - roomReadAt < config.TEST_BALANCE_CHECK_MS) return;
+    roomReadAt = Date.now();
+    const bal = Number((await db.prepare('SELECT balance_usd FROM billing_accounts WHERE workspace_id = ?').get(workload.workspace_id))?.balance_usd ?? 0);
+    const owed = withFee(spend + outUsd) - await allowanceLeft(workload.workspace_id);
+    if (owed > 0 && bal - owed < 0) lowBalance = true;
+  }
   /* The run's ending is written only while it is still running and nobody has asked it to stop.
      A stop can arrive while the last charge is being settled; unguarded, the run then wrote
      "done" and switched the model while the page said nothing had been switched. Answers false
@@ -483,17 +552,25 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      asks a few of its calls at once (see tryModel), so the limit is checked against both before one goes. */
   let outUsd = 0;
   const perCallUsd = () => (Number(plan.estimateUsd) > 0 ? Number(plan.estimateUsd) / Math.max(1, nominal) : 0);
+  /* The most this test may spend, before our fee: its quote's "at most", which the page showed, from the first call to the
+     last. It used to be set only once the race began, as the larger of the quote and what one measurement may spend, so
+     the bar was never held to anything, and a test quoted at thirty cents could spend two dollars. */
+  const capLimit = Number(plan.capRaw) > 0 ? Number(plan.capRaw)
+    : Math.max(Number(plan.ceilingUsd) || config.EVAL_MAX_USD_PER_RUN, Number(plan.estimateUsd) || 0);
+  // what stops the next call: the test's own limit reached ('budget'), or a balance that no longer covers it ('balance')
+  const outOfRoom = (ahead = 0) => (lowBalance ? 'balance' : spentTotal + outUsd + ahead >= capLimit ? 'budget' : null);
   let reusedCount = 0;
   let savedUsd = 0;
   // Jev's reading of the models to try, taken for this measurement, is paid for with it
   if (plan.fitCost > 0) { spend += plan.fitCost; spentTotal += plan.fitCost; }
 
-  /* Charge what has run so far, and say whether there is anything left. */
+  /* Charge what has run so far, and say whether there is anything left. What is charged comes off the money the test set
+     aside, in the same step. */
   const settle = async (note) => {
     if (spend <= 0) return true;
     const amount = spend;
     spend = 0;
-    await chargeEval(workload.workspace_id, amount, note);
+    await chargeEval(workload.workspace_id, amount, note, { holdId: box.holdId });
     await db.prepare('UPDATE eval_runs SET spend_usd = spend_usd + ? WHERE id = ?').run(round8(amount), run.id);
     const left = (await db.prepare('SELECT balance_usd FROM billing_accounts WHERE workspace_id = ?')
       .get(workload.workspace_id))?.balance_usd ?? 0;
@@ -570,6 +647,31 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     return { ok: true, runId: run.id, stopped: true };
   };
 
+  /* Stopped before any model was compared: at its limit ('budget', the most it may spend, as the page quoted), or because
+     the balance no longer covers what it runs ('balance'). What ran is charged, nothing is switched, and it says so; the
+     next test nobody asks for comes in its rhythm, as after any test. */
+  const endCapped = async (why, during) => {
+    await settle(`Measuring ${workload.slug}, stopped ${why === 'balance' ? 'for the balance' : 'at its limit'}`);
+    await keepSavings();
+    const limitWords = `its limit of $${(Number(plan.atMostUsd) || capLimit).toFixed(2)}`;
+    const ok = await finish(why === 'balance' ? 'no_balance' : 'capped',
+      why === 'balance' ? 'balance ran out while the bar was set' : `reached ${limitWords} while ${during}`);
+    if (!ok) return await endStopped();
+    await rest(workloadId);
+    await scheduleNext(workloadId, { changed: false });
+    await addActivity(workload.workspace_id, {
+      kind: 'floor',
+      title: why === 'balance' ? `Testing ${workload.slug} stopped for your balance` : `Testing ${workload.slug} stopped at its limit`,
+      detail: why === 'balance'
+        ? `Your own requests used the money it had set aside, so it stopped while ${during}, rather than take your balance below zero. `
+          + 'Nothing was switched. Add credit in Settings and the next test runs as usual.'
+        : `It reached ${limitWords} while ${during}, before any cheaper model was compared. You were charged only for what it ran, `
+          + 'and nothing was switched.',
+      workloadId,
+    });
+    return { ok: true, runId: run.id, capped: why };
+  };
+
   /* A stop that arrived while this was being picked up ends it before a single call is sent. */
   if (jobId && (await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId))?.status === 'cancelled') {
     return await endStopped();
@@ -642,12 +744,17 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   // the bar: the customer's own model against itself, reusing what is already paid for
   const bar = [];
   let stopped = false;
+  // stopped at its limit ('budget') or for the balance ('balance') before any model was compared (see endCapped)
+  let capped = null;
   let cantAnswer = false;
   let account = null;
   try {
   await inParallel(samples, 3, async (s, i) => {
-    if (stopped || cantAnswer || account) return;
+    if (stopped || cantAnswer || account || capped) return;
     if (await halted()) { stopped = true; return; }
+    // never past its limit, nor past what the balance covers, even while the bar is set
+    const room = outOfRoom(2 * perCallUsd());
+    if (room) { capped = room; return; }
     const body = JSON.parse(s.request_json);
     /* The answer the customer's own model actually gave this call, when it is kept, is one of the two
        the bar needs, so only one is paid for. It came from their real deployment, which is exactly the
@@ -686,6 +793,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     throw err;
   }
   if (stopped) return await endStopped();
+  if (capped) return await endCapped(capped, `checking how much ${reference}'s answers vary`);
   if (account) {
     reportCallFailure({ kind: 'measurement replays', model: reference, status: account.status, message: account.error });
     return await interrupt(accountProblem(account));
@@ -745,7 +853,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   let barFacts = 0;
   try {
   await inParallel(kept, 6, async (p) => {
-    if (stopped) return;
+    if (stopped || capped) return;
+    // a judgement is a paid call too: never past the limit, nor past what the balance covers
+    const room = outOfRoom(perCallUsd());
+    if (room) { capped = room; return; }
     let score;
     /* One of the two answers missing because the provider was busy says nothing about whether the
        model agrees with itself, so the pair is left out of the noise. Counted as a disagreement,
@@ -785,6 +896,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     throw err;
   }
   if (stopped) return await endStopped();
+  if (capped) return await endCapped(capped, `comparing ${reference}'s answers with each other`);
   /* A bar set from a handful of pairs is no bar. When the provider was too busy to give most calls
      their second answer, that is an outage, and the run tries again later rather than measuring
      every model against a bar nobody set. */
@@ -870,8 +982,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     const worse = [];
     try {
       await inParallel(pairs, 6, async (p) => {
-        if (stopped) return;
+        if (stopped || capped) return;
         if (await halted()) { stopped = true; return; }
+        const room = outOfRoom(perCallUsd());
+        if (room) { capped = room; return; }
         const j = await qualityOf(p.body, p.b.value, p.a.value);
         addJudge(j.cost);
         if (j.cost > 0 && await step(1, phase)) stopped = true;
@@ -885,6 +999,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       throw err;
     }
     if (stopped) return await endStopped();
+    if (capped) return await endCapped(capped, `asking whether ${reference}'s answers are at least as good as each other`);
     /* Too few readings came back to set a bar from: the judge was not answering, which says nothing about the
        workload, so it tries again later rather than saying it cannot be measured. */
     if (!worse.length || (worse.length < Math.min(10, pairs.length) && worse.length * 2 < pairs.length)) {
@@ -1321,11 +1436,12 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     };
     for (;;) {
       while (!quit && !st.stopped && !thrown && out.size < room() && at < st.seq.length) {
-        if (halt) { st.stopped = halt === 'budget' ? 'budget' : 'user'; quit = true; break; }
-        /* Never past the most one measurement may spend, whatever it was quoted at: the quote counts
-           a few calls for each model dropped early, and a model can be dropped late. Held to what has been
-           spent and what the calls still out are likely to cost. */
-        if (spentTotal + outUsd >= hardLimit) { halt = 'budget'; st.stopped = 'budget'; quit = true; break; }
+        if (halt) { st.stopped = halt === 'budget' || halt === 'balance' ? 'budget' : 'user'; quit = true; break; }
+        /* Never past the most this test may spend, as its quote said, nor past what the balance covers: the quote counts a
+           few calls for each model dropped early, and a model can be dropped late. Held to what has been spent and what the
+           calls still out are likely to cost. */
+        const over = outOfRoom();
+        if (over) { halt = halt || over; st.stopped = 'budget'; quit = true; break; }
         if (await halted()) { halt = halt || 'stopped'; st.stopped = 'user'; quit = true; break; }
         const cost = guess();
         outUsd += cost;
@@ -1586,7 +1702,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
     // the model this look found cannot keep up, once it has (see busy)
     let busyKey = null;
     await inParallel(picks, Math.max(1, config.EVAL_CALLS_PER_MODEL), async (c) => {
-      if (over || halt || spentTotal + outUsd >= hardLimit) { over = true; return; }
+      if (over || halt) { over = true; return; }
+      const room = outOfRoom();
+      if (room) { if (room === 'balance') halt = halt || 'balance'; over = true; return; }
       if (await halted()) { halt = 'stopped'; over = true; return; }
       confirmLeft = Math.max(0, confirmLeft - sends(c));
       const body = JSON.parse(c.request_json);
@@ -1806,12 +1924,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   let accountHit = null;
   let overQuote = false;
   const quote = Number(plan.estimateUsd) || 0;
-  const softLimit = quote > 0 ? quote * 1.5 : config.EVAL_MAX_USD_PER_RUN;
-  /* Never past what one measurement of this workload may spend, nor past what is left of the
-     workspace's own optimization budget, whatever it was quoted at. Spend here is counted before our
-     fee, the budget after it. */
-  let hardLimit = Math.max(Number(plan.ceilingUsd) || config.EVAL_MAX_USD_PER_RUN, quote);
-  if (plan.optimizeBudget) hardLimit = Math.min(hardLimit, plan.optimizeBudget.leftUsd / (1 + config.ROUTING_FEE_PCT / 100));
+  const softLimit = Math.min(quote > 0 ? quote * 1.5 : config.EVAL_MAX_USD_PER_RUN, capLimit);
+  /* Never past the most this test may spend (capLimit, its quote's "at most" before our fee), which already allows for
+     what one measurement of this workload may spend, the testing limit left and the balance free. */
+  const hardLimit = capLimit;
   /* The second looks to come (see below), counted into what is left from the start of the race: without them the
      count grew by half again once the race ended, and the page's bar ran backwards or sat still. Up to
      EVAL_CONFIRM_TRIES of them where there are enough calls no measurement has looked at for one, each on as many
@@ -1978,7 +2094,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       if (!c.ok) { checks.push({ structureOk: false, p: 0, ms: 0, liveCost: 0 }); continue; }
       const shapeOk = structureOf(p.body, c.json, shape);
       if (!shapeOk.ok) { checks.push({ structureOk: false, p: 0, ms: 0, liveCost: 0 }); continue; }
-      if (halt || spentTotal >= hardLimit) return false;
+      if (halt || spentTotal >= hardLimit || lowBalance) { if (lowBalance) halt = halt || 'balance'; return false; }
       if (await halted()) { halt = 'stopped'; return false; }
       let j;
       try { j = await jevCheck(p.body, c.json, shape, { scope: workload.workspace_id }); } catch { return false; }
@@ -2379,7 +2495,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   const outcome = results.length ? 'compared' : 'no_balance';
   // a stop that arrived during that last settle wins: stopped, and nothing switched
   const why = halt === 'balance' ? 'balance ran out part way through'
-    : halt === 'budget' || (overQuote && finished < want) ? 'reached the most one measurement may spend' : null;
+    : halt === 'budget' || (overQuote && finished < want) ? `reached its limit of $${(Number(plan.atMostUsd) || capLimit).toFixed(2)}` : null;
   if (!await finish(outcome, why)) {
     return await endStopped();
   }
@@ -2584,7 +2700,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        again, or the run ended before it could look. Nothing is switched on one look; a person decides,
        or the next measurement does. */
     const r = second ? second.r : unlooked;
-    const cut = halt === 'balance' ? 'your balance ran out' : 'it reached the most one measurement may spend';
+    const cut = halt === 'balance' ? 'your balance ran out' : `it reached its limit of $${(Number(plan.atMostUsd) || capLimit).toFixed(2)}`;
     const why = unlooked ? `the measurement ended before it could look at it again on calls it had never seen (${cut})`
       : second.c.note
         || `on ${second.c.runs} calls it had never seen it differed ${second.c.gap.toFixed(2)}% of the time, and could be as high as ${second.c.hi.toFixed(2)}% against a ${second.c.floor.toFixed(2)}% bar`;
@@ -2734,6 +2850,8 @@ async function closeRun(run, how, { release = true } = {}) {
     .run(how === 'stopped' ? 'stopped' : 'failed', how, now(),
          how === 'stopped' ? null : 'interrupted', run.id);
   if (!closed.rows.length) return false;
+  // the money it set aside, which nothing will charge against now
+  if (run.hold_id) await releaseHold(run.hold_id).catch(() => {});
   if (how === 'stopped') await deferAfterStop(run.workload_id);
   else await deferAfterFailure(run.workload_id);
   /* and let go of the job that started it. Left claimed, the job still counted as open, so

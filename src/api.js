@@ -10,7 +10,7 @@ import { startSignUp, checkPassword, startSession, endSession, session, requireU
 import send, { codeEmail, accountExistsEmail, noticeEmail } from './email.js';
 import { issueKey, listKeys, revokeKey, revealKey, revealKeyById } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity, track } from './traffic.js';
-import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available, optimizeSpent, spentOnCalls, maybeTopUp } from './billing.js';
+import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available, optimizeSpent, spentOnCalls, maybeTopUp, testingLimitOf } from './billing.js';
 import { notifyPrefs, NOTIFY_KINDS } from './notify.js';
 import { routedSavings } from './eval/actual.js';
 import { adviceFor } from './eval/advice.js';
@@ -391,7 +391,7 @@ const refSpeedOf = (run) => ({
 /* The columns a measurement row is read with, wherever the page lists or opens one. */
 const RUN_COLUMNS = `id, status, outcome, trigger, sample_size, models_planned, floor_pct, noise_pct,
   spend_usd, error, steps_done, steps_total, started_at, finished_at, created_at, reused, saved_usd, judge,
-  quote_usd, recorded_refs, judge_check_json, yardstick`;
+  quote_usd, recorded_refs, judge_check_json, yardstick, quote_about_usd, cap_usd`;
 
 /* Why a measurement has no models to show, in words somebody can act on. The page puts this
    where the chart would be. It used to leave the section out instead, so opening one of these
@@ -412,6 +412,9 @@ function nothingCompared(r) {
     case 'no_balance':
       return 'Your balance ran out once the bar was set, so no models were tried. Add credit and it can '
         + 'be measured again.';
+    case 'capped':
+      return `This test reached its limit${Number(r.cap_usd) > 0 ? ` of $${Number(r.cap_usd).toFixed(2)}` : ''}, the most its quote said `
+        + 'it may spend, before any model was tried. You were charged only for what it ran, and nothing was switched.';
     case 'stopped':
       return 'This measurement was stopped before any model had answered all of its calls, so there is '
         + 'nothing to compare. You were charged only for the calls it made, and nothing was switched.';
@@ -624,7 +627,7 @@ api.get('/workloads/:id', async (req, res) => {
   const traffic = await trafficOf(w);
   const running = await db.prepare(
     `SELECT id, steps_total, steps_done, phase, spend_usd, started_at, models_planned, sample_size,
-            stop_requested_at, heartbeat_at
+            stop_requested_at, heartbeat_at, quote_about_usd, cap_usd
        FROM eval_runs WHERE workload_id = ? AND status = 'running'
       ORDER BY created_at DESC LIMIT 1`).get(w.id);
   /* A measurement asked for and not started yet is a job waiting its turn, which can be a few
@@ -651,6 +654,10 @@ api.get('/workloads/:id', async (req, res) => {
     models: Math.min(plan.models, plan.order.length),
     modelsWanted: plan.models,
     estimateUsd: plan.estimateUsd,
+    /* The quote as the page shows it, our fee included: about what a test would cost, corrected by how far recent tests
+       ran over their estimates, and the most it may spend, where it stops (quoteCalibration in src/eval/plan.js). */
+    aboutUsd: plan.aboutUsd ?? null,
+    atMostUsd: plan.atMostUsd ?? null,
     /* What a measurement is worth: what it is expected to find a month, what the switch already saves
        and protects, and the most one may spend on this workload. A measurement nobody asks for runs
        only when it would pay for itself within EVAL_PAYBACK_MONTHS. */
@@ -709,6 +716,9 @@ api.get('/workloads/:id', async (req, res) => {
       done: running.steps_done,
       phase: running.phase,
       spend: round8(running.spend_usd || 0),
+      // what its quote said, our fee included: about what it would cost, and the most it may, where it stops
+      quote: running.quote_about_usd ?? null,
+      cap: running.cap_usd ?? null,
       startedAt: running.started_at,
       models: running.models_planned,
       sample: running.sample_size,
@@ -1381,8 +1391,16 @@ api.get('/settings', async (req, res) => {
         AND routing_mode IS NOT NULL`).get(req.workspace.id))?.n) || 0,
     // whether this workspace's results (never content) may help other workspaces choose models
     shareStats: Number(req.workspace.share_stats || 0) === 1,
-    // the most optimizing may spend over thirty days, and what it has
-    optimizeBudget: req.workspace.optimize_budget_usd ?? null,
+    /* The testing limit: the most tests and the checks after a switch may spend in any thirty days, our fee included. The
+       amount that applies (null for none), whether it is the default the workspace has until it chooses, and whether it
+       chose no limit at all. */
+    testingLimit: {
+      usd: testingLimitOf(req.workspace),
+      isDefault: !Number(req.workspace.optimize_budget_none || 0) && (req.workspace.optimize_budget_usd ?? null) === null,
+      none: Number(req.workspace.optimize_budget_none || 0) === 1,
+      defaultUsd: config.TESTING_LIMIT_DEFAULT_USD,
+    },
+    optimizeBudget: testingLimitOf(req.workspace),
     // the share of it kept for measurements, which background work never spends (backgroundLeft)
     optimizeReserve: config.OPTIMIZE_RESERVE_SHARE,
     optimizeSpent: await optimizeSpent(req.workspace.id),
@@ -1475,17 +1493,20 @@ api.post('/settings/share-stats', async (req, res) => {
   return res.json({ ok: true, enabled: on });
 });
 
-/* The most optimizing (measurements and background answers) may spend over thirty days. Null is no
-   ceiling beyond what each measurement is worth. */
+/* The testing limit: the most tests and the checks after a switch may spend in any thirty days. An amount, nothing for the
+   default (TESTING_LIMIT_DEFAULT_USD), or `none: true` for no limit at all. */
 api.post('/settings/optimize-budget', async (req, res) => {
-  const raw = req.body?.amountUsd;
+  const none = req.body?.none === true;
+  const raw = none ? null : req.body?.amountUsd;
   const amount = raw === null || raw === undefined || raw === '' ? null : Number(raw);
   if (amount !== null && (!Number.isFinite(amount) || amount < 0 || amount > 100000)) {
-    return fail(res, 400, 'The budget is a number of dollars between 0 and 100,000, or nothing for no budget.');
+    return fail(res, 400, 'The testing limit is a number of dollars between 0 and 100,000, or nothing for the default.');
   }
-  await db.prepare('UPDATE workspaces SET optimize_budget_usd = ? WHERE id = ?').run(amount, req.workspace.id);
+  await db.prepare('UPDATE workspaces SET optimize_budget_usd = ?, optimize_budget_none = ? WHERE id = ?')
+    .run(amount, none ? 1 : 0, req.workspace.id);
   forgetPlanAll();
-  return res.json({ ok: true, amountUsd: amount });
+  forgetWorkspace(req.workspace.id);
+  return res.json({ ok: true, amountUsd: amount, none, usd: none ? null : amount ?? config.TESTING_LIMIT_DEFAULT_USD });
 });
 
 /* Whether long instructions may be marked for caching, on models that only cache what is marked. */

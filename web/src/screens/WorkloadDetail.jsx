@@ -177,12 +177,18 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
             </div>
             <div className="wp-headacts">
               <span className={`wp-pill is-${pill.tone}`}><span className="wp-pd" />{pill.text}</span>
-              <button type="button" className="wp-btn" disabled={!m.canRun || busy || live.starting || running} onClick={live.start}>
-                {live.starting ? 'Starting…' : 'Test now'}
-              </button>
+              <span className="wp-testnow">
+                <button type="button" className="wp-btn" disabled={!m.canRun || busy || live.starting || running} onClick={live.start}
+                  title={m.canRun && m.atMostUsd > 0 ? `About ${cents(m.aboutUsd)}, and never more than ${cents(m.atMostUsd)}` : undefined}>
+                  {live.starting ? 'Starting…' : m.canRun && m.aboutUsd > 0 && !running ? `Test now, about ${cents(m.aboutUsd)}` : 'Test now'}
+                </button>
+                {/* what a test would cost, before anybody presses it: the most it may spend is where it stops. Under the button
+                    it is about, wherever the button wraps to */}
+                {!running && m.canRun && m.atMostUsd > 0 && <span className="wp-most">Never more than {cents(m.atMostUsd)}</span>}
+              </span>
             </div>
           </div>
-          {/* why Test now cannot run, unless it is that there are too few requests yet, which card 1 shows */}
+          {/* why Test now cannot run, unless it is that there are too few requests yet, which the top says */}
           {!running && !m.canRun && m.reason && pg.enough.yes && <p className="wp-why">{m.reason}</p>}
         </div>
 
@@ -299,8 +305,9 @@ async function stopOutcome(workloadId) {
 }
 
 /* When a workload is next tested, in a few words: a date, soon, when a person asks, or once it has the requests a test
-   needs. */
-const nextWords = (e) => {
+   needs; or why the last one nobody asked for did not run, where that is what stands in the way (pageOf's skip). */
+const nextWords = (e, skip = null) => {
+  if (skip?.short) return skip.short;
   if (!e.yes) return `after ${num(e.need - e.have)} more ${e.need - e.have === 1 ? 'request' : 'requests'}`;
   if (!(e.everyDays > 0)) return 'when you ask';
   if (!e.nextAt || e.nextAt <= Date.now()) return 'soon';
@@ -384,7 +391,7 @@ function Summary({ w, pg, cand, waitsForPerson, copiesOnly, running, busy, act, 
   const nextTile = (
     <div className="wp-tile">
       <span className="wp-k">Next test</span>
-      <span className="wp-v words">{nextWords(e)}</span>
+      <span className="wp-v words" title={pg.skip?.text || undefined}>{nextWords(e, pg.skip)}</span>
     </div>
   );
 
@@ -622,7 +629,7 @@ function Measurements({ w, pg, live, goTo }) {
     <section className="wp-card" aria-labelledby="wp-runs-h">
       <div className="wp-cardhead">
         <h3 id="wp-runs-h">Tests</h3>
-        <span className="wp-s">Next: {nextWords(pg.enough)}</span>
+        <span className="wp-s" title={pg.skip?.text || undefined}>Next: {nextWords(pg.enough, pg.skip)}</span>
       </div>
       {live.notice && !live.run && <p className="wp-empty" style={{ paddingTop: 10, paddingBottom: 0 }}>{live.notice}</p>}
       {!count ? (
@@ -658,7 +665,7 @@ function LiveRun({ w, live, feePct }) {
         <span className="wp-ww"><span className="wp-when">{title}</span><span className="wp-what">{sub}</span></span>
         <span className="wp-num">{r.sample ? `${num(r.sample)} requests` : ''}</span>
         <span className="wp-num">{queued ? '' : leftLine(r.leftMs)}</span>
-        <span className="wp-num">{queued ? '' : cents(withFee(r.spend, feePct))}</span>
+        <span className="wp-num">{queued ? '' : `${cents(withFee(r.spend, feePct))}${r.quote > 0 ? ` of about ${cents(r.quote)}` : ''}`}</span>
         <span className={`wp-tag ${stopping ? 'is-mut' : 'is-brand'}`}>{stopping ? 'Stopping' : queued ? 'Waiting to start' : 'Testing now'}</span>
       </div>
       <div className="wp-liverow">
@@ -705,7 +712,8 @@ function RunRow({ w, r, open, onToggle, goTo }) {
       <button type="button" className="wp-runbtn" aria-expanded={open} aria-controls={did} onClick={onToggle}>
         {I.chev}
         <span className="wp-ww">
-          <span className="wp-when">{timeIST(r.at)} IST</span><span className="wp-what">{r.what}</span>
+          {/* what its quote said before it ran, beside what it cost (tests from before quotes were kept have none) */}
+          <span className="wp-when">{timeIST(r.at)} IST</span><span className="wp-what">{r.what}{r.quote > 0 ? `, quoted ${cents(r.quote)}` : ''}</span>
           {/* on a narrow screen the figures beside it have no room, so they are a line under it instead */}
           <span className="wp-what narrow">{`${num(r.n)} requests${r.mins ? `, ${num(r.mins)} min` : ''}, ${cents(r.usd)}`}</span>
         </span>

@@ -17,6 +17,7 @@ export const NOTIFY_KINDS = {
   waiting: 'A cheaper model is waiting for your yes',
   reverted: 'A switch is undone',
   money: 'Your balance is low, a top up fails, or a spending limit is reached',
+  testing: 'Testing reaches your testing limit and pauses',
 };
 
 export function notifyPrefs(ws) {
