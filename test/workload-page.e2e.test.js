@@ -568,6 +568,68 @@ test('a switch still taking over, and one waiting for its first request through 
   assert.equal(c.share, null, 'nothing answered here yet');
 });
 
+test('the drawing at the top of every page: requests a day, when the last one came, and so whether they are arriving now', async () => {
+  const { ws } = await account();
+  const t = now();
+  // nothing switched on it: thirty requests over a day and a half, the last seven hours ago
+  const wid = await workload(ws, 'flow-plain');
+  for (let i = 0; i < 30; i += 1) await call(ws, wid, { at: t - 36 * HOUR + i * HOUR });
+  // a failed try answered another way is not one of the customer's requests, so it is never the last one
+  await call(ws, wid, { at: t - MIN, check: { by: 'fell back' } });
+  const f = (await pageOf(await load(wid))).flow;
+  near(f.perDay, 30 / 1.5, 'thirty over a day and a half, the way what a switch is worth counts them', 0.01);
+  assert.equal(f.copiesPerDay, 0);
+  assert.equal(f.lastAt, t - 7 * HOUR, 'the last request, seven hours ago');
+  assert.equal(f.liveMs, 15 * MIN, 'the drawing moves while the last request is under a quarter of an hour old');
+  assert.ok(t - f.lastAt > f.liveMs, 'so this one stands still');
+  // one just now: arriving
+  await call(ws, wid, { at: t - 2 * MIN });
+  const g = (await pageOf(await load(wid))).flow;
+  assert.equal(g.lastAt, t - 2 * MIN);
+  assert.ok(t - g.lastAt <= g.liveMs, 'and moves');
+  // copies count as requests that came, and are counted apart
+  const copies = await workload(ws, 'flow-copies');
+  for (let i = 0; i < 7; i += 1) await call(ws, copies, { at: t - 7 * DAY + HOUR + i * DAY, source: 'trace' });
+  const c = (await pageOf(await load(copies))).flow;
+  assert.equal(c.perDay, 0, 'none routed');
+  near(c.copiesPerDay, 1, 'a copy a day', 0.01);
+  // a workload nothing has reached has no last request, and never moves
+  const quiet = (await pageOf(await load(await workload(ws, 'flow-none')))).flow;
+  assert.deepEqual([quiet.perDay, quiet.lastAt], [0, null]);
+});
+
+test('money on the page: what testing cost this month, and what the test that switched a workload expected it to save', async () => {
+  const { ws } = await account();
+  const t = now();
+  const IST = 5.5 * HOUR;
+  const ist = new Date(t + IST);
+  const monthStart = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), 1) - IST;
+  const wid = await workload(ws, 'money');
+  // a test this month and one last month: only this month's is counted, our fee included
+  await run(ws, wid, { at: Math.max(monthStart + 20 * MIN, t - HOUR), spend: 0.2, results: [] });
+  await run(ws, wid, { at: monthStart - DAY, spend: 5, results: [] });
+  const g = await pageOf(await load(wid));
+  near(g.spentMonth, 0.2 * FEE, 'this month\'s test, with the fee');
+  // switched by a test that found a month on the original model costs 300 and on the cheaper model 30 (run() writes them),
+  // with no request through it since: what a request costs on it is read from that test
+  const at = t - 2 * DAY;
+  const armId = await arm(ws, wid, { kind: 'model', model: CHEAP, recipe: null }, { ratio: 0.1, at });
+  const made = await run(ws, wid, { at: at - HOUR, spend: 0, results: [{ key: CHEAP, verdict: 'cleared', confirm: 'cleared' }] });
+  for (let i = 0; i < 10; i += 1) await call(ws, wid, { at: at - DAY + i * HOUR, cost: 0.004 });
+  await switchTo(wid, { model: CHEAP, armId, at, runId: made, rollout: 0.05 });
+  const d = (await pageOf(await load(wid))).doing;
+  near(d.expectedMonth, 270, 'the test expected 300 a month on the original model and 30 on the cheaper one');
+  assert.equal(d.afterFrom, 'test', 'nothing has come through since the switch, so the test says what a request costs');
+  near(d.after, d.before * 0.1, 'a tenth of what one costs on the original model, as the test found');
+  near(d.less, 0.9, 'ninety percent less');
+  // once requests come through it, what they paid is what a request costs
+  for (let i = 0; i < 5; i += 1) await call(ws, wid, { at: at + HOUR + i * HOUR, served: CHEAP, arm: armId, cost: 0.0008 });
+  const e = (await pageOf(await load(wid))).doing;
+  assert.equal(e.afterFrom, 'requests');
+  near(e.after, 0.0008 * FEE, 'what they paid, our fee included');
+  assert.equal(e.expectedMonth, d.expectedMonth, 'the saving the test expected stays what it expected');
+});
+
 /* The routes, and the workspace's one choice ------------------------------------------------------- */
 
 test('the page\'s routes answer only the workspace that owns the workload', async () => {
@@ -586,8 +648,11 @@ test('the page\'s routes answer only the workspace that owns the workload', asyn
   const page = await get(`/workloads/${wid}/page`);
   assert.equal(page.status, 200);
   const g = await page.json();
-  for (const k of ['kind', 'enough', 'doing', 'measurements', 'calls', 'feePct']) assert.ok(k in g, `the page carries ${k}`);
+  for (const k of ['kind', 'enough', 'flow', 'spentMonth', 'doing', 'measurements', 'calls', 'feePct']) assert.ok(k in g, `the page carries ${k}`);
   assert.equal(g.measurements[0].id, rid);
+  // the workload says how many cheaper models its newest comparison passed, for the page's "9 cheaper models passed"
+  const wl = await (await get(`/workloads/${wid}`)).json();
+  assert.equal(wl.certificate.passedCheaper, 1);
   const more = await (await get(`/workloads/${wid}/page/calls?page=2`)).json();
   assert.equal(more.page, 2);
   assert.equal(more.rows.length, 2);

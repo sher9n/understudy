@@ -793,6 +793,8 @@ api.get('/workloads/:id', async (req, res) => {
       noise: cert.run.noise_pct, reference: cert.run.reference_model,
       finishedAt: cert.run.finished_at,
       referenceCostMonth: refCost,
+      // how many cheaper models passed it, besides what serves the workload now: "9 cheaper models passed"
+      passedCheaper: cheaperCleared(cert.results).filter((r) => r.model_id !== servingAs).length,
       refSpeed: refSpeedOf(cert.run),
       judge: cert.run.judge ?? null,
       reused: cert.run.reused ?? 0,
