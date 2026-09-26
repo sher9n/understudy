@@ -1,15 +1,50 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api, usd, usdHeld, dateIST, ago } from '../api.js';
 import { more } from '../moreApi.js';
-import { I, ChoicePic } from '../WorkloadCharts.jsx';
-import '../workload-page.css';
+import '../settings.css';
 
-/* Everything a workspace chooses, in one place, each with what it does in plain words. Every change is
-   saved on its own and read back from the server, so what the page shows is what is in force. */
+/* Everything a workspace chooses, on one short page (variation 1 of the Settings artboard, 26 Sep 2026): six topics in
+   the order people need them, each setting a name and one plain sentence beside its control, and the four changed least
+   under More options. Every change is saved on its own and read back from the server, so what the page shows is what is
+   in force. */
 
 const Sw = ({ on, onClick, busy, label }) => (
   <button type="button" className={`sw${on ? ' swon' : ''}`} disabled={busy} onClick={onClick}
     role="switch" aria-checked={!!on} aria-label={label}><i /></button>
+);
+
+/* A row of choices, one of them chosen; the chosen one says what it does in the row's sentence. */
+const Choices = ({ label, options, chosen, busy, onChoose }) => (
+  <span className="st-seg" role="group" aria-label={label}>
+    {options.map((o) => (
+      <button type="button" key={o.value} className={o.value === chosen ? 'on' : ''} aria-pressed={o.value === chosen}
+        disabled={busy} onClick={() => { if (o.value !== chosen) onChoose(o.value); }}>{o.label}</button>
+    ))}
+  </span>
+);
+
+/* A choice of several named options, as a list to pick from. */
+const Pick = ({ id, label, value, options, busy, onPick }) => (
+  <select id={id} className="st-select" aria-label={label} value={String(value)} disabled={busy}
+    onChange={(e) => onPick(e.target.value)}>
+    {options.map((o) => <option key={o.value} value={String(o.value)}>{o.label}</option>)}
+  </select>
+);
+
+/* One setting: its name and one sentence on the left, its control on the right (under the words on a phone). */
+const Row = ({ label, id, say, children, className = '' }) => (
+  <div className={`st-row ${className}`}>
+    <div className="st-lbl"><b id={id}>{label}</b>{say && <span>{say}</span>}</div>
+    {children && <div className="st-ctl">{children}</div>}
+  </div>
+);
+
+const Card = ({ id, title, intro, children, foot }) => (
+  <section className="st-card" id={id} aria-labelledby={`${id}-h`}>
+    <div className="st-cardhead"><h2 id={`${id}-h`}>{title}</h2>{intro && <p>{intro}</p>}</div>
+    {children}
+    {foot && <div className="st-foot">{foot}</div>}
+  </section>
 );
 
 const AMOUNTS = [10, 25, 50, 100];
@@ -17,9 +52,16 @@ const TOPUPS = [10, 25, 50, 100, 250];
 // a few round numbers up to the ceiling, rather than every integer to twenty
 const modelChoices = (max) => [3, 5, 10, 15, 20].filter((n) => n <= max);
 const MODES = [
-  { mode: 'auto', label: 'Automatic', note: 'Switch to it. Watched every day, switched back the moment it slips.' },
-  { mode: 'ask', label: 'Ask me first', note: 'Tell me what passed, and wait for my yes.' },
-  { mode: 'off', label: 'Never switch', note: 'Only measure and report. Nothing changes.' },
+  { value: 'auto', label: 'Switch automatically', note: 'Understudy moves your requests to it step by step, checks it every day, and switches back if quality slips.' },
+  { value: 'ask', label: 'Ask me first', note: 'Understudy tells you what passed and waits for your yes.' },
+  { value: 'off', label: 'Never switch', note: 'Understudy only tests and reports. Nothing changes.' },
+];
+/* Which of the models that pass a workload's test it switches to (src/eval/confidence.js), for every workload that has
+   not chosen for itself. */
+const ROUTING = [
+  { value: 'cautious', label: 'Cautious', note: 'Switch only when Understudy is very sure the answers stay as good. You save a little less.' },
+  { value: 'balanced', label: 'Balanced', note: 'Pick the biggest saving Understudy is sure of. When two save about the same, pick the faster one.' },
+  { value: 'savings', label: 'Most savings', note: 'Pick the cheapest model that passes, as long as it is fast enough.' },
 ];
 const money = (v) => (v === null || v === undefined || v === '' ? '' : String(v));
 /* An amount as typed: empty for none, or dollars with at most two places. Anything else is refused
@@ -28,6 +70,7 @@ const money = (v) => (v === null || v === undefined || v === '' ? '' : String(v)
 const MONEY = /^\d{1,7}(\.\d{1,2})?$/;
 const typedOk = (v) => v === '' || MONEY.test(v);
 const typedNum = (v) => (v === '' ? null : Number(v));
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 export default function Settings({ data, reload }) {
   const [busy, setBusy] = useState(false);
@@ -43,10 +86,14 @@ export default function Settings({ data, reload }) {
     const t = setTimeout(() => setOk(null), 6000);
     return () => clearTimeout(t);
   }, [ok]);
+  // the chip on a workload's page links to #optimize: brought into view once the page is drawn
+  useEffect(() => {
+    if (window.location.hash === '#optimize') document.getElementById('optimize')?.scrollIntoView({ block: 'start' });
+  }, []);
 
   return (
-    <div className="settingspage">
-      <div className="phead"><h1>Settings</h1></div>
+    <div className="settingspage st">
+      <header className="st-head"><h1>Settings</h1><p>These apply to your whole workspace.</p></header>
       {/* Said where it can be seen: at the foot of the window, whichever section was saved. At the top
           of a long page a confirmation or a refusal landed out of sight of the button pressed. */}
       {(err || ok) && (
@@ -55,185 +102,105 @@ export default function Settings({ data, reload }) {
           <button type="button" className="settoastx" aria-label="Close" onClick={() => { setErr(null); setOk(null); }}>×</button>
         </div>
       )}
-      <Account data={data} busy={busy} run={run} />
-      <Keys data={data} busy={busy} run={run} />
-      <Money data={data} busy={busy} run={run} setErr={setErr} />
-      <Limits data={data} busy={busy} run={run} />
-      <SwitchChoice data={data} busy={busy} run={run} />
-      <Optimizing data={data} busy={busy} run={run} />
+      <Switching data={data} busy={busy} run={run} />
+      <Billing data={data} busy={busy} run={run} setErr={setErr} />
       <Privacy data={data} busy={busy} run={run} />
+      <Keys data={data} busy={busy} run={run} />
+      <Account data={data} busy={busy} run={run} />
       <Emails data={data} busy={busy} run={run} />
     </div>
   );
 }
 
-function Account({ data, busy, run }) {
-  const [name, setName] = useState(data.name);
-  const [email, setEmail] = useState(data.email);
-  const [pending, setPending] = useState(null);
-  const [code, setCode] = useState('');
-  const [current, setCurrent] = useState('');
-  const [next, setNext] = useState('');
-  const [emailPw, setEmailPw] = useState('');
-  const min = data.passwordMin || 8;
-  const moving = email.trim().toLowerCase() !== data.email;
+/* What happens when a cheaper model passes a test, how careful to be, and how often to test again: one choice each for
+   the whole workspace, which every workload follows (each workload's page shows the first as a chip that links here).
+   The four settings changed least wait under More options. */
+function Switching({ data, busy, run }) {
+  const [applyRouting, setApplyRouting] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [budget, setBudget] = useState(money(data.optimizeBudget));
+  const mode = MODES.find((m) => m.value === data.defaultOptimizeMode) || MODES[0];
+  const routing = ROUTING.find((r) => r.value === data.defaultRoutingMode) || ROUTING[1];
+  const own = Number(data.routingOwn) || 0;
+  const budgetOk = typedOk(budget);
+  const budgetNum = typedNum(budget);
+  const retest = data.measureEveryDays;
   return (
-    <section className="opt" aria-labelledby="s-account">
-      <div className="opthead"><h2 id="s-account">Account</h2></div>
-      <div className="kvrow">
-        <span className="kvk" id="s-name">Name</span>
-        <span className="kvv"><input className="inp" aria-labelledby="s-name" value={name} onChange={(e) => setName(e.target.value)} /></span>
-        <span className="kva">
-          <button type="button" className="minig" disabled={busy || name === data.name} onClick={run(() => api.profile({ name }), 'Your name is saved.')}>Save</button>
-        </span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk" id="s-email">Email</span>
-        <span className="kvv">
-          <input className="inp" type="email" aria-labelledby="s-email" value={email} onChange={(e) => setEmail(e.target.value)} />
-          {moving && !data.needsPassword && (
-            <input className="inp" type="password" autoComplete="current-password" placeholder="Your current password"
-              aria-label="Your current password, to change your email" value={emailPw} onChange={(e) => setEmailPw(e.target.value)} />
+    <Card id="optimize" title="Switching"
+      intro="Understudy tests cheaper models on your real requests. These choices decide what happens when one of them does as well as your current model."
+      foot={(
+        <button type="button" className="st-more" aria-expanded={open} aria-controls="st-more" onClick={() => setOpen((v) => !v)}>
+          {open ? 'Fewer options' : 'More options: models per test, testing budget, sharing'}
+          <svg viewBox="0 0 16 16" aria-hidden="true" className={open ? 'up' : ''}><path d="M4.5 6.2 8 9.7l3.5-3.5" /></svg>
+        </button>
+      )}>
+      <Row label="When a cheaper model passes a test" id="st-mode" say={mode.note}>
+        <Choices label="When a cheaper model passes a test" options={MODES} chosen={mode.value} busy={busy}
+          onChoose={(v) => run(() => more.setDefaultMode(v, true), `Every workload now follows: ${MODES.find((m) => m.value === v).label}.`)()} />
+      </Row>
+      <Row label="How careful to be" id="st-routing"
+        say={(
+          <>
+            {routing.note}
+            {own > 0 && (
+              <label className="st-check">
+                <input type="checkbox" checked={applyRouting} onChange={(e) => setApplyRouting(e.target.checked)} />
+                {`Also make the ${plural(own, 'workload that chose its own', 'workloads that chose their own')} follow it, the next time you choose`}
+              </label>
+            )}
+          </>
+        )}>
+        <Choices label="How careful to be" options={ROUTING} chosen={routing.value} busy={busy}
+          onChoose={(v) => run(() => api.setDefaultRouting(v, applyRouting), `Workloads now pick: ${ROUTING.find((r) => r.value === v).label}.`)()} />
+      </Row>
+      <Row label="How often to re-test" id="st-retest"
+        say={retest
+          ? 'At most this often, and only when a test is likely to pay for itself. A new or cheaper model can bring one forward.'
+          : 'Nothing is tested until you press Test now on a workload. A model you switched to is still checked on your live requests.'}>
+        <Pick id="st-retest-pick" label="How often to re-test" value={retest} busy={busy}
+          options={(data.measureChoices || []).map((c) => ({ value: c.days, label: c.label }))}
+          onPick={(v) => run(() => api.setMeasureEvery(Number(v)), 'How often to re-test is saved.')()} />
+      </Row>
+      {open && (
+        <div className="st-sub" id="st-more">
+          <Row label="Models per test" id="st-models" say="Each test tries this many models. More models give a fuller picture, and cost more.">
+            <Choices label="Models per test" options={modelChoices(data.evalModelsMax).map((n) => ({ value: n, label: String(n) }))}
+              chosen={data.evalModels} busy={busy} onChoose={(n) => run(() => api.setModelsTested(n), `Each test now tries ${n} models.`)()} />
+          </Row>
+          <Row label="Testing budget" id="st-budget"
+            say={budgetOk
+              ? `The most Understudy may spend on tests and checks in any 30 days. Leave it empty for no limit. ${usd(data.optimizeSpent || 0)} spent in the last 30 days.${data.optimizeReserve > 0 ? ` The last ${Math.round(data.optimizeReserve * 100)}% of it is kept for tests.` : ''}`
+              : 'Write an amount in dollars, like 20 or 7.50, or leave it empty for no limit.'}>
+            <input className="inp st-amount" inputMode="decimal" placeholder="No limit" aria-labelledby="st-budget" aria-invalid={!budgetOk}
+              value={budget} onChange={(e) => setBudget(e.target.value.replace(/[^\d.]/g, ''))} />
+            <button type="button" className="minig" disabled={busy || !budgetOk || budgetNum === (data.optimizeBudget ?? null)}
+              onClick={run(() => more.setOptimizeBudget(budgetNum), 'Your testing budget is saved.')}>Save</button>
+          </Row>
+          <Row label="Share results" id="st-share"
+            say="Help everyone pick better models by sharing which models passed which kinds of work. Your requests, answers and names are never shared.">
+            <Sw label="Share results" on={data.shareStats} busy={busy} onClick={run(() => more.setShareStats(!data.shareStats))} />
+          </Row>
+          {data.cacheHintsAvailable && (
+            <Row label="Mark repeated instructions" id="st-cache"
+              say="Some providers charge less for text they have seen before. Understudy can mark a long instruction you send again and again. Your words stay the same.">
+              <Sw label="Mark repeated instructions" on={data.cacheHints} busy={busy} onClick={run(() => more.setCacheHints(!data.cacheHints))} />
+            </Row>
           )}
-          <span className="segnote">
-            {data.needsPassword
-              ? 'Choose a password first, under Password below, then change your email.'
-              : 'Changing it needs your current password. A new address is only used once you type the code we send to it, and every other session is then signed out.'}
-          </span>
-        </span>
-        <span className="kva">
-          <button type="button" className="minig" disabled={busy || !moving || data.needsPassword || !emailPw}
-            onClick={run(async () => { const r = await api.profile({ email, password: emailPw }); setPending(r.pendingEmail || null); setEmailPw(''); },
-              'A code is on its way to the new address.')}>Change</button>
-        </span>
-      </div>
-      {pending && (
-        <div className="kvrow">
-          <span className="kvk" id="s-code">Code sent to {pending}</span>
-          <span className="kvv">
-            <input className="inp" inputMode="numeric" autoComplete="one-time-code" aria-labelledby="s-code" value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} />
-          </span>
-          <span className="kva">
-            <button type="button" className="mini" disabled={busy || code.length < 6}
-              onClick={run(async () => { await api.verifyEmailChange(pending, code); setPending(null); setCode(''); }, 'Your email address is changed.')}>
-              Confirm
-            </button>
-          </span>
         </div>
       )}
-      <div className="kvrow">
-        <span className="kvk" id="s-pw">Password</span>
-        <span className="kvv">
-          {!data.needsPassword && (
-            <input className="inp" type="password" autoComplete="current-password" placeholder="Current password" aria-label="Current password"
-              value={current} onChange={(e) => setCurrent(e.target.value)} />
-          )}
-          <input className="inp" type="password" autoComplete="new-password" placeholder={`New password, at least ${min} characters`} aria-label="New password"
-            value={next} onChange={(e) => setNext(e.target.value)} />
-          <span className="segnote">
-            {data.needsPassword ? 'You signed in with an emailed code, so choose a password for next time. '
-              : ''}Every other session is signed out when it changes.
-          </span>
-        </span>
-        <span className="kva">
-          <button type="button" className="minig" disabled={busy || next.length < min || (!data.needsPassword && !current)}
-            onClick={run(async () => { await api.changePassword(current, next); setCurrent(''); setNext(''); }, 'Your password is changed. Other sessions are signed out.')}>
-            {data.needsPassword ? 'Set' : 'Change'}
-          </button>
-        </span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk">Other sessions</span>
-        <span className="kvv">Sign out every browser but this one, for example after using a shared computer.</span>
-        <span className="kva">
-          <button type="button" className="minig" disabled={busy} onClick={run(() => api.signOutOthers(), 'Every other session is signed out.')}>Sign out others</button>
-        </span>
-      </div>
-    </section>
+    </Card>
   );
 }
 
-function Keys({ data, busy, run }) {
-  const [fresh, setFresh] = useState(null);
-  const [shown, setShown] = useState({});
-  const [names, setNames] = useState({});
-  const [newName, setNewName] = useState('production');
-  const [sure, setSure] = useState(null);
-  const [copied, setCopied] = useState(null);
-  const cols = { gridTemplateColumns: 'minmax(0, 1fr) 150px 120px 120px 190px' };
-  const copy = (id, text) => {
-    navigator.clipboard?.writeText(text).then(() => { setCopied(id); setTimeout(() => setCopied(null), 2500); }).catch(() => {});
-  };
-  return (
-    <section className="opt" aria-labelledby="s-keys">
-      <div className="opthead">
-        <h2 id="s-keys">API keys</h2>
-        <span className="s">
-          {data.canRevealKeys
-            ? 'Each key can be named, shown again, and revoked on its own. A revoked key stops working at once.'
-            : 'Each key can be named and revoked on its own. This deployment cannot show a key again after it is made, so copy a new one when it appears. A revoked key stops working at once.'}
-        </span>
-      </div>
-      <div className="gthead" style={cols} aria-hidden="true">
-        <span>Name</span><span>Key</span><span>Created</span><span>Last used</span><span />
-      </div>
-      {data.keys.map((k) => (
-        <div className="gtrow" key={k.id} style={cols}>
-          <div className="on">
-            <input className="inp" aria-label={`Name of the key ${k.prefix}`} value={names[k.id] ?? k.name}
-              onChange={(e) => setNames((m) => ({ ...m, [k.id]: e.target.value }))}
-              onBlur={() => { const v = (names[k.id] ?? k.name).trim(); if (v && v !== k.name) run(() => api.renameKey(k.id, v))(); }} />
-          </div>
-          <div className="mdl"><span className="vh">Key </span>{`${k.prefix}…`}</div>
-          <div className="shp"><span className="vh">Created </span>{dateIST(k.created_at)} IST</div>
-          <div className="shp"><span className="vh">Last used </span>{k.last_used_at ? ago(k.last_used_at) : 'never'}</div>
-          <div style={{ textAlign: 'right', display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-            {data.canRevealKeys && (
-              <button type="button" className="minig" disabled={busy} aria-expanded={!!shown[k.id]}
-                aria-label={`${shown[k.id] ? 'Hide' : 'Show'} the key ${k.name}`}
-                onClick={run(async () => {
-                  if (shown[k.id]) { setShown((m) => ({ ...m, [k.id]: null })); return; }
-                  const r = await api.revealKeyById(k.id);
-                  setShown((m) => ({ ...m, [k.id]: r.key }));
-                })}>{shown[k.id] ? 'Hide' : 'Show'}</button>
-            )}
-            {sure === k.id ? (
-              <button type="button" className="mini danger" disabled={busy} aria-label={`Yes, revoke the key ${k.name}`}
-                onClick={run(async () => { await api.revokeKey(k.id); setSure(null); }, 'The key is revoked. Calls with it are refused from now on.')}>Yes, revoke</button>
-            ) : (
-              <button type="button" className="minig" disabled={busy} aria-label={`Revoke the key ${k.name}`} onClick={() => setSure(k.id)}>Revoke</button>
-            )}
-          </div>
-          {shown[k.id] && (
-            <div className="keyshow" style={{ gridColumn: '1 / -1' }}>
-              <code className="m">{shown[k.id]}</code>
-              <button type="button" className="minig" onClick={() => copy(k.id, shown[k.id])}>{copied === k.id ? 'Copied' : 'Copy'}</button>
-            </div>
-          )}
-        </div>
-      ))}
-      <div className="barnote" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <input className="inp" style={{ maxWidth: 220 }} aria-label="Name for a new key" value={newName} onChange={(e) => setNewName(e.target.value)} />
-        <button type="button" className="mini" disabled={busy || !newName.trim()}
-          onClick={run(async () => { const r = await api.newKey(newName.trim()); setFresh(r.key); })}>Create a key</button>
-        <span>Name it after where it is used, so you know which to revoke.</span>
-      </div>
-      {fresh && (
-        <div className="okbox keyshow" role="status">
-          <span>Your new key{data.canRevealKeys ? '' : '. Copy it now: it cannot be shown again'}:</span>
-          <code className="m">{fresh}</code>
-          <button type="button" className="minig" onClick={() => copy('fresh', fresh)}>{copied === 'fresh' ? 'Copied' : 'Copy'}</button>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function Money({ data, busy, run, setErr }) {
+/* The balance and adding to it, topping it up by itself, the most requests may cost, the card, and every movement. */
+function Billing({ data, busy, run, setErr }) {
   const [picking, setPicking] = useState(false);
   const [paying, setPaying] = useState(null);
   const [withTopUp, setWithTopUp] = useState(false);
+  const [history, setHistory] = useState(false);
+  const l = data.limits || {};
+  const [daily, setDaily] = useState(money(l.dailyUsd));
+  const [monthly, setMonthly] = useState(money(l.monthlyUsd));
   /* The first page comes with Settings, so a payment that just landed shows the moment Settings is read
      again; older pages are added below it and let go whenever the first page changes. */
   const [older, setOlder] = useState([]);
@@ -256,319 +223,260 @@ function Money({ data, busy, run, setErr }) {
       const r = await api.ledgerMore(last.created_at, last.id);
       const rows = r.rows || r.ledger || [];
       if (!rows.length || r.more === false) setEnded(true);
-      setOlder((l) => [...l, ...rows]);
+      setOlder((x) => [...x, ...rows]);
     } catch (e) { setErr(e.message); }
   };
   const pay = data.payments;
   // only a card saved at a checkout that said so is ever charged automatically
   const topUpCard = !!data.card?.forTopUps;
+  const limitsOk = typedOk(daily) && typedOk(monthly);
+  const limitsChanged = limitsOk && (typedNum(daily) !== (l.dailyUsd ?? null) || typedNum(monthly) !== (l.monthlyUsd ?? null));
+  // the amount in force is always one of the choices, whatever it is
+  const topUps = [...new Set([...TOPUPS, Number(data.topUpAmount)].filter((a) => Number.isFinite(a)))]
+    .sort((a, b) => a - b).filter((a) => a >= (data.topUpMin ?? 0) && a <= (data.topUpMax ?? 1e9));
+  const topUpSay = `${topUpCard
+    ? `Adds ${usd(data.topUpAmount)} to your balance when it falls below ${usd(data.topUpThreshold)}.`
+    : data.card
+      ? 'The card on file was not saved for top ups. Add credit again and tick the box there to save it for them.'
+      : 'Needs a card saved for top ups. Add credit and tick the box to top up automatically, which saves the card.'}${
+    data.cardNote === 'unreachable' ? ' Paused because the card processor could not be reached. Switch it back on to try again.'
+      : data.cardNote ? ` Turned off because the card was declined (${data.cardNote}).` : ''}`;
   return (
-    <section className="opt" aria-labelledby="s-money">
-      <div className="opthead">
-        <h2 id="s-money">Money</h2>
-        {pay === 'off' && <span className="s">No payment provider is set up here, so balances are read only.</span>}
-        {pay === 'test' && <span className="s">Payments here are in test mode: cards are not charged.</span>}
-        {pay === 'test_refused' && <span className="s">Payments are switched off here: this deployment has only a test payment key, and it adds nothing to a balance.</span>}
-      </div>
-      <div className="kvrow">
-        <span className="kvk">Balance</span>
-        <span className="kvv kvm">
-          {usdHeld(data.balance)}
-          {data.held > 0 && <span className="segnote"> {usd(data.held)} is set aside for calls in flight right now; {usd(data.free)} is free to spend.</span>}
-        </span>
-        <span className="kva">
-          <button type="button" className="mini" disabled={!data.canBill || busy || paying} onClick={() => setPicking((v) => !v)} aria-expanded={picking}>
-            {data.balance > 0 ? 'Add credit' : 'Add credit to start'}
-          </button>
-        </span>
-      </div>
+    <Card id="st-billing" title="Billing"
+      intro={pay === 'off' ? 'No payment provider is set up here, so your balance cannot be topped up.'
+        : pay === 'test' ? 'Payments here are in test mode, so cards are not charged.'
+          : pay === 'test_refused' ? 'Payments are switched off here. This deployment only has a test payment key, which adds nothing to a balance.'
+            : null}>
+      <Row label="Balance" id="st-balance"
+        say={`Your requests and tests are paid from this balance.${data.held > 0 ? ` ${usd(data.held)} is set aside for requests in progress, so ${usd(data.free)} is free to spend.` : ''}`}>
+        <span className="st-money m">{usdHeld(data.balance)}</span>
+        <button type="button" className="mini" disabled={!data.canBill || busy || paying} aria-expanded={picking} onClick={() => setPicking((v) => !v)}>
+          {data.balance > 0 ? 'Add credit' : 'Add credit to start'}
+        </button>
+      </Row>
       {picking && (
-        <div className="kvrow amountrow">
-          <span className="kvk">How much</span>
-          <span className="kvv">
-            <span className="amounts">
-              {AMOUNTS.map((a) => (
-                <button type="button" key={a} className="minig" disabled={!!paying} onClick={() => buy(a)}>{paying === a ? 'Opening…' : `$${a}`}</button>
-              ))}
-            </span>
-            <label className="segnote" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <Row label="How much to add" id="st-amount"
+          say={(
+            <label className="st-check">
               <input type="checkbox" checked={withTopUp} onChange={(e) => setWithTopUp(e.target.checked)} />
-              Also top up automatically with this card when the balance runs low (you can turn it off at any time)
+              Also top up automatically with this card when the balance runs low. You can turn it off at any time.
             </label>
-          </span>
-          <span className="kva" />
-        </div>
-      )}
-      <div className="kvrow">
-        <span className="kvk">Automatic top up</span>
-        <span className="kvv">
-          <span className="seg" role="group" aria-label="Top up amount">
-            {/* the amount in force is always one of the choices, whatever it is */}
-            {[...new Set([...TOPUPS, Number(data.topUpAmount)].filter((a) => Number.isFinite(a)))]
-              .sort((a, b) => a - b)
-              .filter((a) => a >= (data.topUpMin ?? 0) && a <= (data.topUpMax ?? 1e9)).map((a) => (
-                <button type="button" key={a} disabled={busy || !topUpCard} className={a === data.topUpAmount ? 'segb on' : 'segb'}
-                  aria-pressed={a === data.topUpAmount} onClick={run(() => api.setTopUp({ enabled: data.autoTopUp, amountUsd: a }))}>${a}</button>
-              ))}
-          </span>
-          <span className="segnote">
-            {topUpCard
-              ? `Charges ${usd(data.topUpAmount)} to your card when the balance falls below ${usd(data.topUpThreshold)}, at most ${data.topUpMaxPerDay} times a day.`
-              : data.card
-                ? 'The card on file was not saved for top ups. Add credit again and tick the box there, which saves it for them and shows you what that means.'
-                : 'Needs a card saved for top ups: add credit and tick the box to top up automatically, which saves the card for them.'}
-            {data.cardNote === 'unreachable'
-              ? ' Paused after the card processor could not be reached; switch it back on to try again.'
-              : data.cardNote ? ` Turned off after the card was declined (${data.cardNote}).` : ''}
-          </span>
-        </span>
-        <span className="kva">
-          {/* switching it on needs a card saved for top ups; switching it off never needs anything */}
-          <Sw label="Automatic top up" on={data.autoTopUp} busy={busy || (!data.autoTopUp && (!data.canBill || !topUpCard))}
-            onClick={run(() => api.setTopUp(data.autoTopUp ? { enabled: false } : { enabled: true, amountUsd: data.topUpAmount }))} />
-        </span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk">Card</span>
-        <span className="kvv kvm">{data.card ? `${data.card.brand} ···· ${data.card.last4}` : 'none saved'}</span>
-      </div>
-      {data.plan && (
-        <div className="kvrow">
-          <span className="kvk">Measuring allowance</span>
-          <span className="kvv">{usd(data.plan.allowanceLeft)} of {usd(data.plan.allowanceTotal)} left this period. Measuring uses it before your balance.</span>
-        </div>
-      )}
-      {ledger.length > 0 && (
-        <div className="barnote" aria-label="Recent movements">
-          {ledger.map((l) => (
-            <div key={l.id || `${l.created_at}-${l.amount_usd}`}>{l.amount_usd >= 0 ? '+' : ''}{usd(l.amount_usd)} · {l.note || l.kind} · {ago(l.created_at)}</div>
+          )}>
+          {AMOUNTS.map((a) => (
+            <button type="button" key={a} className="minig" disabled={!!paying} onClick={() => buy(a)}>{paying === a ? 'Opening…' : `$${a}`}</button>
           ))}
-          {!ended && ledger.length >= 10 && <button type="button" className="lnk linkbtn" onClick={moreLedger}>Show older movements</button>}
-        </div>
+        </Row>
       )}
-    </section>
-  );
-}
-
-function Limits({ data, busy, run }) {
-  const l = data.limits || {};
-  const [daily, setDaily] = useState(money(l.dailyUsd));
-  const [monthly, setMonthly] = useState(money(l.monthlyUsd));
-  const num = typedNum;
-  const valid = typedOk(daily) && typedOk(monthly);
-  const changed = valid && (num(daily) !== (l.dailyUsd ?? null) || num(monthly) !== (l.monthlyUsd ?? null));
-  return (
-    <section className="opt" aria-labelledby="s-limits">
-      <div className="opthead">
-        <h2 id="s-limits">Spending limits</h2>
-        <span className="s">Calls through Understudy are refused once a limit is reached, with a message saying when they resume. Days and months are told in IST.</span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk" id="s-daily">A day</span>
-        <span className="kvv">
-          <input className="inp" inputMode="decimal" placeholder="No limit" aria-labelledby="s-daily" aria-invalid={!typedOk(daily)}
-            value={daily} onChange={(e) => setDaily(e.target.value.replace(/[^\d.]/g, ''))} />
-          <span className="segnote">
-            {typedOk(daily) ? `${usd(l.spentToday || 0)} spent on calls today.` : 'Write an amount in dollars, like 25 or 12.50, or leave it empty for no limit.'}
-          </span>
-        </span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk" id="s-monthly">A month</span>
-        <span className="kvv">
-          <input className="inp" inputMode="decimal" placeholder="No limit" aria-labelledby="s-monthly" aria-invalid={!typedOk(monthly)}
-            value={monthly} onChange={(e) => setMonthly(e.target.value.replace(/[^\d.]/g, ''))} />
-          <span className="segnote">
-            {typedOk(monthly) ? `${usd(l.spentMonth || 0)} spent on calls this month.` : 'Write an amount in dollars, like 250 or 99.50, or leave it empty for no limit.'}
-          </span>
-        </span>
-        <span className="kva">
-          <button type="button" className="minig" disabled={busy || !changed} onClick={run(() => more.setLimits(num(daily), num(monthly)), 'Your limits are saved.')}>Save</button>
-        </span>
-      </div>
-    </section>
-  );
-}
-
-/* Which of the setups that clear a workload it switches to (src/eval/confidence.js), for every workload
-   that has not chosen for itself. */
-const ROUTING = [
-  { mode: 'cautious', label: 'Cautious',
-    note: 'Only switch to a setup we are at least 99% sure keeps your answers as good as your own model’s, and hold its second look to a stricter standard. It saves a little less, and switches a little less often.' },
-  { mode: 'balanced', label: 'Balanced',
-    note: 'Switch to the biggest saving we are sure of: what a setup saves, times how sure we are that it keeps your answers as good. Where two save about the same, the faster one.' },
-  { mode: 'savings', label: 'Most savings',
-    note: 'Switch to the cheapest setup that clears your bar and passes its second look, as long as it is fast enough for your speed setting.' },
-];
-
-/* What happens when a cheaper setup passes: one choice for the whole workspace, Automatic unless it is changed, and
-   every workload follows it (each workload's page shows it as a chip that links here). Three cards, each with a
-   small picture of what happens, as a radio group: arrow keys move between them. */
-function SwitchChoice({ data, busy, run }) {
-  const chosen = MODES.some((m) => m.mode === data.defaultOptimizeMode) ? data.defaultOptimizeMode : 'auto';
-  const refs = useRef({});
-  // the chip on a workload's page links to #optimize: brought into view once the page is drawn
-  useEffect(() => {
-    if (window.location.hash === '#optimize') document.getElementById('optimize')?.scrollIntoView({ block: 'start' });
-  }, []);
-  const choose = (mode) => { if (mode !== chosen) run(() => more.setDefaultMode(mode, true), `Every workload now follows: ${MODES.find((m) => m.mode === mode).label}.`)(); };
-  const onKey = (e) => {
-    const i = MODES.findIndex((m) => m.mode === chosen);
-    const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0;
-    if (!step) return;
-    e.preventDefault();
-    const next = MODES[(i + step + MODES.length) % MODES.length].mode;
-    refs.current[next]?.focus();
-    choose(next);
-  };
-  return (
-    <section className="opt" id="optimize" aria-labelledby="s-switch">
-      <div className="opthead"><h2 id="s-switch">When a cheaper setup passes</h2></div>
-      <div className="wp wp-setbody">
-        <div className="wp-opts" role="radiogroup" aria-labelledby="s-switch" onKeyDown={onKey}>
-          {MODES.map((m) => (
-            <button type="button" key={m.mode} ref={(el) => { refs.current[m.mode] = el; }} className="wp-opt" role="radio"
-              aria-checked={m.mode === chosen} tabIndex={m.mode === chosen ? 0 : -1} disabled={busy} onClick={() => choose(m.mode)}>
-              <div className="wp-optop">
-                <span className="wp-optnm"><span className="wp-radio" aria-hidden="true" />{m.label}</span>
-                {m.mode === 'auto' && <span className="wp-def">Default</span>}
-              </div>
-              <div className="wp-optpic"><ChoicePic kind={m.mode} /></div>
-              <div className="wp-optd">{m.note}</div>
-            </button>
-          ))}
-        </div>
-        <div className="wp-applies">{I.info}Applies to every workload in this workspace. Each workload page shows it as a small chip.</div>
-      </div>
-    </section>
-  );
-}
-
-function Optimizing({ data, busy, run }) {
-  const [applyRouting, setApplyRouting] = useState(false);
-  const [budget, setBudget] = useState(money(data.optimizeBudget));
-  const routing = ROUTING.find((r) => r.mode === data.defaultRoutingMode) || ROUTING[1];
-  const budgetOk = typedOk(budget);
-  const budgetNum = typedNum(budget);
-  return (
-    <section className="opt" aria-labelledby="s-opt">
-      <div className="opthead"><h2 id="s-opt">Optimizing</h2></div>
-      <div className="kvrow">
-        <span className="kvk">Routing priority</span>
-        <span className="kvv">
-          <span className="seg" role="group" aria-label="Which of the setups that clear a workload it switches to">
-            {ROUTING.map((r) => (
-              <button type="button" key={r.mode} disabled={busy} className={r.mode === routing.mode ? 'segb on' : 'segb'} aria-pressed={r.mode === routing.mode}
-                onClick={run(() => api.setDefaultRouting(r.mode, applyRouting))}>{r.label}</button>
-            ))}
-          </span>
-          <span className="segnote">{routing.note}</span>
-          <label className="segnote" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input type="checkbox" checked={applyRouting} onChange={(e) => setApplyRouting(e.target.checked)} />
-            Make the workloads that chose their own follow it too, the next time you choose
+      <Row label="Automatic top up" id="st-topup" say={topUpSay}>
+        <Pick id="st-topup-pick" label="Top up amount" value={data.topUpAmount} busy={busy || !topUpCard}
+          options={topUps.map((a) => ({ value: a, label: `$${a}` }))}
+          onPick={(v) => run(() => api.setTopUp({ enabled: data.autoTopUp, amountUsd: Number(v) }), 'Your top up amount is saved.')()} />
+        {/* switching it on needs a card saved for top ups; switching it off never needs anything */}
+        <Sw label="Automatic top up" on={data.autoTopUp} busy={busy || (!data.autoTopUp && (!data.canBill || !topUpCard))}
+          onClick={run(() => api.setTopUp(data.autoTopUp ? { enabled: false } : { enabled: true, amountUsd: data.topUpAmount }))} />
+      </Row>
+      <Row label="Spending limits" id="st-limits"
+        say={limitsOk
+          ? `When you reach a limit, requests stop until the next day or month, India time. ${usd(l.spentToday || 0)} spent today and ${usd(l.spentMonth || 0)} this month.`
+          : 'Write an amount in dollars, like 25 or 12.50, or leave it empty for no limit.'}>
+        <span className="st-inputs">
+          <label>A day
+            <input className="inp st-amount" inputMode="decimal" placeholder="No limit" aria-label="Spending limit for a day" aria-invalid={!typedOk(daily)}
+              value={daily} onChange={(e) => setDaily(e.target.value.replace(/[^\d.]/g, ''))} />
+          </label>
+          <label>A month
+            <input className="inp st-amount" inputMode="decimal" placeholder="No limit" aria-label="Spending limit for a month" aria-invalid={!typedOk(monthly)}
+              value={monthly} onChange={(e) => setMonthly(e.target.value.replace(/[^\d.]/g, ''))} />
           </label>
         </span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk">Measure by itself</span>
-        <span className="kvv">
-          <span className="seg" role="group" aria-label="How often to measure">
-            {(data.measureChoices || []).map((c) => (
-              <button type="button" key={c.days} disabled={busy} className={c.days === data.measureEveryDays ? 'segb on' : 'segb'}
-                aria-pressed={c.days === data.measureEveryDays} onClick={run(() => api.setMeasureEvery(c.days))}>{c.label}</button>
-            ))}
-          </span>
-          <span className="segnote">
-            {data.measureEveryDays
-              ? 'At most this often, and only when what a measurement can be expected to find would pay for it within two months. '
-                + 'Re-checks that keep finding nothing new space themselves out; a new or cheaper model brings the next one forward. '
-                + 'A switch is also watched on your live calls every hour.'
-              : 'Nothing is measured until you press Measure now on a workload. A switch is still watched on your live calls every hour.'}
-          </span>
-        </span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk">Models tried each time</span>
-        <span className="kvv">
-          <span className="seg" role="group" aria-label="Models tried each time">
-            {modelChoices(data.evalModelsMax).map((n) => (
-              <button type="button" key={n} disabled={busy} className={n === data.evalModels ? 'segb on' : 'segb'} aria-pressed={n === data.evalModels}
-                onClick={run(() => api.setModelsTested(n))}>{n}</button>
-            ))}
-          </span>
-          <span className="segnote">More is a fuller picture and costs more, since each answers every sampled call. {data.evalModelsMax} is the most we run.</span>
-        </span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk" id="s-budget">Optimizing budget</span>
-        <span className="kvv">
-          <input className="inp" inputMode="decimal" placeholder="No budget" aria-labelledby="s-budget" aria-invalid={!budgetOk}
-            value={budget} onChange={(e) => setBudget(e.target.value.replace(/[^\d.]/g, ''))} />
-          <span className="segnote">
-            {budgetOk
-              ? <>The most measuring, background answers, background checks against your own model, answers read in the background and live experiments may spend over thirty days, together.{data.optimizeReserve > 0 ? ` The last ${Math.round(data.optimizeReserve * 100)}% of it is kept for measuring.` : ''}{' '}{usd(data.optimizeSpent || 0)} spent in the last thirty days.</>
-              : 'Write an amount in dollars, like 20 or 7.50, or leave it empty for no budget.'}
-          </span>
-        </span>
-        <span className="kva">
-          <button type="button" className="minig" disabled={busy || !budgetOk || budgetNum === (data.optimizeBudget ?? null)}
-            onClick={run(() => more.setOptimizeBudget(budgetNum), 'Your optimizing budget is saved.')}>Save</button>
-        </span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk">Share results</span>
-        <span className="kvv">
-          Let which models cleared which kinds of workload help other workspaces choose what to try. Never a call, an answer, a name or a figure: only verdicts, counted.
-        </span>
-        <span className="kva"><Sw label="Share results" on={data.shareStats} busy={busy} onClick={run(() => more.setShareStats(!data.shareStats))} /></span>
-      </div>
-      {data.cacheHintsAvailable && (
-        <div className="kvrow">
-          <span className="kvk">Mark for caching</span>
-          <span className="kvv">
-            On models that only cache what is marked, mark a long instruction you send again and again, so it is read back at a tenth of the price.
-            Only on workloads busy enough for it to pay; the words sent are exactly yours.
-          </span>
-          <span className="kva"><Sw label="Mark for caching" on={data.cacheHints} busy={busy} onClick={run(() => more.setCacheHints(!data.cacheHints))} /></span>
+        <button type="button" className="minig" disabled={busy || !limitsChanged}
+          onClick={run(() => more.setLimits(typedNum(daily), typedNum(monthly)), 'Your limits are saved.')}>Save</button>
+      </Row>
+      <Row label="Card" id="st-card"
+        say={data.card ? `${data.card.brand} ending ${data.card.last4}.${topUpCard ? ' It is saved for top ups.' : ''}` : 'No card is saved yet.'}>
+        {ledger.length > 0 && (
+          <button type="button" className="minig" aria-expanded={history} aria-controls="st-history" onClick={() => setHistory((v) => !v)}>
+            {history ? 'Hide payment history' : 'Payment history'}
+          </button>
+        )}
+      </Row>
+      {history && (
+        <div className="st-history" id="st-history" aria-label="Payment history">
+          {ledger.map((x) => (
+            <div key={x.id || `${x.created_at}-${x.amount_usd}`} className="st-move">
+              <span className={`m ${x.amount_usd >= 0 ? 'in' : 'out'}`}>{x.amount_usd >= 0 ? '+' : ''}{usd(x.amount_usd)}</span>
+              <span className="what">{x.note || x.kind}</span>
+              <span className="when">{ago(x.created_at)}</span>
+            </div>
+          ))}
+          {!ended && ledger.length >= 10 && <button type="button" className="st-more" onClick={moreLedger}>Show older payments</button>}
         </div>
       )}
-    </section>
+      {data.plan && (
+        <Row label="Testing allowance" id="st-allowance"
+          say={`${usd(data.plan.allowanceLeft)} of ${usd(data.plan.allowanceTotal)} left this period. Tests use it before your balance.`} />
+      )}
+    </Card>
   );
 }
 
 function Privacy({ data, busy, run }) {
   return (
-    <section className="opt" aria-labelledby="s-privacy">
-      <div className="opthead"><h2 id="s-privacy">Privacy and data</h2></div>
-      <div className="kvrow">
-        <span className="kvk">Zero data retention</span>
-        <span className="kvv">
-          {data.zdrOnly
-            ? 'Every call goes only to providers that keep nothing of what they are sent.'
-            : 'Calls may go to providers that keep what they are sent for a while (usually to check for abuse), never to ones that train on it. More models can be used.'}
-          {data.zdrForced ? ' This deployment requires it for every workspace.' : ''}
-        </span>
-        <span className="kva">
-          <Sw label="Zero data retention" on={data.zdrOnly} busy={busy || data.zdrForced} onClick={run(() => more.setZdr(!data.zdrOnly))} />
-        </span>
-      </div>
-      <div className="kvrow">
-        <span className="kvk">Keep call content for</span>
-        <span className="kvv">
-          <span className="seg" role="group" aria-label="Keep call content for">
-            {data.retentionChoices.map((c) => (
-              <button type="button" key={c.days} disabled={busy} className={c.days === data.retentionDays ? 'segb on' : 'segb'}
-                aria-pressed={c.days === data.retentionDays} onClick={run(() => api.retention(c.days))}>{c.label}</button>
-            ))}
-          </span>
-          <span className="segnote">
-            {data.retentionDays
-              ? 'After this, every copy of what a call said and what was answered is cleared. What calls cost and every measurement are kept.'
-              : 'Nothing is cleared on a schedule.'}
-          </span>
-        </span>
-      </div>
-    </section>
+    <Card id="st-privacy" title="Privacy">
+      <Row label="Zero data retention" id="st-zdr"
+        say={`${data.zdrOnly
+          ? 'Send requests only to model providers that delete them right away.'
+          : 'Requests may also go to providers that keep them for a while, usually to check for abuse, but never to ones that train on them. More models can be used.'}${
+          data.zdrForced ? ' This deployment requires it for every workspace.' : ''}`}>
+        <Sw label="Zero data retention" on={data.zdrOnly} busy={busy || data.zdrForced} onClick={run(() => more.setZdr(!data.zdrOnly))} />
+      </Row>
+      <Row label="Keep request text for" id="st-keep"
+        say={data.retentionDays
+          ? 'After that, the text of requests and answers is deleted. What they cost and your test results are kept.'
+          : 'Nothing is deleted on a schedule.'}>
+        <Pick id="st-keep-pick" label="Keep request text for" value={data.retentionDays} busy={busy}
+          options={data.retentionChoices.map((c) => ({ value: c.days, label: c.label }))}
+          onPick={(v) => run(() => api.retention(Number(v)), 'How long request text is kept is saved.')()} />
+      </Row>
+    </Card>
+  );
+}
+
+function Keys({ data, busy, run }) {
+  const [fresh, setFresh] = useState(null);
+  const [shown, setShown] = useState({});
+  const [names, setNames] = useState({});
+  const [newName, setNewName] = useState('production');
+  const [sure, setSure] = useState(null);
+  const [copied, setCopied] = useState(null);
+  const copy = (id, text) => {
+    navigator.clipboard?.writeText(text).then(() => { setCopied(id); setTimeout(() => setCopied(null), 2500); }).catch(() => {});
+  };
+  return (
+    <Card id="st-keys" title="API keys"
+      intro={`Name each key after where you use it, so you know which one to revoke.${data.canRevealKeys ? ''
+        : ' This deployment cannot show a key again after it is made, so copy a new key when it appears.'}`}
+      foot={(
+        <>
+          <input className="inp st-keyname" aria-label="Name for a new key" value={newName} onChange={(e) => setNewName(e.target.value)} />
+          <button type="button" className="mini" disabled={busy || !newName.trim()}
+            onClick={run(async () => { const r = await api.newKey(newName.trim()); setFresh(r.key); })}>Create a key</button>
+        </>
+      )}>
+      {fresh && (
+        <div className="okbox keyshow st-fresh" role="status">
+          <span>Your new key{data.canRevealKeys ? '' : '. Copy it now, because it cannot be shown again'}:</span>
+          <code className="m">{fresh}</code>
+          <button type="button" className="minig" onClick={() => copy('fresh', fresh)}>{copied === 'fresh' ? 'Copied' : 'Copy'}</button>
+        </div>
+      )}
+      {data.keys.length === 0 && <Row label="No keys yet" say="Create one below to send requests through Understudy." />}
+      {data.keys.map((k) => (
+        <div className="st-row st-key" key={k.id}>
+          <div className="st-lbl">
+            <span className="st-keyline">
+              <input className="inp st-keyedit" aria-label={`Name of the key ${k.prefix}`} value={names[k.id] ?? k.name}
+                onChange={(e) => setNames((m) => ({ ...m, [k.id]: e.target.value }))}
+                onBlur={() => { const v = (names[k.id] ?? k.name).trim(); if (v && v !== k.name) run(() => api.renameKey(k.id, v))(); }} />
+              <span className="m st-prefix">{`${k.prefix}…`}</span>
+            </span>
+            <span>{`Made ${dateIST(k.created_at)} IST, last used ${k.last_used_at ? ago(k.last_used_at) : 'never'}`}</span>
+          </div>
+          <div className="st-ctl">
+            {data.canRevealKeys && (
+              <button type="button" className="minig" disabled={busy} aria-expanded={!!shown[k.id]}
+                aria-label={`${shown[k.id] ? 'Hide' : 'Show'} the key ${k.name}`}
+                onClick={run(async () => {
+                  if (shown[k.id]) { setShown((m) => ({ ...m, [k.id]: null })); return; }
+                  const r = await api.revealKeyById(k.id);
+                  setShown((m) => ({ ...m, [k.id]: r.key }));
+                })}>{shown[k.id] ? 'Hide' : 'Show'}</button>
+            )}
+            {sure === k.id ? (
+              <button type="button" className="mini danger" disabled={busy} aria-label={`Yes, revoke the key ${k.name}`}
+                onClick={run(async () => { await api.revokeKey(k.id); setSure(null); }, 'The key is revoked. Requests with it are refused from now on.')}>Yes, revoke</button>
+            ) : (
+              <button type="button" className="minig" disabled={busy} aria-label={`Revoke the key ${k.name}`} onClick={() => setSure(k.id)}>Revoke</button>
+            )}
+          </div>
+          {shown[k.id] && (
+            <div className="keyshow st-keyshow">
+              <code className="m">{shown[k.id]}</code>
+              <button type="button" className="minig" onClick={() => copy(k.id, shown[k.id])}>{copied === k.id ? 'Copied' : 'Copy'}</button>
+            </div>
+          )}
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+function Account({ data, busy, run }) {
+  const [name, setName] = useState(data.name);
+  const [email, setEmail] = useState(data.email);
+  const [pending, setPending] = useState(null);
+  const [code, setCode] = useState('');
+  const [pwOpen, setPwOpen] = useState(false);
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [emailPw, setEmailPw] = useState('');
+  const min = data.passwordMin || 8;
+  const moving = email.trim().toLowerCase() !== data.email;
+  return (
+    <Card id="st-account" title="Account">
+      <Row label="Name" id="st-name">
+        <input className="inp" aria-labelledby="st-name" value={name} onChange={(e) => setName(e.target.value)} />
+        <button type="button" className="minig" disabled={busy || name === data.name} onClick={run(() => api.profile({ name }), 'Your name is saved.')}>Save</button>
+      </Row>
+      <Row label="Email" id="st-email"
+        say={data.needsPassword ? 'Choose a password first, below, then change your email.'
+          : 'Changing it asks for your password and sends a code to the new address. Every other browser is signed out once you confirm it.'}>
+        <input className="inp" type="email" aria-labelledby="st-email" value={email} onChange={(e) => setEmail(e.target.value)} />
+        {moving && !data.needsPassword && (
+          <input className="inp" type="password" autoComplete="current-password" placeholder="Your current password"
+            aria-label="Your current password, to change your email" value={emailPw} onChange={(e) => setEmailPw(e.target.value)} />
+        )}
+        <button type="button" className="minig" disabled={busy || !moving || data.needsPassword || !emailPw}
+          onClick={run(async () => { const r = await api.profile({ email, password: emailPw }); setPending(r.pendingEmail || null); setEmailPw(''); },
+            'A code is on its way to the new address.')}>Change</button>
+      </Row>
+      {pending && (
+        <Row label={`Code sent to ${pending}`} id="st-code" say="Type the six digits from the email to finish changing your address.">
+          <input className="inp st-code" inputMode="numeric" autoComplete="one-time-code" aria-labelledby="st-code" value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} />
+          <button type="button" className="mini" disabled={busy || code.length < 6}
+            onClick={run(async () => { await api.verifyEmailChange(pending, code); setPending(null); setCode(''); }, 'Your email address is changed.')}>
+            Confirm
+          </button>
+        </Row>
+      )}
+      <Row label="Password" id="st-pw"
+        say={data.needsPassword ? 'You signed in with an emailed code, so choose a password for next time.' : 'Every other browser is signed out when it changes.'}>
+        {!pwOpen ? (
+          <button type="button" className="minig" aria-expanded={false} onClick={() => setPwOpen(true)}>
+            {data.needsPassword ? 'Set a password' : 'Change password'}
+          </button>
+        ) : (
+          <>
+            {!data.needsPassword && (
+              <input className="inp" type="password" autoComplete="current-password" placeholder="Current password" aria-label="Current password"
+                value={current} onChange={(e) => setCurrent(e.target.value)} />
+            )}
+            <input className="inp" type="password" autoComplete="new-password" placeholder={`New password, at least ${min} characters`} aria-label="New password"
+              value={next} onChange={(e) => setNext(e.target.value)} />
+            <button type="button" className="mini" disabled={busy || next.length < min || (!data.needsPassword && !current)}
+              onClick={run(async () => { await api.changePassword(current, next); setCurrent(''); setNext(''); setPwOpen(false); },
+                'Your password is changed. Every other browser is signed out.')}>
+              Save
+            </button>
+            <button type="button" className="minig" onClick={() => { setPwOpen(false); setCurrent(''); setNext(''); }}>Cancel</button>
+          </>
+        )}
+      </Row>
+      <Row label="Signed in elsewhere" id="st-others" say="Signs out every other browser, for example after using a shared computer.">
+        <button type="button" className="minig" disabled={busy} onClick={run(() => api.signOutOthers(), 'Every other browser is signed out.')}>Sign out everywhere else</button>
+      </Row>
+    </Card>
   );
 }
 
@@ -576,17 +484,12 @@ function Emails({ data, busy, run }) {
   const kinds = data.notifyKinds || {};
   const prefs = data.notify || {};
   return (
-    <section className="opt" aria-labelledby="s-emails">
-      <div className="opthead">
-        <h2 id="s-emails">Emails</h2>
-        <span className="s">Sent to {data.email}, each event once, at most ten a day.</span>
-      </div>
+    <Card id="st-emails" title="Emails" intro={`Sent to ${data.email}, at most ten a day.`}>
       {Object.entries(kinds).map(([k, words]) => (
-        <div className="kvrow" key={k}>
-          <span className="kvk">{words}</span>
-          <span className="kva"><Sw label={words} on={prefs[k] !== false} busy={busy} onClick={run(() => more.setNotify({ [k]: prefs[k] === false }))} /></span>
-        </div>
+        <Row key={k} label={words} id={`st-email-${k}`}>
+          <Sw label={words} on={prefs[k] !== false} busy={busy} onClick={run(() => more.setNotify({ [k]: prefs[k] === false }))} />
+        </Row>
       ))}
-    </section>
+    </Card>
   );
 }
