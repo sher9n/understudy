@@ -428,6 +428,38 @@ test('a second look a deploy cut short starts again on the new calls it had draw
   assert.equal((await load(w.id)).routed_model, STEADY, 'and it switches, as it would have before the deploy');
 });
 
+test('a workload that offers tools and is answered in words is said to be, not a busy provider, and is not tried again', async () => {
+  seq += 1;
+  const { workspace } = await auth.createAccount({ email: `tools-${seq}-${process.pid}@example.test`, password: 'correct-horse-battery', name: `t${seq}` });
+  await move(workspace.id, { kind: 'credit', amountUsd: 50, note: 'test' });
+  await db.prepare('UPDATE workspaces SET onboarded_at = ? WHERE id = ?').run(now(), workspace.id);
+  // a tool it may call, and the customer's model answering in words every time, as it did and as it does when asked again
+  const tools = [{ type: 'function', function: { name: 'flag_listing', description: 'Flag a listing that breaks policy',
+    parameters: { type: 'object', properties: { reason: { type: 'string' } } } } }];
+  let wl = null;
+  for (let i = 0; i < 120; i += 1) {
+    const request = { model: REF, messages: [{ role: 'system', content: `Check the listing against the policy, set ${seq}.` },
+      { role: 'user', content: `Listing #${String(i).padStart(4, '0')}` }], tools };
+    wl = wl || await workloadFor(workspace.id, request);
+    await recordCall({
+      workspaceId: workspace.id, workloadId: wl.id, source: 'trace', requestedModel: REF, servedModel: REF, statusCode: 200,
+      promptTokens: 800, completionTokens: 60, costUsd: 0.002, chargedUsd: 0, request,
+      response: { choices: [{ message: { content: JSON.stringify({ flagged: false }) } }], usage: { cost: 0.002 } },
+    });
+  }
+  assert.equal((await load(wl.id)).shape_kind, 'tool_call');
+  await enable(workspace.id, [STEADY]);
+  const out = await runEvaluation(wl.id);
+  assert.equal(out.ok, true, `ended, rather than interrupted to be tried again: ${JSON.stringify(out)}`);
+  assert.equal(out.refused, true);
+  const run = await db.prepare('SELECT outcome, error, ref_error FROM eval_runs WHERE id = ?').get(out.runId);
+  assert.equal(run.outcome, 'refused');
+  assert.match(run.ref_error, /answered in words instead of calling one of the tools/);
+  const said = await lastActivity(wl.id);
+  assert.doesNotMatch(`${run.error} ${said.detail}`, /too busy/, 'never blamed on a busy provider');
+  assert.match(said.detail, /answered in words instead of calling one of the tools/);
+});
+
 test('negative: a workspace that measures only when asked books no second look by itself', async () => {
   const { workspace, workload: w } = await seeded({ n: 200, models: [DRIFTY], mode: 'auto' });
   await db.prepare('UPDATE workspaces SET measure_every_days = 0 WHERE id = ?').run(workspace.id);
