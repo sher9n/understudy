@@ -304,7 +304,7 @@ test("a structured answer's differing fields are named against each of the origi
   assert.deepEqual(x.heldTo, [true, true], 'held to each of the two, the score their average');
   assert.deepEqual(x.fields[0], { decide: ['lines'], written: ['note'] }, 'against the first: a deciding field, and a written one worded differently');
   assert.deepEqual(x.fields[1], { decide: [], written: ['note'] }, 'against the second: only the wording');
-  assert.equal(x.verdict.text, 'Different from one of the two answers');
+  assert.equal(x.verdict.text, 'Matched one of the two answers');
   assert.equal(x.verdict.tone, 'warn');
   assert.equal(x.compared, 'Compared field by field');
   assert.deepEqual(x.values.answer, mine, 'the answer as the test read it, to be laid out and marked');
@@ -394,6 +394,49 @@ test('ten requests to a page, numbered through, and a page past the end is empty
   assert.deepEqual([far.rows.length, far.more, far.total], [0, false, 12]);
 });
 
+test("a model's own page reads its answers twenty to a page and one result at a time, each keeping its place", async () => {
+  const { ws } = await account();
+  const wid = await workload(ws, 'own-page');
+  const at = now() - HOUR;
+  const rid = await run(ws, wid, { at, sample: 30, results: [{ key: CHEAP, runs: 30, gap: 10, verdict: 'review' }] });
+  // three different answers (the 5th, 12th and 27th), one cut off (the 20th), one a busy provider refused (the 8th)
+  for (let i = 0; i < 30; i += 1) {
+    const n = i + 1;
+    const c = await call(ws, wid, { at: at - DAY + i * MIN, text: `invoice #${i}` });
+    await sample(rid, c, '{"total":1}', '{"total":1}', { at: at - 40 * MIN });
+    const how = [5, 12, 27].includes(n) ? { text: '{"total":2}', score: 1, scored: 1 }
+      : n === 20 ? { text: null, score: 1, scored: 1, failure: 'truncated' }
+        : n === 8 ? { text: null, score: 1, scored: 0, failure: 'refused', status: 503 }
+          : { text: '{"total":1}', score: 0, scored: 1 };
+    await answer(rid, c, CHEAP, { at: at - 30 * MIN + i, ...how });
+  }
+  const w = await load(wid);
+  const r = await loadRun(rid);
+  const one = await runAnswersOf(w, r, CHEAP, { per: 20 });
+  assert.deepEqual([one.rows.length, one.more, one.per, one.total, one.matched, one.filter], [20, true, 20, 30, 30, null]);
+  const two = await runAnswersOf(w, r, CHEAP, { per: 20, page: 2 });
+  assert.deepEqual(two.rows.map((x) => x.n), Array.from({ length: 10 }, (_, k) => 21 + k));
+  // one result only: each answer keeps its number among all of them, and the pages are counted from the ones shown
+  const diff = await runAnswersOf(w, r, CHEAP, { per: 20, result: 'different' });
+  assert.deepEqual(diff.rows.map((x) => x.n), [5, 12, 27]);
+  assert.deepEqual([diff.matched, diff.total, diff.more, diff.filter], [3, 30, false, 'different']);
+  assert.ok(diff.rows.every((x) => x.verdict.text === 'Different'), JSON.stringify(diff.rows.map((x) => x.verdict)));
+  assert.deepEqual((await runAnswersOf(w, r, CHEAP, { per: 20, result: 'failed' })).rows.map((x) => x.n), [20]);
+  assert.deepEqual((await runAnswersOf(w, r, CHEAP, { per: 20, result: 'busy' })).rows.map((x) => x.n), [8]);
+  assert.equal((await runAnswersOf(w, r, CHEAP, { per: 20, result: 'same' })).matched, 25);
+  const pageOfOne = await runAnswersOf(w, r, CHEAP, { per: 2, page: 2, result: 'different' });
+  assert.deepEqual([pageOfOne.rows.map((x) => x.n), pageOfOne.more], [[27], false], 'the second page of one result');
+  // never more than fifty a page, an unknown result is every answer, and asked without a size, ten as before
+  assert.equal((await runAnswersOf(w, r, CHEAP, { per: 999 })).per, 50);
+  const odd = await runAnswersOf(w, r, CHEAP, { per: 20, result: 'nonsense' });
+  assert.deepEqual([odd.filter, odd.matched, odd.rows.length], [null, 30, 20]);
+  assert.equal((await runAnswersOf(w, r, CHEAP)).rows.length, 10);
+  // the test's page says when it ran and names the original model, for the model's page to say where it is
+  const page = await runPageOf(w, r);
+  assert.equal(page.at, Number(r.created_at));
+  assert.equal(page.referenceName, 'GPT-5.4');
+});
+
 /* 4. The second look ------------------------------------------------------------------------------- */
 
 test("a model's second look, on new requests, is shown apart from its first and moves nothing its row shows", async () => {
@@ -420,7 +463,8 @@ test("a model's second look, on new requests, is shown apart from its first and 
   const first = await runAnswersOf(w, r, CHEAP);
   assert.equal(first.look, 1);
   assert.equal(first.total, 3, 'the first look, on the test\'s own requests');
-  assert.deepEqual(first.looks, { first: 3, second: 2, kept: 2, ended: "it didn't pass" });
+  // with the second look's own figures, which a model's page says in its first paragraph without reading the second look
+  assert.deepEqual(first.looks, { first: 3, second: 2, kept: 2, ended: "it didn't pass", verdict: 'missed', figure: 0.5, bar: 0.1 });
   const second = await runAnswersOf(w, r, CHEAP, { look: 2 });
   assert.equal(second.look, 2);
   assert.equal(second.total, 2);
@@ -468,6 +512,11 @@ test("the answers route: the workload's owner only, a model the test tried, its 
   assert.equal((await (await get(`/workloads/${wid}/runs/${rid}/answers?model=${q(CHEAP)}&page=2`)).json()).rows.length, 2);
   const again = await (await get(`/workloads/${wid}/runs/${rid}/answers?model=${q(CHEAP)}&look=2`)).json();
   assert.deepEqual([again.look, again.total, again.rows[0].callId], [2, 1, f], 'its second look, asked for by name');
+  // a model's own page asks for twenty a page, and for one result only
+  const twenty = await (await get(`/workloads/${wid}/runs/${rid}/answers?model=${q(CHEAP)}&per=20`)).json();
+  assert.deepEqual([twenty.per, twenty.rows.length, twenty.more], [20, 12, false]);
+  const none = await (await get(`/workloads/${wid}/runs/${rid}/answers?model=${q(CHEAP)}&per=20&result=different`)).json();
+  assert.deepEqual([none.filter, none.matched, none.rows.length, none.total], ['different', 0, 0, 12]);
   for (const [path, why] of [
     [`/workloads/${wid}/runs/${rid}/answers?model=${q(REF)}`, 'the original model is not one of the models tried'],
     [`/workloads/${wid}/runs/${rid}/answers`, 'nor is no model at all'],

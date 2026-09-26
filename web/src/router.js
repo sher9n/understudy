@@ -40,6 +40,14 @@ export function parse(pathname = window.location.pathname) {
   const clean = pathname.replace(/\/+$/, '') || '/';
   const workload = clean.match(/^\/workloads\/([A-Za-z0-9_-]+)$/);
   if (workload) return { screen: 'work', openId: workload[1] };
+  // one model in one of a workload's tests: its own page. A model's name carries a slash, which the app's own links
+  // encode into one part of the address and somebody typing it writes as it is, so both lead to the same page.
+  const model = clean.match(/^\/workloads\/([A-Za-z0-9_-]+)\/tests\/([A-Za-z0-9_-]+)\/models\/([^/]+(?:\/[^/]+)*)$/);
+  if (model) {
+    let key = null;
+    try { key = decodeURIComponent(model[3]); } catch { key = null; }
+    if (key) return { screen: 'work', openId: model[1], test: model[2], model: key };
+  }
   const hit = ROUTES.find((r) => r.path === clean);
   return hit ? { screen: hit.screen, openId: null } : { screen: 'notfound', openId: null };
 }
@@ -50,6 +58,9 @@ export function href(screen, openId = null, hash = '') {
   if (openId) return `/workloads/${openId}${tail}`;
   return `${ROUTES.find((r) => r.screen === screen)?.path ?? '/'}${tail}`;
 }
+
+/** The address of one model's page in one of a workload's tests. */
+export const modelHref = (workloadId, testId, key) => `/workloads/${workloadId}/tests/${testId}/models/${encodeURIComponent(key)}`;
 
 export function go(screen, openId = null, { replace = false, hash = '', search = '' } = {}) {
   const to = `${href(screen, openId)}${search}${hash ? `#${hash}` : ''}`;
@@ -91,6 +102,7 @@ export const signInHref = (path) => `/signin?next=${encodeURIComponent(path)}`;
 export function titleFor(screen, name = null) {
   if (screen === 'notfound') return 'Page not found, Understudy';
   if (screen === 'workload') return `${name || 'Workload'}, Understudy`;
+  if (screen === 'model') return `${name || 'Model'}, Understudy`;
   const r = ROUTES.find((x) => x.screen === screen);
   if (!r) return 'Understudy';
   return screen === 'home' ? r.title : `${r.title}, Understudy`;
