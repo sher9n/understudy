@@ -128,17 +128,22 @@ export function startHomeMotion(root) {
       text(mid(g.app), g.app[1] + 22, 'ui t-ink', 'Your app'); text(mid(g.app), g.app[1] + 40, '', '4,800 a day');
       box(g.us, 'var(--brandq)', 'var(--brand)', 1.4, 14);
       text(mid(g.us), g.us[1] + 30, 'ui t-brand', 'Understudy');
-      text(mid(g.us), g.us[1] + 52, '', 'sends each request'); text(mid(g.us), g.us[1] + 70, '', 'to the cheaper model');
+      // what it sends where follows the roll out, in the app's words (setShare below)
+      const says = [text(mid(g.us), g.us[1] + 52, '', ''), text(mid(g.us), g.us[1] + 70, '', '')];
       box(g.cheap, 'var(--okq)', 'var(--ok)', 1.4, 12);
       text(mid(g.cheap), g.cheap[1] + 26, 'ui t-ok', 'Gemma 4 26B'); const top = text(mid(g.cheap), g.cheap[1] + 46, 't-ok', '');
       box(g.yours, 'var(--raise)', 'var(--line)', 1, 12);
       text(mid(g.yours), g.yours[1] + 26, 'ui t-ink', 'GPT-5.4, original'); const bottom = text(mid(g.yours), g.yours[1] + 46, '', '');
       const layer = add(svg, el('g'));
-      return { svg, P, top, bottom, layer, len: null, dots: [], last: 0, owed: 0 };
+      return { svg, P, says, top, bottom, layer, len: null, dots: [], last: 0, owed: 0 };
     }).filter(Boolean);
     if (!views.length) return;
-    // the app's own words for each state (FlowSvg): "still here" while rolling out, "as back-up" once rolled out
+    /* the app's own words for each state (FlowSvg): the share it sends while the roll out is under way and "each request"
+       once it is done; "still here" while rolling out, "as back-up" once rolled out */
     const setShare = (s) => views.forEach((v) => {
+      const done = s >= 0.98;
+      v.says[0].textContent = done ? 'sends each request' : `sends ${Math.round(s * 100)}% to the`;
+      v.says[1].textContent = done ? 'to the cheaper model' : 'cheaper model';
       v.top.textContent = `${Math.round(s * 100)}% answered here`;
       v.bottom.textContent = s >= 0.98 ? `${Math.round((1 - s) * 100)}% here, as back-up` : `${Math.round((1 - s) * 100)}% still here`;
     });

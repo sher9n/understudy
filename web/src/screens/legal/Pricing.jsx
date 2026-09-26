@@ -54,7 +54,7 @@ export default function Pricing({ go }) {
           never spends more than its cap. Experiments have a daily limit, set on each workload.
         </p>
         <p>
-          <b>An optimizing budget</b> in Settings caps everything spent on finding and checking a cheaper model
+          <b>A testing limit</b> in Settings caps everything spent on finding and checking a cheaper model
           over thirty days, measurements, background answers, reads and experiments together. Once it is spent,
           that work waits, and your calls carry on as they are.
         </p>
