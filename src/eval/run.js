@@ -469,10 +469,13 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
      ones count here: a measurement that was stopped or cut short found nothing, and counting its calls
      sent the one that tried again away from the very answers it had just bought, to pay for another
      bar. Every call any measurement looked at, finished or not, is kept from a second look, which has
-     to be on calls the model has never seen. */
+     to be on calls the model has never seen. All but the calls this very test drew before a restart handed it over
+     (HANDED_OVER, under the same job, which starts it again at once): they are its own, and counted as seen, a second
+     look a deploy cut short started again short of the new calls it had just drawn, and waited for as many more. */
   const drawnBefore = await db.prepare(
     `SELECT s.call_id, bool_or(${FOUND('r.')}) AS used FROM eval_samples s JOIN eval_runs r ON r.id = s.run_id
-      WHERE r.workload_id = ? GROUP BY s.call_id`).all(workloadId);
+      WHERE r.workload_id = ? AND NOT (COALESCE(r.job_id = ?, false) AND COALESCE(r.error, '') LIKE ?)
+      GROUP BY s.call_id`).all(workloadId, jobId, `${HANDED_OVER}%`);
   const usedBefore = new Set(drawnBefore.filter((r) => r.used).map((r) => r.call_id));
   const seenBefore = new Set(drawnBefore.map((r) => r.call_id));
   const freshSet = new Set(pool.filter((c) => !usedBefore.has(c.id)).map((c) => c.id));

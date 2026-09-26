@@ -64,6 +64,7 @@ const { cheaperCleared } = await import('../src/eval/outcome.js');
 const { pendingSecondLook } = await import('../src/eval/schedule.js');
 const { unseenCalls } = await import('../src/eval/plan.js');
 const { startWaiting } = await import('../src/proxy.js');
+const { HANDED_OVER_DEPLOY } = await import('../src/jobs.js');
 const { runPageOf } = await import('../src/workloadPage.js');
 const { app } = await import('../src/server.js');
 
@@ -392,6 +393,39 @@ test('negative: a person switching while a second look waits answers it, and no 
   const jobs = await db.prepare(`SELECT payload FROM jobs WHERE kind = 'eval_run' AND status = 'queued' AND (payload::jsonb ->> 'workloadId') = ?`)
     .all(w.id);
   assert.deepEqual(jobs, [], `nothing queued after the switch: ${JSON.stringify(jobs)}`);
+});
+
+test('a second look a deploy cut short starts again on the new calls it had drawn, rather than short of them', async () => {
+  const { workspace, workload: w, seq: set } = await seeded({ n: 200, models: [DRIFTY], mode: 'auto' });
+  assert.equal((await runEvaluation(w.id)).ok, true);
+  await enable(workspace.id, [STEADY]);
+  const second = await runEvaluation(w.id);
+  assert.equal(second.ok, true, JSON.stringify(second));
+  assert.equal((await resultOf(second.runId, STEADY)).confirm_verdict, 'insufficient');
+  // the calls it waits for arrive, and the one that brings them queues its second look
+  let i = 200;
+  while ((await unseenCalls(await load(w.id))) < 88) await record(workspace.id, w.id, i++, set);
+  assert.equal(await startWaiting(), 1);
+  const job = await db.prepare(`SELECT id FROM jobs WHERE kind = 'eval_run' AND status = 'queued' AND (payload::jsonb ->> 'workloadId') = ?`)
+    .get(w.id);
+  assert.ok(job, 'a second look is queued');
+  /* its first attempt drew sixty of the new calls before a deploy handed it over (HANDED_OVER in src/jobs.js), and the
+     same job starts it again */
+  const unseen = await unseenCalls(await load(w.id));
+  const drew = await db.prepare(`SELECT c.id FROM calls c WHERE c.workload_id = ? AND NOT EXISTS (SELECT 1 FROM eval_samples s
+      JOIN eval_runs r ON r.id = s.run_id WHERE s.call_id = c.id AND r.workload_id = ?) ORDER BY c.created_at DESC LIMIT 60`).all(w.id, w.id);
+  const dead = `run_handed_${process.pid}`;
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, outcome, shape_kind, reference_model, created_at, started_at,
+      finished_at, trigger, job_id, error) VALUES (?, ?, ?, 'failed', 'interrupted', ?, ?, ?, ?, ?, 'second_look', ?, ?)`)
+    .run(dead, workspace.id, w.id, w.shape_kind, w.reference_model, now() - 120000, now() - 120000, now() - 60000, job.id, HANDED_OVER_DEPLOY);
+  for (const c of drew) await db.prepare('INSERT INTO eval_samples (id, run_id, call_id) VALUES (?, ?, ?)').run(`smp_${c.id}`, dead, c.id);
+  assert.equal(await unseenCalls(await load(w.id)), unseen - 60, 'drawn by its first attempt');
+  const look = await runEvaluation(w.id, { trigger: 'second_look', jobId: job.id });
+  assert.equal(look.ok, true, JSON.stringify(look));
+  const again = await resultOf(look.runId, STEADY);
+  assert.equal(Number(again.confirm_runs), unseen, `the new calls its first attempt drew are its own: ${again.confirm_runs} of ${unseen}`);
+  assert.equal(again.confirm_verdict, 'cleared', `${again.confirm_verdict} on ${again.confirm_runs}`);
+  assert.equal((await load(w.id)).routed_model, STEADY, 'and it switches, as it would have before the deploy');
 });
 
 test('negative: a workspace that measures only when asked books no second look by itself', async () => {
