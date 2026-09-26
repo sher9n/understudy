@@ -426,8 +426,10 @@ test('a model the second look never reached is not read as confirmed', async () 
     assert.notEqual(b.confirm_verdict, 'cleared');
     assert.equal(steady.confirm_verdict, 'not_reached', 'two looks were spent on the two cheaper ones');
     assert.equal(confirmed(steady), 0);
-    // nothing stood behind any of them twice, so the cheapest comes first, and nobody is told it is ready
-    assert.equal(cheaperCleared(await results(out.runId))[0].model_id, 'vendor/lucky-a');
+    /* nothing stood behind any of them twice: the two that did not hold up on their second look are never offered (the
+       owner's rule of 26 Sep 2026, failedSecondLook), the one the looks never reached waits for its own, and nobody is told
+       it is ready */
+    assert.deepEqual(cheaperCleared(await results(out.runId)).map((r) => r.model_id), ['vendor/steady-small']);
     const rest = await restingStatus(workload.id);
     assert.equal(rest.note, 'A candidate cleared once and needs a second look');
     const w = await load(workload.id);

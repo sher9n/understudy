@@ -228,9 +228,12 @@ test('a model that clears on one lucky look is not switched: the second look on 
   assert.ok(lucky.confirm_runs >= 88, `a second look as large as the first: ${lucky.confirm_runs}`);
   const w = await load(workload.id);
   assert.equal(w.routed_model, null, 'nothing is switched on one look');
-  assert.equal(w.status_note, 'A candidate cleared once and needs a second look');
-  const said = await db.prepare(`SELECT title FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 3`).all(workload.id);
-  assert.ok(said.some((a) => /cleared your bar .* once/.test(a.title)), JSON.stringify(said));
+  /* and it is said as that: looked at again and found wanting, never "needs a second look" over one that had it, and
+     nobody is asked to approve it (the owner's rule of 26 Sep 2026, failedSecondLook) */
+  assert.equal(w.status_note, 'A candidate passed once, but not on new requests');
+  const said = await db.prepare(`SELECT title, detail FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 3`).all(workload.id);
+  assert.ok(said.some((a) => /passed once on .*, but not on new requests/.test(a.title)), JSON.stringify(said));
+  assert.ok(!said.some((a) => /[Aa]pprove/.test(a.detail || '')), JSON.stringify(said));
 });
 
 test('a model that clears is not switched to when the customer\'s own model has no price to hold it against', async () => {

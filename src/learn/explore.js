@@ -2,7 +2,7 @@ import config from '../config.js';
 import { db, id, now } from '../db/index.js';
 import { addActivity, track } from '../traffic.js';
 import { chargeEval } from '../billing.js';
-import { extract, disagreement, structuredCompare, proseText } from '../eval/compare.js';
+import { extract, disagreement, structuredCompare, proseText, heldFieldChanged } from '../eval/compare.js';
 import { judgeBarPair, judgeQuality, numbersDiffer } from '../eval/judge.js';
 import { keptChecklist } from '../eval/checklist.js';
 import { promote, revert, everReverted, keyOfSpec, rollBack } from '../eval/promote.js';
@@ -459,6 +459,12 @@ async function agreementOf(body, used, other, shape, scope, bar = null) {
     if (!b.ok) return { agreement: 0, cost: 0, judgedBy: 'no answer' };
     if (typeof a.value === 'string' && typeof b.value === 'string' && numbersDiffer(b.value, a.value)) {
       return { agreement: 0, cost: 0, judgedBy: 'numbers' };
+    }
+    /* A structured answer's figures are read as strictly: one that changes a figure the customer's model gives the same way
+       on nearly every call, as its measurement read them (bar.stable; heldFieldChanged, figures only), counts as short. It
+       used to reach the judge as its JSON, a changed amount and all. With no such fields read, none is held. */
+    if (shape !== 'free_text' && bar.stable?.size && heldFieldChanged(b.value, a.value, a.value, shape, { figuresOnly: true, only: bar.stable })) {
+      return { agreement: 0, cost: 0, judgedBy: 'fields' };
     }
     const text = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
     // the background answer judged against the used one, as a measurement judges a model against the customer's

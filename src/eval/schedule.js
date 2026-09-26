@@ -1,7 +1,7 @@
 import { db, now } from '../db/index.js';
 import config from '../config.js';
-import { FOUND, OUTCOME_OF } from './outcome.js';
-import { wouldTry } from './plan.js';
+import { FOUND, OUTCOME_OF, cheaperCleared } from './outcome.js';
+import { wouldTry, usableCalls } from './plan.js';
 
 /* When a workload is next measured by itself.
  *
@@ -62,6 +62,50 @@ export async function waitForCalls(workloadId, calls) {
   const at = Math.round(now() + cadence * DAY);
   await db.prepare('UPDATE workloads SET measure_at_calls = ?, recheck_after = ? WHERE id = ?').run(Math.round(calls), at, workloadId);
   return at;
+}
+
+/* What waits for a second look for want of new calls: the models the newest measurement that compared anything would still
+   offer (cheaperCleared: priced, cheaper, never found wanting on a second look) whose second look found too few calls they
+   had never seen ('insufficient'). Only for a workload still on its customer's own model: one switched is re-checked, with
+   what serves it, by the usual measurement. Answers { runId, keys, models, sampled } or null: the rows by name, the models
+   a second-look run races (a strategy's by its parts, rebuilt by the run as usual), and the calls that measurement drew,
+   which the second-look run's first look draws again, answered from what they already bought. */
+export async function pendingSecondLook(workloadId) {
+  const w = await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(workloadId);
+  if (!w || w.routed_model) return null;
+  const last = await db.prepare(
+    `SELECT id FROM eval_runs WHERE workload_id = ? AND status = 'done' AND ${OUTCOME_OF()} = 'compared'
+      ORDER BY created_at DESC LIMIT 1`).get(workloadId);
+  if (!last) return null;
+  const results = await db.prepare('SELECT * FROM eval_results WHERE run_id = ?').all(last.id);
+  const waiting = cheaperCleared(results).filter((r) => r.confirm_verdict === 'insufficient');
+  if (!waiting.length) return null;
+  const models = new Set();
+  for (const r of waiting) {
+    let spec = null;
+    try { spec = r.arm_json ? JSON.parse(r.arm_json) : null; } catch { spec = null; }
+    const parts = spec?.kind === 'cascade' ? [spec.first]
+      : spec?.kind === 'router' ? (Array.isArray(spec.options) ? spec.options : [spec.cheap, spec.strong]) : [];
+    if (parts.length) { for (const p of parts) if (p?.model) models.add(p.model); } else models.add(spec?.model || r.model_id);
+  }
+  const sampled = new Set((await db.prepare('SELECT call_id FROM eval_samples WHERE run_id = ?').all(last.id)).map((x) => x.call_id));
+  return { runId: last.id, keys: waiting.map((r) => r.model_id), models, sampled };
+}
+
+/* After a measurement whose second look found too few new calls: booked to look again the moment enough have arrived, as a
+   second-look run (trigger 'second_look'), rather than at the next measurement a whole rhythm out. A whole new measurement
+   drew its own first look from the new calls first and left its second look short again, so a workload with little
+   traffic never switched: on 26 Sep 2026 an invoice workload had nine models matching every answer, none ever looked at
+   twice. `least` is how many calls a second look needs that no measurement has drawn, and `unseen` how many there are now;
+   every call that arrives is one more. Only where the workspace measures by itself, and never for a count no workload
+   could reach. Answers when it is booked for, or null. */
+export async function bookSecondLook(workload, { least, unseen }) {
+  if (!(await cadenceOf(workload.workspace_id))) return null;
+  if (!(await pendingSecondLook(workload.id))) return null;
+  const have = await usableCalls(workload);
+  const need = have + Math.max(1, Math.ceil(least) - Math.max(0, unseen));
+  if (need > config.EVAL_POOL_MAX) return null;
+  return waitForCalls(workload.id, need);
 }
 
 /* A measurement nobody asked for that the plan turned down for any other reason: looked at again later,

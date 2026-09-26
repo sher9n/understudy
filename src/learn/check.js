@@ -4,6 +4,7 @@ import { db, now } from '../db/index.js';
 import { extract } from '../eval/compare.js';
 import { ask as askJev, clip } from '../jev.js';
 import { textOf } from './threads.js';
+import { cutMiddle } from '../eval/ask.js';
 
 /* The quick check a cascade puts between a cheap model's answer and the customer.
  *
@@ -46,14 +47,15 @@ export function structureOf(body, response, shape) {
   return { ok: true, value: got.value };
 }
 
-/** What Jev reads of a request: its instructions and the last thing asked. */
+/** What Jev reads of a request: its instructions and the last thing asked, each cut from the middle when long, so the
+    end of a long request (often the question itself, after the document it is about) is never what is cut. */
 export function requestText(body) {
   const msgs = Array.isArray(body?.messages) ? body.messages : [];
   const sys = msgs.filter((m) => m.role === 'system' || m.role === 'developer').map((m) => textOf(m.content)).join('\n');
   const last = msgs.filter((m) => m.role === 'user').map((m) => textOf(m.content)).slice(-1)[0] || '';
   const tools = Array.isArray(body?.tools) && body.tools.length
     ? `\nTools it may call: ${body.tools.map((t) => t?.function?.name).filter(Boolean).join(', ')}` : '';
-  return `${sys ? `Instructions: ${clip(sys, 1600)}\n` : ''}Request: ${clip(last, 1400)}${tools}`;
+  return `${sys ? `Instructions: ${cutMiddle(sys, 1600)}\n` : ''}Request: ${cutMiddle(last, 1400)}${tools}`;
 }
 
 /** What Jev reads of an answer: its words, or the tool calls it made. */

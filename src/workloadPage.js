@@ -8,7 +8,7 @@ import { lastAsked, messagesText, responseText } from './callText.js';
 import { valueOf, optimizingSince, paceOf } from './eval/value.js';
 import { routedSavings } from './eval/actual.js';
 import { cadenceOf } from './eval/schedule.js';
-import { outcomeOf } from './eval/outcome.js';
+import { outcomeOf, failedSecondLook, DID_NOT_HOLD_UP } from './eval/outcome.js';
 import { canJudge } from './eval/judge.js';
 import { servingKey } from './eval/promote.js';
 import { controlRecord, barOf } from './learn/control.js';
@@ -240,6 +240,11 @@ function tagOf(r, sum, w) {
     return tag('ok', `${cleared} ${cleared === 1 ? 'model' : 'models'} passed`,
       'A model that passes is tested again on new requests before anything switches.');
   }
+  // passed once and not on the new requests of its second test: never switched to or offered (failedSecondLook)
+  if (Number(sum?.fell) > 0) {
+    return tag('warn', 'Passed once, not again', "A cheaper model passed on this test's requests, but not again on new requests it had never "
+      + 'seen, so nothing switches.');
+  }
   // held back only because the judge got answers planted to test it wrong (see candOf)
   if (Number(sum?.within) > 0 && judgeErrors(r) > 0) {
     return tag('warn', 'Passed, judge unsure', 'A model passed as the judge read it, but the judge got some answers wrong when it was '
@@ -261,9 +266,12 @@ async function measurementsOf(w) {
   if (!runs.length) return [];
   const first = await db.prepare('SELECT id FROM eval_runs WHERE workload_id = ? ORDER BY created_at LIMIT 1').get(w.id);
   const serving = w.routed_model ? await servingKey(w) : null;
+  // the second looks that did not hold up, by the rule every screen reads (failedSecondLook in src/eval/outcome.js)
+  const fell = `e.confirm_verdict IN (${DID_NOT_HOLD_UP.map((v) => `'${v}'`).join(', ')})`;
   const sums = await db.prepare(
     `SELECT e.run_id,
-            COUNT(*) FILTER (WHERE e.verdict = 'cleared' AND e.model_id <> ?) AS cleared,
+            COUNT(*) FILTER (WHERE e.verdict = 'cleared' AND e.model_id <> ? AND NOT COALESCE(${fell}, false)) AS cleared,
+            COUNT(*) FILTER (WHERE e.verdict = 'cleared' AND ${fell}) AS fell,
             COUNT(*) FILTER (WHERE e.verdict = 'review' AND e.model_id <> ?) AS close,
             COUNT(*) FILTER (WHERE e.verdict = 'cleared' AND e.confirm_verdict IN ('cleared', 'live') AND e.model_id <> ?) AS twice,
             COUNT(*) FILTER (WHERE e.verdict = 'cleared' AND e.model_id = ?) AS kept,
@@ -278,7 +286,8 @@ async function measurementsOf(w) {
     return {
       id: r.id,
       at: start,
-      what: r.trigger === 'manual' ? 'Started manually' : (r.trigger === 'first' || r.id === first?.id) ? 'First test' : 'Regular re-test',
+      what: r.trigger === 'manual' ? 'Started manually' : r.trigger === 'second_look' ? 'Second test, on new requests'
+        : (r.trigger === 'first' || r.id === first?.id) ? 'First test' : 'Regular re-test',
       n: Number(r.sample_size) || 0,
       mins: r.finished_at ? Math.max(1, Math.round((Number(r.finished_at) - start) / 60000)) : null,
       // what it cost the customer, our fee included, as they were charged for it (chargeEval)
@@ -411,6 +420,20 @@ function slowerWhy(r, sp) {
   return null;
 }
 
+/* Why a model that passed once did not pass again, in its second look's own figures (lookAgain in src/eval/run.js). */
+function secondWhy(r, differs) {
+  const n = Number(r.confirm_runs) || 0;
+  const on = n ? `on ${n} new requests it had never seen` : 'on new requests it had never seen';
+  const pct = (x) => `${Math.round(Number(x) * 10) / 10}%`;
+  const first = "It stayed within the allowed difference on this test's requests, but";
+  if (r.confirm_verdict === 'slower') return `${first} ${on} it was too slow, so it isn't switched to.`;
+  if (r.confirm_verdict === 'busy') return `${first} ${on} its provider couldn't keep up, so it isn't switched to.`;
+  const fig = r.confirm_gap === null || r.confirm_gap === undefined ? '' : ` on ${pct(r.confirm_gap)} of them`;
+  const allowed = r.confirm_floor === null || r.confirm_floor === undefined ? '' : `, where ${pct(r.confirm_floor)} is allowed`;
+  const close = r.confirm_verdict === 'review' ? ' it came too close to the limit to be sure:' : '';
+  return `${first} ${on}${close} it ${differs}${fig}${allowed}. So it isn't switched to, and the next test looks again.`;
+}
+
 function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = false, floorPct = null, quality = false, names = new Map(), speed = null }) {
   const name = nameOfResult(r);
   const n = Number(r.runs) || 0;
@@ -437,6 +460,10 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
         : ['mut', 'Stopped early', 'The test was stopped before this model had answered every request.'];
   } else if (r.verdict === 'cleared' && (r.confirm_verdict === 'cleared' || r.confirm_verdict === 'live')) {
     out = ['ok', 'Passed twice', "It stayed within the allowed difference on this test's requests, and again on new requests it had never seen."];
+  } else if (r.verdict === 'cleared' && failedSecondLook(r)) {
+    /* passed its first look and not its second, on new requests: never offered or switched to (failedSecondLook). Read as
+       "Passed once" in green, it said it would be tested again, when it had been, and had not passed. */
+    out = ['bad', 'Passed once, not again', secondWhy(r, differs)];
   } else if (r.verdict === 'cleared') {
     out = ['ok', 'Passed once', "It stayed within the allowed difference on this test's requests. It's tested again on new requests before anything switches."];
   } else if (r.verdict === 'review' && unsure && floorPct !== null && Number(r.gap_hi ?? r.gap_pct) <= floorPct) {
@@ -593,6 +620,12 @@ function mainTake(run, cands, w, { small = null, refName }) {
   if (cleared.length) {
     return `${said}${cleared.length === 1 ? 'One model' : `${cleared.length} models`} passed. `
       + 'A model is tested again on new requests before anything switches.';
+  }
+  // passed once and was tested again, and did not pass there (failedSecondLook)
+  const fellBack = cands.find((c) => c.verdict === 'Passed once, not again');
+  if (fellBack) {
+    return `${said}${fellBack.said} passed once, but not again on ${fellBack.second ? `${fellBack.second} ` : ''}new requests it had never `
+      + "seen, so it isn't switched to. The next test looks again.";
   }
   const bar = Number(run.floor_pct) || 0;
   const barWords = `${Math.round(bar * 10) / 10}%`;
@@ -789,6 +822,7 @@ function comparedWords(by, shape, scored) {
   if (b === 'same text') return 'The text was identical';
   if (b === 'checklist' || b.endsWith('+checklist')) return 'Checked against the instructions in the request';
   if (b === 'numbers' || b.endsWith('+numbers')) return "A figure in it differs from the original model's";
+  if (b === 'fields') return 'A field the original model gave the same way twice differs in it';
   if (b === 'jev-quality' || b === 'llm-quality') return 'Read by a judge model twice, once each way round';
   if (b) return 'Read by a judge model';
   return scored && shape !== 'free_text' ? 'Compared field by field' : null;
@@ -808,6 +842,8 @@ function readingsWords(r) {
       return { side: side(p, i), leaned: leaned && leaned !== side(p, i) ? leaned : null, sure: r.chances?.[i] ?? null };
     }),
     split: !!r.split, better: !!r.better, broke: r.broke || null, figures: !!r.figures,
+    // the field of a structured answer it changed that the original model gave the same way both times (heldFieldChanged)
+    field: r.field || null,
   };
 }
 

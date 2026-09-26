@@ -23,7 +23,7 @@ import { saveDef } from './learn/outcomes.js';
 import { learningView, exploreOf, forgetState, EXPLORE_MODES } from './learn/explore.js';
 import { certificate, promote, revert, trafficOf, servingKey, heldBack } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
-import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
+import { outcomeOf, cheaperCleared, carriesOf, failedSecondLook, confirmed } from './eval/outcome.js';
 import { routingModeOf, ROUTING_MODES } from './eval/confidence.js';
 import { switchStory } from './eval/switch-story.js';
 import { valueOf } from './eval/value.js';
@@ -1027,9 +1027,21 @@ api.post('/workloads/:id/promote', async (req, res) => {
      cleared, whatever it cost, used to be taken. */
   const pick = req.body?.model || (cert ? cheaperCleared(cert.results)[0]?.model_id : null);
   if (!pick) return fail(res, 400, 'Nothing has cleared your bar on this workload yet.');
-  // a person may take all of the calls at once; otherwise it starts on a share and grows
-  return res.json(await promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it',
-    rollout: req.body?.rollout !== false }));
+  /* What the newest measurement found of it. One its second look did not hold up for is not switched to on anybody's
+     word (failedSecondLook in src/eval/outcome.js): the page no longer offers it, and nor does this. */
+  const row = cert ? cert.results.find((r) => r.model_id === pick) || null : null;
+  if (row && failedSecondLook(row)) {
+    return fail(res, 409, `${pick} passed once, but did not hold up when it was tested again on requests it had never seen, `
+      + 'so it cannot be switched to. The next test looks at it again.');
+  }
+  /* Every call at once only for one that passed twice: a share at a time, growing while its calls hold up, is what watches
+     a model that has passed once. Otherwise it starts on a share and grows. */
+  const rollout = req.body?.rollout !== false;
+  if (!rollout && !(row && confirmed(row))) {
+    return fail(res, 409, 'Only a model that passed twice can take every request at once. Switched to without that, '
+      + 'it starts on a small share of requests and takes more while they hold up.');
+  }
+  return res.json(await promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it', rollout }));
 });
 
 /* A switch still taking over a share at a time, given every call now, because a person says so. */

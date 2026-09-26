@@ -245,8 +245,8 @@ export default function HowRouting({ me, go, inApp = false }) {
 
         <Step n={3} id="priority" title="The best are put in order" figure={<Priorities />}>
           <p>
-            Several options can pass. Understudy puts the biggest saving it can count on first, so a clear pass beats a
-            narrow one.
+            Several options can pass. Understudy puts the biggest saving it can count on first. A clear pass beats a
+            narrow one only when their savings are close.
           </p>
           <p className="hwsoft">Your <b className="hwterm">routing priority</b>, set in Settings, decides how careful it is.</p>
         </Step>

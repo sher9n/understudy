@@ -137,9 +137,12 @@ const BEHAVIOUR = {
 };
 const categories = ['travel', 'food', 'office'];
 const JSONS = {
-  [REF]: (i) => JSON.stringify({ category: categories[nextSeed() % 3], total: 100 + i }),
-  'vendor/good-json': (i) => JSON.stringify({ category: categories[nextSeed() % 3], total: 100 + i }),
+  [REF]: (i) => JSON.stringify({ category: categories[nextSeed() % 3], total: 100 + i, currency: 'EUR' }),
+  'vendor/good-json': (i) => JSON.stringify({ category: categories[nextSeed() % 3], total: 100 + i, currency: 'EUR' }),
   'vendor/broken-json': () => '{"category": "travel", "total": ',
+  /* right on everything the judge looks at, and on every third invoice the wrong currency: a field the customer's model
+     gives the same way every time, which no judge here reads */
+  'vendor/slip-json': (i) => JSON.stringify({ category: categories[nextSeed() % 3], total: 100 + i, currency: i % 3 === 0 ? 'USD' : 'EUR' }),
 };
 const ECHO = { [REF]: (i) => `The answer to request ${i} is ${i * 2}.`, 'vendor/echo': (i) => `The answer to request ${i} is ${i * 2}.` };
 
@@ -215,7 +218,7 @@ const server = http.createServer((req, res) => {
 });
 
 const CANDIDATES = ['vendor/good-poet', 'vendor/nosign-poet', 'vendor/short-poet', 'vendor/landlocked-poet', 'vendor/good-json',
-  'vendor/broken-json', 'vendor/echo', 'judge/small'];
+  'vendor/broken-json', 'vendor/slip-json', 'vendor/echo', 'judge/small'];
 
 test.before(async () => {
   await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
@@ -250,7 +253,7 @@ async function seed({ n = 220, kind = 'poem', enabled = [], mode: optimize = 'au
       : kind === 'echo'
         ? { model: REF, messages: [{ role: 'system', content: 'Answer with the figure asked for, in one sentence.' }, { role: 'user', content: `Double request #${i}` }] }
         : { model: REF, messages: [{ role: 'system', content: system }, { role: 'user', content: `Write a poem about the sea, #${i}` }] };
-    const answer = kind === 'json' ? JSON.stringify({ category: categories[i % 3], total: 100 + i })
+    const answer = kind === 'json' ? JSON.stringify({ category: categories[i % 3], total: 100 + i, currency: 'EUR' })
       : kind === 'echo' ? ECHO[REF](i) : poem(40, i);
     workload = workload || await workloadFor(workspace.id, request);
     await recordCall({
@@ -463,6 +466,51 @@ test('a structured workload whose model disagrees with itself is held to "at lea
     + `${good.errors} errors, stopped ${good.stopped}; judge check ${run.judge_check_json}`);
   const broken = await resultOf(out.runId, 'vendor/broken-json');
   assert.notEqual(broken.verdict, 'cleared');
+});
+
+test('a structured answer judged "at least as good" still fails when it changes a field its customer model gives the same way every time', async () => {
+  mode.jev = 'fair';
+  mode.llm = 'fair';
+  const { workload } = await seed({ kind: 'json', enabled: ['vendor/good-json', 'vendor/slip-json'] });
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const run = await runOf(out.runId);
+  assert.equal(run.yardstick, 'quality', 'judged "at least as good", since its categories differ from call to call');
+  // the fields its model gives the same way on nearly every call: never the category, which it picks afresh each time
+  const stableFields = JSON.parse(run.plan_json).yardstick?.stableFields;
+  assert.deepEqual([...(stableFields || [])].sort(), ['currency', 'total'], JSON.stringify(stableFields));
+  const good = await resultOf(out.runId, 'vendor/good-json');
+  assert.equal(good.verdict, 'cleared', `keeps every field the customer's model keeps: ${good.verdict}, ${good.gap_pct}% against ${run.floor_pct}%`);
+  const slip = await resultOf(out.runId, 'vendor/slip-json');
+  assert.notEqual(slip.verdict, 'cleared', `no judge here reads the currency, so this is the field check at work: ${slip.verdict}, ${slip.gap_pct}%`);
+  const by = await judgedBy(out.runId, 'vendor/slip-json');
+  assert.ok((by.fields || 0) > 0, `decided in code on the invoices it changed the currency of: ${JSON.stringify(by)}`);
+  const one = await db.prepare(`SELECT readings FROM eval_replays WHERE run_id = ? AND model_id = ? AND judged_by = 'fields' LIMIT 1`)
+    .get(out.runId, 'vendor/slip-json');
+  assert.equal(JSON.parse(one.readings).field, 'currency', 'and its page can name the field');
+
+  /* the daily checks read a served answer the same way, held to the fields that measurement read (barOf): the customer's
+     model is asked again, and gives the same currency again */
+  forgetBar(workload.id);
+  const { stable } = await barOf(workload);
+  assert.deepEqual([...(stable || [])].sort(), ['currency', 'total'], 'read back for the daily checks');
+  const body = { model: REF, messages: [{ role: 'system', content: 'Read the invoice and give its category and total as JSON.' }, { role: 'user', content: 'Invoice #3' }],
+    response_format: { type: 'json_object' } };
+  const as = (x) => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(x) } }] });
+  const own = as({ category: 'travel', total: 103, currency: 'EUR' });
+  const ownAgain = async () => ({ json: as({ category: 'office', total: 103, currency: 'EUR' }), cost: 0.002 });
+  const slipped = await scoreServed(body, as({ category: 'food', total: 103, currency: 'USD' }), own, 'json', { yardstick: 'quality', again: ownAgain, stable });
+  assert.equal(slipped.score, 1, JSON.stringify(slipped));
+  assert.equal(slipped.judgedBy, 'fields');
+  assert.equal(slipped.field, 'currency');
+  assert.equal(slipped.twice, true, 'after asking the customer\'s model a second time');
+  // one that keeps what the customer's model keeps, and differs only in what it varies itself, is read by the judge
+  const kept = await scoreServed(body, as({ category: 'food', total: 103, currency: 'EUR' }), own, 'json', { yardstick: 'quality', again: ownAgain, stable });
+  assert.notEqual(kept.judgedBy, 'fields', JSON.stringify(kept));
+  assert.equal(kept.score, 0, JSON.stringify(kept));
+  // and a check with no fields read to go on (a measurement from before they were read) holds none, rather than guess
+  const unread = await scoreServed(body, as({ category: 'food', total: 103, currency: 'USD' }), own, 'json', { yardstick: 'quality', again: ownAgain });
+  assert.notEqual(unread.judgedBy, 'fields', JSON.stringify(unread));
 });
 
 test('negative: a workload whose model agrees with itself stays on "the same answer", and pays for nothing new', async () => {

@@ -232,7 +232,10 @@ export const forgetPlanAll = () => pageMemo.clear();
 
 /* The whole plan, and whether it can run. `reason` is written to be shown to somebody as it
    is: it is the sentence under a button that cannot be pressed. */
-export async function planFor(workload, { canRoute, forRun = false, memo = false, automatic = false } = {}) {
+/* `only`, a set of model ids, plans a measurement of those models alone: a second look at the ones that passed once and had
+   too few new calls to be looked at again (a run with trigger 'second_look', see pendingSecondLook in src/eval/run.js),
+   quoted and turned down on what that costs, not on what a whole measurement would. */
+export async function planFor(workload, { canRoute, forRun = false, memo = false, automatic = false, only = null } = {}) {
   if (memo && !forRun) {
     const key = [workload.speed_pref, workload.judge_mode, workload.routed_model, workload.reference_model, workload.status, canRoute].join('|');
     const hit = pageMemo.get(workload.id);
@@ -348,7 +351,8 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
       return plan;
     }
   }
-  if (automatic && first.order.length) {
+  // (a plan of some models only is quoted on those models, below, never on everything a whole measurement would try)
+  if (automatic && first.order.length && !only) {
     const early = estimate({ ...plan, order: first.order, refPrice: first.refPrice }, profile, facts, workload);
     if (early > plan.worth.budgetUsd) {
       plan.notWorth = true;
@@ -397,6 +401,13 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
     plan.order = [...front, ...plan.order];
     plan.models = Math.max(plan.models, front.length);
     plan.routerParts = front.length;
+  }
+  if (only) {
+    // the models it was asked for, as the plan had them (their recipes and ranks), and nothing else
+    plan.order = plan.order.filter((q) => only.has(q.model));
+    plan.models = Math.max(1, plan.order.length);
+    plan.routerParts = 0;
+    plan.only = [...only];
   }
   plan.candidates = plan.order.map((r) => ({ model_id: r.model, per: r.price, recipe: r.recipe }));
 

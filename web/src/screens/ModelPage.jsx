@@ -608,7 +608,8 @@ const sureWords = (p) => (p === null || p === undefined || !Number.isFinite(Numb
 function Readings({ r }) {
   const each = Array.isArray(r.each) ? r.each : [];
   const both = (side) => each.length === 2 && each.every((e) => e.side === side);
-  const why = r.figures ? 'A figure in it differs from the one the original model gave both times, so it counts as worse whatever a reading says.'
+  const why = r.field ? `Its ${r.field === 'the answer' || r.field === 'the tool called' ? r.field : `"${r.field}"`} differs from what the original model gave both times, so it counts as worse whatever a reading says.`
+    : r.figures ? 'A figure in it differs from the one the original model gave both times, so it counts as worse whatever a reading says.'
     : r.broke ? `It breaks a rule in the request's instructions ("${r.broke}"), so it counts as worse whatever the readings say.`
       : each.length !== 2 ? null
         : both('original') ? "Both readings found the original model's answer better, so it counts as clearly worse."
@@ -629,7 +630,7 @@ function Readings({ r }) {
           ))}
         </ul>
       )}
-      {why && <p className={`wp-ansnote${r.figures || r.broke || both('original') ? ' is-decide' : ''}`}>{why}</p>}
+      {why && <p className={`wp-ansnote${r.field || r.figures || r.broke || both('original') ? ' is-decide' : ''}`}>{why}</p>}
     </div>
   );
 }

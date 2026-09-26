@@ -154,6 +154,151 @@ export function proseText(pairs, side) {
   return pairs.map((p) => `${p.path}: ${p[side]}`).join('\n');
 }
 
+/* Numbers, checked in code, because Jev's own guide says it is not reliable with them. When two
+   answers state the same number of figures and the figures differ, the answers differ, whatever
+   anybody's reading of the prose says: "The total is $1,234.50" against "$1,243.50". When the
+   counts differ, the answers are simply written differently ("4 March" against "2026-03-04",
+   "thirty days" against "30 days") and the reading decides. Thousands separators and decimal
+   commas are read the way people write them. */
+export function numbersOf(text) {
+  const out = [];
+  for (const m of String(text ?? '').matchAll(/\d+(?:[.,]\d+)*/g)) {
+    let t = m[0];
+    if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) t = t.replace(/,/g, '');
+    else if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) t = t.replace(/\./g, '').replace(',', '.');
+    else if (/^\d+,\d{1,2}$/.test(t)) t = t.replace(',', '.');
+    if (/^\d+(\.\d+)?$/.test(t)) t = String(Number(t));
+    out.push(t);
+  }
+  return out.sort();
+}
+
+/* Two answers carry different figures when they state the same count of them with different values,
+   or, when the counts differ, when an amount (a figure with a decimal part or a thousands separator)
+   in one is missing from the other: "Total 1,234.50" against "Total 1,243.50 (incl. 12% VAT)" is a
+   different answer. Plain small figures with different counts are left to the reading, because "4
+   March 2026" against "2026-03-04" carries the month as a figure on one side only. Figures on one
+   side alone say nothing, since the other may write them in words. */
+const AMOUNT = /^\d{1,3}([.,]\d{3})+([.,]\d+)?$|^\d+[.,]\d+$/;
+export function numbersDiffer(a, b) {
+  const x = numbersOf(a);
+  const y = numbersOf(b);
+  if (!x.length || !y.length) return false;
+  if (x.length === y.length) return x.join(',') !== y.join(',');
+  const amounts = (text) => [...String(text ?? '').matchAll(/\d+(?:[.,]\d+)*/g)].map((m) => m[0]).filter((t) => AMOUNT.test(t));
+  const ax = numbersOf(amounts(a).join(' '));
+  const ay = numbersOf(amounts(b).join(' '));
+  if (!ax.length && !ay.length) return false;
+  const count = (xs) => { const m = new Map(); for (const v of xs) m.set(v, (m.get(v) || 0) + 1); return m; };
+  const cx = count(ax);
+  const cy = count(ay);
+  for (const [v, n] of cx) if ((cy.get(v) || 0) !== n) return true;
+  for (const [v, n] of cy) if ((cx.get(v) || 0) !== n) return true;
+  return false;
+}
+
+/* A structured answer held to "at least as good" (its customer's model disagreed with itself too often for "the same
+   answer" to be a bar) is still held to the fields that model gives the same way both times: an amount, a date, an id, a
+   label, a yes or no, which tool was called. One that changes any of them is worse whatever a judge reads of it, since a
+   judge can see that two answers differ, not which one is right: the rule a written answer's figures are held to
+   (qualityAgainst in src/eval/run.js), for a structured answer's fields. Such an answer used to reach the judge as its
+   JSON, and a model that changed an invoice's total could be read as at least as good (26 Sep 2026). A field the
+   customer's model itself gave two ways is left to the judge, as before. Fields are compared as "the same answer"
+   compares them (sameValue): numbers by value, one-word labels whatever their case. A written field (isProse) is held
+   to its figures only, where both of the customer's answers state the same ones (numbersDiffer).
+
+   Answers the first held field `answer` changed, as { path, want, got }, or null when it changed none. With only one
+   answer from the customer's model (`refB` missing), nothing is known to be held, and it answers null. `figuresOnly`
+   holds numbers alone, for a reading that has one answer to hold it to and reads it strictly (a background answer,
+   agreementOf in src/learn/explore.js), as a written answer's figures are read there: every field of a varied workload
+   read that strictly would count almost every answer short.
+
+   `only`, the paths the customer's model gives the same way on nearly every call (stablePaths), holds those alone. Two of
+   its answers to one call can agree on a field it picks afresh each time purely by chance, a third of the time for a
+   choice of three, and a candidate held to that was failed for picking differently, as the customer's model itself does
+   (caught in test on 26 Sep 2026 before it shipped). A measurement always passes it; without it (a reading with no
+   measurement's paths to go on), every field the two answers share is held. */
+export function heldFieldChanged(answer, refA, refB, shapeKind, { figuresOnly = false, only = null } = {}) {
+  if (refA === undefined || refA === null || refB === undefined || refB === null) return null;
+  const holds = (path) => !only || only.has(path);
+  let x = answer;
+  let a = refA;
+  let b = refB;
+  if (shapeKind === 'tool_call') {
+    const names = (calls) => (Array.isArray(calls) ? calls.map((c) => c?.name ?? '').join(', ') : '');
+    // the customer's model called other tools each time: none of the arguments is held, since none lines up
+    if (names(a) !== names(b)) return null;
+    if (names(x) !== names(a)) {
+      return holds(TOOL_PATH) ? { path: TOOL_PATH, want: names(a), got: names(x) } : null;
+    }
+    x = (Array.isArray(x) ? x : []).map((c) => c?.args);
+    a = a.map((c) => c?.args);
+    b = b.map((c) => c?.args);
+  }
+  const named = (path) => (path === '$' ? 'the answer' : path);
+  const lx = leaves(x);
+  const la = leaves(a);
+  const lb = leaves(b);
+  for (const [path, va] of la) {
+    if (!lb.has(path) || !holds(path)) continue;
+    const vb = lb.get(path);
+    const vx = lx.has(path) ? lx.get(path) : undefined;
+    if (isProse(va) && isProse(vb)) {
+      if (typeof vx === 'string' && numbersOf(va).length && !numbersDiffer(va, vb) && numbersDiffer(vx, va)) {
+        return { path: named(path), want: numbersOf(va).join(', '), got: numbersOf(vx).join(', ') };
+      }
+      continue;
+    }
+    if (figuresOnly && (asNumber(va) === null || asNumber(vb) === null)) continue;
+    if (!sameValue(va, vb)) continue;
+    if (!sameValue(vx, va)) return { path: named(path), want: va, got: vx ?? null };
+  }
+  return null;
+}
+
+// what heldFieldChanged and stablePaths call which tool a tool-calling answer called
+const TOOL_PATH = 'the tool called';
+
+/* The fields of a structured answer its customer's model gives the same way on both of its answers to a call, on nearly
+   every call (`share`, of at least `least` calls that both answers have the field in): what heldFieldChanged holds a
+   candidate to. A field that agrees only as often as chance allows, a category the model picks afresh every time, is that
+   model's own variation, and is left to the judge. A written field counts by its figures, where both answers state any.
+   `pairs` are the customer's model's two answers to each call, as a measurement's bar reads them. Answers a Set of paths,
+   named as heldFieldChanged reads them before naming them for a page ('$' for an answer that is a single value). */
+export function stablePaths(pairs, shapeKind, { least = 10, share = 0.95 } = {}) {
+  const tally = new Map();
+  const count = (path, agreed) => {
+    const t = tally.get(path) || [0, 0];
+    t[0] += agreed ? 1 : 0;
+    t[1] += 1;
+    tally.set(path, t);
+  };
+  for (const [a0, b0] of pairs) {
+    if (a0 === undefined || a0 === null || b0 === undefined || b0 === null) continue;
+    let a = a0;
+    let b = b0;
+    if (shapeKind === 'tool_call') {
+      const names = (calls) => (Array.isArray(calls) ? calls.map((c) => c?.name ?? '').join(', ') : '');
+      count(TOOL_PATH, names(a) === names(b));
+      if (names(a) !== names(b)) continue;
+      a = (Array.isArray(a) ? a : []).map((c) => c?.args);
+      b = (Array.isArray(b) ? b : []).map((c) => c?.args);
+    }
+    const la = leaves(a);
+    const lb = leaves(b);
+    for (const [path, va] of la) {
+      if (!lb.has(path)) continue;
+      const vb = lb.get(path);
+      if (isProse(va) && isProse(vb)) {
+        if (numbersOf(va).length && numbersOf(vb).length) count(path, !numbersDiffer(va, vb));
+        continue;
+      }
+      count(path, sameValue(va, vb));
+    }
+  }
+  return new Set([...tally].filter(([, [agreed, n]]) => n >= least && agreed / n >= share).map(([path]) => path));
+}
+
 /** 0 means identical, 1 means a different answer. Null means a judge has to decide: free text, or a
  *  structured answer whose deciding fields all match and whose written fields differ in wording. */
 export function disagreement(a, b, shapeKind) {
@@ -221,9 +366,13 @@ export function marginFloor(noisePct, { marginPct, minPct }) {
  * because nothing varies more than a yes-or-no with the same mean.
  *
  * cleared: even the upper bound is inside the bar.
- * missed: even the lower bound is past the review band.
+ * missed: even the lower bound is past the review band, however few the calls. A sample too small to show a model
+ *   passes can still show it fails: said as "nothing can be said", it kept a model serving that its own re-check had
+ *   read as clearly worse (a short-poem workload on 26 Sep 2026: worse on 4 of 11 calls, at least 16% against a 5%
+ *   bar), since only "missed" switches what serves back.
  * review: the sample straddles the bar, so a person should look.
- * insufficient: a perfect run on this many calls could not clear the bar; nothing can be said.
+ * insufficient: a perfect run on this many calls could not clear the bar, and what it did shows nothing past the
+ *   review band either; nothing can be said.
  */
 const Z95 = 1.6449;
 export function wilson(mean, n, z = Z95) {
@@ -270,11 +419,12 @@ export function verdictWith(scores, floorPct, { reviewBand = 1.25, z = Z95 } = {
   const hi = share.hi * sevHi;
   const loPct = lo * 100;
   const hiPct = hi * 100;
+  // clearly worse is read before too few: it never needs as many calls as clearing does (see the comment above)
+  if (n > 0 && loPct > floorPct * reviewBand) return { verdict: 'missed', gap, lo: loPct, hi: hiPct };
   if (n === 0 || wilson(0, n, zz).hi * 100 > floorPct) {
     return { verdict: 'insufficient', gap, lo: loPct, hi: hiPct, need: callsToClear(floorPct, zz) };
   }
   if (hiPct <= floorPct) return { verdict: 'cleared', gap, lo: loPct, hi: hiPct };
-  if (loPct > floorPct * reviewBand) return { verdict: 'missed', gap, lo: loPct, hi: hiPct };
   return { verdict: 'review', gap, lo: loPct, hi: hiPct };
 }
 
