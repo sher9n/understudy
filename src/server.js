@@ -13,7 +13,7 @@ import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './aler
 
 import { slug, shapeSignals } from './classify.js';
 import { routeOnce, convertWaits, startWaiting } from './proxy.js';
-import { runEvaluation, closeAbandoned, settleOutcomes, rest } from './eval/run.js';
+import { runEvaluation, closeAbandoned, settleOutcomes, rest, handOver } from './eval/run.js';
 import { trueUp } from './trueup.js';
 import { parse as parseRoute } from '../web/src/router.js';
 import { nudgeForCatalog, dueForRecheck } from './eval/schedule.js';
@@ -565,6 +565,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
   process.on('uncaughtException', async (err) => {
     reportCrash({ where: 'the process', err, fatal: true });
+    // nothing more is taken up, and its measurements are left for the process that replaces it, if the database still
+    // answers (requeueDead finds them otherwise)
+    try { await stopJobs(); await handOver({ waitMs: 0 }); await releaseMine(); } catch { /* going down either way */ }
     try { await flushAllAlerts(); } catch { /* going down either way */ }
     setTimeout(() => process.exit(1), 400).unref();
   });
@@ -578,6 +581,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   await enqueue('recheck', {}, { runAfter: now() + 3600000, unique: true });
   await enqueue('learn', {}, { runAfter: now() + 10 * 60000, unique: true });
   startJobs();
+  /* Measurements whose process went without handing them over (killed by a deploy, or a crash) go back in the queue
+     once they have been silent for EVAL_SILENT_SEC, and ones nothing runs any more are closed, looked for every
+     minute rather than hourly, so none reads as running for EVAL_STALE_MIN (requeueDead in src/jobs.js, run first
+     by closeAbandoned). */
+  const sweepDead = () => closeAbandoned().catch((err) => console.error(`closing measurements with no process failed: ${err?.message || err}`));
+  await sweepDead();
+  setInterval(sweepDead, 60000).unref();
   /* A few minutes after boot, once the process a deploy replaced has stopped charging, the limit totals
      are read again from the ledger, so a charge it made without moving them is counted. */
   setTimeout(() => { reconcileLimitTotals().catch(() => {}); }, 3 * 60000).unref();
@@ -589,12 +599,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
   /* Stopping: no new work is claimed, measurements in flight are handed to the next process, alerts
      are sent, and the process ends once open requests finish, or after a few seconds whatever they do,
-     so a measurement handed over is not also finished here. */
+     so a measurement handed over is not also finished here. A deploy's SIGTERM reaches this process
+     only because `npm start` execs it (package.json): npm passes the signal to its own child, and that
+     child used to be a shell, which let it go, so with Railway's default of no time before SIGKILL
+     nothing here ever ran. The service's drainingSeconds (see the README) now gives it more than
+     handOver's wait and the five seconds below. */
   let leaving = false;
   const bye = async () => {
     if (leaving) return;
     leaving = true;
     await stopJobs();
+    // measurements stop at their next step, are charged for what they ran, and are left for the next process
+    await handOver().catch((err) => console.error(`handing measurements over failed: ${err?.message || err}`));
+    // any still waiting on a call by then are marked as they are, and every one's job goes back in the queue
     await releaseMine().catch((err) => console.error(`handing measurements over failed: ${err?.message || err}`));
     await flushAllAlerts().catch(() => {});
     server.close(() => process.exit(0));
