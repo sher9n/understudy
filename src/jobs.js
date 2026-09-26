@@ -192,22 +192,57 @@ export async function stopJobs() {
   if (timer) { clearInterval(timer); timer = null; }
 }
 
+/* What a measurement handed to another process carries as its run's error and its job's note. A process being stopped
+   hands its own over (handOver in src/eval/run.js, then releaseMine); one whose process went without doing so, killed
+   by a deploy or a crash, is found by the silence of its heartbeat (requeueDead). Anything starting with HANDED_OVER
+   reads as either: the next process closes such a run at once and starts its job again. */
+export const HANDED_OVER = 'handed over';
+export const HANDED_OVER_DEPLOY = `${HANDED_OVER}: a new version was starting`;
+export const HANDED_OVER_SILENT = `${HANDED_OVER}: the process running it had stopped`;
+
 /* A process being stopped (a deploy, a restart) hands its measurements over rather than leaving them
-   saying "running" for EVAL_STALE_MIN minutes with nothing behind them. Their runs are marked as
-   nothing running them (a heartbeat of zero, which reads as long gone), so the next process closes
-   them as interrupted at once, and their jobs go back in the queue, so the measurement starts again
-   there. One a person stopped is left alone: its job ends, as a stop should. */
+   saying "running" with nothing behind them. Those still in a call once handOver has waited for them are
+   marked here as nothing running them (a heartbeat of zero, which reads as long gone), so the next process
+   closes them at once, and their jobs go back in the queue, so the measurement starts again there. One a
+   person stopped is left alone: its job ends, as a stop should. */
 export async function releaseMine() {
   const ids = [...mine].filter(([, kind]) => kind === 'eval_run').map(([jobId]) => jobId);
   if (!ids.length) return 0;
   await db.prepare(
-    `UPDATE eval_runs SET heartbeat_at = 0
-      WHERE status = 'running' AND stop_requested_at IS NULL AND job_id = ANY(?::text[])`).run(ids);
+    `UPDATE eval_runs SET heartbeat_at = 0, error = COALESCE(error, ?)
+      WHERE status = 'running' AND stop_requested_at IS NULL AND job_id = ANY(?::text[])`).run(HANDED_OVER_DEPLOY, ids);
   return (await db.prepare(
-    `UPDATE jobs SET status = 'queued', run_after = ?, error = 'handed over: a new version was starting'
+    `UPDATE jobs SET status = 'queued', run_after = ?, error = ?
       WHERE status = 'claimed' AND id = ANY(?::text[])
         AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id AND r.stop_requested_at IS NOT NULL)`)
-    .run(now(), ids)).changes;
+    .run(now(), HANDED_OVER_DEPLOY, ids)).changes;
+}
+
+/* A measurement whose process has gone without handing it over: silent for EVAL_SILENT_SEC, though a living process
+   writes its runs' heartbeats every EVAL_BEAT_SEC (beat in src/eval/run.js). Railway used to kill the old process the
+   moment a deploy asked it to stop, so none was ever handed over, and each read as running for EVAL_STALE_MIN before
+   anything noticed, with its job still claimed by nobody. Its run is marked as handed over and its job goes back in
+   the queue now, so the next claim closes it and starts again, using again what it had paid for. One a person stopped
+   is left to closeAbandoned, which ends it as stopped, and so is one whose job has been taken up DEAD_MAX times, which
+   is a measurement that takes its process down rather than one a deploy caught. Run first by closeAbandoned, which
+   runs every minute; answers how many went back. */
+const DEAD_MAX = 5;
+export async function requeueDead() {
+  /* never a job a new run has taken up since (a restart can leave the dead run and its successor under one job id):
+     that job is the new run's, and closeAbandoned closes the dead one as interrupted and leaves the job with it */
+  const silent = now() - config.EVAL_SILENT_SEC * 1000;
+  const dead = await db.prepare(
+    `UPDATE eval_runs r SET heartbeat_at = 0, error = COALESCE(r.error, ?)
+       FROM jobs j
+      WHERE r.status = 'running' AND r.stop_requested_at IS NULL AND r.heartbeat_at > 0 AND r.heartbeat_at < ?
+        AND j.id = r.job_id AND j.status = 'claimed' AND j.attempts < ?
+        AND NOT EXISTS (SELECT 1 FROM eval_runs x WHERE x.job_id = j.id AND x.id <> r.id AND x.status = 'running'
+                          AND (x.heartbeat_at IS NULL OR x.heartbeat_at >= ?))
+      RETURNING r.job_id`).run(HANDED_OVER_SILENT, silent, DEAD_MAX, silent);
+  const ids = dead.rows.map((r) => r.job_id);
+  if (!ids.length) return 0;
+  return (await db.prepare(`UPDATE jobs SET status = 'queued', run_after = ?, error = ?
+      WHERE status = 'claimed' AND id = ANY(?::text[])`).run(now(), HANDED_OVER_SILENT, ids)).changes;
 }
 
 /* Anything claimed when the process died goes back in the queue at boot, with two exceptions for
@@ -227,5 +262,5 @@ export async function requeueStale() {
     `UPDATE jobs SET status = 'queued' WHERE status = 'claimed' AND claimed_at < ?
         AND NOT (kind = 'eval_run' AND EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id
                    AND r.status = 'running' AND r.heartbeat_at >= ?))`)
-    .run(stale, now() - config.EVAL_STALE_MIN * 60000)).changes;
+    .run(stale, now() - config.EVAL_SILENT_SEC * 1000)).changes;
 }

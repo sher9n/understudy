@@ -351,6 +351,14 @@ export const config = {
      It has to outlast the slowest single call: four tries of UPSTREAM_TIMEOUT_MS and three
      waits of at most UPSTREAM_RETRY_WAIT_MAX_MS, which by default is nine and a half minutes. */
   EVAL_STALE_MIN: num('EVAL_STALE_MIN', 15),
+  /* A process also beats for its own running measurements every EVAL_BEAT_SEC, whatever call they are waiting on, so
+     one silent for EVAL_SILENT_SEC has lost its process: a deploy (Railway gives the old one only the service's
+     drainingSeconds, see the README), a crash or a restart. It goes back in the queue then (requeueDead in src/jobs.js) and starts again
+     at once, instead of reading as running for EVAL_STALE_MIN. A process being stopped hands its own over sooner still
+     (handOver in src/eval/run.js), waiting up to EVAL_HANDOVER_WAIT_MS for them to charge what they ran. */
+  EVAL_BEAT_SEC: num('EVAL_BEAT_SEC', 30),
+  EVAL_SILENT_SEC: num('EVAL_SILENT_SEC', 150),
+  EVAL_HANDOVER_WAIT_MS: num('EVAL_HANDOVER_WAIT_MS', 8000),
 
   /* Choosing which models to measure, and racing them.
      A measurement tries models in order of what they are expected to save, several at once,

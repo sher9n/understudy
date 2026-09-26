@@ -616,21 +616,26 @@ test('a stop on the very last call of a measurement switches nothing', async () 
   void workspace;
 });
 
-test('a run a restart interrupted lets go of its job, so it can be measured again', async () => {
+test('a run a restart killed starts again from its job, and one that keeps killing its process lets go of it', async () => {
   const { workspace, workload } = await seed('release');
   const t = now();
   const jobId = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' });
-  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ? WHERE id = ?`).run(t - 25 * MIN, jobId);
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ?, attempts = 1 WHERE id = ?`).run(t - 25 * MIN, jobId);
   await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
               sample_size, created_at, started_at, heartbeat_at, steps_total, steps_done, job_id)
               VALUES ('run_release', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 40, ?)`)
     .run(workspace.id, workload.id, t - 25 * MIN, t - 25 * MIN, t - 20 * MIN, jobId);
-  // before: the dead job counted as open, so asking again was answered with it and ran nothing
+  /* before: the dead job counted as open, so asking again was answered with it and ran nothing. Now it goes back in
+     the queue (requeueDead), so the measurement starts again, and asking again is answered by the job that will */
+  const bookedBefore = (await load(workload.id)).recheck_after;
   assert.equal(await closeAbandoned(workload.id), 1);
-  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'failed');
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId)).status, 'queued');
+  assert.match((await db.prepare(`SELECT error FROM eval_runs WHERE id = 'run_release'`).get()).error, /^handed over/);
   const again = await enqueue('eval_run', { workloadId: workload.id, trigger: 'manual' }, { unique: true });
-  assert.notEqual(again, jobId, 'a new measurement can be queued');
-  await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE id = ?`).run(again);
+  assert.equal(again, jobId, 'answered by the job that starts it again');
+  // started again at once, not put off: a restart is nobody's failure
+  assert.equal((await load(workload.id)).recheck_after, bookedBefore, 'its next test is not put off');
+  await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE id = ?`).run(jobId);
 
   // a job left claimed with no run at all, its process gone before it started, is let go too
   const orphan = await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic' });
@@ -638,7 +643,17 @@ test('a run a restart interrupted lets go of its job, so it can be measured agai
   await closeAbandoned(workload.id);
   assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(orphan)).status, 'failed');
 
-  /* and an interrupted run, which nobody stopped, does not keep a new workload from starting itself:
+  // one whose job has been taken up five times is a measurement that takes its process down: it lets go of its job
+  const looping = await enqueue('eval_run', { workloadId: workload.id, trigger: 'automatic', n: 'loop' });
+  await db.prepare(`UPDATE jobs SET status = 'claimed', claimed_at = ?, attempts = 5 WHERE id = ?`).run(t - 25 * MIN, looping);
+  await db.prepare(`INSERT INTO eval_runs (id, workspace_id, workload_id, status, shape_kind, reference_model,
+              sample_size, created_at, started_at, heartbeat_at, steps_total, steps_done, job_id)
+              VALUES ('run_release_loop', ?, ?, 'running', 'json', 'openai/gpt-5.4', 100, ?, ?, ?, 300, 40, ?)`)
+    .run(workspace.id, workload.id, t - 25 * MIN, t - 25 * MIN, t - 20 * MIN, looping);
+  assert.equal(await closeAbandoned(workload.id), 1);
+  assert.equal((await db.prepare('SELECT status FROM jobs WHERE id = ?').get(looping)).status, 'failed');
+
+  /* and such an interrupted run, which nobody stopped, does not keep a new workload from starting itself:
      it waits a few hours, never the whole rhythm a stop waits, rather than starting again at once
      (every hourly pass started it again, and each attempt paid for a bar of its own) */
   const after = await load(workload.id);

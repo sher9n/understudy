@@ -2,6 +2,7 @@ import { db, now } from '../db/index.js';
 import config from '../config.js';
 import { FOUND, OUTCOME_OF } from './outcome.js';
 import { wouldTry } from './plan.js';
+import { HANDED_OVER } from '../jobs.js';
 
 /* When a workload is next measured by itself.
  *
@@ -110,12 +111,14 @@ export async function deferAfterFailure(workloadId) {
   if (!w) return null;
   const cadence = await cadenceOf(w.workspace_id);
   if (!cadence) return null;
-  // the ones in a row that ended this way, since the last that found anything, this one included
+  /* the ones in a row that ended this way, since the last that found anything, this one included; never one handed over
+     by a process that was going (src/jobs.js HANDED_OVER), which started again at once and failed at nothing */
   const row = await db.prepare(
     `SELECT COUNT(*) AS n FROM eval_runs r
       WHERE r.workload_id = ? AND (r.status = 'failed' OR (r.status = 'done' AND ${OUTCOME_OF('r.')} = 'no_balance'))
+        AND COALESCE(r.error, '') NOT LIKE ?
         AND r.created_at >= COALESCE((SELECT MAX(x.created_at) FROM eval_runs x WHERE x.workload_id = ? AND ${FOUND('x.')}), 0)`)
-    .get(workloadId, workloadId);
+    .get(workloadId, `${HANDED_OVER}%`, workloadId);
   const inRow = Math.max(1, Number(row?.n || 0));
   const wait = Math.min(cadence * DAY, RETRY_HOURS * HOUR * 2 ** Math.min(10, inRow - 1));
   return await putOff(workloadId, now() + wait);

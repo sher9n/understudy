@@ -77,6 +77,17 @@ deployment failed about twenty seconds in with a single line of build log and no
 removing the file was what made the build succeed. The settings it was carrying (start command,
 health check path and timeout, one replica, restart policy) are set on the service itself.
 
+Two of those settings decide whether a deploy can hand its running measurements over:
+
+- The start script is `exec node ...`. Railway sends SIGTERM to the container's first process, which
+  is `npm start`; npm passes it to its own child, and that child used to be the shell npm runs the
+  script in, which let it go. The app never heard a deploy coming. With `exec` the shell becomes the
+  app, so the signal reaches it.
+- The service's **draining seconds** (Settings, Deploy, or `drainingSeconds` in the API) is 30.
+  Railway's default is 0: SIGKILL at the same moment as SIGTERM, which leaves no time to hand
+  anything over. 30 is more than the app needs (see `EVAL_HANDOVER_WAIT_MS` and `bye` in
+  `src/server.js`).
+
 **Give Postgres a volume, and turn on its backups.** Everything lives in it: accounts, keys,
 traffic, measurements, the ledger. The database runs as its own service in the same project,
 with a volume at `/var/lib/postgresql/data`, and the app reaches it over the private network
@@ -299,9 +310,14 @@ and is charged like the rest, every model that answered all of its calls keeps i
 nothing is switched on the strength of a measurement that did not finish. One still waiting its
 turn is taken out of the queue and costs nothing. After a stop, the next measurement nobody asks
 for waits a whole rhythm; after an outage or a failure it tries again after a few hours, longer
-each time. A deploy hands the measurements in flight to the new process, which closes the old run
-and starts again at once; one a process died in without handing over is closed as interrupted once
-it has been quiet for `EVAL_STALE_MIN` minutes. Two measurements of one workload never run at once.
+each time. A deploy hands the measurements in flight to the new process: each stops at its next
+step, is charged for what it ran and gives back the money it set aside, and its job goes back in
+the queue, so the new process closes the old run as restarted and starts it again at once, using
+again every answer already paid for. One whose process died without handing it over (a crash, or
+a kill before it could) is found by its silence: a living process writes its measurements'
+heartbeats every `EVAL_BEAT_SEC`, so one silent for `EVAL_SILENT_SEC` goes back in the queue the
+same way, looked for every minute. A measurement whose job has been taken up five times is let go
+instead, since it is taking its process down. Two measurements of one workload never run at once.
 
 ## What is kept, and for how long
 
