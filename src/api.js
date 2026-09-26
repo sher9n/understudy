@@ -885,9 +885,11 @@ api.get('/workloads/:id/runs/:runId/answers', async (req, res) => {
   if (!w) return fail(res, 404, 'No such workload.');
   const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ? AND workload_id = ?').get(req.params.runId, w.id);
   if (!run) return fail(res, 404, 'No such measurement.');
-  // its first look, or with look=2 its second, on new requests
+  /* its first look, or with look=2 its second, on new requests; `per` answers a page (at most 50), and `result` one kind of
+     result only: same, partly, different, failed, busy or unjudged */
   const out = await runAnswersOf(w, run, String(req.query.model || ''), {
     page: Number.parseInt(req.query.page, 10) || 1, look: req.query.look === '2' ? 2 : 1,
+    per: Number.parseInt(req.query.per, 10) || undefined, result: req.query.result ? String(req.query.result) : null,
   });
   if (!out) return fail(res, 404, 'No such model in this test.');
   res.json(out);

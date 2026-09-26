@@ -1,0 +1,152 @@
+/* A model's own page in one of a workload's tests (ModelPage.jsx), as the model page artboard drew it on 26 Sep 2026: Back
+   and where you are, one paragraph, four figures against the original model, and its requests as a table twenty to a
+   page, a row opening in place. The request's own pieces (what was asked, the answers, the judge's readings) keep the
+   workload page's styles (.wp .wp-ans*). */
+.wp.mp { display: grid; gap: 22px; align-content: start; min-width: 0; max-width: 1180px; }
+.mp svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.mp .mp-grow { flex: 1 1 auto; }
+.wp .wp-pill.is-bad { background: var(--badq); color: var(--bad); }
+
+.mp .mp-top { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; }
+.mp .mp-back { display: inline-flex; align-items: center; gap: 7px; padding: 7px 13px 7px 9px; border: 1px solid var(--line-strong); border-radius: 9px;
+  font-size: 13.5px; font-weight: 600; color: var(--ink); background: var(--raise); text-decoration: none; }
+.mp .mp-back:hover { border-color: var(--brand); text-decoration: none; }
+.mp .mp-back svg, .mp .mp-nextm svg, .mp .mp-sbtn svg, .mp .mp-ibtn svg { width: 15px; height: 15px; flex: none; }
+.mp .mp-crumbs { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 13px; color: var(--mut); min-width: 0; }
+.mp .mp-crumbs a { color: var(--mut-read); overflow-wrap: anywhere; }
+.mp .mp-crumbs i { font-style: normal; color: var(--line-strong); }
+.mp .mp-nextm { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--brand-read); min-width: 0; }
+.mp .mp-nextm .m { overflow-wrap: anywhere; }
+.mp .mp-nextm .mp-nextw { color: var(--mut); white-space: nowrap; }
+
+.mp .mp-head { display: grid; gap: 10px; }
+.mp .mp-name { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; }
+.mp .mp-name h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.25; overflow-wrap: anywhere; }
+.mp .mp-lead { margin: 0; font-size: 15px; line-height: 1.62; color: var(--mut-read); max-width: 76ch; }
+.mp .mp-from { margin: 0; font-size: 13.5px; color: var(--mut-read); max-width: 76ch; }
+
+.mp .mp-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.mp .mp-tile { border: 1px solid var(--line); border-radius: 12px; background: var(--raise); padding: 14px 16px 15px; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.mp .mp-k { font-size: 12.5px; color: var(--mut); display: flex; align-items: center; gap: 5px; }
+.mp .mp-v { font-size: 26px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.15; overflow-wrap: anywhere; }
+.mp .mp-v em { font-style: normal; font-size: 16px; color: var(--mut-read); font-weight: 500; letter-spacing: -0.01em; }
+.mp .mp-n { font-size: 12.5px; color: var(--mut-read); line-height: 1.45; }
+.mp .mp-n b { color: var(--ok); font-weight: 600; }
+.mp .mp-n b.up { color: var(--warn); }
+.mp .mp-meter, .mp .mp-bars { width: 100%; height: auto; display: block; overflow: visible; }
+.mp .mp-meter .tr { fill: var(--grid); stroke: none; }
+.mp .mp-meter .lim { stroke: var(--mut); stroke-width: 1.5; stroke-dasharray: 3 3; }
+.mp .mp-meter .dot { fill: var(--ok); stroke: var(--raise); stroke-width: 2; }
+.mp .mp-meter .dot.bad { fill: var(--bad); }
+.mp .mp-meter .lb, .mp .mp-bars .bl { font: 500 10px 'JetBrains Mono', ui-monospace, monospace; fill: var(--mut); stroke: none; }
+.mp .mp-bars .me { fill: var(--ok); stroke: none; }
+.mp .mp-bars .ref { fill: var(--line-strong); stroke: none; }
+
+.mp .mp-reqs { display: grid; gap: 12px; min-width: 0; scroll-margin-top: 16px; }
+.mp .mp-reqbar { display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap; margin-top: 6px; }
+.mp .mp-reqbar h2 { margin: 0; font-size: 18px; letter-spacing: -0.02em; }
+.mp .mp-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 10px; padding: 3px; background: var(--panel); gap: 3px; }
+.mp .mp-seg button { padding: 6px 12px; border-radius: 7px; font-size: 13px; color: var(--mut-read); display: inline-flex; gap: 6px; align-items: baseline; }
+.mp .mp-seg button.on { background: var(--raise); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
+.mp .mp-seg button:disabled { cursor: default; }
+.mp .mp-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mp .mp-chip { padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line-strong); font-size: 13px; color: var(--mut-read); background: var(--raise);
+  display: inline-flex; gap: 6px; align-items: baseline; }
+.mp .mp-chip b { font-weight: 600; color: var(--ink); }
+.mp .mp-chip.on { border-color: var(--brand); background: var(--brandq); color: var(--brand-read); }
+.mp .mp-chip.on b { color: var(--brand-read); }
+.mp .mp-chip:disabled { opacity: 0.5; cursor: default; }
+.mp .mp-how { font-size: 13px; }
+.mp .mp-how summary { display: inline-flex; align-items: center; gap: 6px; color: var(--brand-read); font-weight: 600; cursor: pointer; list-style: none; }
+.mp .mp-how summary::-webkit-details-marker { display: none; }
+.mp .mp-how summary svg { width: 14px; height: 14px; }
+.mp .mp-how p { margin: 8px 0 0; max-width: 70ch; color: var(--mut-read); line-height: 1.55; }
+.mp .mp-how[open] { flex-basis: 100%; }
+.mp .mp-shared { margin: 0; font-size: 13.5px; color: var(--mut-read); }
+.mp .mp-shared q { color: var(--ink); }
+
+/* fixed columns, so an opened request's wide answers never squeeze the rows around it */
+.mp .mp-tablewrap { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--raise); }
+.mp .mp-table { width: 100%; border-collapse: collapse; font-size: 13.5px; table-layout: fixed; }
+.mp .mp-table .c-no { width: 60px; }
+.mp .mp-table .c-when { width: 150px; }
+.mp .mp-table .c-res { width: 220px; }
+.mp .mp-table .c-t { width: 118px; }
+.mp .mp-table .c-op { width: 52px; }
+/* the longest result, "Different from one of the two answers", wraps inside its column rather than over the next */
+.mp .mp-res .wp-tag { white-space: normal; display: inline-block; line-height: 1.35; }
+.mp .mp-table th { text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--mut);
+  padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* the workload page keeps its table cells to one line (.wp td); here a request's words and an opened request wrap */
+.mp .mp-table td { padding: 9px 14px; border-top: 0; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: normal; }
+.mp .mp-table tbody tr:last-child td { border-bottom: 0; }
+.mp .mp-table .r { text-align: right; }
+.mp .mp-row { cursor: pointer; }
+.mp .mp-row:hover td { background: var(--panel); }
+.mp .mp-row.is-open td { background: var(--brandq); }
+.mp .mp-row.is-left .mp-inv { color: var(--mut-read); }
+.mp .mp-no { color: var(--mut); }
+.mp .mp-inv { overflow-wrap: anywhere; }
+.mp .mp-gone { color: var(--mut); font-style: italic; }
+.mp .mp-when { color: var(--mut-read); white-space: nowrap; }
+.mp .mp-t2 { color: var(--mut); }
+.mp .mp-op { text-align: right; }
+.mp .mp-ibtn { width: 28px; height: 28px; border-radius: 8px; display: inline-grid; place-items: center; color: var(--mut-read); }
+.mp .mp-row:hover .mp-ibtn, .mp .mp-row.is-open .mp-ibtn { color: var(--brand-read); }
+.mp .mp-detailrow > td { padding: 0; }
+.mp .mp-detail { padding: 16px 18px 18px; display: grid; gap: 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.mp .mp-dhead { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; }
+.mp .mp-dhead b { font-size: 14.5px; }
+.mp .mp-dwhen { color: var(--mut); font-size: 13px; }
+.mp .mp-detail .wp-anstext { background: var(--raise); }
+.mp .mp-sbtn { display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px; border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--raise); font-size: 13px; font-weight: 500; color: var(--ink); }
+.mp .mp-sbtn:disabled { opacity: 0.45; cursor: default; }
+.mp .mp-sbtn.ico { padding: 6px 7px; }
+
+.mp .mp-pager { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: space-between; }
+.mp .mp-pgtext { font-size: 13px; color: var(--mut); }
+.mp .mp-pgbtns { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.mp .mp-pg { min-width: 32px; height: 32px; border-radius: 8px; font: 500 13px 'JetBrains Mono', ui-monospace, monospace; color: var(--mut-read); }
+.mp .mp-pg:hover:not(.on):not(:disabled) { background: var(--grid); }
+.mp .mp-pg.on { background: var(--ink); color: var(--bg); font-weight: 700; }
+.mp .mp-pggap { color: var(--mut); padding: 0 2px; }
+
+@media (max-width: 1100px) {
+  .mp .mp-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+/* a phone: the crumbs give way to Back, the figures two by two, and the table becomes a list */
+@media (max-width: 640px) {
+  .wp.mp { gap: 18px; }
+  .mp .mp-crumbs { display: none; }
+  .mp .mp-nextm .m { display: none; }
+  .mp .mp-name h1 { font-size: 20px; }
+  .mp .mp-lead { font-size: 14px; }
+  .mp .mp-tiles { gap: 10px; }
+  .mp .mp-tile { padding: 12px 12px 13px; }
+  .mp .mp-v { font-size: 20px; }
+  .mp .mp-v em { font-size: 13px; }
+  .mp .mp-filters .mp-grow { display: none; }
+  .mp .mp-seg { width: 100%; }
+  .mp .mp-seg button { flex: 1; justify-content: center; }
+  .mp .mp-table thead, .mp .mp-table colgroup { display: none; }
+  .mp .mp-table, .mp .mp-table tbody { display: block; }
+  .mp .mp-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto 30px;
+    grid-template-areas: "no inv inv op" "no res t1 op"; column-gap: 8px; row-gap: 4px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .mp .mp-row td { border: 0; padding: 0; background: transparent; }
+  .mp .mp-row.is-open { background: var(--brandq); }
+  .mp .mp-row.is-open td, .mp .mp-row:hover td { background: transparent; }
+  .mp .mp-no { grid-area: no; padding-top: 1px; }
+  .mp .mp-inv { grid-area: inv; }
+  .mp .mp-res { grid-area: res; }
+  .mp .mp-t1 { grid-area: t1; align-self: center; }
+  .mp .mp-when, .mp .mp-t2 { display: none; }
+  .mp .mp-op { grid-area: op; align-self: center; }
+  .mp .mp-detailrow, .mp .mp-detailrow > td { display: block; }
+  .mp .mp-detail { padding: 14px 12px 16px; }
+  .mp .mp-dhead .mp-grow { flex-basis: 100%; height: 0; }
+  .mp .mp-pager { justify-content: center; }
+  .mp .mp-pgtext { width: 100%; text-align: center; }
+  .mp .mp-pg:not(.on) { display: none; }
+  .mp .mp-pggap { display: none; }
+}

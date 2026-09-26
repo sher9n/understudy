@@ -152,9 +152,11 @@ export const api = {
   workloadPage: (id) => send('GET', `/workloads/${id}/page`),
   workloadPageCalls: (id, page) => send('GET', `/workloads/${id}/page/calls?page=${page}`),
   workloadRunPage: (id, runId) => send('GET', `/workloads/${id}/runs/${runId}/page`),
-  // one model in one test, request by request, on its first look or its second (runAnswersOf in src/workloadPage.js)
-  runAnswers: (id, runId, model, page = 1, look = 1) =>
-    send('GET', `/workloads/${id}/runs/${runId}/answers?model=${encodeURIComponent(model)}&page=${page}${look === 2 ? '&look=2' : ''}`),
+  /* one model in one test, request by request, on its first look or its second (runAnswersOf in src/workloadPage.js), `per`
+     a page, and optionally one kind of result only */
+  runAnswers: (id, runId, model, page = 1, look = 1, { per = null, result = null } = {}) =>
+    send('GET', `/workloads/${id}/runs/${runId}/answers?model=${encodeURIComponent(model)}&page=${page}${look === 2 ? '&look=2' : ''}`
+      + `${per ? `&per=${per}` : ''}${result ? `&result=${encodeURIComponent(result)}` : ''}`),
   setExplore: (id, b) => send('POST', `/workloads/${id}/explore`, b),
   outcomes: (id) => send('GET', `/workloads/${id}/outcomes`),
   saveOutcomeDef: (id, def) => send('POST', `/workloads/${id}/outcomes/def`, def),

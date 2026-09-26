@@ -665,6 +665,9 @@ export async function runPageOf(w, run) {
   const refName = names.get(run.reference_model) || short(run.reference_model);
   return {
     id: run.id,
+    // when it ran, and the original model by the name people know it, for a model's own page (src/workloadPage.js runAnswersOf)
+    at: Number(run.created_at) || null,
+    referenceName: refName,
     take: takeOf(run, cands, w, { small, refName, check }),
     bar: round8((Number(run.floor_pct) || 0) / 100),
     yardstick: run.yardstick === 'quality' ? 'quality' : 'agreement',
@@ -684,6 +687,19 @@ export async function runPageOf(w, run) {
 }
 
 const ANSWERS_PER_PAGE = 10;
+// the most requests one page of a model's answers holds (a model's own page asks for 20)
+const ANSWERS_PER_PAGE_MAX = 50;
+/* Which of a model's answers to show, by how each was read: the same answer counted in the model's figure, one that matched
+   one of the original model's two, a different one, one that failed, one a busy provider refused (not counted), and one
+   that could not be judged (not counted). The same readings as the counts runAnswersOf gives, over the same rows. */
+const RESULT_FILTERS = {
+  same: 'counts AND failure IS NULL AND error IS NULL AND score <= 0',
+  partly: 'counts AND failure IS NULL AND error IS NULL AND score > 0 AND score < 0.999',
+  different: 'counts AND failure IS NULL AND error IS NULL AND score >= 0.999',
+  failed: 'counts AND (failure IS NOT NULL OR error IS NOT NULL)',
+  busy: "NOT counts AND COALESCE(failure, '') = 'refused'",
+  unjudged: "NOT counts AND COALESCE(failure, '') <> 'refused'",
+};
 const clip = (s, n) => (s === null || s === undefined ? null : String(s).length > n ? `${String(s).slice(0, n)}…` : String(s));
 const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
 
@@ -770,7 +786,9 @@ function answerVerdict(row, quality) {
   const s = Number(row.score);
   if (s <= 0) return { tone: 'ok', text: quality ? 'At least as good' : 'Same answer' };
   if (s >= 0.999) return { tone: 'bad', text: quality ? 'Clearly worse' : 'Different' };
-  return { tone: 'warn', text: quality ? 'Worse in one of two readings' : 'Different from one of the two answers' };
+  // held to "the same answer": the same as one of the original model's two answers and not the other. Held to "at least
+  // as good", a split between the two readings is a tie, so a score between 0 and 1 only comes from an older reading
+  return { tone: 'warn', text: quality ? 'Partly worse' : 'Matched one of the two answers' };
 }
 
 /* One model in one test, request by request: what was asked, the original model's two answers (the two the test held
@@ -779,7 +797,10 @@ function answerVerdict(row, quality) {
    picked by kind of request) keeps no answers of its own, so its lead model's are shown and it says so. Content goes
    with the workspace's retention window, and then says so rather than showing nothing. Null for a model the test did
    not try. */
-export async function runAnswersOf(w, run, key, { page = 1, per = ANSWERS_PER_PAGE, look = 1 } = {}) {
+export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSWERS_PER_PAGE, look = 1, result = null } = {}) {
+  const per = Math.max(1, Math.min(ANSWERS_PER_PAGE_MAX, Math.round(Number(perAsked) || ANSWERS_PER_PAGE)));
+  // one kind of result only, or every answer; a request keeps its place among all of them either way
+  const filter = Object.hasOwn(RESULT_FILTERS, String(result)) ? String(result) : null;
   const r = await db.prepare(`SELECT * FROM eval_results WHERE run_id = ? AND model_id = ? AND verdict <> 'reference'`).get(run.id, key);
   if (!r) return null;
   const name = nameOfResult(r);
@@ -819,10 +840,11 @@ export async function runAnswersOf(w, run, key, { page = 1, per = ANSWERS_PER_PA
      src/eval/run.js), and writes down which (`scored`). An answer kept before it did counts unless it is such a refusal
      (the one it can still be told from: a refusal counts only where it would be refused again, LASTING_STATUSES). */
   // (a missing failure is not a refusal: compared as it is, it would make the whole test unknown and drop the row)
+  const read = `read AS (SELECT *, COALESCE(scored = 1, score IS NOT NULL
+                     AND NOT (COALESCE(failure, '') = 'refused' AND NOT (COALESCE(status, 0) = ANY(?::int[])))) AS counts,
+                   ROW_NUMBER() OVER (ORDER BY created_at, id) AS pos FROM mine)`;
   const counts = await db.prepare(
-    `WITH mine AS (${mine}),
-          read AS (SELECT *, COALESCE(scored = 1, score IS NOT NULL
-                     AND NOT (COALESCE(failure, '') = 'refused' AND NOT (COALESCE(status, 0) = ANY(?::int[])))) AS counts FROM mine)
+    `WITH mine AS (${mine}), ${read}
      SELECT COUNT(*) AS n,
             COUNT(*) FILTER (WHERE counts AND failure IS NULL AND error IS NULL AND score <= 0) AS same,
             COUNT(*) FILTER (WHERE counts AND failure IS NULL AND error IS NULL AND score > 0 AND score < 0.999) AS partly,
@@ -834,11 +856,13 @@ export async function runAnswersOf(w, run, key, { page = 1, per = ANSWERS_PER_PA
             COUNT(*) FILTER (WHERE scored IS NULL) AS unmarked
        FROM read`).get(...mineArgs, LASTING_STATUSES);
   const rows = await db.prepare(
-    `WITH mine AS (${mine})
+    `WITH mine AS (${mine}), ${read}
      SELECT call_id, answer, score, scored, difference, failure, error, status, latency_ms, ttft_ms, cost_usd, judged_by, reused, readings,
-            created_at
-       FROM mine ORDER BY created_at, id LIMIT ? OFFSET ?`)
-    .all(...mineArgs, per + 1, (p - 1) * per);
+            created_at, pos
+       FROM read${filter ? ` WHERE ${RESULT_FILTERS[filter]}` : ''} ORDER BY pos LIMIT ? OFFSET ?`)
+    .all(...mineArgs, LASTING_STATUSES, per + 1, (p - 1) * per);
+  // how many answers the chosen result has, which the pages are counted from
+  const matched = !filter ? Number(counts.n) || 0 : Number(counts[filter === 'different' ? 'differ' : filter]) || 0;
   const page1 = rows.slice(0, per);
   const ids = page1.map((x) => x.call_id).filter(Boolean);
   const [calls, samples, refs] = ids.length ? await Promise.all([
@@ -897,7 +921,14 @@ export async function runAnswersOf(w, run, key, { page = 1, per = ANSWERS_PER_PA
       second: Number(r.confirm_runs) || 0,
       kept: keptSecond,
       ended: r.confirm_verdict ? (CONFIRM_WORDS[r.confirm_verdict] ?? null) : null,
+      // how the second look went, in its own figures, so a page can say it without reading the second look's answers
+      verdict: r.confirm_verdict || null,
+      figure: r.confirm_gap === null || r.confirm_gap === undefined ? null : round8(Number(r.confirm_gap) / 100),
+      bar: r.confirm_floor === null || r.confirm_floor === undefined ? null : round8(Number(r.confirm_floor) / 100),
     },
+    // the answers of one kind of result only, when asked for, and how many there are
+    filter,
+    matched,
     /* Answers kept before the test wrote down which counted: a judgement of one that did not come back can't be told
        from one that did, so where the average and the figure differ, the page says why rather than leaving it. */
     unmarked: Number(counts.unmarked) || 0,
@@ -937,7 +968,8 @@ export async function runAnswersOf(w, run, key, { page = 1, per = ANSWERS_PER_PA
         : c && c.served_model === run.reference_model && Number(c.cost_usd) > 0 ? Number(c.cost_usd) : null;
       const msgs = Array.isArray(req?.messages) ? req.messages.length : 0;
       return {
-        n: (p - 1) * per + k + 1,
+        // its place among all the model's answers in this look, whichever result is shown
+        n: Number(x.pos) || (p - 1) * per + k + 1,
         callId: x.call_id,
         at: Number(c?.created_at) || null,
         purged,
