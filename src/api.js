@@ -1692,7 +1692,8 @@ api.post('/settings/measure-every', async (req, res) => {
     title: days ? `Measuring every ${days} ${days === 1 ? 'day' : 'days'}` : 'Measuring only when you ask',
     detail: days
       ? 'Each workload is measured again on that cadence, and you are charged for the calls it replays.'
-      : 'Nothing is measured, and nothing is spent, until you press Measure now on a workload.',
+      : 'Nothing is tested until you press Test now on a workload. A model you switched to is still checked each day '
+        + 'on some of your live requests, which costs a little.',
   });
   return res.json({ ok: true, days });
 });

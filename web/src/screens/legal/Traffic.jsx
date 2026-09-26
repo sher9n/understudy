@@ -119,7 +119,7 @@ export default function Traffic({ go }) {
         <p>
           A call we route costs what the model provider charges, plus a 1% fee. Measurements, background answers,
           answers read in the background and live experiments are charged at cost plus 1% from your balance, and
-          an optimizing budget in Settings can cap all of them together. Sending us copies is free. Everything is
+          a testing limit in Settings can cap all of them together. Sending us copies is free. Everything is
           on the <To to="pricing" go={go}>pricing</To> page.
         </p>
       </Sec>
@@ -128,19 +128,22 @@ export default function Traffic({ go }) {
         <ul>
           <li><b>Keep content for less time.</b> In Settings, choose how long call content is kept. 30 days is the
             shortest window.</li>
-          <li><b>Measure only when you ask.</b> In Settings, set Measure to &ldquo;Only when I ask&rdquo;. Nothing is
-            replayed on other models, and nothing is spent on measuring, until you press Measure now on a workload.</li>
-          <li><b>No experiments on live calls.</b> On a workload&rsquo;s page, set its experiments to Off. Nothing is
-            read in the background on a workload with no experiments.</li>
-          <li><b>Switch only with your yes.</b> New workspaces start on &ldquo;Automatic&rdquo;: a cheaper setup that
+          <li><b>Measure only when you ask.</b> In Settings, set How often to re-test to &ldquo;Only when I ask&rdquo;.
+            Nothing is replayed on other models, and nothing is spent on measuring, until you press Test now on a
+            workload. A model you switched to is still checked each day on some of your live requests, which costs a
+            little.</li>
+          <li><b>No experiments on live calls.</b> In Settings, choose &ldquo;Ask me first&rdquo;: a few copies are
+            answered in the background instead, and no live answer is changed. Choose &ldquo;Never switch&rdquo; and
+            nothing is read in the background either.</li>
+          <li><b>Switch only with your yes.</b> New workspaces start on &ldquo;Switch automatically&rdquo;: a cheaper setup that
             passes twice is switched to, on a small share of calls first, checked against your own model every day, and
             switched back by itself the moment it slips. In Settings, choose &ldquo;Ask me first&rdquo; to approve each
             switch yourself, or &ldquo;Never switch&rdquo; to only measure and report. It is one choice for every
             workload. A switch can be undone from the workload&rsquo;s page at any time.</li>
-          <li><b>Cap what is spent.</b> In Settings, set a daily or monthly limit on calls, and an optimizing budget
+          <li><b>Cap what is spent.</b> In Settings, set a daily or monthly limit on calls, and a testing limit
             for measuring and everything else done to find a cheaper model.</li>
           <li><b>Keep providers that keep nothing.</b> Zero data retention starts on. Leave it on in Settings.</li>
-          <li><b>No cache markers.</b> In Settings, switch off Mark for caching.</li>
+          <li><b>No cache markers.</b> In Settings, switch off Mark repeated instructions.</li>
           <li><b>No shared results.</b> Share results stays off unless you switch it on in Settings.</li>
           <li><b>No emails.</b> In Settings, under Emails, switch off the ones you do not want.</li>
           <li><b>Stop a key.</b> Revoke it in Settings, and anything using it stops at once.</li>
