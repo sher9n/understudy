@@ -380,7 +380,12 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
   const isServing = !!serving && r.model_id === serving;
   const differs = quality ? "gave clearly worse answers than the original model's" : 'answered differently from the original model';
   let out;
-  if (r.verdict === 'failed') {
+  if (r.verdict === 'failed' && r.stopped === 'busy') {
+    // its provider could not keep up (EVAL_KEEP_UP_REFUSALS): failed for good on this workload
+    out = ['bad', "Couldn't keep up", `Its provider kept turning this test's requests away for coming too fast, even with Understudy waiting `
+      + `${Math.round(config.MODEL_BACKOFF_MAX_MS / 1000)} seconds between them. A model that can't keep up can't handle this workload's `
+      + "traffic, so it failed and won't be tested on this workload again."];
+  } else if (r.verdict === 'failed') {
     out = ['bad', 'Failed requests', "The model's provider refused or failed some of this test's requests, so it can't be relied on for this workload."];
   } else if (r.verdict === 'slower') {
     out = ['warn', 'Slower than original', slowerWhy(r, speed) ?? SLOWER];
@@ -416,7 +421,10 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
   const perCall = ratio !== null && refPer ? ratio * refPer : (name.kind === 'model' ? avg.get(r.model_id) ?? null : null);
   const ms = metric === 'ttft' ? Number(r.ttft_p50) || null : Number(r.latency_p50) || null;
   const pct = (x) => (x === null || x === undefined ? null : round8(Number(x) / 100));
-  const judged = r.verdict !== 'failed' && r.gap_pct !== null && r.gap_pct !== undefined && n > 0;
+  /* A model failed as unable to keep up only once it had answered every request of this test (its provider gave out on its
+     second look, or on another's) was judged on all of them, and its figure says how its answers compared. One stopped part
+     way, or failed for errors, has no figure that means anything. */
+  const judged = (r.verdict !== 'failed' || (r.stopped === 'busy' && n >= sample)) && r.gap_pct !== null && r.gap_pct !== undefined && n > 0;
   const label = name.kind === 'model' ? r.model_id
     : name.kind === 'cascade' ? `${name.first}, checked`
       : name.kind === 'router' && name.version === 2 ? name.short
@@ -444,6 +452,10 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
     perCall: perCall === null ? null : round8(perCall),
     p50: ms,
     tone, verdict, why,
+    /* It failed whatever its answers were like (errors, or a provider that could not keep up). The chart leaves it out: it
+       places models by how their answers compared, and its red is "not a match", which one that answered everything right
+       and could not keep up is not. */
+    failed: r.verdict === 'failed',
     serving: isServing,
     twice: verdict === 'Passed twice',
     confirmRuns: Number(r.confirm_runs) || 0,
@@ -724,7 +736,7 @@ const DIFF_WORDS = {
 const CONFIRM_WORDS = {
   cleared: 'it passed', missed: "it didn't pass", review: "it came close, but didn't pass", slower: 'it was too slow on them',
   insufficient: "there weren't yet enough new requests to look again", not_reached: "it wasn't reached, because another model passed first",
-  live: 'it passed on live requests',
+  live: 'it passed on live requests', busy: "its provider couldn't keep up with the requests",
 };
 
 /* Whether an answer counted towards the model's figure, as the test wrote down, or for an answer kept before it did,

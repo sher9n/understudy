@@ -133,7 +133,8 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
       const life = hit.status === 200 ? config.REPLAY_REUSE_DAYS * DAY : config.REPLAY_FAILURE_REUSE_HOURS * HOUR;
       if (now() - hit.created_at < life) {
         const r = fromRow(hit);
-        return { ...r, cost: 0, reused: true, savedUsd: r.ok ? Number(hit.cost_usd || 0) : 0, key, transient: false, account: false };
+        return { ...r, cost: 0, reused: true, savedUsd: r.ok ? Number(hit.cost_usd || 0) : 0, key, transient: false, account: false,
+          refusedAtLongest: 0 };
       }
     }
   }
@@ -143,6 +144,10 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
   const clean = { ...body };
   delete clean.stream;
   let out;
+  /* How many of its tries its provider turned away for coming too fast while the model was already given the longest
+     wait between them (see giveBack in src/openrouter.js): a test holds that against the model, whether or not a later
+     try was answered (EVAL_KEEP_UP_REFUSALS). */
+  let refusedAtLongest = 0;
   try {
     let got;
     try {
@@ -155,8 +160,9 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
       if (err instanceof UpstreamError) throw err;
       if (err?.name === 'TimeoutError' || err?.name === 'AbortError') throw err;
       const plain = await chat(clean, model, { recipe, pace: true, zdr });
-      got = { json: plain.json, latencyMs: plain.latencyMs, ttftMs: null };
+      got = { json: plain.json, latencyMs: plain.latencyMs, ttftMs: null, refusedAtLongest: plain.refusedAtLongest };
     }
+    refusedAtLongest = Number(got.refusedAtLongest) || 0;
     const usage = got.json?.usage || {};
     out = {
       json: got.json,
@@ -174,6 +180,7 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
     };
   } catch (err) {
     const status = err instanceof UpstreamError ? err.status : 0;
+    refusedAtLongest = Number(err?.refusedAtLongest) || 0;
     out = {
       json: null, ok: false, status, error: err instanceof UpstreamError ? reasonOf(err) : String(err?.message || err),
       latencyMs: null, ttftMs: null, cost: 0, completionTokens: null, reasoningTokens: null, provider: null,
@@ -201,5 +208,5 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
     costUsd: out.cost, chargedUsd: 0, latencyMs: out.latencyMs,
   });
   const account = !out.ok && accountLevel(out.status);
-  return { ...out, reused: false, savedUsd: 0, key, transient: !out.ok && !lasting(out.status) && !account, account };
+  return { ...out, reused: false, savedUsd: 0, key, transient: !out.ok && !lasting(out.status) && !account, account, refusedAtLongest };
 }

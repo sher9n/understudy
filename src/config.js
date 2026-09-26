@@ -83,6 +83,12 @@ export const config = {
   MODEL_BACKOFF_START_MS: num('MODEL_BACKOFF_START_MS', 1000),
   MODEL_BACKOFF_MAX_MS: num('MODEL_BACKOFF_MAX_MS', 30000),
   MODEL_BACKOFF_EASE_AFTER: num('MODEL_BACKOFF_EASE_AFTER', 20),
+  /* A model whose provider turns this many of one test's requests away for coming too fast while it is already given
+     the longest wait between them (MODEL_BACKOFF_MAX_MS) has failed: a provider that cannot take one request in that
+     long cannot carry a workload's real traffic, so the test stops it, and no later test of that workload tries it
+     again (the owner's rule, 26 Sep 2026). Before, it was only slowed: a test waited out a model like that at the
+     longest wait for every one of its requests, an hour or more. */
+  EVAL_KEEP_UP_REFUSALS: num('EVAL_KEEP_UP_REFUSALS', 3),
   UPSTREAM_TIMEOUT_MS: num('UPSTREAM_TIMEOUT_MS', 120000),
   /* Which header names the address a request came from, for the per-address limits (see clientIp in
      limits.js): 'x-real-ip' straight from Railway's edge, or 'xff-first' once its CDN sits in front. */

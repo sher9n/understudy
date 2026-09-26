@@ -301,7 +301,7 @@ export function selectCandidates(input) {
      own model thinking less, or from its cheapest provider, from the customer's own model; and
      `servingRecipe` is how it is sent. */
   const {
-    facts, profile, reference, enabled, want, tryMultiple = 3, reverted = new Set(), serving = null,
+    facts, profile, reference, enabled, want, tryMultiple = 3, reverted = new Set(), cantKeepUp = new Set(), serving = null,
     servingAs = null, servingRecipe = null,
     history = null, fits = null, arena = null, difficulty = null, speed = null,
     refThinks = null, speedHistory = null, busy = null,
@@ -405,6 +405,12 @@ export function selectCandidates(input) {
   const fresh = priced.filter((k) => {
     if (!reverted.has(k.m.id) || k.m.id === serving) return true;
     excluded.push({ model: k.m.id, step: 'reverted', reason: 'was switched to before on this workload and switched back' });
+    return false;
+  }).filter((k) => {
+    /* failed a test of this workload because its provider could not keep up with the requests (cantKeepUpOn in
+       src/eval/history.js): never tried on it again */
+    if (!cantKeepUp.has(k.m.id) || k.m.id === serving) return true;
+    excluded.push({ model: k.m.id, step: 'busy', reason: "couldn't keep up in an earlier test of this workload: its provider kept turning requests away even at the slowest pace, so it isn't tried again" });
     return false;
   });
 

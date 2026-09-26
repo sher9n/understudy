@@ -1125,20 +1125,54 @@ test('a fallback named without its maker is sent under the name it was priced as
   assert.deepEqual(seen.at(-1).models, [LONG]);
 });
 
-test('a call with no model is checked against the model its workload was made with', async () => {
+/* Every request and every copy names the model it is for (the owner's rule, 26 Sep 2026): that model is its workload's
+   own, what cheaper ones are tested against. One that names none is refused before it is grouped, and leaves no workload
+   behind; it used to be answered by the model of whatever workload its words looked most like. */
+test('a call that names no model is refused, whatever workload its words look like, and leaves no workload behind', async () => {
   const { workspace, key } = await auth.createAccount({ email: 'nomodel@example.test', password: 'password-123' });
   await billing.move(workspace.id, { kind: 'credit', amountUsd: 5, note: 'test credit' });
   const system = 'Tag the courier note as late, lost or delivered, one word.';
-  // copies sent to us from a client that used openrouter/auto make the workload
+  // copies of the job, naming the model the customer's own calls went to, make its workload
   for (let i = 0; i < 3; i += 1) {
     const t = await fetch(`${base}/v1/traces`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key.secret}` },
-      body: JSON.stringify({ request: { model: 'openrouter/auto', messages: [{ role: 'system', content: system }, { role: 'user', content: `note ${i}` }] },
-        response: { model: 'openrouter/auto', choices: [{ message: { role: 'assistant', content: 'late' } }], usage: { prompt_tokens: 10, completion_tokens: 1 } } }) });
-    assert.ok(t.status < 300, `trace accepted: ${t.status}`);
+      body: JSON.stringify({ request: { model: MODEL, messages: [{ role: 'system', content: system }, { role: 'user', content: `note ${i}` }] },
+        response: { model: MODEL, choices: [{ message: { role: 'assistant', content: 'late' } }], usage: { prompt_tokens: 10, completion_tokens: 1 } } }) });
+    assert.equal((await t.json()).accepted, 1, 'a copy that names its model is taken');
   }
-  const r = await call(key.secret, { messages: [{ role: 'system', content: system }, { role: 'user', content: 'note 9' }] });
-  assert.equal(r.status, 400, 'refused, not sent unbounded');
-  assert.match((await r.json()).error.message, /workload's model is not one we route to/);
+  const workloads = async () => Number((await db.prepare('SELECT COUNT(*) AS n FROM workloads WHERE workspace_id = ?').get(workspace.id)).n);
+  const before = await workloads();
+  // the same job with no model named: refused, even though its workload has a model it could have been sent to
+  for (const body of [
+    { messages: [{ role: 'system', content: system }, { role: 'user', content: 'note 9' }] },
+    { model: '', messages: [{ role: 'system', content: system }, { role: 'user', content: 'note 10' }] },
+    { model: 7, messages: [{ role: 'system', content: system }, { role: 'user', content: 'note 11' }] },
+    // and a job never seen before, which used to leave an empty workload behind when it was refused
+    { messages: [{ role: 'system', content: 'Summarise the parcel history in one line.' }, { role: 'user', content: 'parcel 5' }] },
+  ]) {
+    const r = await call(key.secret, body);
+    assert.equal(r.status, 400, `refused: ${JSON.stringify(body.model)}`);
+    const err = (await r.json()).error;
+    assert.equal(err.type, 'invalid_request_error');
+    assert.match(err.message, /Name the model this request is for in "model"/);
+  }
+  assert.equal(await workloads(), before, 'no workload was made or changed by a call that named no model');
+});
+
+test('a copy that names no model is not taken, says why, and leaves no workload behind; the others in the same batch are taken', async () => {
+  const { workspace, key } = await auth.createAccount({ email: 'nomodel-copies@example.test', password: 'password-123' });
+  const system = 'Sort the return reason into damaged, wrong item or changed mind.';
+  const copy = (i, model) => ({ request: { ...(model === undefined ? {} : { model }), messages: [{ role: 'system', content: system }, { role: 'user', content: `return ${i}` }] },
+    response: { model: MODEL, choices: [{ message: { role: 'assistant', content: 'damaged' } }], usage: { prompt_tokens: 10, completion_tokens: 1 } } });
+  const t = await fetch(`${base}/v1/traces`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key.secret}` },
+    body: JSON.stringify({ traces: [copy(1), copy(2, MODEL), copy(3, '  ')] }) });
+  assert.equal(t.status, 200);
+  const out = await t.json();
+  assert.deepEqual([out.accepted, out.rejected], [1, 2], JSON.stringify(out));
+  assert.equal(out.reasons.length, 2);
+  assert.match(out.reasons[0], /^copy 1: Name the model this request is for in "request\.model"/);
+  assert.match(out.reasons[1], /^copy 3: /);
+  const made = await db.prepare('SELECT reference_model FROM workloads WHERE workspace_id = ?').all(workspace.id);
+  assert.deepEqual(made.map((w) => w.reference_model), [MODEL], 'one workload, the one the copy that named its model made');
 });
 
 test('with zero retention off, a call is bounded by every provider OpenRouter lists, or by the list price with a ceiling when the list cannot be read', async () => {
