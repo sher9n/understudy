@@ -28,6 +28,7 @@ import { markTrying } from '../learn/explore.js';
 import { forgetBar } from '../learn/control.js';
 import { scheduleNext, deferAutomatic, deferAfterStop, deferAfterFailure, cadenceOf, waitForCalls, pendingSecondLook, bookSecondLook } from './schedule.js';
 import { notify } from '../notify.js';
+import { HANDED_OVER, HANDED_OVER_DEPLOY, requeueDead } from '../jobs.js';
 
 /* A measurement, run as a race.
  *
@@ -307,15 +308,59 @@ async function noteSkip(workload, plan) {
   });
 }
 
-/* A measurement, and the money it set aside given back however it ends: finished, stopped, cut short, turned away or
-   thrown. One whose process dies has it given back by the closer of runs nothing is running (closeRun), or when the hold
-   lapses on its own. */
+/* Handing over. A process being stopped (a deploy, a restart) sets `handingOver` (see handOver): every measurement it
+   is running stops before its next paid call, is charged for what it ran, gives back what it set aside, and is left
+   for the next process with a heartbeat of zero and HANDED_OVER as its error, which that process closes at once
+   (isAbandoned) before starting the same job again. What was paid for is kept (replay_cache), so the new run uses it
+   again rather than buying it twice. While handing over, nothing here writes a heartbeat: one written after the hand
+   over told the next process this one was still running it, and it waited EVAL_STALE_MIN to find out otherwise.
+
+   Beating. While a process lives it writes the heartbeat of every measurement it is running every EVAL_BEAT_SEC,
+   whatever call they are waiting on, so a heartbeat older than EVAL_SILENT_SEC means the process has gone. */
+// HANDED_OVER, the error such a run carries, is src/jobs.js's: the queue writes it too (releaseMine, requeueDead)
+let handingOver = false;
+const liveRuns = new Set();      // the measurements this process is running, until each has ended and given its money back
+const beating = new Set();       // the ids of their runs, once they have one
+let beatTimer = null;
+function beat() {
+  if (beatTimer) return;
+  beatTimer = setInterval(() => {
+    if (handingOver || !beating.size) return;
+    db.prepare(`UPDATE eval_runs SET heartbeat_at = ? WHERE id = ANY(?::text[]) AND status = 'running' AND heartbeat_at <> 0`)
+      .run(now(), [...beating]).catch(() => { /* the next beat, or the calls themselves, will write it */ });
+  }, config.EVAL_BEAT_SEC * 1000);
+  if (beatTimer.unref) beatTimer.unref();
+}
+
+/** Stop this process's measurements at their next step and leave them for the next process (see above). Waits up to
+    `waitMs` for them to end; answers how many had not by then, which releaseMine in src/jobs.js marks as they are. */
+export async function handOver({ waitMs = config.EVAL_HANDOVER_WAIT_MS } = {}) {
+  handingOver = true;
+  const until = Date.now() + waitMs;
+  while (liveRuns.size && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+  return liveRuns.size;
+}
+/** For a process that carries on after handing over, as a test does: measurements may run here again. */
+export function resumeAfterHandOver() { handingOver = false; }
+
+/* A measurement, and the money it set aside given back however it ends: finished, stopped, cut short, turned away,
+   handed over or thrown. One whose process dies has it given back by the closer of runs nothing is running (closeRun),
+   or when the hold lapses on its own. */
 export async function runEvaluation(workloadId, opts = {}) {
-  const box = { holdId: null };
+  const box = { holdId: null, runId: null };
+  const going = (async () => {
+    try {
+      return await measure(workloadId, opts, box);
+    } finally {
+      if (box.runId) beating.delete(box.runId);
+      if (box.holdId) await releaseHold(box.holdId).catch(() => {});
+    }
+  })();
+  liveRuns.add(going);
   try {
-    return await measure(workloadId, opts, box);
+    return await going;
   } finally {
-    if (box.holdId) await releaseHold(box.holdId).catch(() => {});
+    liveRuns.delete(going);
   }
 }
 
@@ -458,6 +503,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
      other test can count the same money, and this one can never take the balance below zero. It is given back as the
      test is charged, and whatever is left once it ends. A customer's own requests may still use it (see available in
      src/billing.js); the test notices, and stops. */
+  // not started at all by a process handing over: its job starts it in the next one
+  if (handingOver) return { snoozeMs: 1, note: HANDED_OVER_DEPLOY };
   const toHold = round8(Math.max(0, (Number(plan.atMostUsd) || 0) - (Number(gate.allowance) || 0)));
   if (toHold > 0) {
     const held = await hold(workload.workspace_id, toHold, 'test');
@@ -515,6 +562,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   /* That nothing else is measuring this workload, and this run's own row, in one step under a lock
      on the workload: two jobs of it that reach this point together both passed the check made before
      planning, and without the lock both started. */
+  if (handingOver) return { snoozeMs: 1, note: HANDED_OVER_DEPLOY };
   const began = await db.tx(async (tx) => {
     await tx.prepare('SELECT pg_advisory_xact_lock(hashtext(?))').get(`eval_run:${workloadId}`);
     if (await tx.prepare(`SELECT 1 FROM eval_runs WHERE workload_id = ? AND status = 'running' LIMIT 1`).get(workloadId)) return false;
@@ -527,6 +575,10 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
     return true;
   });
   if (!began) return measuringAlready(trigger);
+  // beaten for while this process runs it (see beat)
+  box.runId = run.id;
+  beating.add(run.id);
+  beat();
   /* Whatever started it, a workload being measured says so from the moment the run exists, and waits for no
      more calls: this measurement is what it was waiting for. */
   await db.prepare(`UPDATE workloads SET status = 'measuring', measure_at_calls = NULL, test_skip_json = NULL, updated_at = ?
@@ -558,15 +610,18 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
     done += by;
     total = remaining ? done + remaining() : Math.max(total, done);
     // lanes write this side by side, so an older count landing late must not move it backwards
+    // (while handing over the count still moves, the heartbeat does not, and the lane goes no further: see HANDED_OVER)
     const r = await db.prepare(`UPDATE eval_runs SET steps_done = GREATEST(steps_done, ?),
-                  steps_total = GREATEST(?, steps_done, ?), phase = ?, heartbeat_at = ?
-                  WHERE id = ? RETURNING status, stop_requested_at`).run(done, Math.max(total, done), done, phase, now(), run.id);
-    return ended(r.rows[0]);
+                  steps_total = GREATEST(?, steps_done, ?), phase = ?, heartbeat_at = CASE WHEN ? THEN heartbeat_at ELSE ? END
+                  WHERE id = ? RETURNING status, stop_requested_at`).run(done, Math.max(total, done), done, phase, handingOver, now(), run.id);
+    return handingOver || ended(r.rows[0]);
   };
   /* Asked before every paid call goes out, replays and judgements alike, in every lane: the
      heartbeat, and whether to send the call at all. Nothing more is sent once somebody presses
      Stop, and a run waiting on one slow call is never mistaken for an abandoned one. */
   const halted = async () => {
+    // handing over: nothing more is sent, and no heartbeat is written, which would say this process still runs it
+    if (handingOver) return true;
     const r = await db.prepare(`UPDATE eval_runs SET heartbeat_at = ? WHERE id = ?
                   RETURNING status, stop_requested_at`).run(now(), run.id);
     await readRoom();
@@ -685,7 +740,28 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   /* Stopped part way. Everything that ran is charged, every model that answered all of its calls
      keeps its result, and nothing is switched. And the next measurement nobody asks for waits a whole
      rhythm (see deferAfterStop): somebody said stop. */
+  /* Handed over (see HANDED_OVER): what ran is charged and the rest is left for the next process, which closes this run
+     at once and starts its job again. Nothing is switched, and no activity is added here: the next process says it. */
+  const endHandedOver = async () => {
+    await settle(`Measuring ${workload.slug}, handed over`);
+    await keepSavings();
+    await db.tx(async (tx) => {
+      await tx.prepare(`UPDATE eval_runs SET heartbeat_at = 0, phase = NULL, error = COALESCE(error, ?)
+                          WHERE id = ? AND status = 'running'`).run(HANDED_OVER_DEPLOY, run.id);
+      /* its job back in the queue in the same step: marked and still claimed, a close of the run in between (see
+         closeAbandoned) ended the job rather than starting it again */
+      if (jobId) {
+        await tx.prepare(`UPDATE jobs SET status = 'queued', run_after = ?, error = ? WHERE id = ? AND status = 'claimed'`)
+          .run(now(), HANDED_OVER_DEPLOY, jobId);
+      }
+    });
+    return { snoozeMs: 1, note: HANDED_OVER_DEPLOY, runId: run.id, handedOver: true };
+  };
   const endStopped = async () => {
+    // stopped by a process handing over rather than by a person (a person's Stop still ends it as stopped)
+    if (handingOver && !(await db.prepare('SELECT stop_requested_at FROM eval_runs WHERE id = ?').get(run.id))?.stop_requested_at) {
+      return await endHandedOver();
+    }
     await settle(`Measuring ${workload.slug}, stopped`);
     await keepSavings();
     /* Its count says what it had still to do when it stopped ("stopped at 120 of 300"), which never includes the
@@ -2877,7 +2953,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
  * process has been up longer than the same window, by which time the old one is certainly
  * gone; judged earlier, a run still being worked on could be closed from under it. */
 export function isAbandoned(run, at = now()) {
-  const stale = config.EVAL_STALE_MIN * 60000;
+  // silent for longer than a living process ever leaves it (see beat); a handed-over run's heartbeat of zero is at once
+  const stale = config.EVAL_SILENT_SEC * 1000;
   if (run.heartbeat_at == null) {
     return process.uptime() * 1000 > stale && at - (run.started_at ?? run.created_at) > stale;
   }
@@ -2972,12 +3049,18 @@ async function closeRun(run, how, { release = true } = {}) {
   if (!closed.rows.length) return false;
   // the money it set aside, which nothing will charge against now
   if (run.hold_id) await releaseHold(run.hold_id).catch(() => {});
+  /* One handed over by a process that was going (see HANDED_OVER) is no failure: its job is back in the queue and
+     starts it again at once, so the next measurement nobody asks for is not put off. */
+  const handedOver = how !== 'stopped' && String(run.error || '').startsWith(HANDED_OVER);
   if (how === 'stopped') await deferAfterStop(run.workload_id);
-  else await deferAfterFailure(run.workload_id);
+  else if (!handedOver) await deferAfterFailure(run.workload_id);
   /* and let go of the job that started it. Left claimed, the job still counted as open, so
      Measure now was answered with it and started nothing, and a later boot revived it and ran
      a measurement nobody had asked for then. */
-  if (run.job_id && release) {
+  /* Never the job of a run handed over: that job went back in the queue to measure again, and the next process may
+     have taken it up already, before its new run exists; ended here, the job read as failed under a test that ran to
+     the end, and a Test now pressed meanwhile queued a second measurement beside it. */
+  if (run.job_id && release && !handedOver) {
     /* Unless another run holds it now. A restart puts a dead run's job back in the queue, and a
        new run takes it under the same id; releasing it from under that run would leave its
        ending unwritten and its retry skipped. */
@@ -2990,12 +3073,16 @@ async function closeRun(run, how, { release = true } = {}) {
     ?? 'a workload';
   await addActivity(run.workspace_id, {
     kind: 'floor',
-    title: how === 'stopped' ? `Measuring ${slug} stopped` : `Measuring ${slug} was interrupted`,
+    title: how === 'stopped' ? `Measuring ${slug} stopped`
+      : handedOver ? `Testing ${slug} is starting again after a restart` : `Measuring ${slug} was interrupted`,
     detail: how === 'stopped'
       ? `Stopped at ${run.steps_done} of ${run.steps_total} model calls, as you asked. You were charged only `
         + 'for the calls it made, and nothing was switched.'
-      : 'It stopped moving part way through, usually because the service restarted. Nothing was '
-        + 'switched, and it can be measured again.',
+      : handedOver
+        ? 'Understudy restarted while this test ran, usually for an update. It starts again straight away and uses again '
+          + 'the answers it had already paid for. Nothing was switched.'
+        : 'It stopped moving part way through, usually because the service restarted. Nothing was '
+          + 'switched, and it can be measured again.',
     workloadId: run.workload_id,
   });
   return true;
@@ -3003,6 +3090,9 @@ async function closeRun(run, how, { release = true } = {}) {
 
 /** Close every measurement nothing is running any more, for one workload or for all of them. */
 export async function closeAbandoned(workloadId = null) {
+  /* Those whose process went without handing them over go back in the queue first (requeueDead), so they are closed
+     below as handed over and start again, rather than being closed as interrupted with their jobs ended. */
+  await requeueDead().catch((err) => console.error(`finding measurements with no process failed: ${err?.message || err}`));
   const rows = workloadId
     ? await db.prepare(`SELECT * FROM eval_runs WHERE workload_id = ? AND status = 'running'`).all(workloadId)
     : await db.prepare(`SELECT * FROM eval_runs WHERE status = 'running'`).all();

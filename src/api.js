@@ -733,7 +733,7 @@ api.get('/workloads/:id', async (req, res) => {
       heartbeatAt: running.heartbeat_at ?? running.started_at,
       // as a duration, worked out here: the browser's clock is not the server's
       quietMs: Math.max(0, now() - (running.heartbeat_at ?? running.started_at ?? now())),
-      staleMin: config.EVAL_STALE_MIN,
+      staleMin: Math.ceil(config.EVAL_SILENT_SEC / 60),
       // about how long is left, at the pace it has kept so far (see leftOf)
       leftMs: leftOf(running),
     } : waiting ? {

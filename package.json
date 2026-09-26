@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "node --env-file-if-exists=.env src/server.js",
-    "start": "node --env-file-if-exists=.env src/server.js",
+    "start": "exec node --env-file-if-exists=.env src/server.js",
     "build": "vite build",
     "dev:web": "vite",
     "test": "node --test --test-concurrency=1 test/*.test.js",

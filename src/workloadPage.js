@@ -8,6 +8,7 @@ import { lastAsked, messagesText, responseText } from './callText.js';
 import { valueOf, optimizingSince, paceOf } from './eval/value.js';
 import { routedSavings } from './eval/actual.js';
 import { cadenceOf, waitOf } from './eval/schedule.js';
+import { HANDED_OVER } from './jobs.js';
 import { outcomeOf, failedSecondLook, DID_NOT_HOLD_UP } from './eval/outcome.js';
 import { canJudge } from './eval/judge.js';
 import { servingKey } from './eval/promote.js';
@@ -213,6 +214,9 @@ const tooSmall = (run) => {
   return n > 0 && bar > 0 && (z2 / (n + z2)) * 100 > bar;
 };
 
+// a test a restart handed over (src/jobs.js HANDED_OVER), which started again at once as the next test
+const handedOver = (r) => String(r?.error || '').startsWith(HANDED_OVER);
+
 /* A test as a line in the list: what it found, in a few words, and what that means, said when the tag is hovered.
    A test that ends without comparing anything says which way it ended, rather than "could not measure". */
 function tagOf(r, sum, w) {
@@ -221,6 +225,10 @@ function tagOf(r, sum, w) {
   if (r.status === 'running') return tag('brand', 'Testing now', 'This test is running now.');
   if (r.status === 'queued') return tag('brand', 'Waiting to start', 'This test is waiting for its turn to start.');
   if (outcome === 'stopped') return tag('mut', 'Stopped', 'This test was stopped before it finished, so nothing was switched.');
+  if (outcome === 'interrupted' && handedOver(r)) {
+    return tag('mut', 'Restarted', 'Understudy restarted while this test ran, usually for an update, so it started again straight '
+      + 'away, using again the answers it had already paid for. Nothing was switched.');
+  }
   if (outcome === 'interrupted') {
     return tag('mut', 'Test incomplete', 'This test stopped partway, because a provider was too busy or something failed on our side. '
       + 'It tries again by itself, and nothing was switched.');
@@ -621,13 +629,17 @@ function mainTake(run, cands, w, { small = null, refName }) {
       + 'You were charged only for what it ran, and nothing switched.';
   }
   const stopped = outcome === 'stopped' || outcome === 'interrupted';
+  const restarted = outcome === 'interrupted' && handedOver(run);
   if (stopped && !cands.length) {
     return outcome === 'stopped'
       ? 'This test was stopped before any model had answered all of its requests, so there is nothing to compare. Nothing switched.'
-      : 'This test stopped partway, before any model had answered all of its requests, so there is nothing to compare. It tries again by itself, and nothing switched.';
+      : restarted
+        ? 'Understudy restarted while this test ran, usually for an update, so it started again straight away. Nothing switched.'
+        : 'This test stopped partway, before any model had answered all of its requests, so there is nothing to compare. It tries again by itself, and nothing switched.';
   }
   const said = !stopped ? '' : outcome === 'stopped' ? 'This test was stopped before it finished, so nothing switched. '
-    : 'This test stopped partway, so nothing switched. ';
+    : restarted ? 'Understudy restarted while this test ran, so it started again straight away, and nothing switched. '
+      : 'This test stopped partway, so nothing switched. ';
   if (w.routed_model && w.promoted_run_id === run.id) {
     // the one it switched to is the one serving now, not merely the first that passed
     const won = cands.find((c) => c.serving) || cands.find((c) => c.twice) || cands.find((c) => c.tone === 'ok');
