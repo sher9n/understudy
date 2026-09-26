@@ -65,6 +65,8 @@ const { runEvaluation } = await import('../src/eval/run.js');
 const { move } = await import('../src/billing.js');
 const { judgeQuality } = await import('../src/eval/judge.js');
 const { barOf, scoreServed, forgetBar } = await import('../src/learn/control.js');
+const { maybeShadow, stateOf } = await import('../src/learn/explore.js');
+const { askOf } = await import('../src/eval/ask.js');
 const { keptChecklist } = await import('../src/eval/checklist.js');
 const { runPageOf, pageOf } = await import('../src/workloadPage.js');
 
@@ -136,8 +138,12 @@ const BEHAVIOUR = {
   'vendor/landlocked-poet': () => poem(40, nextSeed(), { vocab: INLAND }),
 };
 const categories = ['travel', 'food', 'office'];
+/* 'slips', the customer's model gives another currency on one answer in forty it gives again: a field it still gives the
+   same way on nearly every call */
+let refJson = 0;
 const JSONS = {
-  [REF]: (i) => JSON.stringify({ category: categories[nextSeed() % 3], total: 100 + i, currency: 'EUR' }),
+  [REF]: (i) => JSON.stringify({ category: categories[nextSeed() % 3], total: 100 + i,
+    currency: refMode === 'slips' && (refJson += 1) % 40 === 0 ? 'USD' : 'EUR' }),
   'vendor/good-json': (i) => JSON.stringify({ category: categories[nextSeed() % 3], total: 100 + i, currency: 'EUR' }),
   'vendor/broken-json': () => '{"category": "travel", "total": ',
   /* right on everything the judge looks at, and on every third invoice the wrong currency: a field the customer's model
@@ -511,6 +517,81 @@ test('a structured answer judged "at least as good" still fails when it changes 
   // and a check with no fields read to go on (a measurement from before they were read) holds none, rather than guess
   const unread = await scoreServed(body, as({ category: 'food', total: 103, currency: 'USD' }), own, 'json', { yardstick: 'quality', again: ownAgain });
   assert.notEqual(unread.judgedBy, 'fields', JSON.stringify(unread));
+});
+
+test('the judge reads the question at the end of a long request, however much comes before it', async () => {
+  const seen = [];
+  const askFn = async (state) => {
+    seen.push(state.request);
+    return { answers: { better: { type: 'choice', probabilities: { first: 0.1, second: 0.1, equal: 0.8 } } }, costUsd: 0.001 };
+  };
+  const body = { model: REF, messages: [{ role: 'system', content: `Rules. ${'Be exact about every figure. '.repeat(300)}` },
+    { role: 'user', content: `${'Background. '.repeat(400)}Question: which invoice is overdue, #${process.pid}?` }] };
+  await judgeQuality(askOf(body), 'Invoice 7 is overdue.', 'Invoice 7 is overdue, by nine days.', { scope: `ask-${process.pid}`, askFn, prefer: 'jev' });
+  assert.equal(seen.length, 2, 'read both ways round');
+  for (const r of seen) {
+    assert.ok(r.length <= 2500, `${r.length} characters`);
+    assert.match(r, /Rules\. Be exact/, 'the start of the instructions');
+    assert.match(r, new RegExp(`Question: which invoice is overdue, #${process.pid}\\?$`), 'and the question itself, whole');
+  }
+});
+
+test("the bar reads the customer's model against itself as a candidate is read: its own slips on a held field count half", async () => {
+  mode.jev = 'fair';
+  mode.llm = 'fair';
+  refMode = 'slips';
+  refJson = 0;
+  try {
+    const { workload } = await seed({ kind: 'json', enabled: ['vendor/good-json'] });
+    const out = await runEvaluation(workload.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const run = await runOf(out.runId);
+    assert.equal(run.yardstick, 'quality');
+    const y = JSON.parse(run.plan_json).yardstick;
+    // one answer in forty with another currency is still nearly every call: held
+    assert.deepEqual([...(y.stableFields || [])].sort(), ['currency', 'total'], JSON.stringify(y));
+    /* a fair judge reads neither a category nor a currency as a fault, so every pair of the bar is "as good" to it: what
+       lifts the bar off nothing is the pairs whose two answers gave two currencies, at half each */
+    const pairs = Number(run.sample_size);
+    const slips = Math.floor(pairs / 40);
+    assert.ok(slips >= 1, `the bar has pairs that slipped: ${pairs} pairs`);
+    assert.ok(Math.abs(Number(y.qualityNoisePct) - (50 * slips) / pairs) < 0.6, `${y.qualityNoisePct}% for ${slips} of ${pairs}`);
+    // and a candidate that never slips still clears
+    const good = await resultOf(out.runId, 'vendor/good-json');
+    assert.equal(good.verdict, 'cleared', `${good.verdict}, ${good.gap_pct}% against ${run.floor_pct}%`);
+  } finally {
+    refMode = 'steady';
+  }
+});
+
+test('answers read in the background hold a structured answer to the figures its measurement read the same way', async () => {
+  mode.jev = 'fair';
+  mode.llm = 'fair';
+  // asks before switching, so the one that passed is tried in the background rather than switched to
+  const { workload } = await seed({ kind: 'json', enabled: ['vendor/good-json'], mode: 'ask' });
+  const out = await runEvaluation(workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal((await runOf(out.runId)).yardstick, 'quality');
+  assert.equal((await resultOf(out.runId, 'vendor/good-json')).verdict, 'cleared');
+  await db.prepare(`UPDATE workloads SET explore_mode = 'shadow' WHERE id = ?`).run(workload.id);
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id);
+  forgetBar(w.id);
+  const st = await stateOf(w, { fresh: true });
+  assert.ok(st.arms.some((a) => a.status === 'trying'), `the one that passed is a runner-up: ${JSON.stringify(st.arms.map((a) => [a.label, a.status]))}`);
+  const body = { model: REF, messages: [{ role: 'system', content: 'Read the invoice and give its category and total as JSON.' }, { role: 'user', content: 'Invoice #3' }],
+    response_format: { type: 'json_object' } };
+  const as = (x) => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(x) } }] });
+  const serve = (x) => async () => ({ json: as(x), cost: 0.0002, latencyMs: 10 });
+  const used = as({ category: 'travel', total: 103, currency: 'EUR' });
+  // a changed total is short, decided in code: the judge never reads it
+  const moved = await maybeShadow({ workload: w, body, response: used, callId: null }, { rng: () => 0, serve: serve({ category: 'food', total: 130, currency: 'EUR' }) });
+  assert.ok(moved, 'a background answer was read');
+  assert.deepEqual([moved.agreement, moved.yardstick, JSON.parse(moved.detail_json).judgedBy], [0, 'quality', 'fields'], moved.detail_json);
+  /* against one answer, not two, only a figure is held: a word the customer's model might have put another way on another
+     reading (the currency here) is left to the judge, as is a category it picks afresh each time */
+  const reworded = await maybeShadow({ workload: w, body, response: used, callId: null }, { rng: () => 0, serve: serve({ category: 'food', total: 103, currency: 'USD' }) });
+  assert.ok(reworded, 'a background answer was read');
+  assert.notEqual(JSON.parse(reworded.detail_json).judgedBy, 'fields', reworded.detail_json);
 });
 
 test('negative: a workload whose model agrees with itself stays on "the same answer", and pays for nothing new', async () => {

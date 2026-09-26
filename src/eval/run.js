@@ -77,6 +77,31 @@ const short = (m) => String(m || '').split('/').pop();
 // what a workload's status says when what cleared once did not hold up on calls it had never seen (failedSecondLook)
 const SECOND_LOOK_FAILED = 'A candidate passed once, but not on new requests';
 
+/** Whether what serves keeps serving, read as it serves: its verdict on the readings that settled, `settled` of the `answered`
+    calls it answered. Clearly worse switches it back for good, so only on readings that settled for at least half of those
+    calls: a judge that failed on most of them leaves a few readings, and a few are never enough to say so on, however small
+    a sample may otherwise show a fail (verdictWith). */
+export function keepVerdict(verdict, settled, answered) {
+  return verdict === 'missed' && settled * 2 < answered ? 'insufficient' : verdict;
+}
+
+/** The bar's own pairs under "at least as good" for a structured answer, read as a candidate is read against them: a pair
+    of the customer's model's own answers that disagree on a held field (`stable`, see stablePaths) counts at least half,
+    since one of the two is off. Left out, a model exactly as steady as the customer's was held to a steadier standard than
+    the customer's own, by about half its slips on each held field. `pairs` carry `a` and `b` (the two answers, as extract
+    reads them) and `worse` (the judge's reading); answers the readings to set the bar from, in their order. */
+export function heldBar(pairs, stable, shape) {
+  const out = [];
+  for (const p of pairs) {
+    if (p.worse === null || p.worse === undefined) continue;
+    if (stable?.size && p.a?.ok && p.b?.ok && heldFieldChanged(p.b.value, p.a.value, p.a.value, shape, { only: stable })) {
+      p.worse = Math.max(Number(p.worse), 0.5);
+    }
+    out.push(p.worse);
+  }
+  return out;
+}
+
 /* The fewest of n calls past the slow end that chance would give less than one time in twenty,
    when one call in ten runs past it anyway. Never fewer than two: one slow call is never enough. */
 export function slowEndCount(n, share = 0.1, alpha = 0.05) {
@@ -300,6 +325,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
   }
   const pending = secondLook ? await pendingSecondLook(workloadId) : null;
   if (secondLook && !pending) {
+    /* Answered since it was booked (a person switched, or a measurement ran): looked at again in the workspace's rhythm.
+       Left as the call that started it booked it, an hour out, a whole measurement followed within the hour. */
+    await deferAutomatic(workloadId);
     if (workload.status === 'measuring') await rest(workloadId);
     return { ok: false, reason: 'Nothing waits for a second look any more.' };
   }
@@ -311,7 +339,11 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       /* Turned down for want of calls: started by the call that brings them (waitForCalls), never at a guess of
          when that will be. For anything else, looked at again in its time. */
       // and only for a count it has not reached, so what could start it again never turns it down again
-      if (plan.needCalls > plan.pool) await waitForCalls(workloadId, plan.needCalls);
+      /* A second look that cannot run (the model it waited for switched off, retiring, or priced out) is looked at again
+         in the workspace's rhythm, not in six hours as a whole measurement, and never waits for a count of usable calls,
+         since what it waits for is counted as calls no measurement has drawn (waitOf in src/eval/schedule.js). */
+      if (secondLook) await deferAutomatic(workloadId);
+      else if (plan.needCalls > plan.pool) await waitForCalls(workloadId, plan.needCalls);
       else await deferAutomatic(workloadId, { waitMs: plan.notWorth ? null : 6 * 3600000 });
     }
     /* Back to what its last measurement found, not to "new": a workload that has been measured
@@ -922,6 +954,16 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         + 'so the bar could not be set.');
     }
     yardstick = 'quality';
+    /* The fields its customer's model gives the same way on nearly every call, which a structured answer is held to however
+       a judge reads it (qualityAgainst; stablePaths in src/eval/compare.js), read once from these very pairs, and kept with
+       the run for the daily checks and live experiments to read the same way (barOf in src/learn/control.js). And the bar
+       reads the customer's model against itself as a candidate is read against it: a pair of its own answers that disagree on
+       a held field counts half, since one of the two is off. Left out, a model exactly as steady as the customer's was held
+       to a steadier standard than the customer's own, by about half its slips on each held field. */
+    if (shape !== 'free_text') {
+      stableFields = stablePaths(kept.filter((p) => p.a?.ok && p.b?.ok).map((p) => [p.a.value, p.b.value]), shape);
+      if (stableFields.size) worse.splice(0, worse.length, ...heldBar(kept, stableFields, shape));
+    }
     noise = mean(worse);
     /* From here on the bar is "at least as good", and so is every reading of it: the second look's pooled bar, and
        the customer's model's own score on a call a strategy sends on to it. Pooled with the agreement scores, which
@@ -930,10 +972,6 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        was confirmed and switched to. */
     barScores = worse;
     for (const p of kept) p.noise = p.worse;
-    /* The fields its customer's model gives the same way on nearly every call, which a structured answer is held to however
-       a judge reads it (qualityAgainst; stablePaths in src/eval/compare.js), read once from these very pairs, and kept with
-       the run for the daily checks and live experiments to read the same way (barOf in src/learn/control.js). */
-    if (shape !== 'free_text') stableFields = stablePaths(kept.filter((p) => p.a?.ok && p.b?.ok).map((p) => [p.a.value, p.b.value]), shape);
     planRecord.yardstick = {
       kind: 'quality', reason: judgeReason, agreementNoisePct: round8(agreementNoise * 100), qualityNoisePct: round8(noise * 100),
       marginPct: config.EVAL_QUALITY_MARGIN_PCT, judge: judgeCheck?.judge ?? null, checklist: checklist.map((x) => x.say),
@@ -1461,8 +1499,9 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        row ranks against the rest on every difference, as theirs does: ranked on the other, it came first where it
        should not have, and a cheaper setup behind it was never looked at again. */
     if (keyOf(cand) === servingNow) {
-      const asServed = judge(st.calls.map((c) => readingOf(c, true)).filter((x) => x !== null));
-      row.keep = { verdict: asServed.verdict, gap: round8(asServed.gap) };
+      const settled = st.calls.map((c) => readingOf(c, true)).filter((x) => x !== null);
+      const asServed = judge(settled);
+      row.keep = { verdict: keepVerdict(asServed.verdict, settled.length, st.calls.length), gap: round8(asServed.gap) };
     }
     await insertResult(row);
     // failed as unable to keep up: out of this workload's live experiments at once, as well as its tests (restBusyArms)
@@ -1562,6 +1601,10 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
         addJudge(j.cost);
         if (j.cost > 0) sent += 1;
         if (!j.transient && j.score !== null && j.score !== undefined) noise = j.score;
+        // its own two answers disagreeing on a held field count half here too, as in the first look's bar (heldBar)
+        if (noise !== null && yardstick === 'quality' && shape !== 'free_text') {
+          noise = heldBar([{ a: refs[0], b: refs[1], worse: noise }], stableFields, shape)[0];
+        }
       } else {
         const d = disagreement(refs[0], refs[1], shape);
         if (d !== null) noise = d;
@@ -2214,6 +2257,8 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
       let verdict = verdictOf(reading);
       if (refused) verdict = 'failed';
       else if (calls.length < all.length * 0.9 && verdict === 'cleared') verdict = 'insufficient';
+      // nor said to be clearly worse on under half of them, which would switch it back for good on a few readings
+      else verdict = keepVerdict(verdict, calls.length, all.length);
       return { reading, verdict };
     };
     const strict = judge(known);
@@ -2635,10 +2680,11 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
        a yes: the feed used to ask for one in the same breath as it gave the second look's worse figures. What is still
        offered after it, if anything, is one the second look never reached. */
     const didNotHold = !!second && DID_NOT_HOLD_UP.includes(second.c.verdict);
-    /* by this run's own rule (cleared, priced, cheaper, never switched back: `cleared`), not cheaperCleared, which prices
-       against the customer's model's row, a row this run's results do not hold */
+    /* by the rule the page and the status read again later offer by (cheaperCleared, one switched back before included: a
+       person may still take it), priced against the customer's model as this run priced it, a row its results do not hold */
     const offered = didNotHold
-      ? cleared.find((x) => x.model_id !== servingNow && !failedSecondLook(x) && x.confirm_verdict !== 'left_out') || null : null;
+      ? cheaperCleared([...results, { verdict: 'reference', cost_month_usd: refMonthly }]).find((x) => x.model_id !== servingNow) || null
+      : null;
     if (didNotHold) {
       await settleStatus(offered ? 'certified' : 'no_match', offered ? 'A candidate cleared once and needs a second look' : SECOND_LOOK_FAILED);
       await addActivity(workload.workspace_id, {
@@ -2699,9 +2745,7 @@ export async function runEvaluation(workloadId, { trigger = 'manual', jobId = nu
      (bookSecondLook), rather than at the next measurement a whole rhythm out, which drew its own first look from those
      very calls first. The calls a second look needs that no measurement has drawn, against those there are now. */
   if (!best && second?.c.verdict === 'insufficient') {
-    await bookSecondLook(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId), {
-      least: callsToClear(floor, confirmZ), unseen: pool.filter((c) => !seenBefore.has(c.id) && !sampled.has(c.id)).length,
-    });
+    await bookSecondLook(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId), { least: callsToClear(floor, confirmZ) });
   }
   return { ok: true, runId: run.id, floor, results: results.length, partial: halt === 'balance', reused: reusedCount };
 }
@@ -2756,13 +2800,14 @@ export async function restingStatus(workloadId) {
   if (ready.length) {
     return { status: 'certified', note: confirmed(ready[0]) ? null : 'A candidate cleared once and needs a second look', routed };
   }
+  /* cleared once and did not hold up on calls it had never seen: never offered, and said as that (see failedSecondLook);
+     read before one a cautious priority left out, in the order the run itself says them at its end */
+  if (results.some((r) => r.verdict === 'cleared' && failedSecondLook(r))) {
+    return { status: 'no_match', note: SECOND_LOOK_FAILED, routed };
+  }
   // cleared, and left out by a cautious priority as not sure enough: what the run itself said at its end
   if (results.some((r) => r.verdict === 'cleared' && r.confirm_verdict === 'left_out')) {
     return { status: 'no_match', note: 'A candidate cleared, but not surely enough for a cautious workload', routed };
-  }
-  // cleared once and did not hold up on calls it had never seen: never offered, and said as that (see failedSecondLook)
-  if (results.some((r) => r.verdict === 'cleared' && failedSecondLook(r))) {
-    return { status: 'no_match', note: SECOND_LOOK_FAILED, routed };
   }
   if (results.some((r) => r.verdict === 'review')) {
     return { status: 'certified', note: 'A candidate is close and needs a look', routed };

@@ -11,8 +11,9 @@ process.env.ALERTS_ENABLED = 'false';
 
 const { heldFieldChanged, stablePaths, numbersOf, numbersDiffer } = await import('../src/eval/compare.js');
 const judge = await import('../src/eval/judge.js');
-const { askOf, cutMiddle, ASK_MAX } = await import('../src/eval/ask.js');
+const { askOf, cutMiddle, refit, ASK_MAX } = await import('../src/eval/ask.js');
 const { requestText } = await import('../src/learn/check.js');
+const { keepVerdict, heldBar } = await import('../src/eval/run.js');
 
 const A = { invoice: 'INV-7', total: 1234.5, currency: 'EUR', note: 'Paid by card on the 4th, ahead of the due date as agreed.' };
 const B = { invoice: 'INV-7', total: '1,234.50', currency: 'eur', note: 'Settled by card on the 4th, before the due date, as agreed.' };
@@ -74,13 +75,21 @@ test('a field is held only where the customer model gives it the same way on nea
   assert.equal(heldFieldChanged({ ...a, currency: 'USD' }, a, agreeing, 'json', { only: stable })?.path, 'currency');
   // an empty set holds nothing at all
   assert.equal(heldFieldChanged({ ...a, total: 1 }, a, agreeing, 'json', { only: new Set() }), null);
-  // too few calls to say either way: nothing is stable yet
+  // too few calls to say either way: nothing is stable yet, and ten agreeing of ten is not yet enough either
   assert.equal(stablePaths(pairs.slice(0, 9), 'json').size, 0);
-  // a field the model slips on now and then is still its own (95% of the calls), and one it gets wrong a tenth of the time is not
+  assert.equal(stablePaths(pairs.slice(0, 10), 'json').size, 0, 'a field that agrees 82% of the time shows ten of ten one time in seven');
+  assert.deepEqual([...stablePaths(pairs.slice(0, 30), 'json')].sort(), ['currency', 'note', 'total'], 'thirty of thirty is');
+  // a field the model slips on now and then is still its own (96 of 100), and one it gets wrong a tenth of the time is not
   const slips = Array.from({ length: 100 }, (_, i) => [{ total: 100 + i, id: `A${i}` }, { total: i % 25 === 0 ? 1 : 100 + i, id: i % 10 === 0 ? 'x' : `A${i}` }]);
   assert.deepEqual([...stablePaths(slips, 'json')].sort(), ['total']);
+  // a field there on one answer and not the other disagrees: an optional one, or the fourth line of a list sometimes three long
+  const optional = Array.from({ length: 60 }, (_, i) => [
+    { total: 100 + i, discount: 5, items: i % 2 ? ['a', 'b', 'c', 'd'] : ['a', 'b', 'c'] },
+    i % 2 ? { total: 100 + i, items: ['a', 'b', 'c'] } : { total: 100 + i, discount: 5, items: ['a', 'b', 'c', 'd'] },
+  ]);
+  assert.deepEqual([...stablePaths(optional, 'json')].sort(), ['items[0]', 'items[1]', 'items[2]', 'total']);
   // a tool's name, when it is called the same way nearly always, and its arguments
-  const calls = Array.from({ length: 20 }, (_, i) => [[{ name: 'refund', args: { order: `A-${i}`, amount: i } }], [{ name: 'refund', args: { order: `A-${i}`, amount: i } }]]);
+  const calls = Array.from({ length: 40 }, (_, i) => [[{ name: 'refund', args: { order: `A-${i}`, amount: i } }], [{ name: 'refund', args: { order: `A-${i}`, amount: i } }]]);
   assert.deepEqual([...stablePaths(calls, 'tool_call')].sort(), ['[0].amount', '[0].order', 'the tool called']);
 });
 
@@ -88,6 +97,37 @@ test('read strictly against one answer (a background answer), only figures are h
   assert.equal(heldFieldChanged({ ...A, currency: 'USD', invoice: 'INV-8' }, A, A, 'json', { figuresOnly: true }), null);
   assert.equal(heldFieldChanged({ ...A, total: 1 }, A, A, 'json', { figuresOnly: true })?.path, 'total');
   assert.equal(heldFieldChanged({ ...A, note: 'Paid by card on the 9th, ahead of the due date as agreed.' }, A, A, 'json', { figuresOnly: true })?.path, 'note');
+});
+
+test("the bar's own pairs are read as a candidate is: the customer's two answers disagreeing on a held field count half", () => {
+  const pairs = () => [
+    // the same total, a note worded another way: not held, so the judge's reading stands
+    { a: { ok: true, value: { total: 10, note: 'x' } }, b: { ok: true, value: { total: 10, note: 'y' } }, worse: 0 },
+    // its own two answers give two totals: one of them is off, so at least half
+    { a: { ok: true, value: { total: 10 } }, b: { ok: true, value: { total: 12 } }, worse: 0 },
+    // already more than half: kept as the judge read it
+    { a: { ok: true, value: { total: 10 } }, b: { ok: true, value: { total: 12 } }, worse: 0.8 },
+    // no reading from the judge: left out of the bar, as before
+    { a: { ok: true, value: { total: 10 } }, b: { ok: true, value: { total: 11 } }, worse: null },
+    // one answer that could not be read has no fields to hold
+    { a: { ok: false }, b: { ok: true, value: { total: 12 } }, worse: 0.2 },
+  ];
+  assert.deepEqual(heldBar(pairs(), new Set(['total']), 'json'), [0, 0.5, 0.8, 0.2]);
+  // with no field held, the judge's readings as they were
+  assert.deepEqual(heldBar(pairs(), new Set(), 'json'), [0, 0, 0.8, 0.2]);
+  assert.deepEqual(heldBar(pairs(), null, 'json'), [0, 0, 0.8, 0.2]);
+  // held on the note instead: the pair whose notes differ counts half, and the totals, no longer held, count as the judge read them
+  assert.deepEqual(heldBar(pairs(), new Set(['note']), 'json'), [0.5, 0, 0.8, 0.2]);
+});
+
+test('what serves is switched back for good only on readings that settled for at least half the calls it answered', () => {
+  // a judge that failed on most of the eleven calls left four readings: never enough to switch back on
+  assert.equal(keepVerdict('missed', 4, 11), 'insufficient');
+  // half or more: clearly worse stands
+  assert.equal(keepVerdict('missed', 5, 10), 'missed');
+  assert.equal(keepVerdict('missed', 11, 11), 'missed');
+  // and every other verdict is left as it was
+  for (const v of ['cleared', 'review', 'insufficient']) assert.equal(keepVerdict(v, 2, 11), v);
 });
 
 test('the figure checks moved with the comparisons and read the same from the judge', () => {
@@ -136,6 +176,29 @@ test('a long conversation keeps the instructions, the newest turn whole, and the
   assert.match(c, /user: So which flight is cheapest\?$/);
   assert.match(c, /turn 29 /, 'the newest earlier turn is kept');
   assert.doesNotMatch(c, /turn 0 /, 'and the oldest is the one left out');
+});
+
+test("Jev's shorter reading keeps a question put before a long document, and neither reading runs over", () => {
+  // a 1,200-character instruction, then the question, then a long contract: cut again from its middle, the question fell out
+  const body = { messages: [{ role: 'system', content: `You review contracts for a law firm. ${'Be careful and precise. '.repeat(48)}` },
+    { role: 'user', content: `Summarise this contract in three lines.\n${'Clause text. '.repeat(900)}\nSigned in Colombo.` }] };
+  const full = askOf(body);
+  assert.ok(full.length <= ASK_MAX, `${full.length}`);
+  const jev = refit(full, 2500);
+  assert.ok(jev.length <= 2500, `${jev.length}`);
+  assert.match(jev, /^system: You review contracts for a law firm\./);
+  assert.match(jev, /Summarise this contract in three lines\./, 'the question is still there');
+  assert.match(jev, /Signed in Colombo\.$/);
+  // long instructions and a long conversation: the note of what was left out has room kept for it, and is counted through
+  const turns = Array.from({ length: 30 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `turn ${i} ${'words '.repeat(40)}` }));
+  const c = askOf({ messages: [{ role: 'system', content: 'x'.repeat(6000) }, ...turns, { role: 'user', content: 'So which is cheapest?' }] });
+  assert.ok(c.length <= ASK_MAX, `${c.length} characters`);
+  const c2 = refit(c, 2500);
+  assert.ok(c2.length <= 2500, `${c2.length} characters`);
+  assert.match(c2, /\[30 earlier messages left out\]/, 'the thirty the first reading left out are still counted');
+  assert.match(c2, /user: So which is cheapest\?$/);
+  // text askOf did not write is cut from its middle, as before
+  assert.match(refit(`Instructions: ${'y'.repeat(4000)}\nRequest: what now?`, 2500), /Request: what now\?$/);
 });
 
 test('a cut from the middle keeps both ends and says how long the whole was', () => {

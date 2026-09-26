@@ -260,12 +260,16 @@ export function heldFieldChanged(answer, refA, refB, shapeKind, { figuresOnly = 
 const TOOL_PATH = 'the tool called';
 
 /* The fields of a structured answer its customer's model gives the same way on both of its answers to a call, on nearly
-   every call (`share`, of at least `least` calls that both answers have the field in): what heldFieldChanged holds a
-   candidate to. A field that agrees only as often as chance allows, a category the model picks afresh every time, is that
-   model's own variation, and is left to the judge. A written field counts by its figures, where both answers state any.
-   `pairs` are the customer's model's two answers to each call, as a measurement's bar reads them. Answers a Set of paths,
-   named as heldFieldChanged reads them before naming them for a page ('$' for an answer that is a single value). */
-export function stablePaths(pairs, shapeKind, { least = 10, share = 0.95 } = {}) {
+   every call: what heldFieldChanged holds a candidate to. Nearly every call is read as a range, not a share: the exact
+   lower bound on how often the two agree (exactLower) must be at least `share`, so ten agreeing calls of ten are not yet
+   enough (a field that agrees 82% of the time shows ten of ten about one time in seven), and thirty of thirty are. A
+   field that agrees only as often as chance allows, a category the model picks afresh every time, is that model's own
+   variation, and is left to the judge. A field one answer has and the other does not counts as a disagreement: an optional
+   field, there on half the answers, is not held, nor is the fourth line of a list that is sometimes three lines long. A
+   written field counts by its figures, where both answers state any. `pairs` are the customer's model's two answers to
+   each call, as a measurement's bar reads them. Answers a Set of paths, named as heldFieldChanged reads them before naming
+   them for a page ('$' for an answer that is a single value). */
+export function stablePaths(pairs, shapeKind, { least = 10, share = 0.9 } = {}) {
   const tally = new Map();
   const count = (path, agreed) => {
     const t = tally.get(path) || [0, 0];
@@ -286,8 +290,10 @@ export function stablePaths(pairs, shapeKind, { least = 10, share = 0.95 } = {})
     }
     const la = leaves(a);
     const lb = leaves(b);
-    for (const [path, va] of la) {
-      if (!lb.has(path)) continue;
+    for (const path of new Set([...la.keys(), ...lb.keys()])) {
+      // there in one answer and not the other: they disagree on it
+      if (!la.has(path) || !lb.has(path)) { count(path, false); continue; }
+      const va = la.get(path);
       const vb = lb.get(path);
       if (isProse(va) && isProse(vb)) {
         if (numbersOf(va).length && numbersOf(vb).length) count(path, !numbersDiffer(va, vb));
@@ -296,7 +302,7 @@ export function stablePaths(pairs, shapeKind, { least = 10, share = 0.95 } = {})
       count(path, sameValue(va, vb));
     }
   }
-  return new Set([...tally].filter(([, [agreed, n]]) => n >= least && agreed / n >= share).map(([path]) => path));
+  return new Set([...tally].filter(([, [agreed, n]]) => n >= least && exactLower(agreed, n) >= share).map(([path]) => path));
 }
 
 /** 0 means identical, 1 means a different answer. Null means a judge has to decide: free text, or a
@@ -389,6 +395,47 @@ export function callsToClear(floorPct, z = Z95) {
   return Math.ceil((z * z) / (floorPct / 100) - z * z);
 }
 
+// how likely a normal reading is to fall past z: the one-sided chance a bound at z leaves out (0.05 at Z95, 0.025 at 1.96)
+function outsideOf(z) {
+  const x = Math.abs(z) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * x);
+  const erfc = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))) * Math.exp(-x * x);
+  return z >= 0 ? erfc / 2 : 1 - erfc / 2;
+}
+const logFactorials = [0];
+const logFactorial = (n) => {
+  for (let i = logFactorials.length; i <= n; i += 1) logFactorials[i] = logFactorials[i - 1] + Math.log(i);
+  return logFactorials[n];
+};
+// the chance of k or more in n at rate p
+function atLeast(k, n, p) {
+  if (k <= 0) return 1;
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  let sum = 0;
+  for (let i = k; i <= n; i += 1) {
+    sum += Math.exp(logFactorial(n) - logFactorial(i) - logFactorial(n - i) + i * Math.log(p) + (n - i) * Math.log(1 - p));
+  }
+  return Math.min(1, sum);
+}
+/** The exact lower bound on a rate seen k times in n (Clopper and Pearson's, one-sided), as sure as a bound at `z`: the rate
+    below which k or more in n would happen less often than that. Wilson's bound runs high on a few differences in a few
+    calls (2 in 11 read over 5%, where the exact bound is about 3%), and a small sample's "clearly worse" rests on it
+    (verdictWith), as does which fields a structured answer is held to (stablePaths). */
+export function exactLower(k, n, z = Z95) {
+  if (!(n > 0) || !(k > 0)) return 0;
+  const outside = outsideOf(z);
+  let lo = 0;
+  let hi = Math.min(1, k / n);
+  for (let i = 0; i < 60; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (atLeast(k, n, mid) < outside) lo = mid; else hi = mid;
+  }
+  return lo;
+}
+// the fewest scored calls a small sample's "clearly worse" is ever read on (verdictWith)
+export const MISSED_MIN_CALLS = 10;
+
 /**
  * The verdict for one candidate from its per-call scores (each 0 to 1, 1 meaning a different answer).
  *
@@ -419,12 +466,16 @@ export function verdictWith(scores, floorPct, { reviewBand = 1.25, z = Z95 } = {
   const hi = share.hi * sevHi;
   const loPct = lo * 100;
   const hiPct = hi * 100;
-  // clearly worse is read before too few: it never needs as many calls as clearing does (see the comment above)
-  if (n > 0 && loPct > floorPct * reviewBand) return { verdict: 'missed', gap, lo: loPct, hi: hiPct };
   if (n === 0 || wilson(0, n, zz).hi * 100 > floorPct) {
+    /* Too few to show it passes, which is not too few to show it fails (see the comment above): clearly worse, on at least
+       MISSED_MIN_CALLS scored calls, when even the exact lower bound on how often it differed, times how much, is past the
+       review band. Read on Wilson's bound instead, a few differences in a few calls could fail a model that would pass. */
+    const exactPct = exactLower(k, n, zz) * sevLo * 100;
+    if (n >= MISSED_MIN_CALLS && exactPct > floorPct * reviewBand) return { verdict: 'missed', gap, lo: exactPct, hi: hiPct };
     return { verdict: 'insufficient', gap, lo: loPct, hi: hiPct, need: callsToClear(floorPct, zz) };
   }
   if (hiPct <= floorPct) return { verdict: 'cleared', gap, lo: loPct, hi: hiPct };
+  if (loPct > floorPct * reviewBand) return { verdict: 'missed', gap, lo: loPct, hi: hiPct };
   return { verdict: 'review', gap, lo: loPct, hi: hiPct };
 }
 

@@ -1,7 +1,7 @@
 import { db, now } from '../db/index.js';
 import config from '../config.js';
-import { FOUND, OUTCOME_OF, cheaperCleared } from './outcome.js';
-import { wouldTry, usableCalls } from './plan.js';
+import { FOUND, OUTCOME_OF, cheaperCleared, confirmed } from './outcome.js';
+import { wouldTry, usableCalls, unseenCalls } from './plan.js';
 
 /* When a workload is next measured by itself.
  *
@@ -64,12 +64,15 @@ export async function waitForCalls(workloadId, calls) {
   return at;
 }
 
-/* What waits for a second look for want of new calls: the models the newest measurement that compared anything would still
-   offer (cheaperCleared: priced, cheaper, never found wanting on a second look) whose second look found too few calls they
-   had never seen ('insufficient'). Only for a workload still on its customer's own model: one switched is re-checked, with
-   what serves it, by the usual measurement. Answers { runId, keys, models, sampled } or null: the rows by name, the models
-   a second-look run races (a strategy's by its parts, rebuilt by the run as usual), and the calls that measurement drew,
-   which the second-look run's first look draws again, answered from what they already bought. */
+/* What waits for a second look for want of new calls: the newest measurement that compared anything found a second look short
+   of calls it had never seen ('insufficient') for something it would still offer (cheaperCleared: priced, cheaper, never
+   found wanting on a second look). What a second-look run then races is everything it still offers that no second look has
+   stood behind yet, the ones the looks never reached included: its results are what the page offers from then on, and
+   racing only the ones found short dropped the rest off the page. Only for a workload still on its customer's own model:
+   one switched is re-checked, with what serves it, by the usual measurement. Answers { runId, keys, models, sampled } or
+   null: the rows by name, the setups a second-look run races by the name each one's result carries (a strategy's by its
+   parts, rebuilt by the run as usual), and the calls that measurement drew, which the second-look run's first look draws
+   again, answered from what it already bought. */
 export async function pendingSecondLook(workloadId) {
   const w = await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(workloadId);
   if (!w || w.routed_model) return null;
@@ -78,15 +81,16 @@ export async function pendingSecondLook(workloadId) {
       ORDER BY created_at DESC LIMIT 1`).get(workloadId);
   if (!last) return null;
   const results = await db.prepare('SELECT * FROM eval_results WHERE run_id = ?').all(last.id);
-  const waiting = cheaperCleared(results).filter((r) => r.confirm_verdict === 'insufficient');
-  if (!waiting.length) return null;
+  const offered = cheaperCleared(results);
+  if (!offered.some((r) => r.confirm_verdict === 'insufficient')) return null;
+  const waiting = offered.filter((r) => !confirmed(r));
   const models = new Set();
   for (const r of waiting) {
     let spec = null;
     try { spec = r.arm_json ? JSON.parse(r.arm_json) : null; } catch { spec = null; }
     const parts = spec?.kind === 'cascade' ? [spec.first]
       : spec?.kind === 'router' ? (Array.isArray(spec.options) ? spec.options : [spec.cheap, spec.strong]) : [];
-    if (parts.length) { for (const p of parts) if (p?.model) models.add(p.model); } else models.add(spec?.model || r.model_id);
+    if (parts.length) { for (const p of parts) if (p?.model) models.add(p.key || p.model); } else models.add(r.model_id);
   }
   const sampled = new Set((await db.prepare('SELECT call_id FROM eval_samples WHERE run_id = ?').all(last.id)).map((x) => x.call_id));
   return { runId: last.id, keys: waiting.map((r) => r.model_id), models, sampled };
@@ -96,16 +100,26 @@ export async function pendingSecondLook(workloadId) {
    second-look run (trigger 'second_look'), rather than at the next measurement a whole rhythm out. A whole new measurement
    drew its own first look from the new calls first and left its second look short again, so a workload with little
    traffic never switched: on 26 Sep 2026 an invoice workload had nine models matching every answer, none ever looked at
-   twice. `least` is how many calls a second look needs that no measurement has drawn, and `unseen` how many there are now;
-   every call that arrives is one more. Only where the workspace measures by itself, and never for a count no workload
-   could reach. Answers when it is booked for, or null. */
-export async function bookSecondLook(workload, { least, unseen }) {
+   twice. `least` is how many calls a second look needs that no measurement has drawn: it is booked for that many of them
+   (measure_at_calls), and counted against the calls no measurement has drawn (unseenCalls), which only grow while calls
+   arrive. Booked against every usable call instead, a steady workload whose old calls leave the thirty days as new ones
+   come never reached it. Only where the workspace measures by itself. Answers when it is booked for, or null. */
+export async function bookSecondLook(workload, { least }) {
   if (!(await cadenceOf(workload.workspace_id))) return null;
   if (!(await pendingSecondLook(workload.id))) return null;
-  const have = await usableCalls(workload);
-  const need = have + Math.max(1, Math.ceil(least) - Math.max(0, unseen));
+  const need = Math.max(1, Math.ceil(least));
   if (need > config.EVAL_POOL_MAX) return null;
   return waitForCalls(workload.id, need);
+}
+
+/* What a workload waiting for calls waits for, and has: calls no measurement has drawn for a second look (bookSecondLook),
+   and otherwise calls a measurement can use. Read by what starts it (startIfReady in src/proxy.js) and by what shows it
+   (the workload page and the approval card). Null when it waits for none. */
+export async function waitOf(workload) {
+  const need = Number(workload?.measure_at_calls);
+  if (!(need > 0)) return null;
+  const second = workload.status !== 'new' && !!(await pendingSecondLook(workload.id));
+  return { need, have: second ? await unseenCalls(workload) : await usableCalls(workload), secondLook: second };
 }
 
 /* A measurement nobody asked for that the plan turned down for any other reason: looked at again later,

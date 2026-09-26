@@ -5,10 +5,14 @@
    Cut from the middle, never from the end. The instructions come first and the request being answered
    last, so a cut from the end took the question itself away whenever the instructions were long: a judge
    then weighed two answers without knowing what either was answering (26 Sep 2026). Now the newest turn,
-   from the last thing the user said to the end, is kept whole wherever it fits; the instructions keep
-   their start and their end; the turns between are kept newest first, whole; and whatever is left out
-   says so. A picture, a sound or a file is named where it was, and a tool the model called is shown with
-   what it was called with, rather than dropped as an empty message. */
+   from the last thing the user said to the end, is kept whole wherever it fits, and a longer one keeps its
+   start and its end; the instructions keep their start and their end; the turns between are kept newest
+   first, whole; and whatever is left out says so. A picture, a sound or a file is named where it was, and
+   a tool the model called is shown with what it was called with, rather than dropped as an empty message.
+
+   Jev reads a shorter one than the language-model judge (src/eval/judge.js), and gets it the same way
+   (refit): the text cut again from its middle kept only the instructions' start and the request's end, and
+   a question put before a long document fell in between. */
 
 export const ASK_MAX = 4000;
 
@@ -43,35 +47,64 @@ export function messageLine(m) {
   return `${m?.role || 'user'}: ${t}`;
 }
 
-export function askOf(body, max = ASK_MAX) {
-  const msgs = Array.isArray(body?.messages) ? body.messages : [];
-  const full = msgs.map(messageLine).join('\n');
+// room kept for the line that says how many earlier messages were left out
+const NOTE_ROOM = 48;
+
+/* The messages, each as its line (`text`) with who said it (`role`), fitted into `max`: the newest turn, then the
+   instructions, then the turns between, newest first. `weight` is how many messages a line stands for: one, or the count
+   a note from an earlier fitting already says was left out, so a note left out in turn is still counted. */
+function fit(items, max) {
+  const full = items.map((x) => x.text).join('\n');
   if (full.length <= max) return full;
   // the newest turn: from the last thing the user said to the end (a tool's result after it included)
-  let at = msgs.length - 1;
-  for (let i = msgs.length - 1; i >= 0; i -= 1) {
-    if (msgs[i]?.role === 'user') { at = i; break; }
+  let at = items.length - 1;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i].role === 'user') { at = i; break; }
   }
   // the instructions: the system and developer messages it starts with
   let i = 0;
-  while (i < at && ['system', 'developer'].includes(msgs[i]?.role)) i += 1;
-  const leadFull = msgs.slice(0, i).map(messageLine).join('\n');
-  const between = msgs.slice(i, at);
-  const tailFull = msgs.slice(at).map(messageLine).join('\n');
+  while (i < at && ['system', 'developer'].includes(items[i].role)) i += 1;
+  const leadFull = items.slice(0, i).map((x) => x.text).join('\n');
+  const between = items.slice(i, at);
+  const tailFull = items.slice(at).map((x) => x.text).join('\n');
+  const note = between.length ? NOTE_ROOM : 0;
   /* The newest turn first, whole wherever the instructions' first 40% leave room for it; then the instructions, in
      whatever the newest turn leaves; then the turns between, newest first, in what is left after both. */
   const leadShare = Math.min(leadFull.length, Math.floor(max * 0.4));
-  const tail = cutMiddle(tailFull, max - (leadShare ? leadShare + 1 : 0));
-  const lead = leadFull ? cutMiddle(leadFull, Math.max(0, max - tail.length - 1)) : '';
-  let room = max - tail.length - (lead ? lead.length + 1 : 0) - 48;
+  const tail = cutMiddle(tailFull, Math.max(0, max - (leadShare ? leadShare + 1 : 0) - note));
+  const lead = leadFull ? cutMiddle(leadFull, Math.max(0, max - tail.length - 1 - note)) : '';
+  let room = max - tail.length - (lead ? lead.length + 1 : 0) - note;
   const kept = [];
-  for (let k = between.length - 1; k >= 0; k -= 1) {
-    const line = messageLine(between[k]);
-    if (line.length + 1 > room) break;
-    kept.unshift(line);
-    room -= line.length + 1;
+  let k = between.length - 1;
+  for (; k >= 0; k -= 1) {
+    if (between[k].text.length + 1 > room) break;
+    kept.unshift(between[k].text);
+    room -= between[k].text.length + 1;
   }
-  const dropped = between.length - kept.length;
-  const note = dropped ? `[${dropped} earlier message${dropped === 1 ? '' : 's'} left out]` : '';
-  return [lead, note, ...kept, tail].filter(Boolean).join('\n');
+  const dropped = between.slice(0, k + 1).reduce((a, x) => a + (x.weight || 1), 0);
+  const said = dropped ? `[${dropped} earlier message${dropped === 1 ? '' : 's'} left out]` : '';
+  return [lead, said, ...kept, tail].filter(Boolean).join('\n');
+}
+
+export function askOf(body, max = ASK_MAX) {
+  const msgs = Array.isArray(body?.messages) ? body.messages : [];
+  return fit(msgs.map((m) => ({ role: m?.role || 'user', text: messageLine(m), weight: 1 })), max);
+}
+
+const ROLE_LINE = /^(system|developer|user|assistant|tool): /;
+const NOTE_LINE = /^\[(\d+) earlier messages? left out\]$/;
+
+/** What askOf wrote, fitted into a shorter `max` the same way (the judges give Jev a shorter one): read back into its
+    messages by the line each starts with, then fitted again. Text askOf did not write is one message, cut from its middle. */
+export function refit(text, max) {
+  const t = String(text ?? '');
+  if (t.length <= max) return t;
+  const items = [];
+  for (const line of t.split('\n')) {
+    const role = line.match(ROLE_LINE)?.[1];
+    const note = line.match(NOTE_LINE);
+    if (role || note || !items.length) items.push({ role: role || (note ? 'note' : 'user'), text: line, weight: note ? Number(note[1]) : 1 });
+    else items[items.length - 1].text += `\n${line}`;
+  }
+  return fit(items, max);
 }

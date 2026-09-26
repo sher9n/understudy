@@ -7,7 +7,7 @@ import { LASTING_STATUSES } from './eval/replay.js';
 import { lastAsked, messagesText, responseText } from './callText.js';
 import { valueOf, optimizingSince, paceOf } from './eval/value.js';
 import { routedSavings } from './eval/actual.js';
-import { cadenceOf } from './eval/schedule.js';
+import { cadenceOf, waitOf } from './eval/schedule.js';
 import { outcomeOf, failedSecondLook, DID_NOT_HOLD_UP } from './eval/outcome.js';
 import { canJudge } from './eval/judge.js';
 import { servingKey } from './eval/promote.js';
@@ -57,9 +57,13 @@ async function dailyOf(w, t) {
 async function enoughOf(w, t) {
   const every = await cadenceOf(w.workspace_id);
   const daily = await dailyOf(w, t);
-  const have = await usableCalls(w);
-  // what it was left waiting for, where a test was turned down already, and otherwise what its bar takes
-  const need = Number(w.measure_at_calls) > 0 ? Number(w.measure_at_calls) : barNeed(w).calls;
+  const usable = await usableCalls(w);
+  /* what it was left waiting for, where a test was turned down already or a model waits for its second test, and otherwise
+     what its bar takes; a second test's wait is for requests no test has drawn, counted as what starts it counts them
+     (waitOf), and said as those ("after 12 more requests") */
+  const wait = await waitOf(w);
+  const need = wait ? wait.need : barNeed(w).calls;
+  const have = wait?.secondLook ? wait.have : usable;
   const yes = have >= need;
   const last = await db.prepare('SELECT created_at FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1').get(w.id);
   // when it is next tested by itself: its own booking, or the workspace's rhythm after its last test
@@ -70,7 +74,7 @@ async function enoughOf(w, t) {
     total: daily.reduce((a, x) => a + x.n, 0),
     daily,
     // how many of them a test uses
-    sample: sampleSizeFor(have),
+    sample: sampleSizeFor(usable),
     everyDays: every,
     nextAt,
   };

@@ -522,8 +522,9 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   // read as the workload is judged now: "the same answer", or "at least as good" with the judge and checklist of its measurement
   const bar = await barOf(workload);
   const yardstick = bar.yardstick === 'quality' ? 'quality' : 'agreement';
+  // and a structured answer held to the fields that measurement read its model giving the same way (agreementOf)
   const judging = yardstick === 'quality'
-    ? { yardstick, prefer: bar.prefer, checklist: workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null }
+    ? { yardstick, prefer: bar.prefer, checklist: workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null, stable: bar.stable }
     : null;
   let out = null;
   let status = 200;

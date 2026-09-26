@@ -7,8 +7,9 @@ import { callPrice } from '../models/facts.js';
 import { costOfCall } from './replay.js';
 import { judgeOptions, plainWay } from './way.js';
 import { brokenAgainst } from './checklist.js';
-// a request is cut from its middle for a judge, never its end, where the question being answered is (src/eval/ask.js)
-import { cutMiddle } from './ask.js';
+/* a request is fitted to what Jev reads well as askOf fits one: the instructions' start, the newest turn whole where it
+   fits, never cut from its end, where the question being answered is (src/eval/ask.js) */
+import { refit } from './ask.js';
 import { numbersOf, numbersDiffer } from './compare.js';
 
 /* Deciding whether two written answers say the same thing.
@@ -186,7 +187,7 @@ export async function judgeBetter(request, cand, ref, { scope = null, askFn = as
   const key = keyOf('better', 2, scope, config.JEV_MODEL, config.THREE_WAY_FORGIVE_MAX, config.THREE_WAY_BETTER_MIN, request, cand, ref);
   const hit = await cached(key);
   if (hit?.detail?.verdict) return { ...hit.detail, cost: 0, reused: true };
-  const req = cutMiddle(request, 2500);
+  const req = refit(request, 2500);
   const settled = await Promise.allSettled([
     askFn({ request: req, answers: { first: clip(cand, 2500), second: clip(ref, 2500) } }, { better: BETTER }),
     askFn({ request: req, answers: { first: clip(ref, 2500), second: clip(cand, 2500) } }, { better: BETTER }),
@@ -280,7 +281,7 @@ export async function judgeBarPair(request, a, b, { scope = null, subject = 'b',
           criteria: KINDS,
         };
       }
-      const r = await ask({ request: cutMiddle(request, 2500), answers: { x: clip(x, 2500), y: clip(y, 2500) } }, questions);
+      const r = await ask({ request: refit(request, 2500), answers: { x: clip(x, 2500), y: clip(y, 2500) } }, questions);
       const p = probability(r.answers?.same?.noul);
       const kind = r.answers?.kind?.choice ?? null;
       out = { score: p >= 0.5 ? 0 : 1, judgedBy: 'jev', detail: { p, kind }, cost: r.costUsd };
@@ -399,7 +400,7 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
           };
         }
       }
-      const r = await ask({ request: cutMiddle(request, 2500), answers }, questions);
+      const r = await ask({ request: refit(request, 2500), answers }, questions);
       const A = r.answers || {};
       const pA = probability(A.same0?.noul);
       const pB = label.ref1 ? probability(A.same1?.noul) : null;
@@ -621,7 +622,7 @@ export async function judgeQuality(request, answer, reference, { scope = null, p
   let cost = 0;
   let out = null;
   if (jevFirst) {
-    const req = cutMiddle(request, 2500);
+    const req = refit(request, 2500);
     // asked with the first reading, where the answer judged is first and the reference second
     const needs = Object.fromEntries(asks.flatMap((x, i) => [[`need${i}a`, needQuestion('first', x.say)], [`need${i}b`, needQuestion('second', x.say)]]));
     const settled = await Promise.allSettled([
@@ -740,7 +741,7 @@ export async function openEndedOf(requests, { scope = null, askFn = ask, share: 
     if (hit && Number.isFinite(Number(hit.detail?.p))) { by.add(hit.judgedBy); return Number(hit.detail.p); }
     if (viaJev) {
       try {
-        const r = await askFn({ request: cutMiddle(request, 2500) }, { open: OPEN });
+        const r = await askFn({ request: refit(request, 2500) }, { open: OPEN });
         cost += Number(r?.costUsd) || 0;
         const p = probability(r?.answers?.open?.noul);
         by.add('jev');

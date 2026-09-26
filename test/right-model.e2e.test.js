@@ -62,6 +62,7 @@ const { runEvaluation, restingStatus } = await import('../src/eval/run.js');
 const { promote } = await import('../src/eval/promote.js');
 const { cheaperCleared } = await import('../src/eval/outcome.js');
 const { pendingSecondLook } = await import('../src/eval/schedule.js');
+const { unseenCalls } = await import('../src/eval/plan.js');
 const { startWaiting } = await import('../src/proxy.js');
 const { runPageOf } = await import('../src/workloadPage.js');
 const { app } = await import('../src/server.js');
@@ -71,6 +72,10 @@ await migrate({ quiet: true });
 const REF = 'openai/gpt-5.4';
 // answers every request the way the customer's model does
 const STEADY = 'vendor/steady-small';
+// three more that do too, a little dearer each: four that pass, more than the second looks one measurement takes
+const STEADY_B = 'vendor/steady-b';
+const STEADY_C = 'vendor/steady-c';
+const STEADY_D = 'vendor/steady-d';
 // answers every request wrongly
 const DRIFTY = 'vendor/drifty-small';
 // right on every request of its first look, wrong on every one after
@@ -80,7 +85,9 @@ const SLIPPING = 'vendor/slipping-small';
 // wrong on request #0 alone: nothing a small sample can show either way
 const ODD = 'vendor/odd-small';
 const JUDGE = 'judge/small';
-const MODELS = [STEADY, DRIFTY, LUCKY, SLIPPING, ODD];
+const MODELS = [STEADY, STEADY_B, STEADY_C, STEADY_D, DRIFTY, LUCKY, SLIPPING, ODD];
+// a little dearer each, so which is looked at first is settled by price
+const PRICE_IN = { [STEADY_B]: 0.12e-6, [STEADY_C]: 0.14e-6, [STEADY_D]: 0.16e-6 };
 const DAY = 86400000;
 
 const right = (i) => ({ total: 100 + i, currency: 'EUR', lines: (i % 5) + 1 });
@@ -123,7 +130,7 @@ test.before(async () => {
   await new Promise((r) => { server = app.listen(APP_PORT, '127.0.0.1', r); });
   await saveCatalog([
     { model_id: REF, name: 'OpenAI: GPT-5.4', context_len: 200000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1 },
-    ...MODELS.map((m) => ({ model_id: m, name: m.split('/')[1], context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 0, zdr: 1 })),
+    ...MODELS.map((m) => ({ model_id: m, name: m.split('/')[1], context_len: 128000, price_in: PRICE_IN[m] ?? 0.1e-6, price_out: 0.3e-6, open_weights: 0, zdr: 1 })),
     { model_id: JUDGE, name: 'judge', context_len: 128000, price_in: 0.05e-6, price_out: 0.1e-6, open_weights: 0, zdr: 1 },
   ]);
 });
@@ -268,76 +275,123 @@ test('a model that passed once and did not hold up on new calls is never offered
   assert.equal(pill?.text, 'Passed once, not again', JSON.stringify(pill));
 });
 
-test('one that passed once and had too few new calls is looked at again the moment they arrive, and switched to when it passes', async () => {
+test('what passed once and had too few new calls is looked at again the moment they arrive, and switched to when it passes', async () => {
   const { workspace, workload: w, api, seq: set } = await seeded({ n: 200, models: [DRIFTY], mode: 'auto' });
   // a measurement that tries only a model that fails: every call it draws has now been seen
   const first = await runEvaluation(w.id);
   assert.equal(first.ok, true, JSON.stringify(first));
-  // then one that tries the steady model: its first look takes the other calls, and leaves its second look none
-  await enable(workspace.id, [STEADY]);
+  /* then one that tries four that answer as the customer's model does: their first look takes the other calls and leaves
+     their second looks none, three of them are looked at and found short of calls, and the fourth is never reached */
+  const steady = [STEADY, STEADY_B, STEADY_C, STEADY_D];
+  await enable(workspace.id, steady);
   const second = await runEvaluation(w.id);
   assert.equal(second.ok, true, JSON.stringify(second));
-  const row = await resultOf(second.runId, STEADY);
-  assert.equal(row.verdict, 'cleared', `${row.verdict}, ${row.gap_pct}% on ${row.runs}`);
-  assert.equal(row.confirm_verdict, 'insufficient', `no call it had not seen was left: ${row.confirm_verdict}`);
-  let now1 = await load(w.id);
+  const rows = await Promise.all(steady.map((m) => resultOf(second.runId, m)));
+  for (const r of rows) assert.equal(r.verdict, 'cleared', `${r.model_id}: ${r.verdict}, ${r.gap_pct}% on ${r.runs}`);
+  const looks = rows.map((r) => r.confirm_verdict).sort();
+  assert.deepEqual(looks, ['insufficient', 'insufficient', 'insufficient', 'not_reached'], JSON.stringify(looks));
+  const now1 = await load(w.id);
   assert.equal(now1.routed_model, null, 'nothing switched on one look, even switching by itself');
   assert.equal(now1.status_note, 'A candidate cleared once and needs a second look');
   const said = await lastActivity(w.id);
   assert.match(said.detail, /It is tested again on new requests as soon as enough of them arrive, and it switches by itself if it passes/);
 
-  /* booked for the calls it needs: 88 no measurement has drawn, at a 3% bar, less any of the 200 neither measurement happened
-     to draw (a sample is spread over answer lengths, so it can leave one or two), on top of the 200 there are */
+  /* booked for the calls it needs that no measurement has drawn (88 at a 3% bar), counted as those, and every one it still
+     offers waits for that look, the one the looks never reached included */
   const pending = await pendingSecondLook(w.id);
-  assert.deepEqual(pending?.keys, [STEADY]);
-  const drawn = Number((await db.prepare(`SELECT COUNT(DISTINCT s.call_id) AS n FROM eval_samples s JOIN eval_runs r ON r.id = s.run_id
-      WHERE r.workload_id = ?`).get(w.id)).n);
-  const need = Number(now1.measure_at_calls);
-  assert.equal(need, 200 + 88 - (200 - drawn), `waits for ${need} calls, ${200 - drawn} of the 200 never drawn`);
+  assert.deepEqual([...(pending?.keys || [])].sort(), [...steady].sort());
+  assert.equal(Number(now1.measure_at_calls), 88, `waits for ${now1.measure_at_calls} calls no measurement has drawn`);
+  const unseen0 = await unseenCalls(now1);
+  // the first in the run's own order is offered while it waits (within a point of saving, the faster ranks first)
+  const top = rows.find((r) => Number(r.choice_rank) === 1)?.model_id;
   const page = await api.get(`/workloads/${w.id}`);
-  assert.equal(page.candidate?.model, STEADY, 'offered while it waits');
+  assert.equal(page.candidate?.model, top, 'the first in line offered while it waits');
   assert.equal(page.candidate.confirm.verdict, 'insufficient');
-  assert.deepEqual(page.measure?.waitingFor, { calls: need, have: 200 }, 'and the page can say how many more it waits for');
+  assert.deepEqual(page.measure?.waitingFor, { calls: 88, have: unseen0, secondLook: true }, 'the page can say how many more it waits for');
   // every request at once only for a model that passed twice
-  const allAtOnce = await api.post(`/workloads/${w.id}/promote`, { model: STEADY, rollout: false });
+  const allAtOnce = await api.post(`/workloads/${w.id}/promote`, { model: top, rollout: false });
   assert.equal(allAtOnce.status, 409, JSON.stringify(allAtOnce.body));
   assert.match(JSON.stringify(allAtOnce.body), /Only a model that passed twice can take every request at once/);
 
-  // one call short of the count starts nothing; the call that reaches it starts a second look (more arrive before it runs)
-  for (let i = 200; i < need - 1; i += 1) await record(workspace.id, w.id, i, set);
+  /* a steady workload: old calls leave the thirty days as new ones come, so a count of every usable call stays about level;
+     booked against that it was never reached. Sixty of the first measurement's calls leave now. */
+  await db.prepare(`UPDATE calls SET created_at = ? WHERE id IN (SELECT call_id FROM eval_samples WHERE run_id = ? LIMIT 60)`)
+    .run(now() - 40 * DAY, first.runId);
+  // one call short of what it waits for starts nothing; the call that brings it starts a second look (more arrive before it runs)
+  let i = 200;
+  while ((await unseenCalls(await load(w.id))) < 87) await record(workspace.id, w.id, i++, set);
   assert.equal(await startWaiting(), 0, 'one call short: nothing starts');
-  for (let i = need - 1; i < 300; i += 1) await record(workspace.id, w.id, i, set);
-  assert.equal(await startWaiting(), 1, 'the call that reaches it starts one');
+  await record(workspace.id, w.id, i++, set);
+  assert.equal(await startWaiting(), 1, 'the call that brings it starts one, however many older calls have left');
   const jobs = await db.prepare(`SELECT payload, status, created_at FROM jobs WHERE kind = 'eval_run' AND (payload::jsonb ->> 'workloadId') = ?
       ORDER BY created_at`).all(w.id);
   const queued = jobs.filter((j) => j.status === 'queued').map((j) => JSON.parse(j.payload));
   assert.deepEqual(queued.map((p) => p.trigger), ['second_look'], `a second look, not a whole measurement: ${JSON.stringify(jobs)}`);
+  for (let k = 0; k < 12; k += 1) await record(workspace.id, w.id, i++, set);
 
-  /* the second look: that model alone, even with others switched on that a whole measurement would race, its first look
-     answered from what it already bought, and its second on the new calls */
-  await enable(workspace.id, [STEADY, DRIFTY]);
+  /* a second look whose models were switched off in the meantime cannot run: looked at again in the workspace's rhythm, and
+     never booked for a count of usable calls, which is not what it waits for */
+  await enable(workspace.id, []);
+  const off = await runEvaluation(w.id, { trigger: 'second_look' });
+  assert.equal(off.ok, false, JSON.stringify(off));
+  const deferred = await load(w.id);
+  assert.equal(deferred.measure_at_calls, null, 'not booked for a count of usable calls');
+  assert.ok(Number(deferred.recheck_after) > now() + 2 * DAY, `looked at again in its rhythm, not in hours: ${deferred.recheck_after}`);
+  assert.ok(await pendingSecondLook(w.id), 'and still waiting for its second look');
+
+  /* the second look: those four alone, even with another switched on that a whole measurement would race, their first look
+     answered from what they already bought, and the second on the new calls */
+  await enable(workspace.id, [...steady, DRIFTY]);
   const drifted = got(DRIFTY);
-  const asked = got(STEADY);
+  const asked = new Map(steady.map((m) => [m, got(m)]));
+  const unseen = await unseenCalls(await load(w.id));
   const look = await runEvaluation(w.id, { trigger: 'second_look' });
   assert.equal(look.ok, true, JSON.stringify(look));
   const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(look.runId);
   assert.equal(run.trigger, 'second_look');
   assert.equal(JSON.parse(run.plan_json).secondLookOf?.runId, second.runId);
   const tried = (await db.prepare(`SELECT model_id FROM eval_results WHERE run_id = ? AND verdict <> 'reference'`).all(look.runId)).map((r) => r.model_id);
-  assert.deepEqual(tried, [STEADY], `only the model that waited: ${tried.join(', ')}`);
+  assert.deepEqual([...tried].sort(), [...steady].sort(), `the four that waited, none dropped: ${tried.join(', ')}`);
   assert.equal(got(DRIFTY), drifted, 'and nothing asked of a model switched on that was not waiting');
-  const again = await resultOf(look.runId, STEADY);
+  // switched to the first in line whose second look passed, since this workload switches by itself
+  const after = await load(w.id);
+  const chosen = after.routed_model;
+  assert.ok(steady.includes(chosen), `switched to one of the four: ${chosen}`);
+  const again = await resultOf(look.runId, chosen);
   assert.ok(Number(again.reused) >= 90, `its first look answered from what it already bought: ${again.reused} of ${again.runs}`);
   assert.equal(again.confirm_verdict, 'cleared', `and it passed on the new calls: ${again.confirm_verdict} on ${again.confirm_runs}`);
-  const unseen = 100 + (200 - drawn);
   assert.equal(Number(again.confirm_runs), unseen, `every one of the ${unseen} calls no measurement had drawn`);
   // its second look's calls, and at most the part of its first look the measurement it passed never drew
-  assert.ok(got(STEADY) - asked <= unseen + 30, `it was asked only what it had not answered before: ${got(STEADY) - asked}`);
-  const after = await load(w.id);
-  assert.equal(after.routed_model, STEADY, 'switched to, since this workload switches by itself');
+  const spent = got(chosen) - asked.get(chosen);
+  assert.ok(spent <= unseen + 30, `it was asked only what it had not answered before: ${spent}`);
   assert.equal(await pendingSecondLook(w.id), null, 'and nothing waits any more');
   const story = await runPageOf(after, run);
   assert.ok(story, 'the test has a page');
+  // a second look queued before that starts nothing now: nothing waits for it
+  const late = await runEvaluation(w.id, { trigger: 'second_look' });
+  assert.equal(late.ok, false, JSON.stringify(late));
+  assert.match(late.reason, /Nothing waits for a second look any more/);
+  assert.equal((await load(w.id)).routed_model, chosen, 'and what serves is left serving');
+});
+
+test('negative: a person switching while a second look waits answers it, and no measurement follows the switch', async () => {
+  const { workspace, workload: w, seq: set } = await seeded({ n: 200, models: [DRIFTY], mode: 'auto' });
+  assert.equal((await runEvaluation(w.id)).ok, true);
+  await enable(workspace.id, [STEADY]);
+  const out = await runEvaluation(w.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal((await resultOf(out.runId, STEADY)).confirm_verdict, 'insufficient');
+  assert.equal(Number((await load(w.id)).measure_at_calls), 88, 'a second look is booked');
+  await promote(await load(w.id), STEADY, { runId: out.runId, reason: 'approved by a person' });
+  const switched = await load(w.id);
+  assert.equal(switched.routed_model, STEADY);
+  assert.equal(switched.measure_at_calls, null, 'the switch answers what it waited for');
+  // however many calls come after, none starts a measurement on a count
+  for (let i = 200; i < 300; i += 1) await record(workspace.id, w.id, i, set);
+  await startWaiting();
+  const jobs = await db.prepare(`SELECT payload FROM jobs WHERE kind = 'eval_run' AND status = 'queued' AND (payload::jsonb ->> 'workloadId') = ?`)
+    .all(w.id);
+  assert.deepEqual(jobs, [], `nothing queued after the switch: ${JSON.stringify(jobs)}`);
 });
 
 test('negative: a workspace that measures only when asked books no second look by itself', async () => {
