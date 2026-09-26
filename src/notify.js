@@ -11,11 +11,12 @@ import send, { noticeEmail } from './email.js';
  * switched on in Settings. Sent to the workspace's owner. Nothing here ever holds up a call or a
  * measurement: an email that fails is noted, and the work goes on. */
 
+// named by what happened, as Settings lists them to switch on and off
 export const NOTIFY_KINDS = {
-  switched: 'A workload was switched to a cheaper model, or its switch grew to all of its calls',
-  waiting: 'A cheaper model cleared and is waiting for your approval',
-  reverted: 'A switch was taken back',
-  money: 'Your balance is running low, a top up failed, or a spending limit was reached',
+  switched: 'A workload switches to a cheaper model',
+  waiting: 'A cheaper model is waiting for your yes',
+  reverted: 'A switch is undone',
+  money: 'Your balance is low, a top up fails, or a spending limit is reached',
 };
 
 export function notifyPrefs(ws) {

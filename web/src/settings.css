@@ -1,0 +1,85 @@
+/* Settings, one short page (variation 1 of the Settings artboard, 26 Sep 2026): six topics as cards, each setting a
+   name and one sentence on the left and its control on the right, which move under the words on a phone. The switches,
+   inputs and buttons are the app's own (.sw, .inp, .mini, .minig); the choices are the calm row the artboard drew. */
+.st { display: grid; gap: 16px; max-width: 980px; }
+.st-head h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.25; }
+.st-head p { margin: 4px 0 0; font-size: 14.5px; color: var(--mut-read); }
+
+.st-card { border: 1px solid var(--line); border-radius: 14px; background: var(--raise); overflow: hidden; scroll-margin-top: 16px; }
+.st-cardhead { padding: 16px 20px 4px; display: grid; gap: 3px; }
+.st-cardhead h2 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.02em; }
+.st-cardhead p { margin: 0; font-size: 13.5px; line-height: 1.55; color: var(--mut-read); max-width: 72ch; }
+.st-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto); gap: 8px 24px; align-items: center;
+  padding: 13px 20px; border-top: 1px solid var(--line); }
+.st-cardhead + .st-row, .st-cardhead + .st-fresh + .st-row { border-top: 0; }
+.st-lbl { display: grid; gap: 2px; min-width: 0; }
+.st-lbl b { font-size: 14px; font-weight: 600; }
+.st-lbl > span { font-size: 13px; line-height: 1.5; color: var(--mut-read); max-width: 68ch; }
+.st-ctl { display: flex; justify-content: flex-end; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.st-foot { padding: 11px 20px 14px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.st-sub { background: var(--panel); border-top: 1px solid var(--line); }
+.st-sub .st-row:first-child { border-top: 0; }
+
+/* a row of choices, the chosen one raised */
+.st-seg { display: inline-flex; flex-wrap: wrap; gap: 3px; padding: 3px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); }
+.st-seg button { padding: 6px 12px; border-radius: 7px; font-size: 13px; color: var(--mut-read); white-space: nowrap; }
+.st-seg button:hover:not(.on):not(:disabled) { color: var(--ink); background: var(--grid); }
+.st-seg button.on { background: var(--raise); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
+.st-seg button:disabled { cursor: default; }
+.st-sub .st-seg { background: var(--raise); }
+.st-sub .st-seg button.on { background: var(--panel); }
+
+.st-select { font: inherit; font-size: 13.5px; color: var(--ink); background-color: var(--raise); border: 1px solid var(--line-strong);
+  border-radius: 9px; padding: 7px 32px 7px 11px; min-width: 150px; cursor: pointer; appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 6.2 8 9.7l3.5-3.5' fill='none' stroke='%238a8a95' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 9px center; background-size: 14px; }
+.st-select:disabled { opacity: 0.6; cursor: default; }
+.st-select:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+
+.st .inp.st-amount { min-width: 0; width: 120px; }
+.st .inp.st-code { min-width: 0; width: 130px; letter-spacing: 0.12em; }
+.st-inputs { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.st-inputs label { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--mut-read); }
+.st-check { display: flex; gap: 8px; align-items: flex-start; margin-top: 6px; font-size: 13px; color: var(--mut-read); cursor: pointer; }
+.st-check input { margin-top: 3px; flex: none; }
+.st-money { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
+.st-more { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 600; color: var(--brand-read); }
+.st-more svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.15s ease; }
+.st-more svg.up { transform: rotate(180deg); }
+
+/* keys: a name you can edit in place, the start of the key, when it was made and last used */
+.st-key { align-items: start; }
+.st-keyline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; color: var(--ink); }
+.st .inp.st-keyedit { min-width: 0; width: 200px; font-weight: 600; }
+.st-prefix { font-size: 12.5px; color: var(--mut-read); }
+.st-keyshow { grid-column: 1 / -1; margin: 2px 0 0; }
+.st .inp.st-keyname { min-width: 0; width: 220px; }
+.st-fresh { margin: 0 20px 12px; }
+
+/* payment history, newest first */
+.st-history { border-top: 1px solid var(--line); padding: 8px 20px 14px; display: grid; gap: 2px; }
+.st-move { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 12px; padding: 6px 0; font-size: 13px; border-bottom: 1px solid var(--grid); }
+.st-move:last-of-type { border-bottom: 0; }
+.st-move .in { color: var(--ok); }
+.st-move .out { color: var(--ink); }
+.st-move .what { color: var(--mut-read); overflow-wrap: anywhere; }
+.st-move .when { color: var(--mut); white-space: nowrap; }
+.st-history .st-more { margin-top: 6px; justify-self: start; }
+
+/* a phone: each control under its words */
+@media (max-width: 700px) {
+  .st-head h1 { font-size: 22px; }
+  .st-cardhead { padding: 14px 16px 2px; }
+  .st-row { grid-template-columns: minmax(0, 1fr); padding: 12px 16px; }
+  .st-ctl { justify-content: flex-start; }
+  .st-foot { padding: 10px 16px 13px; }
+  .st-seg { width: 100%; }
+  .st-seg button { flex: 1 1 auto; }
+  .st-select { width: 100%; }
+  .st .inp.st-keyedit, .st .inp.st-keyname { width: 100%; }
+  .st-history { padding: 8px 16px 12px; }
+  .st-move { grid-template-columns: 80px minmax(0, 1fr); }
+  .st-move .when { grid-column: 2; }
+  .st-fresh { margin: 0 16px 12px; }
+}
+@media (prefers-reduced-motion: reduce) { .st-more svg { transition: none; } }

@@ -1372,6 +1372,9 @@ api.get('/settings', async (req, res) => {
     defaultOptimizeMode: req.workspace.default_optimize_mode || config.DEFAULT_OPTIMIZE_MODE,
     // which of the setups that clear a workload it switches to, for workloads that have not chosen
     defaultRoutingMode: ROUTING_MODES.includes(req.workspace.default_routing_mode) ? req.workspace.default_routing_mode : config.ROUTING_MODE_DEFAULT,
+    // how many workloads chose their own, so Settings offers to make them follow only where there are any
+    routingOwn: Number((await db.prepare(`SELECT COUNT(*)::int AS n FROM workloads WHERE workspace_id = ? AND merged_into IS NULL
+        AND routing_mode IS NOT NULL`).get(req.workspace.id))?.n) || 0,
     // whether this workspace's results (never content) may help other workspaces choose models
     shareStats: Number(req.workspace.share_stats || 0) === 1,
     // the most optimizing may spend over thirty days, and what it has
