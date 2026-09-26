@@ -233,6 +233,10 @@ function tagOf(r, sum, w) {
     return tag('bad', 'Not enough valid results', "The original model couldn't answer most of this test's requests when they were run "
       + 'again, so there were too few valid answers to compare other models with.');
   }
+  if (outcome === 'capped') {
+    return tag('warn', 'Reached its limit', 'It stopped at the most its quote said it may spend, before any cheaper model was compared. '
+      + 'You were charged only for what it ran, and nothing was switched.');
+  }
   if (outcome === 'no_balance') return tag('warn', 'Balance ran out', "The balance ran out partway, so the test couldn't finish. Add credit and it can run again.");
   if (w.routed_model && w.promoted_run_id === r.id) return tag('brand', 'Passed, switched', 'A cheaper model passed, and Understudy switched to it.');
   if (Number(sum?.kept) > 0) return tag('ok', 'Still passing', 'The model in use was tested again and is still within the allowed difference.');
@@ -265,7 +269,8 @@ function tagOf(r, sum, w) {
 /* 2. Every measurement, newest first. */
 async function measurementsOf(w) {
   const runs = await db.prepare(
-    `SELECT id, status, outcome, error, trigger, sample_size, spend_usd, created_at, started_at, finished_at, floor_pct, judge_check_json
+    `SELECT id, status, outcome, error, trigger, sample_size, spend_usd, created_at, started_at, finished_at, floor_pct, judge_check_json,
+            quote_about_usd, cap_usd
        FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 30`).all(w.id);
   if (!runs.length) return [];
   const first = await db.prepare('SELECT id FROM eval_runs WHERE workload_id = ? ORDER BY created_at LIMIT 1').get(w.id);
@@ -296,6 +301,9 @@ async function measurementsOf(w) {
       mins: r.finished_at ? Math.max(1, Math.round((Number(r.finished_at) - start) / 60000)) : null,
       // what it cost the customer, our fee included, as they were charged for it (chargeEval)
       usd: withFee(Number(r.spend_usd) || 0),
+      // what its quote said before it ran, our fee included: about what it would cost, and the most it could (null before)
+      quote: r.quote_about_usd === null || r.quote_about_usd === undefined ? null : Number(r.quote_about_usd),
+      cap: r.cap_usd === null || r.cap_usd === undefined ? null : Number(r.cap_usd),
       live: r.status === 'running' || r.status === 'queued',
       tag: tagOf(r, sumOf.get(r.id), w),
     };
@@ -361,6 +369,14 @@ export async function pageOf(w) {
     enough: await enoughOf(w, t),
     // where its requests go now, for the drawing at the top of the page, whatever its state
     flow: await flowOf(w, t),
+    /* why the last test nobody asked for did not run, where that is what the page should say instead of a date: paused at
+       the testing limit, until credit is added, or over what one test may spend (noteSkip in src/eval/run.js) */
+    skip: (() => {
+      try {
+        const s = JSON.parse(w.test_skip_json || 'null');
+        return s && s.short ? { reason: s.reason, short: s.short, text: s.text ?? null, at: Number(s.at) || null } : null;
+      } catch { return null; }
+    })(),
     /* what testing it has cost this month, in India's calendar, our fee included: its tests, and the background answers,
        answers read in the background and daily checks against the original model (optimizingSince) */
     spentMonth: await optimizingSince(w.id, monthStartIST(t)),
@@ -460,7 +476,7 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
     out = r.stopped === 'bar'
       ? ['bad', 'Clearly not a match', 'Testing stopped early because the model was already different enough that more requests were very unlikely to change the result.']
       : r.stopped === 'budget'
-        ? ['mut', 'Stopped early', 'The test reached the most it may spend before this model had answered every request.']
+        ? ['mut', 'Stopped early', 'The test reached its limit before this model had answered every request.']
         : ['mut', 'Stopped early', 'The test was stopped before this model had answered every request.'];
   } else if (r.verdict === 'cleared' && (r.confirm_verdict === 'cleared' || r.confirm_verdict === 'live')) {
     out = ['ok', 'Passed twice', "It stayed within the allowed difference on this test's requests, and again on new requests it had never seen."];
@@ -541,8 +557,12 @@ const pctWords = (x) => `${Math.round(x * 1000) / 10}%`;
 function takeOf(run, cands, w, opts) {
   const main = mainTake(run, cands, w, opts);
   const outcome = outcomeOf(run);
-  const compared = !['unmeasurable', 'refused', 'no_balance'].includes(outcome) && !(run.status === 'running' || run.status === 'queued');
+  const compared = !['unmeasurable', 'refused', 'no_balance', 'capped'].includes(outcome) && !(run.status === 'running' || run.status === 'queued');
   const notes = [];
+  // cut short at the most its quote allowed, once some models had been compared: what it shows is what it got to
+  if (compared && String(run.error || '').startsWith('reached its limit')) {
+    notes.push(`It stopped at ${String(run.error).replace(/^reached /, '')}, the most its quote said it may spend, so not every model it planned was tried.`);
+  }
   const check = opts.check;
   // why it was judged the way it was (planRecord.judging in src/eval/run.js)
   let plan = null;
@@ -595,6 +615,11 @@ function mainTake(run, cands, w, { small = null, refName }) {
       + 'nothing to compare other models with. Nothing switched.';
   }
   if (outcome === 'no_balance') return 'The balance ran out before any other model was tried. Add credit and the test can run again.';
+  if (outcome === 'capped') {
+    const limit = Number(run.cap_usd) > 0 ? ` of $${Number(run.cap_usd).toFixed(2)}` : '';
+    return `This test reached its limit${limit}, the most its quote said it may spend, before any other model was tried. `
+      + 'You were charged only for what it ran, and nothing switched.';
+  }
   const stopped = outcome === 'stopped' || outcome === 'interrupted';
   if (stopped && !cands.length) {
     return outcome === 'stopped'

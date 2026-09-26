@@ -52,7 +52,11 @@
 .wp .wp-btn.pri:hover:not(:disabled) { filter: brightness(1.06); border-color: var(--brand); }
 .wp .wp-btn:disabled { opacity: 0.5; cursor: default; }
 .wp .wp-btn.small { padding: 6px 12px; font-size: 13px; }
-.wp .wp-headacts { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+/* the pill is lined up with the middle of the button beside it (8px shorter), not with the caption under the button */
+.wp .wp-headacts { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+.wp .wp-headacts > .wp-pill { margin-top: 4px; }
+.wp .wp-testnow { display: inline-flex; flex-direction: column; align-items: center; gap: 4px; }
+.wp .wp-most { font-size: 12px; line-height: 1.4; color: var(--mut-read); white-space: nowrap; }
 .wp .wp-why { font-size: 13px; color: var(--mut-read); margin: -8px 0 0; text-align: right; }
 .wp .wp-err { font-size: 13.5px; color: var(--bad); background: var(--badq); border-radius: 10px; padding: 10px 12px; display: flex; gap: 12px; align-items: center; justify-content: space-between; }
 .wp .wp-textbtn { font-size: 13px; font-weight: 600; color: var(--brand-read); cursor: pointer; padding: 0; background: none; border: 0; }

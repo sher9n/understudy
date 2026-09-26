@@ -1,7 +1,7 @@
-import { db, now } from '../db/index.js';
+import { db, now, round8 } from '../db/index.js';
 import config from '../config.js';
 import { jevUsable, jevResting } from '../jev.js';
-import { gateEval, optimizeSpent } from '../billing.js';
+import { gateEval, optimizeSpent, testingLimitOf } from '../billing.js';
 import { zdrFor } from '../workspace.js';
 import { loadFacts, routedCallPrice, callPrice } from '../models/facts.js';
 import { ratingsFor } from '../models/arena.js';
@@ -140,6 +140,30 @@ export function worthOf({ ranked, refPer, month, serving, servingAs = null, trie
 export const ceilingFor = (worth) => Math.max(config.EVAL_MAX_USD_PER_RUN,
   Math.min(config.EVAL_RUN_CAP_USD, Number(worth?.budgetUsd) || 0));
 
+/* How far tests have run over their raw estimate lately (quote_usd, before our fee), from every workspace's tests of the
+   last QUOTE_WINDOW_DAYS that compared models: the median, which makes a quote's "about", and the 90th percentile, which
+   makes its "at most", never less than QUOTE_MOST_OVER_ABOUT times the about. A test that stopped at its limit counts at
+   what it spent, never left out: left out, the tail it was cut from would shrink, the limit with it, and the next tests
+   would be cut sooner and sooner. Worked out every ten minutes at most; the defaults stand until QUOTE_MIN_TESTS. */
+const clampTo = (x, lo, hi) => Math.min(hi, Math.max(lo, Number.isFinite(x) ? x : lo));
+let quoteMemo = { at: 0, v: null };
+export async function quoteCalibration() {
+  if (quoteMemo.v && Date.now() - quoteMemo.at < 10 * 60000) return quoteMemo.v;
+  const r = await db.prepare(
+    `SELECT COUNT(*) AS n,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY spend_usd / quote_usd) AS mid,
+            PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY spend_usd / quote_usd) AS high
+       FROM eval_runs WHERE status = 'done' AND quote_usd > 0.005 AND spend_usd > 0 AND created_at >= ?
+        AND ${OUTCOME_OF()} IN ('compared', 'capped')`).get(now() - config.QUOTE_WINDOW_DAYS * DAY);
+  const tests = Number(r?.n) || 0;
+  const enough = tests >= config.QUOTE_MIN_TESTS;
+  const about = enough ? clampTo(Number(r.mid), 1, 2) : config.QUOTE_ABOUT_DEFAULT;
+  const most = Math.max(enough ? clampTo(Number(r.high), 1, 3) : config.QUOTE_MOST_DEFAULT, about * config.QUOTE_MOST_OVER_ABOUT);
+  quoteMemo = { at: Date.now(), v: { about, most, tests } };
+  return quoteMemo.v;
+}
+export const forgetQuoteCalibration = () => { quoteMemo = { at: 0, v: null }; };
+
 /* How many of them to replay. Ten at the least, a hundred at the most, and never more than
    half of what there is: a measurement is a sample, and leaving the other half untouched is
    what lets a promoted model be re-checked later on calls it has never seen. */
@@ -265,6 +289,9 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const plan = {
     pool, sample, models, candidates: [], order: [], funnel: [], excluded: [], waiting: 0,
     estimateUsd: null, canRun: false, reason: null, reference: workload.reference_model,
+    /* The quote as people see it, our fee included (see quoteCalibration): what the test is expected to cost, and the most
+       it may spend, which is where it stops (capRaw, before our fee, is what the run holds itself to). */
+    aboutUsd: null, atMostUsd: null, capRaw: null,
     judge: jevUsable() ? 'jev' : 'llm', jevResting: jevResting(), factsAt: {}, speed: null, profile: null, pendingJev: 0,
     difficulty: null, cachedBar: 0, refThinks: null, recordedShare, worth: null, notWorth: false,
     ceilingUsd: config.EVAL_MAX_USD_PER_RUN, optimizeBudget: null, unseenPool: pool, yardstick: null,
@@ -365,13 +392,18 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
       return plan;
     }
   }
+  // how far tests have run over their estimates lately, which every figure a person sees is corrected by
+  const cal = await quoteCalibration();
+  const fee = 1 + config.ROUTING_FEE_PCT / 100;
   // (a plan of some models only is quoted on those models, below, never on everything a whole measurement would try)
   if (automatic && first.order.length && !only) {
     const early = estimate({ ...plan, order: first.order, refPrice: first.refPrice }, profile, facts, workload);
-    if (early > plan.worth.budgetUsd) {
+    // held to what it is expected to cost, as corrected, not to the raw estimate, which runs short
+    if (early * cal.about > plan.worth.budgetUsd) {
       plan.notWorth = true;
       plan.estimateUsd = early;
-      plan.reason = notWorthReason(early, plan.worth);
+      plan.aboutUsd = round8(early * cal.about * fee);
+      plan.reason = notWorthReason(plan.aboutUsd, plan.worth);
       return plan;
     }
   }
@@ -440,49 +472,62 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   plan.estimateUsd = estimate(plan, profile, facts, workload);
   plan.worth = worthOf({ ranked: sel.ranked, refPer: sel.refPrice ?? 0, month, serving: workload.routed_model, servingAs, tries });
   plan.ceilingUsd = ceilingFor(plan.worth);
-  plan.worth.worthIt = plan.estimateUsd <= plan.worth.budgetUsd;
-  if (plan.estimateUsd > plan.ceilingUsd) {
+  /* The quote, corrected by how far recent tests ran over theirs, our fee included: about what it will cost, and the most
+     it may spend, which is where the run stops (capRaw, before our fee). Each limit below can only bring the most down. */
+  const expectedRaw = plan.estimateUsd * cal.about;
+  plan.aboutUsd = round8(expectedRaw * fee);
+  let capRaw = Math.min(plan.estimateUsd * cal.most, plan.ceilingUsd);
+  plan.worth.worthIt = expectedRaw <= plan.worth.budgetUsd;
+  if (expectedRaw > plan.ceilingUsd) {
     /* Testing fewer models brings it down only to the setups of the router serving now, which are always
        checked: said as that where they are what the measurement tests, rather than advice that cannot help. */
     const forced = plan.routerParts > 0 && plan.models <= plan.routerParts;
-    plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)}, over the $`
-      + `${plan.ceilingUsd.toFixed(2)} one test of this workload may spend. `
+    plan.reason = `This would cost about $${plan.aboutUsd.toFixed(2)}, over the $`
+      + `${(plan.ceilingUsd * fee).toFixed(2)} one test of this workload may spend. `
       + (forced
         ? `It checks all ${plan.routerParts} models of the router serving it now, however few models you test in Settings. `
-          + `Its live requests are still watched${config.CONTROL_ENABLED ? `, and, within your optimization budget, a few a day are checked against ${short(workload.reference_model)} in the background` : ''}.`
+          + `Its live requests are still watched${config.CONTROL_ENABLED ? `, and, within your testing limit, a few a day are checked against ${short(workload.reference_model)} in the background` : ''}.`
         : 'Testing fewer models in Settings brings it down.');
     return plan;
   }
   /* A measurement nobody asked for runs only when it pays for itself. A person can always ask. */
   if (automatic && !plan.worth.worthIt) {
     plan.notWorth = true;
-    plan.reason = notWorthReason(plan.estimateUsd, plan.worth);
+    plan.reason = notWorthReason(plan.aboutUsd, plan.worth);
     return plan;
   }
-  /* The workspace's own ceiling on optimizing, measurements and background answers together, over the
-     last thirty days. Nothing is spent past it, whoever asks. */
-  const budget = ws?.optimize_budget_usd == null ? null : Number(ws.optimize_budget_usd);
+  /* The testing limit: the most tests and the checks after a switch may spend in any thirty days, our fee included (a
+     default until the workspace chooses, or none if it chose none). Nothing is spent past it, whoever asks. */
+  const budget = testingLimitOf(ws);
   if (budget !== null) {
     const spent = await optimizeSpent(workload.workspace_id);
     const left = Math.max(0, budget - spent);
-    plan.optimizeBudget = { budgetUsd: budget, spentUsd: spent, leftUsd: Math.round(left * 100) / 100 };
-    if (plan.estimateUsd > left) {
-      plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)}, and $${left.toFixed(2)} of your $`
-        + `${budget.toFixed(2)} optimization budget for the last thirty days is left. Raise it in Settings, `
+    plan.optimizeBudget = { budgetUsd: budget, spentUsd: spent, leftUsd: Math.round(left * 100) / 100,
+      isDefault: ws?.optimize_budget_usd === null || ws?.optimize_budget_usd === undefined };
+    if (plan.aboutUsd > left) {
+      plan.limitReached = true;
+      plan.reason = `This would cost about $${plan.aboutUsd.toFixed(2)}, and $${left.toFixed(2)} of your $`
+        + `${budget.toFixed(2)} testing limit for the last thirty days is left. Raise it in Settings, `
         + 'or this can run once earlier spending is more than thirty days old.';
       return plan;
     }
+    capRaw = Math.min(capRaw, left / fee);
   }
-  /* The plan's monthly allowance is spent before the balance, so a plan customer with no balance can
-     still measure within it. */
-  const gate = await gateEval(workload.workspace_id, { estimatedUsd: plan.estimateUsd });
+  /* The plan's monthly allowance is spent before the balance, so a plan customer with no balance can still measure within
+     it. What is free has to cover what the test is expected to cost; the most it may spend is then no more than that, so
+     a test never takes the balance below zero. */
+  const gate = await gateEval(workload.workspace_id, { estimatedUsd: plan.aboutUsd });
   if (!gate.ok) {
     const free = Math.max(0, Number(gate.free ?? 0));
-    plan.reason = `This would cost about $${plan.estimateUsd.toFixed(2)}, and `
+    plan.lowBalance = true;
+    plan.reason = `This would cost about $${plan.aboutUsd.toFixed(2)}, and `
       + (gate.allowance > 0 ? `$${gate.allowance.toFixed(2)} of this month's allowance and ` : '')
       + `$${free.toFixed(2)} of balance are free. Add credit and it can run.`;
     return plan;
   }
+  capRaw = Math.min(capRaw, (Math.max(0, Number(gate.free) || 0) + (Number(gate.allowance) || 0)) / fee);
+  plan.capRaw = round8(Math.max(capRaw, expectedRaw));
+  plan.atMostUsd = round8(plan.capRaw * fee);
   plan.canRun = true;
   return plan;
 }

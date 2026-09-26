@@ -105,20 +105,26 @@ export async function grantStarterCredit(workspaceId) {
    back for lapses on its own, so a crash cannot freeze anybody's balance. */
 
 const HOLD_TTL_MS = () => Math.max(5, config.HOLD_TTL_MIN) * 60000;
+// a running test's: long enough for the longest test, and renewed at every charge it makes (chargeEval)
+const TEST_HOLD_TTL_MS = () => Math.max(30, config.TEST_HOLD_TTL_MIN) * 60000;
 
-/** What can be spent right now: the balance, less what calls in flight have set aside. */
-export async function available(workspaceId, x = db) {
+/* What can be spent right now: the balance, less what work in flight has set aside. A customer's own requests come
+   before tests: for a request (`forCalls`), money a running test set aside is not held against it, so a test never
+   refuses anybody's live traffic. The test notices when that money is gone and stops itself (see run.js). */
+export async function available(workspaceId, x = db, { forCalls = false } = {}) {
   const acct = await account(workspaceId, x);
   const held = await x.prepare(
     `SELECT COALESCE(SUM(amount_usd), 0) AS s, COUNT(*) AS n FROM balance_holds
-      WHERE workspace_id = ? AND expires_at > ?`).get(workspaceId, now());
+      WHERE workspace_id = ? AND expires_at > ?${forCalls ? " AND purpose <> 'test'" : ''}`).get(workspaceId, now());
   return { balance: acct.balance_usd, held: Number(held.s), inFlight: Number(held.n),
     free: round8(acct.balance_usd - Number(held.s)) };
 }
 
-/** Set aside up to `amountUsd` for one piece of work. Answers { ok, holdId, amount } or { ok: false, free }. */
+/** Set aside up to `amountUsd` for one piece of work. Answers { ok, holdId, amount } or { ok: false, free }.
+    A test ('test') sets aside all of what it may spend or nothing, and keeps it while it runs. */
 export async function hold(workspaceId, amountUsd, purpose) {
   const want = round8(Math.max(0, Number(amountUsd) || 0));
+  const test = purpose === 'test';
   /* The workspace's limits are read before the transaction opens. Read inside it, through the shared
      pool, a cold cache made the call holding the account's lock wait for a second connection, while
      every other call of that workspace waited on the lock with a connection of its own: ten calls at
@@ -128,10 +134,11 @@ export async function hold(workspaceId, amountUsd, purpose) {
     await account(workspaceId, tx);
     // the row lock is what makes two holds arriving together take turns
     await tx.prepare('SELECT 1 FROM billing_accounts WHERE workspace_id = ? FOR UPDATE').get(workspaceId);
-    const a = await available(workspaceId, tx);
+    const a = await available(workspaceId, tx, { forCalls: purpose === 'call' });
     let take = null;
     if (a.free >= want && a.free > 0) take = want;
-    else if (a.inFlight === 0 && a.free > 0) take = a.free;
+    // the last of the balance may go to one call alone; never to a test, which would then run past what was set aside
+    else if (!test && a.inFlight === 0 && a.free > 0) take = a.free;
     if (take === null) return { ok: false, free: a.free, inFlight: a.inFlight, want };
     /* A workspace's own ceilings on what its calls may cost count what calls in flight have set
        aside, read under the same lock. Checked only against what had already been charged, a burst
@@ -144,7 +151,7 @@ export async function hold(workspaceId, amountUsd, purpose) {
     }
     const holdId = id('hold');
     await tx.prepare(`INSERT INTO balance_holds (id, workspace_id, amount_usd, purpose, created_at, expires_at)
-                      VALUES (?, ?, ?, ?, ?, ?)`).run(holdId, workspaceId, round8(take), purpose, now(), now() + HOLD_TTL_MS());
+                      VALUES (?, ?, ?, ?, ?, ?)`).run(holdId, workspaceId, round8(take), purpose, now(), now() + (test ? TEST_HOLD_TTL_MS() : HOLD_TTL_MS()));
     return { ok: true, holdId, amount: round8(take) };
   });
   // turned away for balance, not for a limit: a top up that is due is booked (see nudgeTopUp)
@@ -418,7 +425,7 @@ export async function callBound(modelId, shape, { zdr = true } = {}) {
 
 /** Can this workspace make a routed call right now? A quick check before the hold is taken. */
 export async function gateRouting(workspaceId) {
-  const a = await available(workspaceId);
+  const a = await available(workspaceId, db, { forCalls: true });
   if (!(a.free > 0)) {
     nudgeTopUp(workspaceId);
     return {
@@ -609,12 +616,45 @@ export async function optimizeSpent(workspaceId, days = 30) {
   return round8(Number(r?.spent || 0) * (1 + config.ROUTING_FEE_PCT / 100));
 }
 
-/** The workspace's own optimization budget and what is left of it, { budget, left }, or null when it has not set one. */
+/* The testing limit a workspace row has: the amount it chose, the default (TESTING_LIMIT_DEFAULT_USD) when it chose none,
+   or null when it chose no limit at all (optimize_budget_none). */
+export function testingLimitOf(ws) {
+  if (!ws || Number(ws.optimize_budget_none || 0) === 1) return null;
+  return ws.optimize_budget_usd === null || ws.optimize_budget_usd === undefined
+    ? config.TESTING_LIMIT_DEFAULT_USD : Number(ws.optimize_budget_usd);
+}
+
+/** The workspace's testing limit and what is left of it, { budget, left, isDefault }, or null when it chose no limit. */
 export async function optimizeRoom(workspaceId) {
-  const ws = await db.prepare('SELECT optimize_budget_usd FROM workspaces WHERE id = ?').get(workspaceId);
-  if (ws?.optimize_budget_usd === null || ws?.optimize_budget_usd === undefined) return null;
-  const budget = Number(ws.optimize_budget_usd);
-  return { budget, left: round8(Math.max(0, budget - await optimizeSpent(workspaceId))) };
+  const ws = await db.prepare('SELECT optimize_budget_usd, optimize_budget_none FROM workspaces WHERE id = ?').get(workspaceId);
+  const budget = testingLimitOf(ws);
+  if (budget === null) return null;
+  return { budget, left: round8(Math.max(0, budget - await optimizeSpent(workspaceId))),
+    isDefault: ws?.optimize_budget_usd === null || ws?.optimize_budget_usd === undefined };
+}
+
+/* The testing limit reached is told once in each thirty days: on the workspace's activity, and by email where the
+   workspace keeps that kind on. Tests and the checks after a switch wait at it until earlier spending is more than
+   thirty days old, or somebody raises the limit. Called after every charge for testing; answers whether it was told. */
+const toldLimit = new Map();
+export async function tellTestingLimit(workspaceId) {
+  const room = await optimizeRoom(workspaceId);
+  if (!room || room.left > 0.005) return false;
+  const period = Math.floor(now() / (30 * DAY));
+  if (toldLimit.get(workspaceId) === period) return false;
+  toldLimit.set(workspaceId, period);
+  const title = `Testing has reached your testing limit of $${room.budget.toFixed(2)}`;
+  const said = await db.prepare(`SELECT 1 FROM activity WHERE workspace_id = ? AND title = ? AND created_at >= ? LIMIT 1`)
+    .get(workspaceId, title, now() - 30 * DAY);
+  if (said) return false;
+  const lines = [
+    'No test or check runs until spending from more than thirty days ago drops out, or you raise the limit.',
+    'Your own requests carry on as before.',
+  ];
+  await addActivity(workspaceId, { kind: 'floor', title, detail: lines.join(' ') });
+  // notify notes its own failures and never throws; the charge that called this does not wait on it (see chargeEval)
+  await notify(workspaceId, 'testing', `limit:${period}`, { title, lines, path: '/settings', linkText: 'Raise the limit' });
+  return true;
 }
 
 /** What is left of the workspace's own optimization budget, or null when it has not set one. */
@@ -661,8 +701,9 @@ export async function chargeCall(workspaceId, costUsd, note, { holdId = null } =
   return amount;
 }
 
-/** Measurement is charged the same way the customer's own traffic is: from the allowance first. */
-export async function chargeEval(workspaceId, costUsd, note) {
+/** Measurement is charged the same way the customer's own traffic is: from the allowance first. A running test's charge
+    also takes what it charged off the money the test set aside (`holdId`), in the same step, and renews that hold. */
+export async function chargeEval(workspaceId, costUsd, note, { holdId = null } = {}) {
   const amount = withFee(costUsd);
   if (!(amount > 0)) return 0;
   await db.tx(async (tx) => {
@@ -680,7 +721,13 @@ export async function chargeEval(workspaceId, costUsd, note) {
         note: fromAllowance > 0 ? `${note} ($${fromAllowance.toFixed(4)} from this month's allowance)` : note,
       }, tx);
     }
+    // what is charged now no longer needs setting aside: the balance itself has gone down by it
+    if (holdId) {
+      await tx.prepare(`UPDATE balance_holds SET amount_usd = GREATEST(0, amount_usd - ?), expires_at = ? WHERE id = ?`)
+        .run(fromBalance, now() + TEST_HOLD_TTL_MS(), holdId);
+    }
   });
+  tellTestingLimit(workspaceId).catch(() => {});
   return amount;
 }
 

@@ -1064,7 +1064,7 @@ function whyNot(workload, s, st) {
   if (s.mode === 'off') return 'Experiments are off for this workload.';
   if (spentOut(st)) {
     const kept = Math.round(config.OPTIMIZE_RESERVE_SHARE * 100);
-    return `Your optimization budget for the last thirty days is used up${kept > 0 ? `, apart from the ${kept}% kept for measuring` : ''}, `
+    return `Your testing limit for the last thirty days is used up${kept > 0 ? `, apart from the ${kept}% kept for tests` : ''}, `
       + 'so experiments pause until it is raised in Settings or earlier spending ages out.';
   }
   if (st.extraToday >= s.budgetUsd) return `Today's experiments have used the $${s.budgetUsd.toFixed(2)} budget, so they pause until midnight IST.`;
