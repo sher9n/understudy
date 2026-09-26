@@ -76,6 +76,8 @@ function leadOf(c, got, rp) {
     else if (L.verdict === 'slower') out.push('It was too slow on them, so nothing switches to it.');
     else if (L.verdict === 'review' && inside) out.push(`That is inside the ${pct1(bar)} allowed, but not by enough for the test to be sure, so nothing has switched to it yet.`);
     else if ((L.verdict === 'review' || L.verdict === 'missed') && bar !== null && bar !== undefined) out.push(`That is more than the ${pct1(bar)} allowed, so nothing switches to it.`);
+    // its provider could not keep up on the second look (src/eval/run.js lookAgain): why it failed, as its row says it
+    else if (L.verdict === 'busy' && c.why) out.push(c.why);
   } else if (L.verdict === 'insufficient') {
     out.push("There weren't enough new requests for a second look yet, so nothing switches to it until there are.");
   } else if (L.verdict === 'not_reached') {

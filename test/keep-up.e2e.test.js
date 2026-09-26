@@ -59,7 +59,7 @@ const auth = await import('../src/auth.js');
 const { move } = await import('../src/billing.js');
 const { saveCatalog } = await import('../src/openrouter.js');
 const { workloadFor, recordCall, learningSettled } = await import('../src/traffic.js');
-const { runPageOf } = await import('../src/workloadPage.js');
+const { runPageOf, runAnswersOf } = await import('../src/workloadPage.js');
 const { runEvaluation } = await import('../src/eval/run.js');
 const { planFor } = await import('../src/eval/plan.js');
 const { forgetFleet } = await import('../src/eval/history.js');
@@ -78,6 +78,8 @@ const SLOWPOKE = 'vendor/slowpoke-small';
 const JITTERY = 'vendor/jittery-small';
 // answers every request of its first look, then cannot keep up on its second
 const FADING = 'vendor/fading-small';
+// answers every request of its first look and a few of its second, then cannot keep up
+const TIRING = 'vendor/tiring-small';
 // turned away twice at the longest wait on its first look, and once more on its second: three in the test
 const TWICE = 'vendor/twice-small';
 // right on every request, and cannot keep up once its first look is done
@@ -85,7 +87,7 @@ const ABLE = 'vendor/able-small';
 // right on the short requests only, so a router sends it those and ABLE the long ones
 const TINY = 'vendor/tiny-small';
 const JUDGE = 'judge/small';
-const MODELS = [STEADY, CROWDED, SLOWPOKE, JITTERY, FADING, TWICE, ABLE, TINY];
+const MODELS = [STEADY, CROWDED, SLOWPOKE, JITTERY, FADING, TIRING, TWICE, ABLE, TINY];
 const DAY = 86400000;
 // the long requests, one in eight: told apart before they are sent, which is what a router needs
 const hard = (i) => i % 8 === 3;
@@ -100,6 +102,7 @@ const tries = (m) => asked.get(m) || 0;
 const got = (m) => answered.get(m) || 0;
 // the workload each of these is tested on, whose running test says how many requests its first look has
 let fadingOn = null;
+let tiringOn = null;
 let twiceOn = null;
 let ableOn = null;
 // TWICE's tries once its first look is done
@@ -130,6 +133,7 @@ const provider = http.createServer((req, res) => {
     if (m === SLOWPOKE && tries(m) % 3 !== 0) return refuse();
     if (m === JITTERY && tries(m) <= 2) return refuse();
     if (m === FADING && fadingOn && got(m) >= await firstLookSize(fadingOn)) return refuse();
+    if (m === TIRING && tiringOn && got(m) >= await firstLookSize(tiringOn) + 5) return refuse();
     if (m === ABLE && ableOn && got(m) >= await firstLookSize(ableOn)) return refuse();
     if (m === TWICE && twiceOn) {
       if (got(m) >= await firstLookSize(twiceOn)) {
@@ -143,7 +147,7 @@ const provider = http.createServer((req, res) => {
     }
     const i = indexOf(user);
     if (m === TINY) return send(JSON.stringify(hard(i) ? { total: 0, currency: 'EUR', lines: 0 } : right(i)), 0.00005);
-    const cost = m === REF ? 0.002 : m === ABLE ? 0.0006 : [FADING, TWICE].includes(m) ? 0.0001 : 0.0002;
+    const cost = m === REF ? 0.002 : m === ABLE ? 0.0006 : [FADING, TIRING, TWICE].includes(m) ? 0.0001 : 0.0002;
     return send(JSON.stringify(right(i)), cost);
   });
 });
@@ -157,6 +161,7 @@ test.before(async () => {
     { model_id: SLOWPOKE, name: 'Vendor: Slowpoke Small', context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 0, zdr: 1 },
     { model_id: JITTERY, name: 'Vendor: Jittery Small', context_len: 128000, price_in: 0.15e-6, price_out: 0.4e-6, open_weights: 0, zdr: 1 },
     { model_id: FADING, name: 'Vendor: Fading Small', context_len: 128000, price_in: 0.05e-6, price_out: 0.15e-6, open_weights: 0, zdr: 1 },
+    { model_id: TIRING, name: 'Vendor: Tiring Small', context_len: 128000, price_in: 0.05e-6, price_out: 0.15e-6, open_weights: 0, zdr: 1 },
     { model_id: TWICE, name: 'Vendor: Twice Small', context_len: 128000, price_in: 0.05e-6, price_out: 0.15e-6, open_weights: 0, zdr: 1 },
     { model_id: ABLE, name: 'Vendor: Able Small', context_len: 128000, price_in: 0.6e-6, price_out: 1.8e-6, open_weights: 0, zdr: 1 },
     { model_id: TINY, name: 'Vendor: Tiny Small', context_len: 128000, price_in: 0.02e-6, price_out: 0.06e-6, open_weights: 0, zdr: 1 },
@@ -270,6 +275,8 @@ test("the test's page says a model could not keep up, and why", async () => {
     assert.equal(c.tone, 'bad');
     assert.match(c.why, /kept turning this test's requests away for coming too fast/);
     assert.match(c.why, /won't be tested on this workload again/);
+    // stopped part way through its requests, it has no figure it could be judged by
+    assert.equal(c.gap, null, `${m} is not judged on requests it never answered: ${c.gap}`);
   }
   const jittery = page.cands.find((x) => x.key === JITTERY);
   assert.notEqual(jittery.verdict, "Couldn't keep up");
@@ -405,5 +412,37 @@ test('a model that cannot keep up on its second look fails there, and the next i
     assert.equal(plan.excluded.find((e) => e.model === FADING)?.step, 'busy', 'and the next test leaves it out');
   } finally {
     fadingOn = null;
+  }
+});
+
+test("a model that answers some of its second look and then can't keep up keeps its first look's figure, and its page says why", async () => {
+  const { workload: w } = await seeded({ models: [STEADY, TIRING] });
+  tiringOn = w.id;
+  try {
+    const out = await runEvaluation(w.id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(out.runId);
+    const row = (await rowsOf(out.runId)).get(TIRING);
+    assert.equal(row.confirm_verdict, 'busy', `its second look ended as unable to keep up: ${row.confirm_verdict}`);
+    assert.equal(row.verdict, 'failed');
+    assert.equal(row.stopped, 'busy');
+    assert.equal(Number(row.runs), Number(run.sample_size), `it answered every request of its first look: ${row.runs}`);
+    assert.ok(Number(row.confirm_runs) > 0, `and some of its second: ${row.confirm_runs}`);
+
+    const c = (await runPageOf(await load(w.id), run)).cands.find((x) => x.key === TIRING);
+    assert.equal(c.verdict, "Couldn't keep up");
+    // judged on every request of its first look, so its figure stays: "not judged" beside the same answer on all of them
+    assert.equal(c.gap, 0, `its first look's figure is kept: ${c.gap}`);
+    assert.equal(c.second, Number(row.confirm_runs));
+    // and marked failed, so the chart, whose red is "not a match", leaves it out (plotted in web/src/WorkloadCharts.jsx)
+    assert.equal(c.failed, true);
+
+    // what the model's own page reads to say how its second look ended (leadOf in web/src/screens/ModelPage.jsx)
+    const answers = await runAnswersOf(await load(w.id), run, TIRING);
+    assert.equal(answers.looks.verdict, 'busy');
+    assert.equal(answers.looks.second, Number(row.confirm_runs));
+    assert.match(answers.looks.ended, /couldn't keep up/);
+  } finally {
+    tiringOn = null;
   }
 });

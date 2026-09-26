@@ -421,7 +421,10 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
   const perCall = ratio !== null && refPer ? ratio * refPer : (name.kind === 'model' ? avg.get(r.model_id) ?? null : null);
   const ms = metric === 'ttft' ? Number(r.ttft_p50) || null : Number(r.latency_p50) || null;
   const pct = (x) => (x === null || x === undefined ? null : round8(Number(x) / 100));
-  const judged = r.verdict !== 'failed' && r.gap_pct !== null && r.gap_pct !== undefined && n > 0;
+  /* A model failed as unable to keep up only once it had answered every request of this test (its provider gave out on its
+     second look, or on another's) was judged on all of them, and its figure says how its answers compared. One stopped part
+     way, or failed for errors, has no figure that means anything. */
+  const judged = (r.verdict !== 'failed' || (r.stopped === 'busy' && n >= sample)) && r.gap_pct !== null && r.gap_pct !== undefined && n > 0;
   const label = name.kind === 'model' ? r.model_id
     : name.kind === 'cascade' ? `${name.first}, checked`
       : name.kind === 'router' && name.version === 2 ? name.short
@@ -449,6 +452,10 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
     perCall: perCall === null ? null : round8(perCall),
     p50: ms,
     tone, verdict, why,
+    /* It failed whatever its answers were like (errors, or a provider that could not keep up). The chart leaves it out: it
+       places models by how their answers compared, and its red is "not a match", which one that answered everything right
+       and could not keep up is not. */
+    failed: r.verdict === 'failed',
     serving: isServing,
     twice: verdict === 'Passed twice',
     confirmRuns: Number(r.confirm_runs) || 0,

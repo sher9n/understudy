@@ -174,8 +174,10 @@ export function SelfPic({ self, yardstick }) {
 /* A dollar amount on the cost axis, with as many places as it takes: $0.0001, $0.005. */
 const tickUsd = (v) => `$${v >= 1 ? v.toFixed(v % 1 ? 1 : 0) : v.toFixed(Math.max(0, -Math.floor(Math.log10(v) + 1e-9)))}`;
 
-/** Whether a setup can be placed on the chart: it was judged, and what a request costs on it is known. */
-export const plotted = (c) => c.gap !== null && c.gap !== undefined && Number(c.perCall) > 0;
+/** Whether a setup can be placed on the chart: it was judged, what a request costs on it is known, and it did not fail
+    for something other than its answers (a model that answered everything right and could not keep up is no "not a
+    match"; the table and its own page give its figure and why it failed). */
+export const plotted = (c) => !c.failed && c.gap !== null && c.gap !== undefined && Number(c.perCall) > 0;
 
 /* A top for the share axis whose four steps are whole percents: 2, 3, 5, 10, 15, 20 or 25 a step. */
 const SHARE_TOPS = [0.08, 0.12, 0.2, 0.4, 0.6, 0.8, 1];
