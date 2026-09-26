@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { verdictWith, wilson, callsToClear } = await import('../src/eval/compare.js');
+const { verdictWith, wilson, callsToClear, exactLower } = await import('../src/eval/compare.js');
 const { verdictSim, learnRates, choiceSim, routerSim, REQUEST_KINDS } = await import('../src/eval/harness.js');
 const { decide, zSeq, diffRange } = await import('../src/learn/decide.js');
 const { posterior, expectedLoss, zDiff } = await import('../src/learn/bandit.js');
@@ -28,6 +28,31 @@ test('a verdict says how sure it is, and says "not enough" rather than clearing 
   assert.ok(slight.hi < wilson(0.05, 100).hi * 100, 'and the bound is below the count alone');
   // every one of them differing outright is another matter
   assert.equal(verdictWith([...Array(12).fill(1), ...Array(88).fill(0)], 3).verdict, 'missed');
+});
+
+test('a small sample that already shows a model clearly worse says so, rather than "not enough"', () => {
+  // the short-poem workload's own re-check on 26 Sep 2026: worse on 4 of 11 calls against a 5% bar, kept serving as "too few"
+  const poem = verdictWith([...Array(4).fill(1), ...Array(7).fill(0)], 5);
+  assert.equal(poem.verdict, 'missed', `4 of 11 worse, ${poem.lo.toFixed(1)}% at least`);
+  // read on the exact bound (13.5% of calls differ, at least), not Wilson's, which gave 16.07% on that test's page
+  assert.ok(poem.lo > 12 && poem.lo < 13, `its lower bound: ${poem.lo}`);
+  assert.ok(Math.abs(exactLower(2, 11) - 0.0333) < 0.001, `the exact bound on 2 in 11: ${exactLower(2, 11)}`);
+  // two in eleven at a 3% bar: Wilson's bound read it past the band (5.5%); the exact one does not (3.3%), so not a fail
+  assert.equal(verdictWith([1, 1, ...Array(9).fill(0)], 3).verdict, 'insufficient');
+  // nor on fewer than MISSED_MIN_CALLS readings, however they went: a judge failing on most calls leaves a few that settle
+  assert.equal(verdictWith([...Array(5).fill(1), ...Array(4).fill(0)], 5).verdict, 'insufficient', 'five of nine');
+  // one worse answer in eleven shows nothing either way: still too few
+  const one = verdictWith([1, ...Array(10).fill(0)], 5);
+  assert.equal(one.verdict, 'insufficient', `1 of 11, ${one.lo.toFixed(1)}% at least`);
+  assert.equal(one.need, callsToClear(5));
+  // ten perfect answers still cannot clear a bar that takes more, and nothing at all is still nothing
+  assert.equal(verdictWith(Array(10).fill(0), 3.75).verdict, 'insufficient');
+  assert.equal(verdictWith([], 3.75).verdict, 'insufficient');
+  // under the review band is never "missed", however it is read: 2 of 11 at a 20% bar is a straddle, not a fail
+  assert.notEqual(verdictWith([1, 1, ...Array(9).fill(0)], 20).verdict, 'missed');
+  // and a sample big enough to clear is read as it always was
+  assert.equal(verdictWith([...Array(15).fill(1), ...Array(85).fill(0)], 3.75).verdict, 'missed');
+  assert.equal(verdictWith(Array(80).fill(0), 3.75).verdict, 'cleared');
 });
 
 test('a candidate exactly at the bar clears about one time in twenty, never one in two', () => {

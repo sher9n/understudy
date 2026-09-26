@@ -134,9 +134,13 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
   const control = midRollout ? (workload.rollout_from_arm_id ?? null) : (workload.routed_arm_id ?? null);
   const stages = config.ROLLOUT_ENABLED && rollout && control !== arm.id ? config.ROLLOUT_STAGES : [];
   const staged = stages.length > 0;
+  /* A switch answers whatever calls the workload waited for: a second look booked for models that passed once
+     (bookSecondLook in src/eval/schedule.js) was otherwise read as a count of usable calls once nothing waited for it
+     any more, and a whole measurement started on the next call after a person switched. A small workload that still
+     needs calls is booked again by the hourly pass (waitAfterSmall in src/proxy.js). */
   await db.tx(async (tx) => {
     await tx.prepare(`UPDATE workloads SET routed_model = ?, routed_recipe = ?, routed_arm_id = ?, promoted_at = ?, promoted_run_id = ?,
-                status = 'promoted', status_note = NULL, updated_at = ?,
+                status = 'promoted', status_note = NULL, updated_at = ?, measure_at_calls = NULL,
                 rollout_share = ?, rollout_stage = ?, rollout_started_at = ?, rollout_from_arm_id = ? WHERE id = ?`)
       .run(lead.model, lead.recipe ? JSON.stringify(lead.recipe) : null, arm.id, now(), runId, now(),
         staged ? stages[0] : null, staged ? 0 : null, staged ? now() : null, staged ? control : null, workload.id);

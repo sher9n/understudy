@@ -1,7 +1,7 @@
 import config from '../config.js';
 import { db, id, now } from '../db/index.js';
 import { chargeEval, account, backgroundLeft } from '../billing.js';
-import { extract, disagreement, structuredCompare, proseText } from '../eval/compare.js';
+import { extract, disagreement, structuredCompare, proseText, heldFieldChanged } from '../eval/compare.js';
 import { judgeCandidate, judgeBarPair, judgeQuality, numbersDiffer, numbersOf } from '../eval/judge.js';
 import { askOf } from '../eval/ask.js';
 import { keptChecklist } from '../eval/checklist.js';
@@ -55,7 +55,7 @@ const short = (m) => String(m || '').split('/').pop();
  * it states again makes the served answer worse whatever a reading says, since a judge can see that two answers give
  * different figures, not which one is right. `twice` says the customer's model was asked that second time.
  */
-export async function scoreServed(body, served, ref, shape, { scope = null, yardstick = 'agreement', prefer = null, checklist = null, again = null } = {}) {
+export async function scoreServed(body, served, ref, shape, { scope = null, yardstick = 'agreement', prefer = null, checklist = null, again = null, stable = null } = {}) {
   const a = extract(served, shape);
   const b = extract(ref, shape);
   if (!b.ok) return { score: null, better: 0, judgedBy: null, cost: 0, kind: null };
@@ -63,6 +63,21 @@ export async function scoreServed(body, served, ref, shape, { scope = null, yard
   if (yardstick === 'quality') {
     let extra = 0;
     let twice = false;
+    /* A structured answer is held to the fields the customer's model gives the same way on nearly every call, as the
+       measurement read them (`stable`; heldFieldChanged in src/eval/compare.js): where the served answer changes one of
+       them from the customer's answer, that model is asked once more, and one it gives the same way again makes the served
+       answer worse whatever a reading says. It used to reach the judge as its JSON, a changed total and all. With no such
+       fields read (a measurement from before they were), none is held. */
+    const only = stable instanceof Set ? stable : null;
+    if (again && shape !== 'free_text' && only?.size && heldFieldChanged(a.value, b.value, b.value, shape, { only })) {
+      let more = null;
+      try { more = await again(); } catch { more = null; }
+      twice = true;
+      extra += Number(more?.cost) || 0;
+      const c = more?.json ? extract(more.json, shape) : null;
+      const held = c?.ok ? heldFieldChanged(a.value, b.value, c.value, shape, { only }) : null;
+      if (held) return { score: 1, better: 0, judgedBy: 'fields', cost: extra, kind: 'fact', twice, field: held.path };
+    }
     if (again && typeof a.value === 'string' && typeof b.value === 'string' && numbersOf(b.value).length > 0 && numbersDiffer(a.value, b.value)) {
       let more = null;
       try { more = await again(); } catch { more = null; }
@@ -123,17 +138,23 @@ const bars = new Map();
 export async function barOf(workload) {
   const hit = bars.get(workload.id);
   if (hit && Date.now() - hit.at < 10 * 60000) return hit.bar;
-  const row = await db.prepare(`SELECT yardstick, floor_pct, judge_check_json FROM eval_runs WHERE workload_id = ? AND status = 'done'
+  const row = await db.prepare(`SELECT yardstick, floor_pct, judge_check_json, plan_json FROM eval_runs WHERE workload_id = ? AND status = 'done'
         AND floor_pct IS NOT NULL AND ${OUTCOME_OF()} <> 'unmeasurable' ORDER BY created_at DESC LIMIT 1`).get(workload.id)
-    ?? (workload.promoted_run_id ? await db.prepare('SELECT yardstick, floor_pct, judge_check_json FROM eval_runs WHERE id = ?')
+    ?? (workload.promoted_run_id ? await db.prepare('SELECT yardstick, floor_pct, judge_check_json, plan_json FROM eval_runs WHERE id = ?')
       .get(workload.promoted_run_id) : null);
   let check = null;
   try { check = row?.judge_check_json ? JSON.parse(row.judge_check_json) : null; } catch { check = null; }
+  let plan = null;
+  try { plan = row?.plan_json ? JSON.parse(row.plan_json) : null; } catch { plan = null; }
+  const stable = plan?.yardstick?.stableFields;
   const bar = {
     yardstick: row?.yardstick === 'quality' ? 'quality' : 'agreement',
     prefer: check?.prefer === 'llm' ? 'llm' : null,
     floorPct: Number(row?.floor_pct) > 0 ? Number(row.floor_pct)
       : Number(workload.floor_pct) > 0 ? Number(workload.floor_pct) : config.EVAL_FLOOR_MIN_PCT,
+    /* the fields of a structured answer its customer's model gives the same way on nearly every call, as that measurement
+       read them (stablePaths in src/eval/compare.js); null for one measured before they were read, which holds none */
+    stable: Array.isArray(stable) ? new Set(stable) : null,
   };
   bars.set(workload.id, { at: Date.now(), bar });
   if (bars.size > 5000) bars.clear();
@@ -191,7 +212,7 @@ async function control(workload, { body, response, callId, decision }, { serve }
   if (!(Number(acct?.balance_usd) > 0.05)) return null;
 
   // judged by the yardstick of the bar it is held to, and marked with it (see controlRecord)
-  const { yardstick, prefer } = await barOf(workload);
+  const { yardstick, prefer, stable } = await barOf(workload);
   const checklist = yardstick === 'quality' && workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null;
   const row = {
     id: id('ctl'), workspace_id: workload.workspace_id, workload_id: workload.id, arm_id: workload.routed_arm_id,
@@ -204,8 +225,9 @@ async function control(workload, { body, response, callId, decision }, { serve }
   let own = null;
   const ownAnswer = async () => serve(referenceSpec(workload), body, { shape: workload.shape_kind, scope: workload.workspace_id,
     zdr: await zdrFor(workload.workspace_id) });
-  // asked a second time only to see whether it states a figure the served answer changed again (see scoreServed)
-  const again = yardstick === 'quality' && workload.shape_kind === 'free_text'
+  /* asked a second time only to see whether it states a figure, or gives a field of a structured answer, the served answer
+     changed the same way again (see scoreServed) */
+  const again = yardstick === 'quality'
     ? async () => {
       try {
         const r = await ownAnswer();
@@ -227,7 +249,7 @@ async function control(workload, { body, response, callId, decision }, { serve }
     row.cost_usd += Number(own.cost) || 0;
     let s = null;
     try {
-      s = await scoreServed(body, response, own.json, workload.shape_kind, { scope: workload.workspace_id, yardstick, prefer, checklist, again });
+      s = await scoreServed(body, response, own.json, workload.shape_kind, { scope: workload.workspace_id, yardstick, prefer, checklist, again, stable });
     } catch {
       s = null;
     }
@@ -237,7 +259,8 @@ async function control(workload, { body, response, callId, decision }, { serve }
         row.score = s.score;
         row.better = s.better ? 1 : 0;
         row.judged_by = s.judgedBy;
-        row.detail_json = JSON.stringify({ kind: s.kind ?? null, escalated: !!decision.escalated, ...(s.twice ? { askedTwice: true } : {}) });
+        row.detail_json = JSON.stringify({ kind: s.kind ?? null, escalated: !!decision.escalated, ...(s.twice ? { askedTwice: true } : {}),
+          ...(s.field ? { field: s.field } : {}) });
       }
     }
   }

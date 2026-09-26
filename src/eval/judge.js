@@ -7,6 +7,10 @@ import { callPrice } from '../models/facts.js';
 import { costOfCall } from './replay.js';
 import { judgeOptions, plainWay } from './way.js';
 import { brokenAgainst } from './checklist.js';
+/* a request is fitted to what Jev reads well as askOf fits one: the instructions' start, the newest turn whole where it
+   fits, never cut from its end, where the question being answered is (src/eval/ask.js) */
+import { refit } from './ask.js';
+import { numbersOf, numbersDiffer } from './compare.js';
 
 /* Deciding whether two written answers say the same thing.
  *
@@ -91,48 +95,10 @@ export async function judgePair(request, a, b) {
   return { score: 1, cost, judged: false };
 }
 
-/* Numbers, checked in code, because Jev's own guide says it is not reliable with them. When two
-   answers state the same number of figures and the figures differ, the answers differ, whatever
-   anybody's reading of the prose says: "The total is $1,234.50" against "$1,243.50". When the
-   counts differ, the answers are simply written differently ("4 March" against "2026-03-04",
-   "thirty days" against "30 days") and the reading decides. Thousands separators and decimal
-   commas are read the way people write them. */
-export function numbersOf(text) {
-  const out = [];
-  for (const m of String(text ?? '').matchAll(/\d+(?:[.,]\d+)*/g)) {
-    let t = m[0];
-    if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) t = t.replace(/,/g, '');
-    else if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) t = t.replace(/\./g, '').replace(',', '.');
-    else if (/^\d+,\d{1,2}$/.test(t)) t = t.replace(',', '.');
-    if (/^\d+(\.\d+)?$/.test(t)) t = String(Number(t));
-    out.push(t);
-  }
-  return out.sort();
-}
-
-/* Two answers carry different figures when they state the same count of them with different values,
-   or, when the counts differ, when an amount (a figure with a decimal part or a thousands separator)
-   in one is missing from the other: "Total 1,234.50" against "Total 1,243.50 (incl. 12% VAT)" is a
-   different answer. Plain small figures with different counts are left to the reading, because "4
-   March 2026" against "2026-03-04" carries the month as a figure on one side only. Figures on one
-   side alone say nothing, since the other may write them in words. */
-const AMOUNT = /^\d{1,3}([.,]\d{3})+([.,]\d+)?$|^\d+[.,]\d+$/;
-export function numbersDiffer(a, b) {
-  const x = numbersOf(a);
-  const y = numbersOf(b);
-  if (!x.length || !y.length) return false;
-  if (x.length === y.length) return x.join(',') !== y.join(',');
-  const amounts = (text) => [...String(text ?? '').matchAll(/\d+(?:[.,]\d+)*/g)].map((m) => m[0]).filter((t) => AMOUNT.test(t));
-  const ax = numbersOf(amounts(a).join(' '));
-  const ay = numbersOf(amounts(b).join(' '));
-  if (!ax.length && !ay.length) return false;
-  const count = (xs) => { const m = new Map(); for (const v of xs) m.set(v, (m.get(v) || 0) + 1); return m; };
-  const cx = count(ax);
-  const cy = count(ay);
-  for (const [v, n] of cx) if ((cy.get(v) || 0) !== n) return true;
-  for (const [v, n] of cy) if ((cx.get(v) || 0) !== n) return true;
-  return false;
-}
+/* Numbers, checked in code, because Jev's own guide says it is not reliable with them (numbersOf, numbersDiffer): kept
+   in src/eval/compare.js with the other pure comparisons, so a structured answer's written fields are held to them too
+   (heldFieldChanged), and read from here as they always were. */
+export { numbersOf, numbersDiffer };
 
 const SAME = {
   type: 'noul',
@@ -221,7 +187,7 @@ export async function judgeBetter(request, cand, ref, { scope = null, askFn = as
   const key = keyOf('better', 2, scope, config.JEV_MODEL, config.THREE_WAY_FORGIVE_MAX, config.THREE_WAY_BETTER_MIN, request, cand, ref);
   const hit = await cached(key);
   if (hit?.detail?.verdict) return { ...hit.detail, cost: 0, reused: true };
-  const req = clip(request, 2500);
+  const req = refit(request, 2500);
   const settled = await Promise.allSettled([
     askFn({ request: req, answers: { first: clip(cand, 2500), second: clip(ref, 2500) } }, { better: BETTER }),
     askFn({ request: req, answers: { first: clip(ref, 2500), second: clip(cand, 2500) } }, { better: BETTER }),
@@ -315,7 +281,7 @@ export async function judgeBarPair(request, a, b, { scope = null, subject = 'b',
           criteria: KINDS,
         };
       }
-      const r = await ask({ request: clip(request, 2500), answers: { x: clip(x, 2500), y: clip(y, 2500) } }, questions);
+      const r = await ask({ request: refit(request, 2500), answers: { x: clip(x, 2500), y: clip(y, 2500) } }, questions);
       const p = probability(r.answers?.same?.noul);
       const kind = r.answers?.kind?.choice ?? null;
       out = { score: p >= 0.5 ? 0 : 1, judgedBy: 'jev', detail: { p, kind }, cost: r.costUsd };
@@ -434,7 +400,7 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
           };
         }
       }
-      const r = await ask({ request: clip(request, 2500), answers }, questions);
+      const r = await ask({ request: refit(request, 2500), answers }, questions);
       const A = r.answers || {};
       const pA = probability(A.same0?.noul);
       const pB = label.ref1 ? probability(A.same1?.noul) : null;
@@ -656,7 +622,7 @@ export async function judgeQuality(request, answer, reference, { scope = null, p
   let cost = 0;
   let out = null;
   if (jevFirst) {
-    const req = clip(request, 2500);
+    const req = refit(request, 2500);
     // asked with the first reading, where the answer judged is first and the reference second
     const needs = Object.fromEntries(asks.flatMap((x, i) => [[`need${i}a`, needQuestion('first', x.say)], [`need${i}b`, needQuestion('second', x.say)]]));
     const settled = await Promise.allSettled([
@@ -775,7 +741,7 @@ export async function openEndedOf(requests, { scope = null, askFn = ask, share: 
     if (hit && Number.isFinite(Number(hit.detail?.p))) { by.add(hit.judgedBy); return Number(hit.detail.p); }
     if (viaJev) {
       try {
-        const r = await askFn({ request: clip(request, 2500) }, { open: OPEN });
+        const r = await askFn({ request: refit(request, 2500) }, { open: OPEN });
         cost += Number(r?.costUsd) || 0;
         const p = probability(r?.answers?.open?.noul);
         by.add('jev');

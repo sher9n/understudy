@@ -60,6 +60,20 @@ async function eligible(workload) {
     (see eligible): what a workload waiting for calls is waiting to reach (measureWhenReady in src/proxy.js). */
 export const usableCalls = async (workload) => (await eligible(workload)).n;
 
+/** How many of those calls no measurement of this workload has drawn: all a second look may use (lookAgain in
+    src/eval/run.js), and what a model waiting for its second look waits for (bookSecondLook in src/eval/schedule.js).
+    Unlike the usable calls, which stay about level on a steady workload as old calls leave the thirty days, these only
+    grow while calls arrive, so a count of them is one a steady workload reaches. */
+export async function unseenCalls(workload) {
+  const r = await db.prepare(
+    `SELECT COUNT(*) AS n FROM calls c
+      WHERE c.workload_id = ? AND c.request_json IS NOT NULL AND c.created_at >= ?
+        AND c.source NOT IN ('replay', 'test') AND (c.status_code IS NULL OR c.status_code < 400)
+        AND NOT EXISTS (SELECT 1 FROM eval_samples s JOIN eval_runs r ON r.id = s.run_id WHERE s.call_id = c.id AND r.workload_id = ?)`)
+    .get(workload.id, now() - 30 * DAY, workload.id);
+  return Math.min(Number(r?.n || 0), config.EVAL_POOL_MAX);
+}
+
 /** The bar a measurement nobody asked for is sized for (the workload's own, or before it has one, the first bar
     for its kind of answer), how many calls a sample needs to clear it even with every answer matching, and how
     many usable calls give a sample that size. */
@@ -256,7 +270,10 @@ export const forgetPlanAll = () => pageMemo.clear();
 
 /* The whole plan, and whether it can run. `reason` is written to be shown to somebody as it
    is: it is the sentence under a button that cannot be pressed. */
-export async function planFor(workload, { canRoute, forRun = false, memo = false, automatic = false } = {}) {
+/* `only`, a set of setup names (a model, or "…#lighter"), plans a measurement of those alone: a second look at the ones that
+   passed once and are waiting for new calls (a run with trigger 'second_look', see pendingSecondLook in
+   src/eval/schedule.js), quoted and turned down on what that costs, not on what a whole measurement would. */
+export async function planFor(workload, { canRoute, forRun = false, memo = false, automatic = false, only = null } = {}) {
   if (memo && !forRun) {
     const key = [workload.speed_pref, workload.judge_mode, workload.routed_model, workload.reference_model, workload.status, canRoute].join('|');
     const hit = pageMemo.get(workload.id);
@@ -378,7 +395,8 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   // how far tests have run over their estimates lately, which every figure a person sees is corrected by
   const cal = await quoteCalibration();
   const fee = 1 + config.ROUTING_FEE_PCT / 100;
-  if (automatic && first.order.length) {
+  // (a plan of some models only is quoted on those models, below, never on everything a whole measurement would try)
+  if (automatic && first.order.length && !only) {
     const early = estimate({ ...plan, order: first.order, refPrice: first.refPrice }, profile, facts, workload);
     // held to what it is expected to cost, as corrected, not to the raw estimate, which runs short
     if (early * cal.about > plan.worth.budgetUsd) {
@@ -429,6 +447,14 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
     plan.order = [...front, ...plan.order];
     plan.models = Math.max(plan.models, front.length);
     plan.routerParts = front.length;
+  }
+  if (only) {
+    /* the setups it was asked for, by the name each one's result carries (a model, or the customer's own asked another way,
+       "…#lighter"), as the plan had them, and nothing else */
+    plan.order = plan.order.filter((q) => only.has(q.key || q.model));
+    plan.models = Math.max(1, plan.order.length);
+    plan.routerParts = 0;
+    plan.only = [...only];
   }
   plan.candidates = plan.order.map((r) => ({ model_id: r.model, per: r.price, recipe: r.recipe }));
 

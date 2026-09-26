@@ -48,13 +48,24 @@ export function cheaperCleared(results, feePct = config.ROUTING_FEE_PCT) {
   const ceiling = 1 / (1 + (Number(feePct) || 0) / 100);
   const rank = (r) => (r.choice_rank === null || r.choice_rank === undefined ? Infinity : Number(r.choice_rank));
   /* One a cautious workload left out as not sure enough is never offered: offered, approving with no
-     model named switched to exactly what the workload's own priority had turned down. */
+     model named switched to exactly what the workload's own priority had turned down. Nor one its second look
+     did not hold up (failedSecondLook). */
   return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null && refCost != null
     && Number(r.cost_month_usd) < Number(refCost)
     && (r.cost_ratio == null || Number(r.cost_ratio) < ceiling)
-    && r.confirm_verdict !== 'left_out')
+    && r.confirm_verdict !== 'left_out' && !failedSecondLook(r))
     .sort((a, b) => (confirmed(b) - confirmed(a)) || (rank(a) - rank(b)) || (a.cost_month_usd - b.cost_month_usd));
 }
+
+/* The second look was run, on calls the model had never seen, and it did not hold up there: it came close without
+   passing ('review'), it answered differently or worse ('missed'), it was too slow ('slower'), or its provider could not
+   keep up ('busy'). Such a model is never offered, never what an approval with no model named switches to, and never
+   switched to on a person's word either (the promote route in src/api.js): it used to be offered all the same, under
+   "It passed once, but hasn't yet passed again", with a way to take every request at once, and the activity feed asked
+   for the approval in the same breath as it gave the second look's worse figures (26 Sep 2026). One the second look never
+   reached, or that had too few new calls to look at ('insufficient'), has not been found wanting, and waits as before. */
+export const DID_NOT_HOLD_UP = ['review', 'missed', 'slower', 'busy'];
+export const failedSecondLook = (r) => DID_NOT_HOLD_UP.includes(r?.confirm_verdict);
 
 /* Whether the second look stood behind a result: it cleared again on calls it had never seen
    ('cleared'), or it is a strategy, whose second look is its live rollout, a small share of the

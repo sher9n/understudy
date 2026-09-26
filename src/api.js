@@ -15,7 +15,7 @@ import { notifyPrefs, NOTIFY_KINDS } from './notify.js';
 import { routedSavings } from './eval/actual.js';
 import { adviceFor } from './eval/advice.js';
 import { planFor, forgetPlan, forgetPlanAll } from './eval/plan.js';
-import { cadenceOf } from './eval/schedule.js';
+import { cadenceOf, waitOf } from './eval/schedule.js';
 import { recipeKind } from './eval/select.js';
 import { outcomeSummary, outcomeTotals, tasksFor } from './learn/views.js';
 import { nameOfResult, armById } from './learn/arms.js';
@@ -23,7 +23,7 @@ import { saveDef } from './learn/outcomes.js';
 import { learningView, exploreOf, forgetState, EXPLORE_MODES } from './learn/explore.js';
 import { certificate, promote, revert, trafficOf, servingKey, heldBack } from './eval/promote.js';
 import { stopMeasuring, closeAbandoned, rest } from './eval/run.js';
-import { outcomeOf, cheaperCleared, carriesOf } from './eval/outcome.js';
+import { outcomeOf, cheaperCleared, carriesOf, failedSecondLook, confirmed } from './eval/outcome.js';
 import { routingModeOf, ROUTING_MODES } from './eval/confidence.js';
 import { switchStory } from './eval/switch-story.js';
 import { valueOf } from './eval/value.js';
@@ -671,7 +671,11 @@ api.get('/workloads/:id', async (req, res) => {
     nextAt: w.recheck_after ? Number(w.recheck_after) : null,
     /* waiting for calls rather than for a time (see waitForCalls): how many of them it needs, counted as a
        measurement counts them, and how many it has; the call that brings them starts it */
-    waitingFor: Number(w.measure_at_calls) > 0 ? { calls: Number(w.measure_at_calls), have: plan.pool } : null,
+    /* (for a second look, calls no measurement has drawn: counted as what starts it counts them, waitOf) */
+    waitingFor: await (async () => {
+      const wait = await waitOf(w);
+      return wait ? { calls: wait.need, have: wait.have, secondLook: wait.secondLook } : null;
+    })(),
     picked: plan.order.slice(0, plan.models).map((r) => r.model),
     /* How the models were chosen, for the page to explain: what ruled each group out, in what
        order the rest will be tried and why, what Jev and the leaderboard said, how old each fact
@@ -1037,9 +1041,26 @@ api.post('/workloads/:id/promote', async (req, res) => {
      cleared, whatever it cost, used to be taken. */
   const pick = req.body?.model || (cert ? cheaperCleared(cert.results)[0]?.model_id : null);
   if (!pick) return fail(res, 400, 'Nothing has cleared your bar on this workload yet.');
-  // a person may take all of the calls at once; otherwise it starts on a share and grows
-  return res.json(await promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it',
-    rollout: req.body?.rollout !== false }));
+  /* What the newest measurement that tried it found of it (the newest of all, or the newest to try it where that one did
+     not). One its second look did not hold up for is not switched to on anybody's word (failedSecondLook in
+     src/eval/outcome.js): the page no longer offers it, and nor does this. */
+  const row = (cert ? cert.results.find((r) => r.model_id === pick) : null) || await db.prepare(
+    `SELECT e.* FROM eval_results e JOIN eval_runs r ON r.id = e.run_id WHERE r.workload_id = ? AND e.model_id = ?
+      ORDER BY r.created_at DESC LIMIT 1`).get(w.id, pick) || null;
+  if (row && failedSecondLook(row)) {
+    return fail(res, 409, `${pick} passed once, but did not hold up when it was tested again on requests it had never seen, `
+      + (row.confirm_verdict === 'busy'
+        ? "since its provider couldn't keep up, so it cannot be switched to, and it isn't tested on this workload again."
+        : 'so it cannot be switched to. The next test looks at it again.'));
+  }
+  /* Every call at once only for one that passed twice: a share at a time, growing while its calls hold up, is what watches
+     a model that has passed once. Otherwise it starts on a share and grows. */
+  const rollout = req.body?.rollout !== false;
+  if (!rollout && !(row && confirmed(row))) {
+    return fail(res, 409, 'Only a model that passed twice can take every request at once. Switched to without that, '
+      + 'it starts on a small share of requests and takes more while they hold up.');
+  }
+  return res.json(await promote(w, pick, { runId: cert?.run.id, actorUserId: req.user.id, reason: 'you approved it', rollout }));
 });
 
 /* A switch still taking over a share at a time, given every call now, because a person says so. */

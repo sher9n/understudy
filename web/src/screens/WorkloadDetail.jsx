@@ -506,7 +506,17 @@ function Waiting({ w, cand, busy, copiesOnly, act, go, goTo }) {
   const why = w.optimizeMode === 'ask' ? 'Your workspace asks first, so nothing switches until you say yes.'
     : w.optimizeMode === 'off' ? 'Your workspace never switches by itself.'
       : cand.heldBack ? "It was switched back before, so it won't switch by itself again."
-        : 'It needs a second look on new requests before it can switch by itself.';
+        : 'It has to pass a second test, on new requests it has never seen, before it switches by itself.';
+  /* Where it stands on that second test, when it has not passed one: one that did not hold up there is never offered
+     (failedSecondLook in src/eval/outcome.js), so it is either waiting for enough new requests (booked to run the moment
+     they arrive, see bookSecondLook in src/eval/run.js) or was not reached. */
+  const waitingFor = w.measure?.waitingFor || null;
+  const moreCalls = waitingFor ? Math.max(1, Number(waitingFor.calls) - Number(waitingFor.have)) : null;
+  const second = confirmedLook(cand.confirm) ? null
+    : cand.confirm?.verdict === 'insufficient'
+      ? (moreCalls ? `It has passed one test. There weren't enough new requests to test it again yet, so that runs by itself as soon as ${num(moreCalls)} more arrive.`
+        : "It has passed one test. There weren't enough new requests to test it again yet, so the next test does.")
+      : "It has passed one test, and hasn't been tested again on new requests yet.";
   const to = runId ? modelHref(w.id, runId, cand.model) : null;
   const open = () => { if (goTo) goTo(to); else window.location.assign(to); };
   return (
@@ -514,6 +524,7 @@ function Waiting({ w, cand, busy, copiesOnly, act, go, goTo }) {
       <p className="wp-attlabel"><i aria-hidden="true" />Waiting for your yes</p>
       <h2 id="wp-att-h">Switch to <span className="m">{name}</span>?</h2>
       <p className="wp-one">{why}</p>
+      {second && <p className="wp-one">{second}</p>}
       {copiesOnly && (
         <p className="wp-one">
           Your requests reach Understudy only as copies, so a switch waits for the first request sent through Understudy.{' '}

@@ -17,8 +17,8 @@ import { serveWith, writeAsStream, routeFor } from './learn/serve.js';
 import { leadModel } from './learn/arms.js';
 import { zdrFor, cacheHintFor } from './workspace.js';
 import { estimateCost } from './trueup.js';
-import { cadenceOf } from './eval/schedule.js';
-import { planFor, usableCalls, barNeed } from './eval/plan.js';
+import { cadenceOf, waitOf } from './eval/schedule.js';
+import { planFor, barNeed } from './eval/plan.js';
 import { callsToClear } from './eval/compare.js';
 import { OUTCOME_OF } from './eval/outcome.js';
 
@@ -793,12 +793,18 @@ async function startIfReady(workload) {
   const need = Number(workload.measure_at_calls);
   if (!(need > 0) || workload.merged_into) return false;
   if (!(await cadenceOf(workload.workspace_id))) return false;
-  if ((await usableCalls(workload)) < need) return false;
+  /* counted as what it waits for is counted (waitOf): calls no measurement has drawn for a second look, which only grow while
+     calls arrive, and otherwise calls a measurement can use */
+  const wait = await waitOf(workload);
+  if (!wait || wait.have < need) return false;
   const claimed = await db.prepare(
     `UPDATE workloads SET measure_at_calls = NULL, recheck_after = ? WHERE id = ? AND measure_at_calls IS NOT NULL RETURNING id`)
     .run(now() + 3600000, workload.id);
   if (!claimed.rows?.length) return false;
-  await enqueue('eval_run', { workloadId: workload.id, trigger: workload.status === 'new' ? 'first' : 'automatic' }, { unique: true });
+  /* What it waited for: the calls a second look needs, for models that passed once (pendingSecondLook), which it then takes
+     alone; otherwise a measurement of its own. */
+  await enqueue('eval_run', { workloadId: workload.id, trigger: wait.secondLook ? 'second_look' : workload.status === 'new' ? 'first' : 'automatic' },
+    { unique: true });
   return true;
 }
 
