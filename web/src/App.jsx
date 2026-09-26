@@ -11,6 +11,7 @@ import Home from './screens/Home.jsx';
 import Dashboard from './screens/Dashboard.jsx';
 import Workloads from './screens/Workloads.jsx';
 import WorkloadDetail from './screens/WorkloadDetail.jsx';
+import ModelPage from './screens/ModelPage.jsx';
 import Models from './screens/Models.jsx';
 import Settings from './screens/Settings.jsx';
 import ConnectWizard from './screens/ConnectWizard.jsx';
@@ -91,7 +92,8 @@ const WAS_IN = (() => { try { return localStorage.getItem('us_in') === '1'; } ca
 
 export default function App() {
   const [me, setMe] = useState(null);
-  const [{ screen, openId }, setWhere] = useState(() => parse());
+  // with a test and a model when the address is one model's page in one of the workload's tests
+  const [{ screen, openId, test, model }, setWhere] = useState(() => parse());
   const [freshKey, setFreshKey] = useState(null);
   // an account confirmed from another browser than the one that signed up keeps no password (see startSignUp)
   const [pwNote, setPwNote] = useState(false);
@@ -323,10 +325,12 @@ export default function App() {
      dashboard is looking at the sign-in form, and the tab says so. */
   const shown = PUBLIC.has(screen) || screen === 'home' || screen === 'notfound' ? screen
     : me && !me.signedIn && !me.offline ? (AUTH.has(screen) ? screen : 'signin')
-      : openId ? 'workload' : screen;
+      : openId ? (model && screen === 'work' ? 'model' : 'workload') : screen;
   useEffect(() => {
-    document.title = titleFor(shown, openId ? names[openId] : null);
-  }, [shown, openId, names]);
+    // a model's page is named after the model, then the workload it was tested on
+    const name = shown === 'model' ? `${String(model).split('/').pop()}, ${names[openId] || 'Workload'}` : openId ? names[openId] : null;
+    document.title = titleFor(shown, name);
+  }, [shown, openId, model, names]);
 
   const mode = dark ? 'dark' : 'light';
 
@@ -527,9 +531,12 @@ export default function App() {
 
   const here = openId ? 'work' : screen;
   const body = () => {
+    if (openId && model && test) {
+      return <ModelPage wid={openId} runId={test} model={model} go={go} goTo={goTo} key={`${openId}:${test}:${model}`} />;
+    }
     if (openId) {
       return <WorkloadDetail id={openId} onBack={() => go('work')}
-        onChanged={() => load('work')} go={go} />;
+        onChanged={() => load('work')} go={go} goTo={goTo} />;
     }
     if (err) {
       /* A screen that could not be read says why, and offers the one thing that will help: to
