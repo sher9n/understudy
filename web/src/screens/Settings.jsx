@@ -118,19 +118,16 @@ export default function Settings({ data, reload }) {
 function Switching({ data, busy, run }) {
   const [applyRouting, setApplyRouting] = useState(false);
   const [open, setOpen] = useState(false);
-  const [budget, setBudget] = useState(money(data.optimizeBudget));
   const mode = MODES.find((m) => m.value === data.defaultOptimizeMode) || MODES[0];
   const routing = ROUTING.find((r) => r.value === data.defaultRoutingMode) || ROUTING[1];
   const own = Number(data.routingOwn) || 0;
-  const budgetOk = typedOk(budget);
-  const budgetNum = typedNum(budget);
   const retest = data.measureEveryDays;
   return (
     <Card id="optimize" title="Switching"
       intro="Understudy tests cheaper models on your real requests. These choices decide what happens when one of them does as well as your current model."
       foot={(
         <button type="button" className="st-more" aria-expanded={open} aria-controls="st-more" onClick={() => setOpen((v) => !v)}>
-          {open ? 'Fewer options' : 'More options: models per test, testing budget, sharing'}
+          {open ? 'Fewer options' : 'More options: models per test, sharing'}
           <svg viewBox="0 0 16 16" aria-hidden="true" className={open ? 'up' : ''}><path d="M4.5 6.2 8 9.7l3.5-3.5" /></svg>
         </button>
       )}>
@@ -166,15 +163,6 @@ function Switching({ data, busy, run }) {
           <Row label="Models per test" id="st-models" say="Each test tries this many models. More models give a fuller picture, and cost more.">
             <Choices label="Models per test" options={modelChoices(data.evalModelsMax).map((n) => ({ value: n, label: String(n) }))}
               chosen={data.evalModels} busy={busy} onChoose={(n) => run(() => api.setModelsTested(n), `Each test now tries ${n} models.`)()} />
-          </Row>
-          <Row label="Testing budget" id="st-budget"
-            say={budgetOk
-              ? `The most Understudy may spend on tests and checks in any 30 days. Leave it empty for no limit. ${usd(data.optimizeSpent || 0)} spent in the last 30 days.${data.optimizeReserve > 0 ? ` The last ${Math.round(data.optimizeReserve * 100)}% of it is kept for tests.` : ''}`
-              : 'Write an amount in dollars, like 20 or 7.50, or leave it empty for no limit.'}>
-            <input className="inp st-amount" inputMode="decimal" placeholder="No limit" aria-labelledby="st-budget" aria-invalid={!budgetOk}
-              value={budget} onChange={(e) => setBudget(e.target.value.replace(/[^\d.]/g, ''))} />
-            <button type="button" className="minig" disabled={busy || !budgetOk || budgetNum === (data.optimizeBudget ?? null)}
-              onClick={run(() => more.setOptimizeBudget(budgetNum), 'Your testing budget is saved.')}>Save</button>
           </Row>
           <Row label="Share results" id="st-share"
             say="Help everyone pick better models by sharing which models passed which kinds of work. Your requests, answers and names are never shared.">
@@ -231,6 +219,13 @@ function Billing({ data, busy, run, setErr }) {
   const topUpCard = !!data.card?.forTopUps;
   const limitsOk = typedOk(daily) && typedOk(monthly);
   const limitsChanged = limitsOk && (typedNum(daily) !== (l.dailyUsd ?? null) || typedNum(monthly) !== (l.monthlyUsd ?? null));
+  /* The testing limit: the amount chosen, the default the workspace has until it chooses (the box left empty), or none. */
+  const tl = data.testingLimit || { usd: data.optimizeBudget ?? null, isDefault: false, none: data.optimizeBudget == null, defaultUsd: 20 };
+  const [limitTyped, setLimitTyped] = useState(tl.none || tl.isDefault ? '' : money(tl.usd));
+  useEffect(() => { setLimitTyped(tl.none || tl.isDefault ? '' : money(tl.usd)); }, [tl.none, tl.isDefault, tl.usd]);
+  const limitTypedOk = typedOk(limitTyped);
+  const limitTypedNum = typedNum(limitTyped);
+  const limitChanged = limitTypedOk && !tl.none && limitTypedNum !== (tl.isDefault ? null : tl.usd);
   // the amount in force is always one of the choices, whatever it is
   const topUps = [...new Set([...TOPUPS, Number(data.topUpAmount)].filter((a) => Number.isFinite(a)))]
     .sort((a, b) => a - b).filter((a) => a >= (data.topUpMin ?? 0) && a <= (data.topUpMax ?? 1e9));
@@ -248,7 +243,7 @@ function Billing({ data, busy, run, setErr }) {
           : pay === 'test_refused' ? 'Payments are switched off here. This deployment only has a test payment key, which adds nothing to a balance.'
             : null}>
       <Row label="Balance" id="st-balance"
-        say={`Your requests and tests are paid from this balance.${data.held > 0 ? ` ${usd(data.held)} is set aside for requests in progress, so ${usd(data.free)} is free to spend.` : ''}`}>
+        say={`Your requests and tests are paid from this balance.${data.held > 0 ? ` ${usd(data.held)} is set aside for requests and tests in progress, so ${usd(data.free)} is free to spend.` : ''}`}>
         <span className="st-money m">{usdHeld(data.balance)}</span>
         <button type="button" className="mini" disabled={!data.canBill || busy || paying} aria-expanded={picking} onClick={() => setPicking((v) => !v)}>
           {data.balance > 0 ? 'Add credit' : 'Add credit to start'}
@@ -277,7 +272,7 @@ function Billing({ data, busy, run, setErr }) {
       </Row>
       <Row label="Spending limits" id="st-limits"
         say={limitsOk
-          ? `When you reach a limit, requests stop until the next day or month, India time. ${usd(l.spentToday || 0)} spent today and ${usd(l.spentMonth || 0)} this month.`
+          ? `The most your requests may cost. When you reach a limit, requests stop until the next day or month, India time. Tests have their own limit, below. ${usd(l.spentToday || 0)} spent today and ${usd(l.spentMonth || 0)} this month.`
           : 'Write an amount in dollars, like 25 or 12.50, or leave it empty for no limit.'}>
         <span className="st-inputs">
           <label>A day
@@ -291,6 +286,23 @@ function Billing({ data, busy, run, setErr }) {
         </span>
         <button type="button" className="minig" disabled={busy || !limitsChanged}
           onClick={run(() => more.setLimits(typedNum(daily), typedNum(monthly)), 'Your limits are saved.')}>Save</button>
+      </Row>
+      <Row label="Testing limit" id="st-testing"
+        say={!limitTypedOk ? 'Write an amount in dollars, like 20 or 7.50, or leave it empty for the default.'
+          : tl.none ? `No limit. Each test still stops at the most its quote says. ${usd(data.optimizeSpent || 0)} spent on testing in the last 30 days.`
+            : `The most tests, and the checks after a switch, may spend in any 30 days.${tl.isDefault ? ` The default is ${usd(tl.defaultUsd)}.` : ''} `
+              + `${usd(data.optimizeSpent || 0)} spent in the last 30 days.`}>
+        <input className="inp st-amount" inputMode="decimal" placeholder={tl.none ? 'No limit' : String(tl.defaultUsd)} aria-labelledby="st-testing"
+          aria-invalid={!limitTypedOk} value={limitTyped} disabled={tl.none} onChange={(e) => setLimitTyped(e.target.value.replace(/[^\d.]/g, ''))} />
+        {!tl.none && (
+          <button type="button" className="minig" disabled={busy || !limitChanged}
+            onClick={run(() => more.setOptimizeBudget(limitTypedNum), 'Your testing limit is saved.')}>Save</button>
+        )}
+        <button type="button" className="minig" disabled={busy}
+          onClick={run(() => (tl.none ? more.setOptimizeBudget(null) : more.setOptimizeBudget(null, { none: true })),
+            tl.none ? `Your testing limit is back to the default, ${usd(tl.defaultUsd)}.` : 'Testing has no limit now. Each test still stops at the most its quote says.')}>
+          {tl.none ? 'Set a limit' : 'No limit'}
+        </button>
       </Row>
       <Row label="Card" id="st-card"
         say={data.card ? `${data.card.brand} ending ${data.card.last4}.${topUpCard ? ' It is saved for top ups.' : ''}` : 'No card is saved yet.'}>

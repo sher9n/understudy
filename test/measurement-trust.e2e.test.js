@@ -595,7 +595,8 @@ test('with calls out at once, a measurement still never spends past its limit', 
   const { workspace, workload } = await seed({ n: 200, enabled: ['vendor/pricey-small'] });
   delayFor.set('vendor/pricey-small', 20);
   try {
-    const quote = (await planFor(await load(workload.id), { canRoute: true })).estimateUsd;
+    // the quote a person sees, our fee in it and corrected by how far tests run over their estimates (see quoteCalibration)
+    const quote = (await planFor(await load(workload.id), { canRoute: true })).aboutUsd;
     const budget = Math.ceil(quote * 100 + 3) / 100;
     await db.prepare('UPDATE workspaces SET optimize_budget_usd = ? WHERE id = ?').run(budget, workspace.id);
     const limit = budget / (1 + config.ROUTING_FEE_PCT / 100);
