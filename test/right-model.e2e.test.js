@@ -313,7 +313,10 @@ test('one that passed once and had too few new calls is looked at again the mome
   const queued = jobs.filter((j) => j.status === 'queued').map((j) => JSON.parse(j.payload));
   assert.deepEqual(queued.map((p) => p.trigger), ['second_look'], `a second look, not a whole measurement: ${JSON.stringify(jobs)}`);
 
-  // the second look: that model alone, its first look answered from what it already bought, its second on the new calls
+  /* the second look: that model alone, even with others switched on that a whole measurement would race, its first look
+     answered from what it already bought, and its second on the new calls */
+  await enable(workspace.id, [STEADY, DRIFTY]);
+  const drifted = got(DRIFTY);
   const asked = got(STEADY);
   const look = await runEvaluation(w.id, { trigger: 'second_look' });
   assert.equal(look.ok, true, JSON.stringify(look));
@@ -322,6 +325,7 @@ test('one that passed once and had too few new calls is looked at again the mome
   assert.equal(JSON.parse(run.plan_json).secondLookOf?.runId, second.runId);
   const tried = (await db.prepare(`SELECT model_id FROM eval_results WHERE run_id = ? AND verdict <> 'reference'`).all(look.runId)).map((r) => r.model_id);
   assert.deepEqual(tried, [STEADY], `only the model that waited: ${tried.join(', ')}`);
+  assert.equal(got(DRIFTY), drifted, 'and nothing asked of a model switched on that was not waiting');
   const again = await resultOf(look.runId, STEADY);
   assert.ok(Number(again.reused) >= 90, `its first look answered from what it already bought: ${again.reused} of ${again.runs}`);
   assert.equal(again.confirm_verdict, 'cleared', `and it passed on the new calls: ${again.confirm_verdict} on ${again.confirm_runs}`);
