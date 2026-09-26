@@ -955,8 +955,12 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   const unusable = bar.filter((p) => (!p.a.ok && !p.b.ok) || deadNow(p));
   /* When every one of those calls failed only because the provider was busy or timing out, that
      is an outage, not the customer's model being unable to answer: it used to end the run as
-     "your own model could not answer these calls", which the page then said for a month. */
-  const outage = unusable.length > 0 && unusable.every((p) => [p.ra, p.rb].every((r) => r.ok || r.transient || r.recorded));
+     "your own model could not answer these calls", which the page then said for a month. An answer
+     that came back and cannot be read as what the calls ask for (words where a tool call was asked
+     for, JSON that does not parse) is the model's own, never an outage: read as one, a workload
+     whose model answers in words was "too busy" on every test, tried again every half hour. */
+  const outage = unusable.length > 0 && unusable.every((p) => [[p.ra, p.a], [p.rb, p.b]]
+    .every(([r, x]) => r.recorded || r.transient || (r.ok && x.ok)));
   if ((unusable.length * 2 > bar.length || cantAnswer) && outage) {
     return await interrupt(`The provider was too busy to answer ${reference} on ${unusable.length} of the first `
       + `${bar.length} calls, so the bar could not be set.`);
