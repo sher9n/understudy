@@ -20,6 +20,12 @@ export const plainClick = (fn) => (e) => {
   fn(e);
 };
 
+/** A link inside markup the app did not write (a lifted panel set as HTML): a plain click on anything matching
+    `selector` is followed in place by `fn`. Put it on the element holding the markup. */
+export const clickWithin = (selector, fn) => (e) => {
+  if (fn && e.target.closest(selector)) plainClick(fn)(e);
+};
+
 /* The first thing Tab reaches on a page: a way past the menu to the page itself, shown only
    while it has focus. It moves focus to the page rather than only scrolling to it, so the next
    Tab carries on from there. */

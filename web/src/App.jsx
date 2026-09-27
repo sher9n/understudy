@@ -359,11 +359,12 @@ export default function App() {
   const inAppGuide = GUIDES.has(screen) && !!me?.signedIn;
 
   /* The site as it was: the old homepage and the two old guides, the same for everybody, signed in or not, so the two
-     sites can be read side by side. Their links to each other stay on the old site (linkmap.js). */
+     sites can be read side by side. Their links to each other stay on the old site (linkmap.js), and they keep the
+     look they had: one-look.css leaves a frame marked legacy alone. */
   if (LEGACY.has(screen)) {
     const Page = PAGES[screen];
     return (
-      <div className="u" data-mode={mode}>
+      <div className="u legacy" data-mode={mode}>
         <LinkMap.Provider value={LEGACY_LINKS}>
           {screen === 'legacyhome' ? <LegacyHome go={go} dark={dark} setDark={setDark} /> : (
             <PublicPage me={me} go={go} dark={dark} setDark={setDark} here={screen === 'legacyhow' ? 'how' : 'routing'}>

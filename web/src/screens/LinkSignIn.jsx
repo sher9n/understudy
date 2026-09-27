@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import { clickWithin, plainClick } from '../nav.jsx';
 
 /* The page an emailed link opens.
 
@@ -13,7 +14,9 @@ const tokenFrom = () => {
   return m ? decodeURIComponent(m[1]) : '';
 };
 
-export default function LinkSignIn({ pitchHtml, onDone }) {
+/* Its two links, back to signing in and on to a new code, are followed in place like every other link in the app,
+   rather than loading the whole page again; a middle or modified click still opens them the browser's way. */
+export default function LinkSignIn({ pitchHtml, onDone, onHome, onSignIn, onNewCode }) {
   const [token] = useState(tokenFrom);
   const [state, setState] = useState({ phase: token ? 'checking' : 'dead' });
   const [tries, setTries] = useState(0);
@@ -50,13 +53,14 @@ export default function LinkSignIn({ pitchHtml, onDone }) {
 
   const confirming = state.purpose === 'verify';
   return (
-    <div className="board">
+    <div className="lifted">
       <div>
         <div className="authsplit">
-          <aside className="pitch" dangerouslySetInnerHTML={{ __html: pitchHtml }} />
+          {/* the name at the top of the story panel leads back to the website */}
+          <aside className="pitch" onClick={clickWithin('a.brand', onHome)} dangerouslySetInnerHTML={{ __html: pitchHtml }} />
           <main className="formside">
             <div className="toprow">
-              <a className="lnk" href="/signin">← Sign in another way</a>
+              <a className="lnk" href="/signin" onClick={onSignIn ? plainClick(onSignIn) : undefined}>← Sign in another way</a>
             </div>
             <div className="authcard">
               {state.phase === 'checking' && <><h1>One moment</h1><p className="sub">Checking the link from your email.</p></>}
@@ -87,7 +91,7 @@ export default function LinkSignIn({ pitchHtml, onDone }) {
                   <p className="sub">
                     Links work once, for ten minutes. Ask for a new one and it will be in your inbox in a moment.
                   </p>
-                  <a className="btn full" href="/signin/code">Email me a new code and link</a>
+                  <a className="btn full" href="/signin/code" onClick={onNewCode ? plainClick(onNewCode) : undefined}>Email me a new code and link</a>
                 </>
               )}
             </div>

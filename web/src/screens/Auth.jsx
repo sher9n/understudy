@@ -53,10 +53,14 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
     }
   };
 
+  // the name at the top of the story panel leads back to the website, on every one of these screens
+  const home = () => go('home');
+
   if (pending) {
     return (
       <CodeSignIn
         pitchHtml={PITCH}
+        onHome={home}
         purpose="verify"
         initial={{ email: pending.email, sent: { minutes: pending.minutes, digits: pending.digits } }}
         resend={() => api.signUp(pending.fields)}
@@ -66,12 +70,23 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
     );
   }
 
-  if (mode === 'link') return <LinkSignIn pitchHtml={PITCH} onDone={(fresh, key, kept) => onDone(fresh, key, kept)} />;
+  if (mode === 'link') {
+    return (
+      <LinkSignIn
+        pitchHtml={PITCH}
+        onHome={home}
+        onSignIn={() => go('signin')}
+        onNewCode={() => go('signincode')}
+        onDone={(fresh, key, kept) => onDone(fresh, key, kept)}
+      />
+    );
+  }
 
   if (codeMode) {
     return (
       <CodeSignIn
         pitchHtml={PITCH}
+        onHome={home}
         onDone={(fresh, key, kept) => onDone(!!fresh, key, kept)}
         onBack={() => go('signin')}
       />
@@ -83,8 +98,12 @@ export default function Auth({ mode, go, onDone, dark, setDark }) {
       html={signUp ? signupHtml : signinHtml}
       vals={{ dark, light: !dark, error }}
       onSubmit={submit}
-      hrefs={{ go_signup: href('signup'), go_signin: href('signin'), want_code: href('signincode') }}
+      hrefs={{ go_home: href('home'), go_signup: href('signup'), go_signin: href('signin'), want_code: href('signincode'),
+        go_pricing: href('pricing'), go_traffic: href('traffic') }}
       on={{
+        go_home: home,
+        go_pricing: () => go('pricing'),
+        go_traffic: () => go('traffic'),
         toggleTheme: () => setDark(!dark),
         go_signup: () => go('signup'),
         go_signin: () => go('signin'),
