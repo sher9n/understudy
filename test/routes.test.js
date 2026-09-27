@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ROUTES, PUBLIC, parse, href, modelHref, titleFor } from '../web/src/router.js';
+import { ROUTES, PUBLIC, LEGACY, parse, href, modelHref, titleFor } from '../web/src/router.js';
 
 /* The addresses the site answers. The server serves the app for every address the router knows
    and a 404 for any other (src/server.js asks the same parse), so these are the pages that can be
@@ -23,6 +23,26 @@ test('how models are routed has an address of its own, readable without an accou
   assert.equal(href('routing', null, 'second-look'), '/how-models-are-routed#second-look', 'a part of it can be linked to');
   assert.ok(PUBLIC.has('routing'), 'it needs no account, so it never sends anybody to sign in');
   assert.equal(titleFor('routing'), 'How models are routed, Understudy');
+});
+
+test('the site as it was stays at /legacy, readable without an account, to compare with the new pages', () => {
+  assert.deepEqual(parse('/legacy'), { screen: 'legacyhome', openId: null });
+  assert.deepEqual(parse('/legacy/'), { screen: 'legacyhome', openId: null }, 'a trailing slash is the same page');
+  assert.deepEqual(parse('/legacy/how-it-works'), { screen: 'legacyhow', openId: null });
+  assert.deepEqual(parse('/legacy/how-models-are-routed'), { screen: 'legacyrouting', openId: null });
+  assert.equal(parse('/legacy/pricing').screen, 'notfound', 'only the homepage and the two guides have an old version');
+  for (const s of ['legacyhome', 'legacyhow', 'legacyrouting']) {
+    assert.ok(PUBLIC.has(s), `${s} needs no account`);
+    assert.ok(LEGACY.has(s), `${s} is part of the old site`);
+  }
+  assert.equal(href('legacyhow', null, 'testing'), '/legacy/how-it-works#testing', 'a step on an old guide can be linked to');
+  assert.equal(titleFor('legacyhome'), 'Legacy homepage, Understudy', 'a tab says it is the old page');
+  assert.equal(titleFor('legacyrouting'), 'How models are routed (legacy), Understudy');
+  // the new pages keep their own addresses
+  assert.equal(parse('/').screen, 'home');
+  assert.equal(parse('/how-it-works').screen, 'how');
+  assert.equal(parse('/how-models-are-routed').screen, 'routing');
+  assert.ok(!LEGACY.has('home') && !LEGACY.has('how') && !LEGACY.has('routing'), 'the new pages are not the old site');
 });
 
 test('every address leads back to its own screen, and every public page has one', () => {

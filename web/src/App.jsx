@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, onWorkloadName, onSignedOut } from './api.js';
 import { usd } from './money.js';
-import { parse, go as navigate, onPop, PUBLIC, titleFor, safeNext, here as hereNow, signInHref,
+import { parse, go as navigate, onPop, PUBLIC, LEGACY, titleFor, safeNext, here as hereNow, signInHref,
   href } from './router.js';
 import { plainClick } from './nav.jsx';
 import Notice from './Notice.jsx';
 import Shell from './Shell.jsx';
 import Auth from './screens/Auth.jsx';
-import Home from './screens/Home.jsx';
+import { SiteHome, SiteHow, SiteRouting } from './screens/site/SitePage.jsx';
+// the homepage and the two guides as they were before the pages built from the 27 Sep 2026 artboard, kept at /legacy
+import LegacyHome from './screens/Home.jsx';
+import { LinkMap, LEGACY_LINKS } from './linkmap.js';
 import Dashboard from './screens/Dashboard.jsx';
 import Workloads from './screens/Workloads.jsx';
 import WorkloadDetail from './screens/WorkloadDetail.jsx';
@@ -36,9 +39,10 @@ const APP = new Set(['dash', 'work', 'models', 'settings', 'connect']);
 // the doors in: a password, an emailed code, the page an emailed link opens, and signing up
 const AUTH = new Set(['signin', 'signup', 'signincode', 'signinlink']);
 
-/* The pages anybody can read. Each is drawn inside the same public frame as the home page. */
-const PAGES = { how: HowItWorks, routing: HowRouting, traffic: Traffic, pricing: Pricing, terms: Terms, privacy: Privacy, dpa: Dpa,
-  subprocessors: Subprocessors, security: Security, contact: Contact, status: Status };
+/* The pages anybody can read. The two guides carry the homepage's own top bar and footer; every other one is drawn
+   inside the public frame. The guides as they were are kept at /legacy, in the public frame they had. */
+const PAGES = { how: SiteHow, routing: SiteRouting, traffic: Traffic, pricing: Pricing, terms: Terms, privacy: Privacy, dpa: Dpa,
+  subprocessors: Subprocessors, security: Security, contact: Contact, status: Status, legacyhow: HowItWorks, legacyrouting: HowRouting };
 
 /* Every one of these screens is built out of the customer's own traffic, so before the guide
    is finished they are either empty or half a story. Settings is deliberately not on the
@@ -332,6 +336,18 @@ export default function App() {
     document.title = titleFor(shown, name);
   }, [shown, openId, model, names]);
 
+  /* The site as it was is kept to compare with the new pages, not to be found: its pages ask search engines not to
+     list them, and every other page takes that back. */
+  useEffect(() => {
+    let tag = document.head.querySelector('meta[name="robots"]');
+    if (LEGACY.has(shown)) {
+      if (!tag) { tag = document.createElement('meta'); tag.setAttribute('name', 'robots'); document.head.appendChild(tag); }
+      tag.setAttribute('content', 'noindex');
+    } else if (tag) {
+      tag.remove();
+    }
+  }, [shown]);
+
   const mode = dark ? 'dark' : 'light';
 
   /* The public pages do not wait for the account check. The status page most of all: somebody
@@ -341,8 +357,35 @@ export default function App() {
   /* A guide opened by somebody signed in is read inside the app (below); while the account check is still out in
      a browser that was signed in last time, a moment of loading rather than the public frame and then the app. */
   const inAppGuide = GUIDES.has(screen) && !!me?.signedIn;
+
+  /* The site as it was: the old homepage and the two old guides, the same for everybody, signed in or not, so the two
+     sites can be read side by side. Their links to each other stay on the old site (linkmap.js). */
+  if (LEGACY.has(screen)) {
+    const Page = PAGES[screen];
+    return (
+      <div className="u" data-mode={mode}>
+        <LinkMap.Provider value={LEGACY_LINKS}>
+          {screen === 'legacyhome' ? <LegacyHome go={go} dark={dark} setDark={setDark} /> : (
+            <PublicPage me={me} go={go} dark={dark} setDark={setDark} here={screen === 'legacyhow' ? 'how' : 'routing'}>
+              <Page me={me} go={go} />
+            </PublicPage>
+          )}
+        </LinkMap.Provider>
+      </div>
+    );
+  }
+
   if (GUIDES.has(screen) && !me && WAS_IN) {
     return <div className="u" data-mode={mode}><div className="loading">Loading…</div></div>;
+  }
+  // the two guides, read by somebody signed out: with the homepage's own top bar and footer
+  if (GUIDES.has(screen) && !inAppGuide) {
+    const Page = PAGES[screen];
+    return (
+      <div className="u" data-mode={mode}>
+        <Page me={me} go={go} dark={dark} setDark={setDark} />
+      </div>
+    );
   }
   if (PUBLIC.has(screen) && !inAppGuide) {
     const Page = PAGES[screen];
@@ -363,7 +406,7 @@ export default function App() {
   if (screen === 'home') {
     return (
       <div className="u" data-mode={mode}>
-        <Home me={me} go={go} dark={dark} setDark={setDark} />
+        <SiteHome me={me} go={go} dark={dark} setDark={setDark} />
       </div>
     );
   }
@@ -452,7 +495,7 @@ export default function App() {
     return (
       <div className="u" data-mode={mode}>
         <Shell here={screen} me={me} go={go} dark={dark} setDark={setDark} onSignOut={signOut} locked={!me.onboarded}>
-          <Page me={me} go={go} inApp />
+          <Page me={me} go={go} dark={dark} setDark={setDark} inApp />
         </Shell>
       </div>
     );
