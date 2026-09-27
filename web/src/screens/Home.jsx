@@ -3,6 +3,7 @@ import { href } from '../router.js';
 import Board from '../Board.jsx';
 import { SkipLink } from '../nav.jsx';
 import { startHomeMotion } from '../homeMotion.js';
+import { useLinkTo } from '../linkmap.js';
 import html from './home.html?raw';
 import '../home.css';
 
@@ -17,8 +18,13 @@ const SAMPLE_BASE = 'https://api.understudy.dev/v1';
 const LINKS = ['how', 'routing', 'pricing', 'terms', 'privacy', 'contact'];
 
 /* Straight from the design board, with its own header and footer. The live parts are the calls
-   to action, the theme switch, and the links to how it works, pricing and the small print. */
+   to action, the theme switch, and the links to how it works, pricing and the small print.
+
+   This is the homepage as it was before the one built from the 27 Sep 2026 artboard
+   (screens/site/SitePage.jsx), kept at /legacy to compare the two; its links to the guides lead to
+   their old versions (linkmap.js). */
 export default function Home({ go, dark, setDark }) {
+  const to = useLinkTo();
   // arriving at /#how from another page lands on that part of this one
   useEffect(() => {
     if (window.location.hash === '#how') document.getElementById('how')?.scrollIntoView({ block: 'start' });
@@ -35,12 +41,12 @@ export default function Home({ go, dark, setDark }) {
         subs={{ [SAMPLE_BASE]: `${window.location.origin}/v1` }}
         hrefs={{
           go_signup: href('signup'), go_signin: href('signin'),
-          ...Object.fromEntries(LINKS.map((to) => [`go_${to}`, href(to)])),
+          ...Object.fromEntries(LINKS.map((k) => [`go_${k}`, href(to(k))])),
         }}
         on={{
           go_signup: () => go('signup'),
           go_signin: () => go('signin'),
-          ...Object.fromEntries(LINKS.map((to) => [`go_${to}`, () => go(to)])),
+          ...Object.fromEntries(LINKS.map((k) => [`go_${k}`, () => go(to(k))])),
           toggleTheme: () => setDark(!dark),
         }}
       />

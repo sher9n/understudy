@@ -1,0 +1,274 @@
+/* The public site's three pages: the homepage, How it works and How models are routed, as the 27 Sep 2026 homepage
+   artboard drew them (screens/site/*.html, moved by siteMotion.js). The site as it was before stays at /legacy.
+
+   Everything here sits under .w, the page's own root. The app styles a few short names globally (.on, and a, button and
+   p themselves), so the rules the page relies on are set here rather than inherited. The page takes the app's own
+   light and dark (the data-mode on .u), with colours of its own: a cooler off-white and a deeper black than the app's
+   screens, and a serif for what the page says. */
+
+/* SitePage's own wrapper, there only to hold on to the page: it takes no part in the layout */
+.sitepage { display: contents; }
+.w, .w *, .w *::before, .w *::after { box-sizing: border-box; }
+.w {
+  --pad: clamp(18px, 4vw, 64px);
+  --w-gap: clamp(80px, 11vw, 150px);
+  --w-bg: #f7f7f8; --w-ink: #0e1016; --w-mut: #585d6c; --w-faint: #8a8f9d; --w-line: #dfe1e7; --w-card: #ffffff; --w-track: #e4e6ec;
+  --w-acc: #0f62fe; --w-acc-read: #0b4fd0; --w-acc-soft: #e7eeff; --w-ink2: #2e323d; --w-logo: #0e1016; --w-logo-u: #ffffff;
+  --w-ok: #2b8a3e; --w-ok-soft: #ebfbee; --w-bad: #e03131; --w-bad-soft: #fff5f5; --w-k1: #0b7285; --w-k2: #6741d9;
+  color-scheme: light; background: var(--w-bg); color: var(--w-ink); transition: background-color 0.35s ease, color 0.35s ease;
+  font-family: 'Schibsted Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 16px; line-height: 1.55; letter-spacing: normal;
+}
+[data-mode='dark'] .w {
+  --w-bg: #08090c; --w-ink: #eef0f5; --w-ink2: #c3c8d3; --w-mut: #a1a7b4; --w-faint: #7d8493; --w-line: #22262f; --w-card: #101319; --w-track: #252a33;
+  --w-acc: #5b93ff; --w-acc-read: #7aa7ff; --w-acc-soft: #14203a; --w-logo: #eef0f5; --w-logo-u: #08090c;
+  --w-ok: #69db7c; --w-ok-soft: #0f2618; --w-bad: #ff8787; --w-bad-soft: #2a1215; --w-k1: #66d9e8; --w-k2: #b197fc;
+  color-scheme: dark;
+}
+.lifted > .w { flex: 1 0 auto; display: flex; flex-direction: column; }
+.w a, .w a:hover { color: inherit; text-decoration: none; }
+.w :focus-visible { outline: 2px solid var(--w-acc); outline-offset: 2px; border-radius: 6px; }
+/* said to a screen reader, not shown */
+.w .w-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+/* no transition while a part is put back to its starting point to replay */
+.w .no-anim, .w .no-anim * { transition: none !important; }
+
+/* The page between its top bar and its footer: one column of sections, as wide as the words and pictures need. */
+.w .w-main { width: min(100% - 2 * var(--pad), 1180px); margin-inline: auto; display: grid; gap: var(--w-gap); }
+.w .w-serif { font-family: 'Newsreader', Georgia, 'Times New Roman', serif; font-optical-sizing: auto; font-weight: 400; letter-spacing: -0.012em; }
+.w .w-label { margin: 0; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--w-mut); }
+.w .w-fine { margin: 0; font-size: 13px; color: var(--w-faint); line-height: 1.5; }
+
+/* The top bar: the name and the two guides on the left; light and dark, sign in and a key on the right, over a thin line.
+   One row at every width, a little lower than the artboard's. */
+.w .w-nav { display: flex; align-items: center; gap: 12px 28px; flex-wrap: wrap; padding: 13px var(--pad); border-bottom: 1px solid var(--w-line); }
+.w .w-navl { display: flex; align-items: center; gap: 12px 28px; flex-wrap: wrap; margin-right: auto; }
+.w .w-word { font-weight: 700; font-size: 17px; letter-spacing: -0.02em; color: var(--w-ink); }
+.w .w-navr { display: flex; align-items: center; gap: 18px; margin-left: auto; }
+.w .w-signin { font-size: 14.5px; color: var(--w-mut); transition: color 0.15s ease; }
+.w .w-signin:hover, .w .w-links a:hover { color: var(--w-ink); }
+.w .w-key { display: inline-flex; align-items: center; padding: 9px 17px; border-radius: 9px; background: var(--w-acc); color: #ffffff; font-weight: 600; font-size: 14.5px; white-space: nowrap; }
+[data-mode='dark'] .w .w-key { color: #08090c; }
+.w .w-links { display: flex; gap: 24px; font-size: 14.5px; color: var(--w-mut); flex-wrap: wrap; }
+.w .w-links a { transition: color 0.15s ease; }
+.w .w-links a[aria-current="page"] { color: var(--w-ink); font-weight: 500; }
+.w .w-mode { display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0; border-radius: 8px; border: 0;
+  background: transparent; color: var(--w-mut); cursor: pointer; transition: background-color 0.2s ease, color 0.2s ease; }
+.w .w-mode:hover { background: var(--w-card); color: var(--w-ink); }
+.w .w-mode svg { width: 18px; height: 18px; display: block; }
+.w .w-mode .i-sun, [data-mode='dark'] .w .w-mode .i-moon { display: none; }
+[data-mode='dark'] .w .w-mode .i-sun { display: block; }
+
+/* The footer: the name, and the pages somebody looks for at the foot of a page. */
+.w .w-foot { width: min(100% - 2 * var(--pad), 1180px); margin: var(--w-gap) auto 0; padding-block: 22px 56px; border-top: 1px solid var(--w-line);
+  display: flex; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; font-size: 13.5px; color: var(--w-faint); }
+.w .w-footl { display: flex; gap: 8px 18px; flex-wrap: wrap; }
+.w .w-footl a { transition: color 0.15s ease; }
+.w .w-footl a:hover { color: var(--w-ink); }
+
+.w .w-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 20px; border-radius: 9px;
+  background: var(--w-ink); color: var(--w-bg); font-weight: 600; font-size: 14.5px; border: 0; cursor: pointer; white-space: nowrap; }
+.w .w-btn2 { display: inline-flex; align-items: center; justify-content: center; padding: 12px 20px; border-radius: 9px; border: 1px solid var(--w-line);
+  background: var(--w-card); color: var(--w-ink); font-weight: 600; font-size: 14.5px; white-space: nowrap; }
+[data-mode='dark'] .w .t-win { border-color: #262c3a; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(76, 141, 255, 0.14); }
+
+/* ---- the homepage ---- */
+/* the top: what Understudy is, three figures, and the orb of every model tried */
+.w .a-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(24px, 4vw, 56px); align-items: center; padding-top: clamp(36px, 7vw, 100px); }
+.w .a-words { display: grid; gap: 22px; }
+.w .a-h1 { margin: 0; font-size: clamp(30px, 3.2vw, 44px); line-height: 1.16; text-wrap: balance; }
+.w .a-h1b { margin: 0; font-size: clamp(24px, 2.4vw, 33px); line-height: 1.22; color: var(--w-ink2); text-wrap: pretty; }
+.w .a-orb { position: relative; width: 100%; max-width: 620px; aspect-ratio: 1; justify-self: center; }
+.w .a-orb canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.w .p-trio { display: flex; flex-wrap: wrap; margin: 0; padding: 0; list-style: none; font-size: 17px; gap: 8px 0; }
+.w .p-trio li { padding-inline: 16px; border-left: 1px solid var(--w-line); white-space: nowrap; }
+.w .p-trio li:first-child { padding-left: 0; border-left: 0; }
+.w .p-trio b { font-weight: 600; color: var(--w-acc-read); }
+
+/* the labs, in the serif, with no shapes */
+.w .k-labs { display: grid; gap: 30px; justify-items: center; text-align: center; }
+.w .k-names { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px 40px; max-width: 1060px; margin: 0; padding: 0; list-style: none; font-size: 23px; color: var(--w-mut); }
+.w .k-names li { font-family: 'Newsreader', Georgia, serif; white-space: nowrap; }
+
+/* the two steps */
+.w .k-step { display: grid; gap: 22px; justify-items: center; text-align: center; }
+.w .k-say { margin: 0; font-size: clamp(24px, 2.8vw, 36px); line-height: 1.22; max-width: 30ch; text-wrap: balance; }
+.w .k-step .t-win { width: min(100%, 780px); text-align: left; }
+.w .k-fig { width: min(100%, 1140px); margin: 14px 0 0; display: grid; gap: 16px; }
+.w .k-fig .w-fine { max-width: 92ch; justify-self: center; text-wrap: pretty; }
+.w .k-lead { margin: 0; font-size: clamp(21px, 2.3vw, 31px); line-height: 1.3; max-width: 44ch; text-wrap: balance; }
+.w .k-route { width: min(100%, 1140px); }
+.w .a-cta { display: grid; gap: 14px; justify-items: center; text-align: center; }
+.w .a-cta h2 { margin: 0; font-size: clamp(32px, 4.2vw, 56px); line-height: 1.06; text-wrap: balance; }
+.w .a-cta p { margin: 0 0 14px; font-size: 17px; color: var(--w-mut); }
+
+/* step 1: a real switch, replayed line by line, dark in both themes */
+.w .t-win { background: radial-gradient(120% 110% at 80% 0%, rgba(76, 141, 255, 0.16), rgba(76, 141, 255, 0) 60%), #0b0e14; border: 1px solid #1d2230; border-radius: 16px;
+  overflow: hidden; box-shadow: 0 30px 80px rgba(14, 16, 22, 0.28), 0 0 0 1px rgba(76, 141, 255, 0.08); }
+.w .t-top { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #1a1f2b; }
+.w .t-top i { width: 10px; height: 10px; border-radius: 50%; background: #2a303d; }
+.w .t-top span { margin-left: 8px; font: 12px 'JetBrains Mono', ui-monospace, monospace; color: #6c7385; }
+.w .t-body { margin: 0; padding: 18px 20px 22px; min-height: 290px; font: 13.5px/1.85 'JetBrains Mono', ui-monospace, monospace; color: #cfd5e1; }
+.w .t-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.w .t-line .p { color: #4c8dff; }
+.w .t-line .ok { color: #45d49a; }
+.w .t-line .mut { color: #6c7385; }
+.w .t-line .hi { color: #ffffff; }
+.w .t-caret { display: inline-block; width: 8px; height: 16px; background: #4c8dff; vertical-align: -3px; animation: w-blink 1s steps(1) infinite; }
+@keyframes w-blink { 50% { opacity: 0; } }
+
+/* step 2: requests from three jobs, each routed to the model proven on it (drawn and moved by siteMotion.js) */
+.w .rt { display: block; width: 100%; height: auto; overflow: visible; margin-inline: auto; }
+.w .rt[data-lay="narrow"] { max-width: 480px; }
+.w .rt text { font-family: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif; }
+.w .rt .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.w .rt-path { transition: stroke 0.6s ease, stroke-width 0.6s ease; }
+.w .rt-ro { transition: opacity 0.5s ease; }
+
+/* ---- the two guides, in the homepage's manner: a centred head, then each step as words beside its picture ---- */
+.w .g-head { display: grid; gap: 18px; justify-items: center; text-align: center; padding-top: clamp(36px, 6vw, 90px); }
+.w .g-h1 { margin: 0; font-size: clamp(38px, 5vw, 64px); line-height: 1.05; letter-spacing: -0.02em; text-wrap: balance; }
+.w .g-lead { margin: 0; font-size: clamp(17px, 1.5vw, 19px); line-height: 1.6; color: var(--w-mut); max-width: 58ch; text-wrap: pretty; }
+.w .g-lead b { color: var(--w-ink); font-weight: 600; }
+.w .g-aside { margin: 8px 0 0; display: grid; gap: 4px; padding: 12px 18px; border: 1px solid var(--w-line); border-radius: 12px; background: var(--w-card); font-size: 14.5px; color: var(--w-mut); max-width: 46ch; }
+.w .g-aside .w-label { font-size: 10.5px; }
+.w .g-once { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(24px, 4vw, 56px); align-items: center; width: min(100%, 1060px); justify-self: center; }
+.w .g-code { min-width: 0; }
+.w .g-pre { margin: 0; min-height: 0; white-space: pre; overflow-x: auto; }
+.w .g-pre span { display: block; }
+.w .g-pre .g-hl { background: rgba(69, 212, 154, 0.12); color: #b9f3d6; margin-inline: -20px; padding-inline: 20px; }
+.w .g-h2 { margin: 0; font-size: clamp(26px, 2.7vw, 36px); line-height: 1.15; text-wrap: balance; }
+.w .g-txt { display: grid; gap: 14px; align-content: start; min-width: 0; }
+.w .g-txt p { margin: 0; font-size: 16.5px; line-height: 1.6; color: var(--w-mut); max-width: 52ch; text-wrap: pretty; }
+.w .g-txt p.g-first { color: var(--w-ink2); }
+.w .g-txt p b { color: var(--w-ink); font-weight: 600; }
+.w .g-txt .g-num { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--w-acc-read); }
+.w .g-steps { display: grid; gap: clamp(64px, 8vw, 112px); width: min(100%, 1060px); justify-self: center; }
+.w .g-rule { display: flex; align-items: center; gap: 16px; }
+.w .g-rule::before, .w .g-rule::after { content: ""; flex: 1; height: 1px; background: var(--w-line); }
+.w .g-step { display: grid; grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr); gap: clamp(24px, 4vw, 64px); align-items: center; scroll-margin-top: 24px; }
+.w .g-once { scroll-margin-top: 24px; }
+.w .g-fig { margin: 0; display: grid; gap: 10px; min-width: 0; }
+.w .g-fig figcaption { font-size: 13px; color: var(--w-faint); }
+.w .g-card { background: var(--w-card); border: 1px solid var(--w-line); border-radius: 16px; padding: clamp(14px, 2.2vw, 24px); }
+.w .g-cta { display: grid; gap: 14px; justify-items: center; text-align: center; }
+.w .g-cta h2 { margin: 0; font-size: clamp(32px, 4.2vw, 52px); line-height: 1.08; text-wrap: balance; }
+.w .g-cta p { margin: 0 0 12px; font-size: 17px; color: var(--w-mut); }
+.w .g-btns { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+
+/* the guides' pictures: drawn once, coloured by the page's tokens, so they follow light and dark */
+.w .gd { display: block; width: 100%; height: auto; overflow: visible; }
+.w .gd text { font-family: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif; fill: var(--w-ink); }
+.w .gd .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; letter-spacing: 0.04em; }
+.w .gd .c-card { fill: var(--w-card); stroke: var(--w-line); }
+.w .gd .c-bg { fill: var(--w-bg); stroke: var(--w-line); }
+.w .gd .c-mut { fill: var(--w-mut); }
+.w .gd .c-faint { fill: var(--w-faint); }
+.w .gd .c-acc { fill: var(--w-acc-read); }
+.w .gd .c-accfill { fill: var(--w-acc); }
+.w .gd .c-track { fill: var(--w-track); }
+.w .gd .c-k1 { fill: var(--w-k1); }
+.w .gd .c-k2 { fill: var(--w-k2); }
+.w .gd .c-ok { fill: var(--w-ok); }
+.w .gd .c-bad { fill: var(--w-bad); }
+.w .gd .c-badsoft { fill: var(--w-bad-soft); stroke: var(--w-bad); }
+.w .gd .a-area { fill: var(--w-acc-soft); }
+.w .gd .l-line { fill: none; stroke: var(--w-line); }
+.w .gd .l-faint { fill: none; stroke: var(--w-faint); }
+.w .gd .l-acc { fill: none; stroke: var(--w-acc); }
+.w .gd .l-ok { fill: none; stroke: var(--w-ok); }
+.w .gd .l-bad { fill: none; stroke: var(--w-bad); }
+.w .gd .l-k1 { fill: none; stroke: var(--w-k1); }
+.w .gd .l-k2 { fill: none; stroke: var(--w-k2); }
+.w .gd .l-white { fill: none; stroke: var(--w-card); }
+.w .gd .d-draw { stroke-dasharray: 1; stroke-dashoffset: 0; transition: stroke-dashoffset 1.6s ease; }
+.w .gd .d-grow { transform-box: fill-box; transform-origin: 0 50%; transition: transform 1s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.w .pre .gd .d-draw { stroke-dashoffset: 1; }
+.w .pre .gd .d-grow { transform: scaleX(0); }
+.w .gd-n { display: none; }
+.w .t-win .g-pre { min-height: 0; }
+
+/* How models are routed: the five steps in a row, the kinds of option, the judge, the priorities */
+.w .r-flow { margin: 0; display: grid; gap: 14px; width: min(100%, 1060px); justify-self: center; }
+.w .r-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 22px; }
+.w .r-steps > li { position: relative; display: grid; }
+/* each card is a way to its step, as the funnel on the page before was */
+.w .r-card { position: relative; display: grid; gap: 10px; justify-items: center; align-content: start; text-align: center; padding: 20px 12px 16px;
+  background: var(--w-card); border: 1px solid var(--w-line); border-radius: 14px; transition: border-color 0.2s ease; }
+.w .r-card:hover { border-color: var(--w-faint); }
+.w .r-card b { font-size: 14px; line-height: 1.3; font-weight: 700; max-width: 16ch; }
+.w .r-last { background: var(--w-acc-soft); border-color: var(--w-acc); }
+.w .r-last:hover { border-color: var(--w-acc); }
+.w .r-n { position: absolute; left: -9px; top: -9px; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--w-acc);
+  color: #ffffff; font: 600 12px/1 'JetBrains Mono', ui-monospace, monospace; }
+[data-mode='dark'] .w .r-n { color: #08090c; }
+.w .r-mini { width: 120px; max-width: 100%; }
+.w .r-cap { font-size: 12.5px; color: var(--w-mut); line-height: 1.35; }
+.w .r-steps > li:not(:last-child)::after { content: ""; position: absolute; top: 50%; right: -15px; width: 8px; height: 8px; border-top: 1.5px solid var(--w-faint);
+  border-right: 1.5px solid var(--w-faint); transform: translateY(-50%) rotate(45deg); }
+.w .r-opts { list-style: none; margin: 0; padding: 0; border: 1px solid var(--w-line); border-radius: 16px; background: var(--w-card); }
+.w .r-opts li { display: flex; gap: 14px; align-items: flex-start; padding: 14px 18px; }
+.w .r-opts li + li { border-top: 1px solid var(--w-line); }
+.w .r-opts b { display: block; font-size: 14.5px; }
+.w .r-opts span span { display: block; font-size: 13.5px; color: var(--w-mut); line-height: 1.45; }
+.w .r-ic { flex: none; width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--w-acc-soft); color: var(--w-acc-read); }
+.w .r-ic svg { width: 19px; height: 19px; display: block; }
+.w .r-judge { display: grid; gap: 10px; }
+.w .r-jh, .w .r-jr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.78fr); gap: 10px; }
+.w .r-jh span { font: 500 10.5px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: 0.1em; text-transform: uppercase; color: var(--w-faint); }
+.w .r-q { padding: 11px 13px; border: 1px solid var(--w-line); border-radius: 10px; background: var(--w-bg); font-size: 13.5px; line-height: 1.4; }
+.w .r-v { display: grid; place-content: center; text-align: center; border: 1px solid; border-radius: 10px; font-size: 12.5px; line-height: 1.3; padding: 8px; }
+.w .r-v b { font-size: 15px; }
+.w .r-v.ok { background: var(--w-ok-soft); border-color: var(--w-ok); color: var(--w-ok); }
+.w .r-v.bad { background: var(--w-bad-soft); border-color: var(--w-bad); color: var(--w-bad); }
+.w .r-jnote { margin: 4px 0 0; padding: 10px 14px; border: 1px solid var(--w-line); border-radius: 10px; font-size: 13px; color: var(--w-mut); text-align: center; }
+.w .r-prio { display: grid; gap: 10px; }
+.w .r-p { display: grid; gap: 4px; padding: 13px 16px; border: 1px solid var(--w-line); border-radius: 12px; background: var(--w-card); }
+.w .r-p b { font-size: 15px; display: flex; align-items: center; gap: 10px; }
+.w .r-p span { font-size: 13.5px; color: var(--w-mut); }
+.w .r-p.r-on { border-color: var(--w-acc); background: var(--w-acc-soft); }
+.w .r-chip { font: 600 10px/1 'JetBrains Mono', ui-monospace, monospace; letter-spacing: 0.1em; text-transform: uppercase; color: var(--w-acc-read); }
+
+/* Read inside the app, by somebody signed in: the app's frame gives the guide its ground, its sides and its menu, so the
+   guide draws neither top bar nor footer, and starts near the top. */
+.shellmain .w { background: transparent; }
+.shellmain .w .w-main { width: 100%; padding-bottom: 48px; }
+.shellmain .w .g-head { padding-top: 16px; }
+
+/* a tablet: the words above the picture */
+@media (max-width: 860px) {
+  .w .a-hero { grid-template-columns: minmax(0, 1fr); }
+  .w .g-once, .w .g-step { grid-template-columns: minmax(0, 1fr); }
+  .w .r-steps { grid-template-columns: minmax(0, 1fr); gap: 24px; max-width: 360px; justify-self: center; width: 100%; }
+  .w .r-steps > li:not(:last-child)::after { top: auto; right: auto; bottom: -17px; left: 50%; transform: translateX(-50%) rotate(135deg); }
+  .w .p-trio li { padding-inline: 0 14px; border-left: 0; }
+  .w .k-names { font-size: 20px; gap: 10px 26px; }
+}
+/* a phone: the top bar keeps to one row, so the two guides go to the footer, as on the site before */
+@media (max-width: 640px) {
+  .w .w-links { display: none; }
+  .w .w-nav { gap: 10px; }
+  .w .w-navr { gap: 12px; }
+  .w .w-key { padding: 8px 13px; font-size: 13.5px; }
+  .w .w-signin { font-size: 14px; }
+}
+@media (max-width: 600px) {
+  .w .gd-w { display: none; }
+  .w .gd-n { display: block; }
+  .w .r-jh, .w .r-jr { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.9fr); gap: 8px; }
+}
+/* the small phones (360 px is a common one): a little less room around and between the parts, as the site's top bar
+   had before, so all four still fit on one row */
+@media (max-width: 380px) {
+  .w .w-nav { padding-inline: 14px; gap: 8px; }
+  .w .w-navr { gap: 9px; }
+  .w .w-word { font-size: 16px; }
+  .w .w-key { padding: 8px 11px; }
+}
+/* the very narrowest: the theme switch gives way, so signing in and the key still fit on one row */
+@media (max-width: 340px) {
+  .w .w-mode { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .w, .w .t-caret { animation: none; transition: none; }
+  .w .rt-path, .w .rt-ro, .w .gd .d-draw, .w .gd .d-grow { transition: none; }
+}

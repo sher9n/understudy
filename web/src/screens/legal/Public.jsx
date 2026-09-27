@@ -1,6 +1,7 @@
 import React from 'react';
 import { href } from '../../router.js';
 import { plainClick, SkipLink } from '../../nav.jsx';
+import { useLinkTo } from '../../linkmap.js';
 import '../../public.css';
 
 /* The frame every public page shares: the home page, and the pages that say what happens to
@@ -15,11 +16,13 @@ import '../../public.css';
 export const UPDATED = '23 September 2026';
 
 /** A link to a screen in the app, handled in place on a plain click and left to the browser
-    for anything else, so it can still be opened in a new tab. */
+    for anything else, so it can still be opened in a new tab. On the site as it was (/legacy),
+    a link to the homepage or a guide leads to its old version (linkmap.js). */
 export function To({ to, go, hash = '', search = '', children, ...rest }) {
-  const target = `${href(to)}${search}${hash ? `#${hash}` : ''}`;
+  const dest = useLinkTo()(to);
+  const target = `${href(dest)}${search}${hash ? `#${hash}` : ''}`;
   return (
-    <a href={target} onClick={plainClick(() => go(to, null, { hash, search }))} {...rest}>
+    <a href={target} onClick={plainClick(() => go(dest, null, { hash, search }))} {...rest}>
       {children}
     </a>
   );

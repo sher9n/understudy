@@ -1,0 +1,65 @@
+<!-- The homepage, from the 27 Sep 2026 homepage artboard (AiqV94PNZNg8VYZDzXnRoT), word for word. Step 2 moves as the quiet board's version 2. The moving parts are in siteMotion.js; the page around it is SitePage.jsx. -->
+<div class="w">
+<div data-if="pub">
+  <nav class="w-nav" aria-label="Understudy">
+    <div class="w-navl">
+      <a class="w-word" data-go="go_home" aria-label="Understudy, home">Understudy</a>
+      <span class="w-links"><a data-go="go_how">How it works</a><a data-go="go_routing">Model routing</a></span>
+    </div>
+    <div class="w-navr">
+      <button class="w-mode" type="button" data-go="toggleTheme"><span class="w-sr" data-text="modeLabel">Switch to the dark theme</span><svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.4 14.6A8.6 8.6 0 0 1 9.4 3.6a8.6 8.6 0 1 0 11 11Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 2.6v2.3M12 19.1v2.3M2.6 12h2.3M19.1 12h2.3M5.4 5.4l1.6 1.6M17 17l1.6 1.6M5.4 18.6 7 17M17 7l1.6-1.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
+      <span data-if="signedOut"><a class="w-signin" data-go="go_signin">Sign in</a><a class="w-key" data-go="go_signup">Get an API key</a></span>
+      <span data-if="signedIn"><a class="w-key" data-go="go_app" data-text="appLabel">Open the dashboard</a></span>
+    </div>
+  </nav>
+</div>
+<main class="w-main" id="main">
+  <header class="a-hero">
+    <div class="a-words">
+      <h1 class="a-h1 w-serif">Understudy is the optimizer for AI agents.</h1>
+      <p class="a-h1b w-serif">It tests the frontier on your agent’s own calls, and runs every step on the model that does it best.</p>
+      <ul class="p-trio"><li><b>+4%</b> precision</li><li><b>91%</b> lower cost</li><li><b>2.3×</b> faster tool calls</li></ul>
+      <p class="w-fine">Averages from our own workloads, 19 to 26 September 2026.</p>
+    </div>
+    <div class="a-orb"><canvas id="orbK" role="img" aria-label="A dark, grainy orb covered in points, one for each of 491 model tries; the 40 that passed glow blue as it turns."></canvas></div>
+  </header>
+
+  <section class="k-labs" aria-label="Models we work with">
+    <p class="w-label">Tested across 123 models from more than 20 providers</p>
+    <ul class="k-names">
+      <li>OpenAI</li><li>Anthropic</li><li>Google</li><li>Meta</li><li>Mistral AI</li><li>DeepSeek</li><li>Qwen</li><li>NVIDIA</li>
+      <li>Amazon</li><li>Microsoft</li><li>IBM</li><li>ByteDance Seed</li><li>Z.ai</li><li>Inception</li><li>Upstage</li><li>Tencent</li>
+    </ul>
+  </section>
+
+  <section class="k-step" id="how" aria-label="Step 1">
+    <p class="w-label">1. Connect once</p>
+    <p class="k-say w-serif">Point your coding agent at Understudy. Nothing else in your code changes.</p>
+    <div class="t-win" role="group" aria-label="A real switch, replayed line by line">
+      <div class="t-top"><i></i><i></i><i></i><span>understudy · tool-initialization-setup</span></div>
+      <div class="t-body" id="termK" aria-live="off"></div>
+    </div>
+  </section>
+
+  <section class="k-step" aria-label="Step 2">
+    <p class="w-label">2. Intelligent model routing</p>
+    <p class="k-lead w-serif">Understudy routes every request by its job, then by its question, to the model proven to handle it, reducing costs while maintaining accuracy.</p>
+    <figure class="k-fig k-route">
+      <svg class="rt" id="routeK" role="img" aria-label="Requests from three jobs arrive: tool calls, translation and customer support. Understudy sends tool calls to Gemma 4 31B and translation to GPT-5.4 while Ling 3.0 Flash rehearses on copies. Customer support passes a second sorting point, by type of question, which sends order status questions to Qwen 2.5 7B and billing and new questions to GPT-5.4. Small dots travel their routes, sometimes several at once, heading to different models."></svg>
+      <p class="w-fine">Example requests. The tool call and translation routes are Understudy’s real decisions in our own workspaces (25 and 26 September 2026); the split of customer support by question is an example.</p>
+    </figure>
+  </section>
+
+  <section class="a-cta">
+    <h2 class="w-serif">Frontier performance, proven on your traffic.</h2>
+    <p class="w-serif">Start with the model you run today.</p>
+    <a class="w-btn" data-go="go_signup">Get an API key</a>
+  </section>
+</main>
+<div data-if="pub">
+  <footer class="w-foot">
+    <span>Understudy</span>
+    <nav class="w-footl" aria-label="More about Understudy"><a data-go="go_how">How it works</a><a data-go="go_routing">Model routing</a><a data-go="go_pricing">Pricing</a><a data-go="go_terms">Terms</a><a data-go="go_privacy">Privacy</a><a data-go="go_contact">Contact</a></nav>
+  </footer>
+</div>
+</div>

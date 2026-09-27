@@ -16,6 +16,11 @@ export const ROUTES = [
   // the pages anybody can read, signed in or not
   { screen: 'how', path: '/how-it-works', title: 'How it works' },
   { screen: 'routing', path: '/how-models-are-routed', title: 'How models are routed' },
+  /* The homepage and the two guides as they were before the pages built from the 27 Sep 2026 homepage artboard, kept
+     to compare the two. Their links lead to each other (linkmap.js), and they ask search engines not to list them. */
+  { screen: 'legacyhome', path: '/legacy', title: 'Legacy homepage' },
+  { screen: 'legacyhow', path: '/legacy/how-it-works', title: 'How it works (legacy)' },
+  { screen: 'legacyrouting', path: '/legacy/how-models-are-routed', title: 'How models are routed (legacy)' },
   { screen: 'traffic', path: '/traffic', title: 'What happens to your traffic' },
   { screen: 'pricing', path: '/pricing', title: 'Pricing' },
   { screen: 'terms', path: '/terms', title: 'Terms of service' },
@@ -31,7 +36,10 @@ export const ROUTES = [
    sign in: a person checking how it works, what we keep, what it costs or whether the service
    is up should be able to do that before they have an account, and after they have left one. */
 export const PUBLIC = new Set(['how', 'routing', 'traffic', 'pricing', 'terms', 'privacy', 'dpa', 'subprocessors',
-  'security', 'contact', 'status']);
+  'security', 'contact', 'status', 'legacyhome', 'legacyhow', 'legacyrouting']);
+
+/** The site as it was, kept to compare with the new homepage and guides. */
+export const LEGACY = new Set(['legacyhome', 'legacyhow', 'legacyrouting']);
 
 /** What a URL means. A workload's own page carries its id. An address that means nothing is
     said to be nothing, rather than quietly shown as the home page: a mistyped link that lands
