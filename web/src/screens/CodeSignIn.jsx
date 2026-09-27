@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
+import { clickWithin } from '../nav.jsx';
 
 /* Signing in without a password, and confirming a new account.
 
@@ -29,7 +30,7 @@ const WORDS = {
   },
 };
 
-export default function CodeSignIn({ pitchHtml, digits = 6, purpose = 'sign_in', initial = null, resend = null, onDone, onBack }) {
+export default function CodeSignIn({ pitchHtml, digits = 6, purpose = 'sign_in', initial = null, resend = null, onDone, onBack, onHome }) {
   const w = WORDS[purpose] || WORDS.sign_in;
   const [email, setEmail] = useState(initial?.email || '');
   const [sent, setSent] = useState(initial?.sent ? { minutes: initial.sent.minutes, digits: initial.sent.digits ?? digits } : null);
@@ -74,13 +75,16 @@ export default function CodeSignIn({ pitchHtml, digits = 6, purpose = 'sign_in',
   };
 
   return (
-    /* The wrapper matters: shell.css lays out `.board > div` as a flex column, which is
+    /* The wrapper matters: shell.css lays out `.lifted > div` as a flex column, which is
        what the lifted screens need. Without an intermediate element the two column split
-       below would inherit that and drop the form underneath the panel. */
-    <div className="board">
+       below would inherit that and drop the form underneath the panel. It is `lifted`, the
+       name Board.jsx gives the password screens, and never `board`: app.css draws that as a
+       card, which framed the whole page in a rounded border and made it scroll by 2 pixels. */
+    <div className="lifted">
       <div>
       <div className="authsplit">
-        <aside className="pitch" dangerouslySetInnerHTML={{ __html: pitchHtml }} />
+        {/* the name at the top of the story panel leads back to the website */}
+        <aside className="pitch" onClick={clickWithin('a.brand', onHome)} dangerouslySetInnerHTML={{ __html: pitchHtml }} />
         <main className="formside">
           <div className="toprow">
             <a className="lnk" href={purpose === 'verify' ? '/signup' : '/signin'}

@@ -1,0 +1,111 @@
+/* One look for the whole app. The website's pages (screens/site, site.css) set it in September 2026: a soft off-white
+   ground with white cards, cool greys, the serif for what a page is called, and a top bar of set measures. Every other
+   screen, signed in or out, takes that look here, mostly through the tokens it already uses, and no screen's words or
+   pictures changed for it: only colours, type, spacing and where a few things sit. It loads after every other sheet.
+
+   The site as it was, kept at /legacy to compare with (App.jsx gives its frame the class legacy), keeps its own look:
+   every rule here is for .u:not(.legacy). */
+
+/* ---- the palette: the site's colours, in the names every screen already uses ---- */
+/* The readable grey (--mut-read) is the site's own (--w-mut). The lighter one (--mut, for labels and small print) keeps
+   the shade the app had, turned to the site's cooler tint, so no label gets harder to read than it was. */
+.u:not(.legacy)[data-mode='light'] {
+  --bg: #f7f7f8; --panel: #f0f1f4; --raise: #ffffff; --line: #dfe1e7; --line-strong: #cfd3db; --grid: #eceef2;
+  --ink: #0e1016; --mut: #676c7a; --mut-read: #585d6c; --code: #f3f4f7;
+  --brand: #0f62fe; --brandq: #e7eeff; --brand-hover: #0b4fd0; --onbrand: #ffffff; --brand-read: #0b4fd0;
+}
+.u:not(.legacy)[data-mode='dark'] {
+  --bg: #08090c; --panel: #0c0e13; --raise: #101319; --line: #22262f; --line-strong: #2f3541; --grid: #171a21;
+  --ink: #eef0f5; --mut: #8b91a0; --mut-read: #a1a7b4; --code: #0c0e13;
+  --brand: #5b93ff; --brandq: #14203a; --brand-hover: #7aa7ff; --onbrand: #08090c; --brand-read: #7aa7ff;
+}
+
+/* ---- type: the site's serif for the title of every page ---- */
+.u:not(.legacy) :is(.phead h1, .st-head h1, .wizmain h1, .dochead h1, .authcard h1, .pitch-h, .wp-title) {
+  font-family: 'Newsreader', Georgia, 'Times New Roman', serif; font-optical-sizing: auto; font-weight: 400; letter-spacing: -0.012em;
+}
+.u:not(.legacy) :is(.phead h1, .st-head h1, .wizmain h1) { font-size: 34px; line-height: 1.12; }
+.u:not(.legacy) .wp-title { font-size: 32px; line-height: 1.15; }
+.u:not(.legacy) .dochead h1 { font-size: clamp(34px, 4.6vw, 48px); line-height: 1.06; }
+.u:not(.legacy) .authcard h1 { font-size: 32px; line-height: 1.12; margin-bottom: 10px; }
+.u:not(.legacy) .pitch-h { font-size: clamp(30px, 2.8vw, 38px); line-height: 1.14; }
+
+/* ---- the name, the same everywhere: the site's wordmark ---- */
+.u:not(.legacy) :is(.pubwm, .brand, .side .wm, .phonetop .wm) { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; color: var(--ink); }
+.u:not(.legacy) :is(a.brand, a.pubwm, .side a.wm, .phonetop a.wm):hover { text-decoration: none; }
+/* before signing in, the name leads back to the website */
+.u:not(.legacy) a.brand { align-self: flex-start; border-radius: 6px; }
+
+/* ---- the top bar of the public pages: the site's own (site.css .w-nav), measure for measure, so it does not move by a
+   pixel between the homepage and pricing. These rules outrank public.css's own phone rules, which is intended: the
+   site's bar keeps its measures down to 640 pixels and then follows its own steps, repeated below. ---- */
+/* The site sets its letters at their normal spacing, the app a hair tighter (-0.006em). Nobody sees that in a paragraph,
+   and loosening every screen would push 19 lines onto a second line, so only the bar, which must line up with the
+   site's to the pixel, takes the site's spacing. */
+.u:not(.legacy) .pubhead { gap: 12px 28px; padding: 13px clamp(18px, 4vw, 64px); line-height: 1.55; letter-spacing: normal; }
+.u:not(.legacy) .pubnav { gap: 24px; font-size: 14.5px; }
+.u:not(.legacy) .pubnav a, .u:not(.legacy) .pubsignin { transition: color 0.15s ease; }
+.u:not(.legacy) .pubnav a[aria-current='page'] { color: var(--ink); font-weight: 500; }
+.u:not(.legacy) .pubacts { gap: 18px; }
+.u:not(.legacy) .pubtheme { padding: 0; transition: background-color 0.2s ease, color 0.2s ease; }
+.u:not(.legacy) .pubtheme:hover { background: var(--raise); color: var(--ink); }
+.u:not(.legacy) .pubtheme svg { width: 18px; height: 18px; display: block; }
+.u:not(.legacy) .pubsignin { font-size: 14.5px; }
+/* the site's key has no border and the app's button carries a 1 pixel one, so a pixel less padding makes it the same size */
+.u:not(.legacy) .pubhead .btn { padding: 8px 16px; font-size: 14.5px; border-radius: 9px; }
+/* its footer, on the same ground, the same side margins and to the same width as the site's */
+.u:not(.legacy) .pubfoot { padding: 40px clamp(18px, 4vw, 64px) 56px; }
+.u:not(.legacy) .pubfootin { max-width: 1180px; }
+.u:not(.legacy) .pubcolh { font-size: 11px; letter-spacing: 0.14em; font-weight: 600; }
+.u:not(.legacy) .pubcols a { color: var(--mut); transition: color 0.15s ease; }
+.u:not(.legacy) .pubcols a:hover { color: var(--ink); text-decoration: none; }
+@media (max-width: 720px) {
+  .u:not(.legacy) .pubfoot { padding-block: 30px 40px; }
+}
+/* on a phone the bar keeps to one row, as the site's does, and in its steps: the two guides are in the footer */
+@media (max-width: 640px) {
+  .u:not(.legacy) .pubnav { display: none; }
+  .u:not(.legacy) .pubhead { gap: 10px; }
+  .u:not(.legacy) .pubacts { gap: 12px; }
+  .u:not(.legacy) .pubhead .btn { padding: 7px 12px; font-size: 13.5px; }
+  .u:not(.legacy) .pubsignin { font-size: 14px; }
+}
+@media (max-width: 380px) {
+  .u:not(.legacy) .pubhead { padding-inline: 14px; gap: 8px; }
+  .u:not(.legacy) .pubacts { gap: 9px; }
+  .u:not(.legacy) .pubhead .pubwm { font-size: 16px; }
+  .u:not(.legacy) .pubhead .btn { padding: 7px 10px; }
+}
+@media (max-width: 340px) {
+  .u:not(.legacy) .pubtheme { display: none; }
+}
+
+/* ---- signing in and up: the story on the site's ground, the form on a white page beside it ---- */
+.u:not(.legacy) .pitch { background: var(--bg); }
+.u:not(.legacy) .formside { background: var(--raise); }
+/* every link in a form is underlined, and that caught the one link drawn as a button ("Email me a new code and link") */
+.u:not(.legacy) .authcard a.btn { text-decoration: none; }
+/* The name stands level with the row of links across the page, as everything in the site's bar does: both are 34 pixels
+   high, and every one of these screens gives its row that height, so the form starts at the same place on all four. */
+.u:not(.legacy) .pitch a.brand { line-height: 34px; }
+.u:not(.legacy) .formside .toprow { min-height: 34px; }
+/* On a phone the story goes under the form, and the name went with it, below the fold. It is lifted to the top corner
+   instead, where the website keeps it, and the row keeps room on its left so a long link wraps rather than runs under it.
+   The form then starts the same 28 pixels under that row on every one of these screens (it used to float, touching the
+   row on one screen and 42 pixels under it on another, as the page's height happened to fall), and the story fills
+   whatever the screen has left. */
+@media (max-width: 900px) {
+  .u:not(.legacy) .authsplit { position: relative; grid-template-rows: auto 1fr; }
+  .u:not(.legacy) .pitch a.brand { position: absolute; top: 28px; left: 22px; z-index: 1; }
+  .u:not(.legacy) .formside .toprow { padding-left: 112px; margin-bottom: 28px; }
+}
+/* on the narrowest phones the name steps down to 16 pixels, as the site's does, which leaves the longest link its line */
+@media (max-width: 380px) {
+  .u:not(.legacy) .pitch a.brand { font-size: 16px; }
+  .u:not(.legacy) .formside .toprow { padding-left: 104px; }
+}
+/* the theme switch in the corner, as the site's: a square with the larger icon */
+.u:not(.legacy) .toprow .ni { width: 34px !important; height: 34px; padding: 0; justify-content: center; border-radius: 8px; color: var(--mut-read); }
+.u:not(.legacy) .toprow .ni:hover { background: var(--bg); color: var(--ink); }
+.u:not(.legacy) .toprow .ni svg { width: 18px; height: 18px; }
+.u:not(.legacy) .toprow { font-size: 14px; }
