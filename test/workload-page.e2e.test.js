@@ -349,13 +349,17 @@ test('an opened measurement places every setup by what a request costs on it, an
   assert.equal(rp.yardstick, 'agreement');
   near(rp.yours.perCall, 0.0036, 'a request on the customer\'s own model, from its answers in this measurement');
   assert.equal(rp.yours.p50, 2000);
-  assert.deepEqual(rp.cands.map((c) => [c.key, c.tone, c.verdict]), [
-    [CHEAP, 'warn', 'Too few to be sure'],
-    [OTHER, 'bad', 'Not a match'],
+  /* In the order the approved board (29 Sep) draws a test: the models that could be picked first, then every other by
+     its score (src/eval/score.js; balance, as nobody chose), one with no score last. None passed here: steady scores
+     76 (100 quality, 90 cost, 30 speed), dropped 49 (0, 97, 65) and the other 41 (0, 95, 40), each differing more than
+     twice what is allowed, so cost and speed decide between them. */
+  assert.deepEqual(rp.cands.map((c) => [c.key, c.tone, c.verdict, c.scores.balance === null ? null : Math.round(c.scores.balance)]), [
+    [CHEAP, 'warn', 'Too few to be sure', 76],
     // stopped early because it could no longer win: clearly not a match, which is the reason, not a system error
-    ['vendor/dropped', 'bad', 'Clearly not a match'],
-    ['vendor/refuses', 'bad', 'Failed requests'],
-  ], 'passed first, then close, then not a match, closest first');
+    ['vendor/dropped', 'bad', 'Clearly not a match', 49],
+    [OTHER, 'bad', 'Not a match', 41],
+    ['vendor/refuses', 'bad', 'Failed requests', null],
+  ], 'the ones that could be picked first, then the rest by score, one with no score last');
   for (const c of rp.cands) assert.ok(c.why && c.why.length > 20, `${c.verdict} says why`);
   assert.match(rp.cands.find((c) => c.key === 'vendor/dropped').why, /^Testing stopped early because the model was already different enough/);
   const cheap = rp.cands[0];

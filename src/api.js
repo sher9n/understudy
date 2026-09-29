@@ -1503,6 +1503,8 @@ api.post('/settings/default-routing', async (req, res) => {
     moved = (await db.prepare(`UPDATE workloads SET routing_mode = NULL, updated_at = ? WHERE workspace_id = ? AND merged_into IS NULL
         AND routing_mode IS NOT NULL`).run(now(), req.workspace.id)).changes;
   }
+  // live experiments read it too (worthTrying), and keep what they read for a minute: from now, not a minute from now
+  for (const r of await db.prepare('SELECT id FROM workloads WHERE workspace_id = ?').all(req.workspace.id)) forgetState(r.id);
   const words = { balance: 'optimize for balance: quality counts most, cost and speed the same',
     quality: 'optimize for quality, and switch only to models Understudy is almost certain about',
     cost: 'optimize for cost: the bill counts most', speed: 'optimize for speed: how soon answers arrive counts most' };

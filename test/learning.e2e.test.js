@@ -73,6 +73,7 @@ const CHEAPER = 'vendor/cheaper';
 // two more a later measurement finds, for which runners-up are worth trying (only ever marked, never served)
 const FAR = 'vendor/far';
 const THIN = 'vendor/thin';
+const NEAR = 'vendor/near';
 const COST = { [REF]: 0.002, [STEADY]: 0.0004, [CHEAPER]: 0.0001 };
 const right = (i) => ({ total: 100 + i, currency: 'USD' });
 // the cheaper runner-up gets one call in four wrong, which a background answer shows
@@ -133,6 +134,7 @@ test.before(async () => {
     { model_id: CHEAPER, name: 'cheaper', context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 1, zdr: 1 },
     { model_id: FAR, name: 'far', context_len: 128000, price_in: 0.06e-6, price_out: 0.2e-6, open_weights: 1, zdr: 1 },
     { model_id: THIN, name: 'thin', context_len: 128000, price_in: 0.38e-6, price_out: 0.95e-6, open_weights: 1, zdr: 1 },
+    { model_id: NEAR, name: 'near', context_len: 128000, price_in: 0.01e-6, price_out: 0.02e-6, open_weights: 1, zdr: 1 },
   ]);
 });
 
@@ -267,8 +269,9 @@ test('a runner-up is tried only where live calls could show it the better choice
      allowed; THIN differs as seldom as what serves and saves a little more. Scored out of 100 (src/eval/score.js; no
      timings here, so quality and cost only), on Balance: steady 80.6 (81 quality, 80 cost), cheaper 79.6 (68, 95),
      far 70.7 (51, 97), thin 81.0 (81, 81). */
+  // each one the test was almost certain about, so optimizing for quality rules on the scores alone
   const row = (model_id, ratio, gap) => ({ model_id, verdict: 'cleared', stopped: null, cost_month_usd: ratio * 100, cost_ratio: ratio,
-    gap_pct: gap, runs: 80, arm_json: null, recipe_json: null });
+    gap_pct: gap, runs: 80, arm_json: null, recipe_json: null, chance: 0.999 });
   await markTrying(s.workload, { runId: null, refMonthly: 100, floor: 4,
     results: [row(STEADY, 0.2, 1.5), row(CHEAPER, 0.05, 2.6), row(FAR, 0.03, 3.9), row(THIN, 0.19, 1.5)] });
   const tried = async () => {
@@ -291,6 +294,24 @@ test('a runner-up is tried only where live calls could show it the better choice
   assert.equal(t[CHEAPER], true, `optimized for cost ${JSON.stringify(t)}`);
   assert.equal(t[FAR], false, `optimized for cost ${JSON.stringify(t)}`);
   assert.equal(t[THIN], false);
+});
+
+test('optimized for quality, a runner-up the test was not almost certain about is never tried on live calls', async () => {
+  const s = await shop('sure');
+  await db.prepare('UPDATE workloads SET routing_mode = ? WHERE id = ?').run('quality', s.workload.id);
+  const row = (model_id, ratio, gap, chance) => ({ model_id, verdict: 'cleared', stopped: null, cost_month_usd: ratio * 100,
+    cost_ratio: ratio, gap_pct: gap, runs: 80, arm_json: null, recipe_json: null, chance });
+  /* NEAR differs less often than steady and costs next to nothing: 89.9 optimizing for quality (88 quality, 99 cost)
+     against steady's 80.8, clearly better however its live calls turn out. Only how sure the test was decides. */
+  const tried = async (chance) => {
+    await markTrying(s.workload, { runId: null, refMonthly: 100, floor: 4,
+      results: [row(STEADY, 0.2, 1.5, 0.999), row(NEAR, 0.004, 1, chance)] });
+    forgetState(s.workload.id);
+    const view = await learningView(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id));
+    return view.others.find((o) => o.key === NEAR)?.tryable;
+  };
+  assert.equal(await tried(0.95), false, 'only 95% sure it keeps the allowed difference: a test would not switch to it, nor may a live one');
+  assert.equal(await tried(0.999), true, 'almost certain: tried');
 });
 
 test('a switched workload tries a small share of its calls elsewhere, and every call says what chance it had', async () => {
