@@ -148,6 +148,10 @@ const provider = http.createServer((req, res) => {
     const i = indexOf(user);
     if (m === TINY) return send(JSON.stringify(hard(i) ? { total: 0, currency: 'EUR', lines: 0 } : right(i)), 0.00005);
     const cost = m === REF ? 0.002 : m === ABLE ? 0.0006 : [FADING, TIRING, TWICE].includes(m) ? 0.0001 : 0.0002;
+    /* STEADY answers a little later than every other model here, the customer's included. The cheaper models it is
+       tested beside then come first in line on every part of their score, not only on cost: everything answers at once
+       otherwise, and which is quicker by a millisecond, a third of the score on Balance, is chance on a busy machine. */
+    if (m === STEADY) await new Promise((r) => setTimeout(r, 40));
     return send(JSON.stringify(right(i)), cost);
   });
 });

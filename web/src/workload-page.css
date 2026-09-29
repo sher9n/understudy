@@ -6,6 +6,9 @@
 .shellmain .page:has(> .wp-page) { max-width: 1120px; padding: 26px 32px 40px; }
 
 .wp { --wp-dot-ink: #fff; font-size: 14.5px; line-height: 1.5; letter-spacing: -0.006em; }
+/* the three parts of a model's score, each its own colour in a test's table, as the website draws them */
+.wp { --wp-q: #0f62fe; --wp-c: #0b7285; --wp-s: #6741d9; }
+[data-mode='dark'] .wp { --wp-q: #5b93ff; --wp-c: #66d9e8; --wp-s: #b197fc; }
 /* In the dark the artboard reads blue text a step lighter than the app's token, and a number inside a coloured dot
    in ink rather than white: white on the dark theme's light green is too faint to read (about 1.9 to 1). */
 [data-mode='dark'] .wp { --wp-dot-ink: #03060d; --brand-read: #6a9fff; }
@@ -222,8 +225,45 @@
 .wp .wp-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
 .wp .wp-legend i.wp-dash { width: 16px; height: 0; border-radius: 0; border-top: 2px dashed var(--ok); vertical-align: 3px; }
 .wp .wp-legend .wp-help { margin-left: 2px; }
-/* one heading over a test's chart and table, which show the same models two ways */
+/* one heading over a test's chart and table, which show the same models two ways, and what the workload optimizes for
+   beside it (OptimizeFor in WorkloadDetail.jsx) */
 .wp .wp-detailhead { margin: 0 0 -8px; }
+.wp .wp-detailtop { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+.wp .wp-detailtop .wp-detailhead { margin: 0; }
+.wp .wp-optfor { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.wp .wp-optfor-l { font-size: 13px; color: var(--mut-read); }
+.wp .wp-seg { display: inline-flex; flex-wrap: wrap; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 10px; background: var(--raise); }
+.wp .wp-seg button { border: 0; background: transparent; padding: 5px 11px; border-radius: 7px; font: inherit; font-size: 13px; color: var(--mut-read);
+  cursor: pointer; line-height: 1.4; }
+.wp .wp-seg button:hover { color: var(--ink); }
+.wp .wp-seg button[aria-checked="true"] { background: var(--brandq); color: var(--brand-read); font-weight: 600; }
+.wp .wp-seg button:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.wp .wp-seg button:disabled { cursor: default; }
+/* under the choice: whose choice it is and when it applies, with the way back to the workspace's; or why it could not be saved */
+.wp .wp-optnote { flex-basis: 100%; font-size: 12.5px; line-height: 1.45; color: var(--mut-read); text-align: right; }
+.wp .wp-optnote .wp-textbtn { font-size: 12.5px; }
+.wp .wp-optnote.is-err { color: var(--bad); font-weight: 600; }
+/* on a phone only, what each figure means, where the table's column heads would say it */
+.wp .wp-phoneparts { display: none; }
+.wp .wp-phonetag { font-size: 12.5px; font-weight: 600; color: var(--brand-read); text-decoration: underline dotted; text-underline-offset: 3px; }
+/* a test's table, scored: the model it picks, the score, and each part out of 100 with the figure it comes from */
+/* the outcome and, on the pick, its words: side by side where there is room, the words under the outcome where there is not */
+.wp .wp-outc { white-space: normal; min-width: 150px; }
+.wp .wp-best { display: inline-block; margin: 3px 0 3px 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px;
+  background: var(--brandq); color: var(--brand-read); line-height: normal; vertical-align: middle; white-space: nowrap; }
+.wp .wp-scorecell { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.wp .wp-scorecell.none { font-family: inherit; font-size: 12.5px; font-weight: 400; }
+.wp .wp-part { display: inline-grid; justify-items: end; gap: 3px; }
+.wp .wp-part .wp-pv { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.wp .wp-part.is-none .wp-pv { font-family: inherit; font-size: 12.5px; font-weight: 400; color: var(--mut); }
+.wp .wp-part .wp-pbar { display: block; width: 52px; height: 3px; border-radius: 2px; background: var(--grid); overflow: hidden; }
+.wp .wp-part .wp-pbar i { display: block; height: 100%; border-radius: 2px; }
+.wp .wp-part.is-q .wp-pbar i { background: var(--wp-q); }
+.wp .wp-part.is-c .wp-pbar i { background: var(--wp-c); }
+.wp .wp-part.is-s .wp-pbar i { background: var(--wp-s); }
+.wp .wp-part .wp-pf { font-size: 11.5px; color: var(--mut); }
+.wp .wp-req span { display: block; }
+.wp .wp-req .wp-reqnew { font-size: 11.5px; color: var(--mut); margin-top: 2px; }
 .wp .wp-empty { padding: 4px 20px 20px; color: var(--mut-read); font-size: 13.5px; }
 .wp .wp-loadline { font-size: 13px; color: var(--mut); }
 
@@ -245,6 +285,9 @@
 .wp td .wp-tag { line-height: normal; }
 .wp .wp-no { width: 20px; height: 20px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 11px; font-weight: 700; color: var(--wp-dot-ink); }
 .wp .wp-mdl { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12.5px; }
+/* a long model name takes a second line rather than pushing the score columns out of the table's box */
+.wp .wp-cands td.wp-mdl { white-space: normal; max-width: 260px; }
+.wp .wp-cands td.wp-mdl .wp-mdlbtn span { overflow-wrap: break-word; }
 .wp .wp-calls td:first-child { color: var(--mut-read); }
 .wp .wp-calls tbody tr.open-able { cursor: pointer; }
 .wp .wp-calls tbody tr.open-able:hover td { background: var(--panel); }
@@ -379,15 +422,22 @@
   .wp .wp-cands td[data-label]::before, .wp .wp-calls td[data-label]::before {
     content: attr(data-label); display: block; font-family: 'Schibsted Grotesk', system-ui, sans-serif; font-size: 11px; font-weight: 600;
     letter-spacing: 0.06em; text-transform: uppercase; color: var(--mut); margin-bottom: 1px; }
-  /* four figures, two to a line: each keeps room for its name over it */
+  /* the score and its three parts, two to a line, then the requests: each keeps room for its name over it */
   .wp .wp-cands tr { display: grid; grid-template-columns: 28px repeat(2, minmax(0, 1fr)); gap: 6px 8px; padding: 10px 0; border-top: 1px solid var(--line); align-items: start; }
   .wp .wp-cands td:nth-child(1) { grid-column: 1; grid-row: 1 / span 2; }
   .wp .wp-cands td:nth-child(2) { grid-column: 2 / -1; grid-row: 1; overflow-wrap: anywhere; }
-  .wp .wp-cands td:nth-child(3) { grid-column: 2 / -1; grid-row: 2; }
+  .wp .wp-cands td:nth-child(3) { grid-column: 2 / -1; grid-row: 2; white-space: normal; }
   .wp .wp-cands td:nth-child(4) { grid-column: 2; grid-row: 3; }
   .wp .wp-cands td:nth-child(5) { grid-column: 3; grid-row: 3; }
   .wp .wp-cands td:nth-child(6) { grid-column: 2; grid-row: 4; }
   .wp .wp-cands td:nth-child(7) { grid-column: 3; grid-row: 4; }
+  .wp .wp-cands td:nth-child(8) { grid-column: 2 / -1; grid-row: 5; }
+  .wp .wp-cands .wp-part { justify-items: start; }
+  .wp .wp-cands .wp-req span { display: inline; }
+  .wp .wp-cands .wp-req .wp-reqnew { margin: 0 0 0 4px; }
+  .wp .wp-optfor { width: 100%; }
+  .wp .wp-optnote { text-align: left; }
+  .wp .wp-phoneparts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 0; width: 100%; font-size: 12.5px; color: var(--mut-read); }
   .wp .wp-cands .wp-mdlbtn { align-items: flex-start; }
   .wp .wp-cands .wp-mdlbtn .wp-chev { margin-top: 2px; }
   /* a model's requests, opened under it: the whole width, not a cell of the grid */
@@ -407,6 +457,10 @@
   .wp .wp-calls tr.saidrow { display: block; border-top: 0; padding-top: 0; }
   .wp .wp-calls .wp-srv { align-items: flex-start; }
   .wp .wp-calls .wp-srv i { margin-top: 5px; }
+}
+/* the narrowest phones: the four choices of Optimize for kept on one line */
+@media (max-width: 380px) {
+  .wp .wp-seg button { padding: 5px 8px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .wp .wp-runbtn .wp-chev, .wp .wp-mdlbtn .wp-chev { transition: none; }

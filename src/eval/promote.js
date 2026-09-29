@@ -5,6 +5,7 @@ import { OUTCOME_OF, RECENT_CALLS, carriesOf } from './outcome.js';
 import { upsertArm, armById, leadModel, specOfResult, setStatus } from '../learn/arms.js';
 import { forgetState } from '../learn/memo.js';
 import config from '../config.js';
+import { offlineOf } from './score.js';
 
 const record = async (workload, row, x = db) =>
   await x.prepare(`INSERT INTO promotions (id, workload_id, action, from_model, to_model, reason, run_id,
@@ -92,6 +93,20 @@ export async function servingKey(workload) {
   return keyOfSpec({ kind: 'model', model: workload.routed_model, recipe }, workload.reference_model);
 }
 
+/**
+ * What a test found about one setup, as a setup kept for live experiments carries it (offlineOf in score.js), from its
+ * row in eval_results (with run_id, gap_pct, cost_ratio, latency_p50, ttft_p50, chance) and the test it came from: the
+ * allowed difference, the customer's model's time, and whether it was timed to the first word or the whole answer.
+ */
+export async function offlineOfResult(row) {
+  const run = await db.prepare('SELECT floor_pct, ref_latency_p50, ref_ttft_p50, plan_json, choice_json FROM eval_runs WHERE id = ?')
+    .get(row.run_id);
+  const read = (x) => { try { return x ? JSON.parse(x) : null; } catch { return null; } };
+  const ttft = Number(run?.ref_ttft_p50) > 0 && (read(run?.choice_json)?.metric ?? read(run?.plan_json)?.speed?.metric) === 'ttft';
+  return offlineOf(row, { floor: run?.floor_pct ?? null, metric: ttft ? 'ttft' : 'latency',
+    refP50: ttft ? run?.ref_ttft_p50 : run?.ref_latency_p50, runId: row.run_id, at: now() });
+}
+
 export async function promote(workload, modelId, { runId = null, reason = 'cleared your bar', actorUserId = null, auto = false, recipe = undefined, spec: given = null, detail = null, rollout = true } = {}) {
   if (auto && await everReverted(workload.id, modelId)) {
     return { ok: false, code: 'previously_reverted' };
@@ -106,7 +121,8 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
      cleared: one measured with its thinking off, sent live with it on, can spend a short answer
      cap thinking and answer nothing. */
   let spec = given;
-  const cols = 'r.model_id, r.recipe_json, r.arm_json, r.cost_ratio, r.verdict, r.gap_pct, r.runs, r.escalated_pct, r.run_id';
+  const cols = `r.model_id, r.recipe_json, r.arm_json, r.cost_ratio, r.verdict, r.gap_pct, r.runs, r.escalated_pct, r.run_id,
+    r.latency_p50, r.ttft_p50, r.chance`;
   const row = (runId ? await db.prepare(`SELECT ${cols} FROM eval_results r WHERE r.run_id = ? AND r.model_id = ?`)
     .get(runId, modelId) : null) || await db.prepare(
     `SELECT ${cols} FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
@@ -115,11 +131,11 @@ export async function promote(workload, modelId, { runId = null, reason = 'clear
   if (recipe !== undefined && spec.kind === 'model') spec = { ...spec, recipe };
   /* What the measurement said about it travels with the switch, its cost against the customer's
      own model above all: learning cannot price or budget an experiment against a switch whose cost
-     it does not know. */
-  const offline = row ? {
-    verdict: row.verdict, gap: row.gap_pct, ratio: row.cost_ratio ?? null, escalatedPct: row.escalated_pct ?? null,
-    runs: row.runs, runId: row.run_id, at: now(),
-  } : null;
+     it does not know. And all of what it is scored on, as the end of a test keeps it (offlineOf): the
+     bar and the customer's model's time its figures are read against, and how that time was taken.
+     Kept without them, what served could not be scored, and live experiments tried and switched to
+     runners-up the next test switched straight back from. */
+  const offline = row ? await offlineOfResult(row) : null;
   const arm = await upsertArm(workload, spec, { status: 'serving', originRunId: runId, offline });
   const lead = leadModel(spec);
   /* A switch starts on a share of the calls (see reviewRollout in src/learn/explore.js), and the rest

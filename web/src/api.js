@@ -124,7 +124,7 @@ export const api = {
   setSpeed: (id, pref) => send('POST', `/workloads/${id}/speed`, { pref }),
   // how its answers are judged when another model is tested: 'auto', 'same' or 'quality'
   setJudging: (id, mode) => send('POST', `/workloads/${id}/judging`, { mode }),
-  // which of the setups that clear a workload it switches to: cautious, balanced, savings, or 'default' for the workspace's
+  // what a workload optimizes for when the models a test tries are scored: balance, quality, cost, speed, or 'default' for the workspace's
   setRouting: (id, mode) => send('POST', `/workloads/${id}/routing`, { mode }),
   setDefaultRouting: (mode, applyToExisting = false) => send('POST', '/settings/default-routing', { mode, applyToExisting }),
   promote: (id, model) => send('POST', `/workloads/${id}/promote`, { model }),

@@ -44,6 +44,17 @@ const JUDGING = [
   { mode: 'quality', chip: 'At least as good', label: 'At least as good',
     note: "Another model passes when its answers are at least as good as the original model's, even when they're worded differently. Right for creative writing." },
 ];
+/* What a workload optimizes for when the models a test tries are scored (routing_mode; see src/eval/score.js): each model
+   gets quality, cost and speed out of 100, and one score out of 100 that weighs them this way. Balance unless changed. */
+const OPTIMIZE = [
+  { k: 'balance', label: 'Balance' },
+  { k: 'quality', label: 'Quality' },
+  { k: 'cost', label: 'Cost' },
+  { k: 'speed', label: 'Speed' },
+];
+// the words on the model a test's page picks, for what the workload optimizes for
+const bestWords = (k) => (k === 'balance' || !k ? 'Best balance' : `Best for ${k}`);
+
 // why the newest test judged answers as at least as good (planRecord.judging.reason)
 const JUDGED_WHY = {
   'open-ended': 'these requests ask for open-ended writing',
@@ -89,6 +100,40 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
   const [busy, setBusy] = useState(false);
   // how its answers are judged, opened from the chip under its name
   const [judgingOpen, setJudgingOpen] = useState(false);
+  /* What it optimizes for, as just chosen: the tables re-sort at once. It is saved once the choosing stops, only the
+     last choice, one save at a time, and the workload is read again after: the arrow keys pass through the other
+     choices on the way to one, and each of them saved was the workload's setting for a moment, while the choice turned
+     itself off under the keyboard for every save and lost its place. One that could not be saved goes back, and says
+     why beside the choice. Leaving the page before it is saved still saves it, for this workload. */
+  const [optPending, setOptPending] = useState(null);
+  const [optErr, setOptErr] = useState('');
+  const optSave = useRef({ want: null, timer: null, saving: false });
+  const alive = useRef(true);
+  const saveOptimize = useRef(null);
+  saveOptimize.current = async () => {
+    const s = optSave.current;
+    clearTimeout(s.timer);
+    s.timer = null;
+    if (s.saving) return;
+    s.saving = true;
+    let failed = null;
+    while (s.want && !failed) {
+      const k = s.want;
+      try { await api.setRouting(id, k); } catch (e) { failed = e; }
+      if (failed || s.want === k) s.want = null;
+    }
+    s.saving = false;
+    if (!alive.current) return;
+    if (failed) setOptErr(`That could not be saved: ${failed.message}`);
+    await load();
+    onChanged?.();
+    // a choice made while this one was saved is still to come, and shows until it is
+    if (alive.current && !s.want && !s.timer) setOptPending(null);
+  };
+  useEffect(() => () => {
+    alive.current = false;
+    if (optSave.current.timer) saveOptimize.current();
+  }, []);
 
   const load = useCallback(() => Promise.all([
     api.workload(id).then((x) => { setW(x); setErr(null); }).catch((e) => setErr(e.message)),
@@ -207,7 +252,22 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
         {waitsForPerson
           ? <Waiting w={w} cand={cand} busy={busy} copiesOnly={copiesOnly} act={act} go={go} goTo={goTo} />
           : <div className="wp-calm">{I.check}<b>Nothing needs you.</b></div>}
-        <Measurements w={w} pg={pg} live={live} goTo={goTo} />
+        <Measurements w={w} pg={pg} live={live} goTo={goTo}
+          optimize={{
+            k: optPending === 'default' ? (w.routingModeDefault || 'balance') : optPending || w.routingModeUsed || 'balance',
+            // its own choice, or the workspace's (null on the workload), as it will be once what was chosen is saved
+            own: optPending ? optPending !== 'default' : !!w.routingMode,
+            saving: !!optPending,
+            err: optErr,
+            set: (k) => {
+              setOptErr('');
+              setOptPending(k);
+              const s = optSave.current;
+              s.want = k;
+              clearTimeout(s.timer);
+              s.timer = setTimeout(() => saveOptimize.current(), 700);
+            },
+          }} />
         <Calls w={w} pg={pg} />
       </div>
     </div>
@@ -614,7 +674,7 @@ function Judging({ w, busy, act, onClose }) {
 
 /* 2. Model tests: a test running now first, with its progress and Stop, then each one there has been, newest first,
    the newest open. */
-function Measurements({ w, pg, live, goTo }) {
+function Measurements({ w, pg, live, goTo, optimize }) {
   const rows = pg.measurements.filter((r) => !r.live);
   /* The test the page's address names (#run_...) opens instead of the newest, and is brought into view: that is where Back
      from one of its models' pages lands, and what a link to one test shows. */
@@ -648,7 +708,7 @@ function Measurements({ w, pg, live, goTo }) {
       ) : (
         <div className="wp-runs">
           {live.run && <LiveRun w={w} live={live} feePct={pg.feePct} />}
-          {rows.map((r) => <RunRow key={r.id} w={w} r={r} open={open.has(r.id)} onToggle={() => toggle(r.id)} goTo={goTo} />)}
+          {rows.map((r) => <RunRow key={r.id} w={w} r={r} open={open.has(r.id)} onToggle={() => toggle(r.id)} goTo={goTo} optimize={optimize} />)}
         </div>
       )}
     </section>
@@ -709,7 +769,7 @@ function LiveRun({ w, live, feePct }) {
 }
 
 /* One test: its line, and opened, what it found and every model it tried. The line's tag says what it means when hovered. */
-function RunRow({ w, r, open, onToggle, goTo }) {
+function RunRow({ w, r, open, onToggle, goTo, optimize }) {
   const [rp, setRp] = useState(null);
   const [err, setErr] = useState(null);
   const read = useCallback(() => {
@@ -741,7 +801,7 @@ function RunRow({ w, r, open, onToggle, goTo }) {
         ) : (
           <>
             <div className="wp-take">{I.info}<span>{rp.take}</span></div>
-            {rp.cands.length > 0 ? <RunDetail rp={rp} wid={w.id} goTo={goTo} /> : rp.self && (
+            {rp.cands.length > 0 ? <RunDetail rp={rp} wid={w.id} goTo={goTo} optimize={optimize} /> : rp.self && (
               <div className="wp-chartbox wp-selfbox">
                 <p className="wp-sub">{rp.self.noise !== null ? 'Original model against itself' : 'How far it got'}</p>
                 <SelfPic self={rp.self} yardstick={rp.yardstick} />
@@ -773,8 +833,10 @@ export function ColumnWords({ rp }) {
 
 /* One model on a test's chart, pointed at, focused or tapped: its number and name, its outcome, and each figure its row
    in the table has, beside the original model's where the test has it. */
-function DotWords({ c, rp }) {
+function DotWords({ c, rp, k = 'balance' }) {
   if (!c) return null;
+  const score = c.scores?.[k] ?? null;
+  const p = c.parts || {};
   const quality = rp.yardstick === 'quality';
   const ref = rp.yours || {};
   // a saving short of the whole cost is never rounded up to all of it: 99.5% less is "99% less", not "100% less"
@@ -786,6 +848,9 @@ function DotWords({ c, rp }) {
       <p className="wp-dt-head"><span className="wp-dt-no" style={{ background: toneColor(c.tone) }}>{c.no}</span><span>{c.label}</span></p>
       <p className="wp-dt-out" style={{ color: toneColor(c.tone) }}>{c.verdict}</p>
       <dl>
+        {score !== null && (
+          <div><dt>Score</dt><dd>{Math.round(score)} of 100: quality {p.quality}, cost {p.cost}, speed {p.speed ?? 'not counted'}</dd></div>
+        )}
         <div><dt>{quality ? 'Worse than original model' : 'Different from original model'}</dt>
           <dd>{pct1(c.gap)} of requests{rp.bar > 0 ? `, at most ${pct1(rp.bar)} allowed` : ''}</dd></div>
         <div><dt>Per 1,000 requests</dt><dd>{perK(c.perCall)}{vs}</dd></div>
@@ -891,25 +956,132 @@ export function SampledWords() {
   );
 }
 
-function RunDetail({ rp, wid, goTo }) {
+/* What a test's Score column means (see Help): one figure out of 100, how much each part counts in it for what the
+   workload optimizes for, and which model is picked: the rows above the pick with higher scores, and a model in use
+   kept over a higher score, said as the rule they follow. Where the original model was not timed, speed is counted for
+   no model, and the weights the page states would not add up to the scores it shows, so that is said too. */
+function ScoreWords({ k, rp }) {
+  const w = rp.weights?.[k] || { quality: 40, cost: 30, speed: 30 };
+  const name = (OPTIMIZE.find((o) => o.k === k) || OPTIMIZE[0]).label;
+  const timed = !!rp.yours?.p50;
+  return (
+    <>
+      <p><b>Score</b></p>
+      <p>How well this model balances quality, cost and speed, out of 100. Optimizing for {name}, quality counts {w.quality}%, cost {w.cost}% and speed {w.speed}%.</p>
+      {!timed && <p>The original model wasn't timed in this test, so speed isn't counted for any model, and quality and cost share its part.</p>}
+      <p>Only models that passed and cost less than the original model can be picked{k === 'quality' ? ', and, optimizing for quality, only ones the test is almost certain about' : ''}. They come first, best score first. A model already in use stays unless another scores at least 3 more.</p>
+    </>
+  );
+}
+function QualityWords({ rp }) {
+  return rp.yardstick === 'quality' ? (
+    <>
+      <p><b>Quality</b></p>
+      <p>How rarely this model gave a clearly worse answer than the original model, out of 100: 100 when it never did, 50 at the most allowed. The figure under it is how often it did.</p>
+    </>
+  ) : (
+    <>
+      <p><b>Quality</b></p>
+      <p>How rarely this model answered differently from the original model, out of 100: 100 when it never did, 50 at the most allowed. The figure under it is how often it did.</p>
+    </>
+  );
+}
+function CostWords() {
+  return (
+    <>
+      <p><b>Cost</b></p>
+      <p>How much less this model costs than the original model, out of 100: 92 means it costs 92% less.</p>
+    </>
+  );
+}
+function SpeedWords({ rp }) {
+  return (
+    <>
+      <p><b>Speed</b></p>
+      <p>How much sooner this model's {rp.metric === 'ttft' ? 'first word' : 'typical answer'} arrives than the original model's, out of 100: 54 means 54% sooner. A slower model scores 0.</p>
+    </>
+  );
+}
+
+/* What the workload optimizes for, above a test's table: four choices in one row, the arrow keys moving between them. A
+   change re-sorts every test on the page at once and is saved once the choosing stops (see WorkloadDetail); from then it
+   is the workload's own, and its next test picks by it, which the line under it says, with the way back to the
+   workspace's choice. Never turned off while a change is saved: a choice turned off under the keyboard lost its
+   place, and the next arrow press with it. */
+function OptimizeFor({ optimize }) {
+  const refs = useRef({});
+  const label = useId();
+  const k = OPTIMIZE.some((o) => o.k === optimize.k) ? optimize.k : 'balance';
+  const choose = (next) => { if (next !== k) optimize.set(next); };
+  const onKey = (e) => {
+    const i = OPTIMIZE.findIndex((o) => o.k === k);
+    const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const next = OPTIMIZE[(i + step + OPTIMIZE.length) % OPTIMIZE.length].k;
+    refs.current[next]?.focus();
+    choose(next);
+  };
+  return (
+    <div className="wp-optfor">
+      <span className="wp-optfor-l" id={label}>Optimize for</span>
+      <span className="wp-seg" role="radiogroup" aria-labelledby={label} onKeyDown={onKey}>
+        {OPTIMIZE.map((o) => (
+          <button type="button" key={o.k} ref={(el) => { refs.current[o.k] = el; }} role="radio" aria-checked={o.k === k}
+            tabIndex={o.k === k ? 0 : -1} onClick={() => choose(o.k)}>{o.label}</button>
+        ))}
+      </span>
+      {/* a save that failed, said over the line that says whose choice it is, which stays with its way back */}
+      {optimize.err && <span className="wp-optnote is-err" role="alert">{optimize.err}</span>}
+      <span className="wp-optnote" aria-live="polite">
+        {optimize.saving ? 'Saving…' : optimize.own ? (
+          <>
+            Set for this workload. Its next test picks by it.{' '}
+            <button type="button" className="wp-textbtn" onClick={() => optimize.set('default')}>Use your workspace's choice</button>
+          </>
+        ) : "Your workspace's choice, from Settings. The next test picks by it."}
+      </span>
+    </div>
+  );
+}
+
+function RunDetail({ rp, wid, goTo, optimize }) {
   const quality = rp.yardstick === 'quality';
   const axis = quality ? 'Worse than original model' : 'Different from original model';
-  const col = quality ? 'Worse' : 'Different';
   const time = rp.metric === 'ttft' ? 'Time to first word' : 'Typical time';
-  const run = { ...rp, axis };
-  const chart = rp.cands.some(plotted);
+  /* The table's order and its pick, for what the workload optimizes for now: sent with the test for every choice, so a
+     change re-sorts it here at once. A test read before scores had none, and keeps the order it came in. */
+  const k = optimize?.k || rp.optimize || 'balance';
+  const byKey = new Map(rp.cands.map((c) => [c.key, c]));
+  const view = rp.orderBy?.[k] ? rp.orderBy[k].map((key) => byKey.get(key)).filter(Boolean) : rp.cands;
+  const best = rp.bestBy?.[k] ?? null;
+  // the pick is what serves, kept although another scores more (keptBy): said as that, not as the best
+  const kept = !!rp.keptBy?.[k];
+  const run = { ...rp, axis, cands: view };
+  const chart = view.some(plotted);
   const barWords = `${Math.round(rp.bar * 1000) / 10}%`;
   return (
     <div className="wp-detailgrid">
       {/* one heading over the chart and the table under it, which show the same models two ways */}
-      <p className="wp-sub wp-detailhead">
-        Models tested
-        {/* a phone shows no column names, so the first figure is explained here instead */}
-        <span className="wp-phonehelp"><Help label={axis}><ColumnWords rp={rp} /></Help></span>
-      </p>
+      <div className="wp-detailtop">
+        <p className="wp-sub wp-detailhead">
+          Models tested
+          {/* a phone shows no column names, so the score is explained here instead */}
+          <span className="wp-phonehelp"><Help label="Score"><ScoreWords k={k} rp={rp} /></Help></span>
+        </p>
+        {optimize && <OptimizeFor optimize={optimize} />}
+        {/* and on a phone, what each part means, which the table's column heads say where there is room for them */}
+        <p className="wp-phoneparts">
+          <span>What the figures mean:</span>
+          <Help label="Quality" trigger={<span className="wp-phonetag">Quality</span>}><QualityWords rp={rp} /></Help>
+          <Help label="Cost" trigger={<span className="wp-phonetag">Cost</span>}><CostWords /></Help>
+          <Help label="Speed" trigger={<span className="wp-phonetag">Speed</span>}><SpeedWords rp={rp} /></Help>
+          <Help label="Requests sampled" trigger={<span className="wp-phonetag">Requests sampled</span>}><SampledWords /></Help>
+        </p>
+      </div>
       {chart && (
         <div className="wp-chartbox">
-          <CompareChart run={run} tip={(c) => <DotWords c={c} rp={rp} />} />
+          <CompareChart run={run} tip={(c) => <DotWords c={c} rp={rp} k={k} />} />
           <div className="wp-legend">
             <span><i style={{ background: 'var(--ok)' }} />passed</span>
             <span><i style={{ background: 'var(--warn)' }} />close match, slower, or too few to be sure</span>
@@ -927,15 +1099,17 @@ function RunDetail({ rp, wid, goTo }) {
               <th aria-label="Number" />
               <th>Model</th>
               <th>Outcome</th>
-              <th className="r">{col}<Help label={axis}><ColumnWords rp={rp} /></Help></th>
+              <th className="r">Score<Help label="Score"><ScoreWords k={k} rp={rp} /></Help></th>
+              <th className="r">Quality<Help label="Quality"><QualityWords rp={rp} /></Help></th>
+              <th className="r">Cost<Help label="Cost"><CostWords /></Help></th>
+              <th className="r">Speed<Help label="Speed"><SpeedWords rp={rp} /></Help></th>
               <th className="r">Requests sampled<Help label="Requests sampled"><SampledWords /></Help></th>
-              <th className="r">Per 1,000</th>
-              <th className="r">{time}</th>
             </tr>
           </thead>
           <tbody>
-            {rp.cands.map((c, i) => (
-              <CandRow key={c.key} c={c} i={i} rp={rp} wid={wid} col={col} time={time} goTo={goTo} />
+            {view.map((c, i) => (
+              <CandRow key={c.key} c={c} i={i} rp={rp} wid={wid} k={k} best={c.key === best} kept={c.key === best && kept}
+                time={time} goTo={goTo} />
             ))}
           </tbody>
         </table>
@@ -944,18 +1118,43 @@ function RunDetail({ rp, wid, goTo }) {
   );
 }
 
+/* One part of a model's score in a test's table: the part out of 100, a short bar of it, and the figure it comes from
+   under it. A part that could not be worked out says why, where the figure would be. */
+function Part({ v, kind, fact, none }) {
+  /* the figure stays where it is known and the part is not (the original model not timed or priced in this test): the
+     cell used to say "not timed" beside a model the chart gave a time */
+  if (v === null || v === undefined) {
+    return (
+      <span className="wp-part is-none">
+        <span className="wp-pv">{fact ? 'not compared' : none}</span>
+        {fact && <span className="wp-pf">{fact}</span>}
+      </span>
+    );
+  }
+  return (
+    <span className={`wp-part is-${kind}`}>
+      <span className="wp-pv">{v}</span>
+      <span className="wp-pbar" aria-hidden="true"><i style={{ width: `${v}%` }} /></span>
+      {fact && <span className="wp-pf">{fact}</span>}
+    </span>
+  );
+}
+
 /* One model in a test's table: its row, which opens the model's own page, every request the test ran through it
    (ModelPage). The whole row answers a click; the model's name is the link, for the keyboard, a screen reader and a new
    tab. On the way, this test is written into the page's address, so Back opens this same test again. */
-function CandRow({ c, i, rp, wid, col, time, goTo }) {
+function CandRow({ c, i, rp, wid, k, best, kept = false, time, goTo }) {
   const tag = <span className={`wp-tag is-${c.tone}`}>{c.verdict}</span>;
   const to = modelHref(wid, rp.id, c.key);
   const open = () => {
     try { window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#${rp.id}`); } catch { /* no history */ }
     if (goTo) goTo(to); else window.location.assign(to);
   };
-  // the test's own requests, and the new ones a second look read it on
-  const sampled = `${!rp.sample || c.n >= rp.sample ? num(c.n) : `${num(c.n)} of ${num(rp.sample)}`}${c.second > 0 ? ` + ${num(c.second)} new` : ''}`;
+  const quality = rp.yardstick === 'quality';
+  const score = c.scores?.[k] ?? null;
+  const p = c.parts || {};
+  // the test's own requests, and the new ones a second look read it on, one under the other
+  const sampled = !rp.sample || c.n >= rp.sample ? num(c.n) : `${num(c.n)} of ${num(rp.sample)}`;
   return (
     /* a click on another button in the row (the outcome's words), or inside words it floats above the page, is its own */
     <tr className="open-able" onClick={(e) => { if (e.currentTarget.contains(e.target) && !e.target.closest('button, a')) open(); }}>
@@ -965,11 +1164,25 @@ function CandRow({ c, i, rp, wid, col, time, goTo }) {
           <span>{c.label}</span>{I.chev}
         </a>
       </td>
-      <td>{c.why ? <Help label={c.verdict} trigger={tag}><p>{c.why}</p></Help> : tag}</td>
-      <td className={`r m${c.gap === null ? ' none' : ''}`} data-label={col}>{c.gap === null ? 'not judged' : pct1(c.gap)}</td>
-      <td className="r m" data-label="Requests sampled">{sampled}</td>
-      <td className={`r m${c.perCall === null ? ' none' : ''}`} data-label="Per 1,000 requests">{c.perCall === null ? 'not priced' : perK(c.perCall)}</td>
-      <td className={`r m${!c.p50 ? ' none' : ''}`} data-label={time}>{c.p50 ? secs(c.p50) : 'not timed'}</td>
+      <td className="wp-outc">
+        {c.why ? <Help label={c.verdict} trigger={tag}><p>{c.why}</p></Help> : tag}
+        {best && (kept
+          ? <span className="wp-best" title="A model already in use stays unless another scores at least 3 more.">Stays in use</span>
+          : <span className="wp-best">{bestWords(k)}</span>)}
+      </td>
+      <td className={`r wp-scorecell${score === null ? ' none' : ''}`} data-label="Score">{score === null ? 'not scored' : Math.round(score)}</td>
+      <td className="r" data-label="Quality">
+        <Part v={p.quality} kind="q" none="not judged" fact={c.gap === null ? null : `${pct1(c.gap)} ${quality ? 'worse' : 'differed'}`} />
+      </td>
+      <td className="r" data-label="Cost">
+        <Part v={p.cost} kind="c" none="not priced" fact={c.perCall === null ? null : `${perK(c.perCall)} per 1,000`} />
+      </td>
+      <td className="r" data-label={`Speed, ${time.toLowerCase()}`}>
+        <Part v={p.speed} kind="s" none="not timed" fact={c.p50 ? secs(c.p50) : null} />
+      </td>
+      <td className="r m wp-req" data-label="Requests sampled">
+        <span>{sampled}</span>{c.second > 0 && <span className="wp-reqnew">+ {num(c.second)} new</span>}
+      </td>
     </tr>
   );
 }

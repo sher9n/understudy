@@ -19,6 +19,7 @@ import { watchPins } from './pins.js';
 import { memo, forgetState } from './memo.js';
 import { account, backgroundLeft } from '../billing.js';
 import { maybeControl, controlRecord, controlBreach, barOf } from './control.js';
+import { optimizeFor, partsOf, scoreOf, offlineOf } from '../eval/score.js';
 
 /* Learning, from what live calls show, which way of serving a workload works best.
  *
@@ -27,10 +28,12 @@ import { maybeControl, controlRecord, controlBreach, barOf } from './control.js'
  * (see outcomes.js). So once a workload is switched, a small share of its calls, within limits the
  * workload sets, is served another way: half by the customer's own model, as the yardstick the
  * serving strategy is held against, and half by runners-up from the last measurement that are
- * cheaper still. Each such call records the chance it had of being served that way, so what the
- * experiments show can be read fairly. Every hour the records are read again, and when the
- * evidence is strong enough the workload moves: to a cheaper runner-up that works as often, or
- * back to the customer's own model when what serves works less often than it does.
+ * cheaper still, score close to the best it found, and would score clearly better, for what the
+ * workload optimizes for (src/eval/score.js), if their live calls showed them as good (worthTrying).
+ * Each such call records the chance it had of being served that way, so what the experiments show
+ * can be read fairly. Every hour the records are read again, and when the evidence is strong enough
+ * the workload moves: to such a runner-up that works as often, the best scoring first, or back to
+ * the customer's own model when what serves works less often than it does.
  *
  * A workload whose switches wait for approval never has an answer changed: its runners-up answer
  * copies of a few calls in the background instead, and what that shows is put in front of
@@ -367,17 +370,73 @@ async function readState(workload) {
   /* the workspace's own ceiling on optimizing, if it set one: nothing is tried past it, nor out of the share of it
      kept for measurements (backgroundLeft) */
   const budgetLeft = await backgroundLeft(workload.workspace_id);
+  // what the workload optimizes for, which a runner-up has to score clearly better on to be tried (worthTrying)
+  const ws = await db.prepare('SELECT default_routing_mode FROM workspaces WHERE id = ?').get(workload.workspace_id);
+  const optimize = optimizeFor(workload, ws, config.ROUTING_MODE_DEFAULT);
   return { arms: recs, byId: recById, serving, baseline, prior, extraToday: extra, dayStart, at: t, grader,
     detection, detectionFrom: gradedDetection !== null ? 'graded' : 'signals', hasEvents, settleMs, perDay, budgetLeft,
-    dailySaving: dailySavingOf() };
+    dailySaving: dailySavingOf(), optimize };
 }
 
-/* The runners-up worth trying: ones the last measurement found inside the bar, still offered, and
-   cheaper than what serves now. One that only came close has not earned a customer's live calls, and
-   one dearer than what serves has nothing to offer an experiment. */
-const cheaperThan = (st, ratio) => (ratio === null || ratio === undefined ? []
-  : st.arms.filter((a) => a.status === 'trying' && a.usable !== false && a.ratio !== null && a.ratio < ratio
-    && (a.offline?.verdict ?? 'cleared') === 'cleared'));
+/* A strategy's quality, cost and speed scores, from the measurement that last found it (its offline record: see
+   markTrying), or null parts where that record has no such figure. The customer's own model, when it is what serves,
+   differs from itself by nothing and saves nothing, in money or in time. */
+const ORIGINAL_PARTS = { quality: 100, cost: 0, speed: 0, metric: null };
+const partsOfArm = (a) => (!a ? ORIGINAL_PARTS : {
+  ...partsOf({ gapPct: a.offline?.gap, floorPct: a.offline?.floor, costRatio: a.offline?.ratio ?? a.ratio,
+    p50: a.offline?.p50, refP50: a.offline?.refP50 }),
+  metric: a.offline?.metric ?? null,
+});
+/* Two setups' exact scores for what the workload optimizes for (src/eval/score.js), each null where it has none, on
+   the same parts: speed counts only where both records have it, taken the same way (to the first word, or the whole
+   answer: a workload can change which), since a record kept before timings were, set against one with them, or timed
+   on another clock, would otherwise be scored on different parts. The customer's own model is as fast as itself on
+   any clock. */
+function pairScores(pa, pb, optimize) {
+  const x = { ...pa };
+  const y = { ...pb };
+  const clocks = x.metric && y.metric && x.metric !== y.metric;
+  if (x.speed === null || y.speed === null || clocks) { x.speed = null; y.speed = null; }
+  return [scoreOf(x, optimize)?.exact ?? null, scoreOf(y, optimize)?.exact ?? null];
+}
+
+/* The runners-up worth trying: ones the last measurement found inside the bar, still offered and cheaper than what
+   serves now, which live calls could show to be the better choice for what the workload optimizes for. One that only
+   came close has not earned a customer's live calls, and one dearer than what serves has nothing to offer an
+   experiment. Of the rest, live calls can only settle what a measurement could not tell apart: whether a runner-up
+   is as good as what serves, which a few points of quality on one sample cannot say. So one is tried only when
+     - its score is within SCORE_SWITCH_MARGIN of the best score the measurements found (what serves and every other
+       runner-up): one clearly below the best has already been told apart, and switched to on live results, it was
+       switched away from again by the next measurement, which switches to a score that clearly beats what serves;
+     - and, shown as good as what serves (its quality taken as what serves scored, where it scored less), it would
+       score clearly better, by the same margin: one that saves little, or saves by answering much more slowly where
+       the workload asked for speed to count, has nothing to switch to it for.
+   With a score unknown (a record kept before scores were), being cheaper is enough, as it always was. `servingRec` is
+   what serves, or null where the customer's own model does. Best score first, the order the hourly review switches in. */
+const worthTrying = (st, servingRec) => {
+  const ratio = servingRec ? servingRec.ratio : 1;
+  if (ratio === null || ratio === undefined) return [];
+  const optimize = st.optimize || 'balance';
+  const margin = config.SCORE_SWITCH_MARGIN;
+  const cleared = (a) => a.usable !== false && (a.offline?.verdict ?? 'cleared') === 'cleared';
+  const found = st.arms.filter((b) => ['serving', 'trying'].includes(b.status) && cleared(b)).map(partsOfArm);
+  const ps = partsOfArm(servingRec);
+  const scored = [];
+  for (const a of st.arms) {
+    if (a.status !== 'trying' || !cleared(a) || a.ratio === null || a.ratio === undefined || !(a.ratio < ratio)) continue;
+    /* Optimized for quality, only what the test was almost certain keeps the allowed difference, as a test switches to
+       (rankByScore): chosen after the test, the setting reaches live experiments at once, not at the next test. A
+       record from before it kept how sure the test was is not tried either: nothing says it was sure enough. */
+    if (optimize === 'quality' && !(Number(a.offline?.chance) >= config.CAUTIOUS_MIN_CHANCE)) continue;
+    const pa = partsOfArm(a);
+    const asGood = { ...pa, quality: pa.quality !== null && ps.quality !== null ? Math.max(pa.quality, ps.quality) : pa.quality };
+    const [x, y] = pairScores(asGood, ps, optimize);
+    if (x !== null && y !== null && x < y + margin) continue;
+    if (found.some((pb) => { const [u, v] = pairScores(pa, pb, optimize); return u !== null && v !== null && v >= u + margin; })) continue;
+    scored.push({ a, exact: scoreOf(pa, optimize)?.exact ?? null });
+  }
+  return scored.sort((p, q) => (q.exact ?? -Infinity) - (p.exact ?? -Infinity) || p.a.ratio - q.a.ratio).map((p) => p.a);
+};
 
 /**
  * Which strategy answers one call, when the workload experiments: { armId, spec, propensity,
@@ -391,7 +450,7 @@ export async function chooseExplore(workload, servingArm, { rng = Math.random } 
   // until what serves has a known cost, nothing is tried (see readState)
   const serving = st.byId.get(servingArm.id);
   if (!serving || serving.ratio === null) return null;
-  const candidates = cheaperThan(st, serving.ratio);
+  const candidates = worthTrying(st, serving);
   const plan = explorePlan({ share: s.share, serving, candidates, baseline: st.baseline.usable ? st.baseline : null });
   if (plan.length === 1) return null;
   const pick = pickFrom(plan, rng());
@@ -511,7 +570,7 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   const st = await stateOf(workload);
   if (st.extraToday >= s.budgetUsd || spentOut(st)) return null;
   // what answered the call: the serving strategy, or the customer's own model when nothing is switched
-  const candidates = cheaperThan(st, st.serving ? st.serving.ratio : 1);
+  const candidates = worthTrying(st, st.serving);
   if (!candidates.length) return null;
   // paid for like a measurement, so only while the balance can pay for it
   const acct = await account(workload.workspace_id);
@@ -832,8 +891,8 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
      hourly looks on this very record by src/learn/horizon.js. */
   if (serving && serving.ratio !== null) {
     // each with how long its record has been gathering, which is what the chance of being wrong is spent over
-    const runners = cheaperThan(st, serving.ratio).map((a) => ({ id: a.id, fair: a.fair, graded: a.graded, ratio: a.ratio,
-      verdict: a.offline?.verdict ?? 'cleared', ageDays: a.ageDays }));
+    const runners = worthTrying(st, serving).map((a, k) => ({ id: a.id, fair: a.fair, graded: a.graded, ratio: a.ratio,
+      verdict: a.offline?.verdict ?? 'cleared', ageDays: a.ageDays, rank: k }));
     const ruling = decide({ serving: { id: serving.id, fair: serving.fair, graded: serving.graded, ageDays: serving.ageDays },
       base: { id: base.id, fair: base.fair, graded: base.graded, ageDays: base.ageDays },
       runners, detection: st.detection, hasEvents: st.hasEvents },
@@ -909,7 +968,7 @@ export async function reviewWorkload(given, { promoteFn = promote, revertFn = re
     const bar = await barOf(workload);
     const floor = bar.floorPct;
     const quality = bar.yardstick === 'quality';
-    for (const a of cheaperThan(st, serving ? serving.ratio : 1).filter((x) => x.post.nShadow >= min && !x.stats?.suggestedAt)) {
+    for (const a of worthTrying(st, serving).filter((x) => x.post.nShadow >= min && !x.stats?.suggestedAt)) {
       const sameShare = a.same / a.post.nShadow;
       if ((1 - sameShare) * 100 > floor) continue;
       await addActivity(workload.workspace_id, {
@@ -958,7 +1017,7 @@ export async function reviewAll() {
  * measurement said about it. A runner-up it no longer vouches for is set aside, and one switched
  * back for good stays out.
  */
-export async function markTrying(workload, { runId, results, refMonthly, floor }) {
+export async function markTrying(workload, { runId, results, refMonthly, floor, metric = 'latency', refP50 = null }) {
   const keep = new Set();
   for (const r of results) {
     // only what cleared the bar is tried on live calls; one that came close has not earned them
@@ -971,9 +1030,9 @@ export async function markTrying(workload, { runId, results, refMonthly, floor }
     if (refMonthly !== null && (r.cost_month_usd === null || r.cost_month_usd >= refMonthly)) continue;
     if (await everReverted(workload.id, r.model_id)) continue;
     const ratio = r.cost_ratio ?? (refMonthly ? r.cost_month_usd / refMonthly : null);
+    // everything its score is worked out from, as a switch keeps it too (offlineOf; worthTrying)
     const arm = await upsertArm(workload, specOfResult(r), {
-      originRunId: runId,
-      offline: { verdict: r.verdict, gap: r.gap_pct, floor, ratio, escalatedPct: r.escalated_pct ?? null, runs: r.runs, runId, at: now() },
+      originRunId: runId, offline: offlineOf(r, { floor, metric, refP50, runId, ratio, at: now() }),
     });
     keep.add(arm.id);
     if (!['serving', 'retired', 'baseline'].includes(arm.status)) await setStatus(arm.id, 'trying');
@@ -1016,7 +1075,7 @@ export async function learningView(workload) {
     weekCalls += Number(r.n);
   }
   // what can be tried against what answers now: the serving strategy, or the customer's own model
-  const tryableIds = new Set(cheaperThan(st, st.serving ? st.serving.ratio : 1).map((a) => a.id));
+  const tryableIds = new Set(worthTrying(st, st.serving).map((a) => a.id));
   const shape = (a, role) => ({
     id: a.virtual ? null : a.id, key: a.spec ? keyOfSpec(a.spec, ref) : null, tryable: tryableIds.has(a.id),
     role, label: a.label || labelOf(a.spec, ref), kind: a.kind || a.spec?.kind, status: a.status,
@@ -1072,8 +1131,8 @@ function whyNot(workload, s, st) {
   if (st.serving && st.serving.ratio === null) {
     return 'Nothing is tried until the next measurement prices what serves now against your own model: without that, an experiment could not be held to a budget.';
   }
-  if (s.mode === 'shadow' && !cheaperThan(st, st.serving ? st.serving.ratio : 1).length) {
-    return 'Background answers start once a measurement finds a runner-up that is cheaper than what answers now.';
+  if (s.mode === 'shadow' && !worthTrying(st, st.serving).length) {
+    return 'Background answers start once a measurement finds a runner-up worth trying: cheaper than what answers now, scoring close to the best it found, and clearly better if its answers hold up.';
   }
   return null;
 }

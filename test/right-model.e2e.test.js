@@ -303,7 +303,7 @@ test('what passed once and had too few new calls is looked at again the moment t
   assert.deepEqual([...(pending?.keys || [])].sort(), [...steady].sort());
   assert.equal(Number(now1.measure_at_calls), 88, `waits for ${now1.measure_at_calls} calls no measurement has drawn`);
   const unseen0 = await unseenCalls(now1);
-  // the first in the run's own order is offered while it waits (within a point of saving, the faster ranks first)
+  // the first in the run's own order is offered while it waits (the best score for what the workload optimizes for first)
   const top = rows.find((r) => Number(r.choice_rank) === 1)?.model_id;
   const page = await api.get(`/workloads/${w.id}`);
   assert.equal(page.candidate?.model, top, 'the first in line offered while it waits');

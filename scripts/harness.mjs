@@ -39,12 +39,14 @@ for (const volume of [100, 1000]) {
 }
 
 const u = (rng, a, b) => a + (b - a) * rng();
-console.log('\nCHOOSING: which of the setups that cleared is switched to, by routing priority (3000 workloads each)');
+console.log('\nCHOOSING: which of the setups that cleared is switched to, by what the workload optimizes for (3000 workloads each)');
 const MODES = [
-  ['cheapest first, one second look less (the old rule)', { mode: 'savings', tries: 2 }],
-  ['most savings', { mode: 'savings', tries: 3 }],
-  ['balanced', { mode: 'balanced', tries: 3 }],
-  ['cautious', { mode: 'cautious', tries: 3 }],
+  ['cheapest first, one second look less (the old rule)', { mode: 'cheapest', tries: 2 }],
+  ['cheapest first', { mode: 'cheapest', tries: 3 }],
+  ['balance', { mode: 'balance', tries: 3 }],
+  ['quality', { mode: 'quality', tries: 3 }],
+  ['cost', { mode: 'cost', tries: 3 }],
+  ['speed', { mode: 'speed', tries: 3 }],
 ];
 const CHOICES = [
   ['eight setups, pass mark 3%', { floorPct: 3, setups: (rng) => Array.from({ length: 8 }, (_, i) => ({ id: `m${i}`, rate: u(rng, 0, 0.06), ratio: u(rng, 0.03, 0.6), p50: u(rng, 0.3, 2) })) }],
@@ -58,7 +60,7 @@ const CHOICES = [
 ];
 for (const [name, s] of CHOICES) {
   console.log(`  ${name}`);
-  const rows = [...MODES, ...(s.best && s.best() === 'good' ? [['tested once, no second look', { mode: 'savings', secondLook: false }]] : [])];
+  const rows = [...MODES, ...(s.best && s.best() === 'good' ? [['tested once, no second look', { mode: 'cheapest', secondLook: false }]] : [])];
   for (const [label, m] of rows) {
     const r = choiceSim({ ...s, ...m, trials: 3000, seed: 11 });
     console.log(`    ${label.padEnd(52)} switched ${pct(r.switched)}  past the mark ${pct(r.broken)}  saving ${pct(r.saving)}  speed ${r.speed === null ? '-' : r.speed.toFixed(2)}${r.right === null ? '' : `  the right one ${pct(r.right)}`}`);

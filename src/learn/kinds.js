@@ -428,7 +428,7 @@ export function learnRouter(calls, options, { floorPct, margin = 0.8, shrink = 2
     if (k === per.length) {
       /* Only a table that really splits the calls: every kind to the customer's own model saves nothing,
          and every kind to one setup is that setup, which is measured on its own and competes with the
-         router for the switch (rankCleared). Letting it win here meant a router that would save more was
+         router for the switch (rankByScore, src/eval/score.js). Letting it win here meant a router that would save more was
          never even tried whenever one dearer setup was about as safe. */
       if (new Set(table).size < 2) return;
       const v = valueOf(table);

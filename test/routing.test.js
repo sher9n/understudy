@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { betaCdf, chanceWithin, safeSaving, rankCleared, routingModeOf } from '../src/eval/confidence.js';
+import { betaCdf, chanceWithin, safeSaving } from '../src/eval/confidence.js';
+import { partsOf, scoreOf, rankByScore, optimizeFor, optimizeValue, beatsServing, PRESETS, p50Of } from '../src/eval/score.js';
 import { askedText, featuresRaw, idfOf, weigh, chooseKinds, learnRouter, routeOf, simulateRoutes, crossFitRouter, familiarLine } from '../src/learn/kinds.js';
+import { bestFor, pickFor } from '../src/workloadPage.js';
 
 /* Performance first: how sure a measurement is that a setup keeps the promise, which of the setups
    that cleared is switched to, and the router that sends each kind of request to the setup that does
@@ -42,40 +44,160 @@ test('a safe saving is the saving after our fee, times how sure we are', () => {
   assert.equal(safeSaving(1.2, 0.99), 0, 'dearer than the customer\'s own saves nothing');
 });
 
-const row = (id, cost, safe, latency, chance = 0.999) => ({ model_id: id, cost_month_usd: cost, safe_saving: safe, latency_p50: latency, chance });
+/* The score every setup a test tries is given (src/eval/score.js), worked by hand on two real tests from production,
+   25 Sep 2026: the tool-call workload (GPT-5.4 at $1.43 a thousand requests and 1.62 s, 4.63% allowed) and the invoice
+   workload (GPT-5.4 at $2.43 a thousand and 2.01 s, 3% allowed). */
+const TOOL = { floorPct: 4.6296, refP50: 1617, ref: 1.42519 };
+const INVOICE = { floorPct: 3, refP50: 2014, ref: 2.43416 };
+const res = (id, gap, per1k, p50, t, extra = {}) => ({ model_id: id, gap_pct: gap, cost_ratio: per1k / t.ref, latency_p50: p50, chance: 0.999, ...extra });
 
-test('the routing priority decides which of the setups that cleared comes first', () => {
-  const thin = row('thin', 30, 0.66, 2000, 0.95);
-  const comfy = row('comfy', 32, 0.679, 1500, 0.999);
-  const slowTie = row('slow', 40, 0.603, 5000);
-  const fastTie = row('fast', 42, 0.599, 900);
-  const all = [thin, comfy, slowTie, fastTie];
-  assert.deepEqual(rankCleared(all, { mode: 'savings' }).order.map((r) => r.model_id), ['thin', 'comfy', 'slow', 'fast'],
-    'most savings is the cheapest first, as it always was');
-  assert.deepEqual(rankCleared(all, { mode: 'balanced' }).order.map((r) => r.model_id), ['comfy', 'thin', 'fast', 'slow'],
-    'balanced is the biggest saving we are sure of, and within a point the faster one');
-  const cautious = rankCleared(all, { mode: 'cautious', cautiousChance: 0.99 });
-  assert.deepEqual(cautious.order.map((r) => r.model_id), ['comfy', 'fast', 'slow'], 'cautious leaves out what we are not sure enough of');
-  assert.deepEqual(cautious.left.map((x) => x.row.model_id), ['thin']);
-  // streamed workloads are ranked on time to the first word
-  const a = { ...row('a', 10, 0.5, 4000), ttft_p50: 300 };
-  const b = { ...row('b', 11, 0.5, 1000), ttft_p50: 900 };
-  assert.deepEqual(rankCleared([b, a], { mode: 'balanced', metric: 'ttft' }).order.map((r) => r.model_id), ['a', 'b']);
-  // two a hair apart either side of a round number are still a tie, and the faster one goes first
-  const p = row('p', 20, 0.8960, 2000);
-  const q = row('q', 21, 0.8940, 800);
-  assert.deepEqual(rankCleared([p, q], { mode: 'balanced' }).order.map((r) => r.model_id), ['q', 'p']);
-  // the order does not depend on the order they arrive in
-  const many = [thin, comfy, slowTie, fastTie, p, q];
-  const once = rankCleared(many, { mode: 'balanced' }).order.map((r) => r.model_id);
-  assert.deepEqual(rankCleared([...many].reverse(), { mode: 'balanced' }).order.map((r) => r.model_id), once);
+test('each part is out of 100: quality against the allowed difference, cost and speed against the original model', () => {
+  // gemma-4-31b-it on the tool-call test: no answer differed, $0.110 against $1.425, 0.738 s against 1.617 s
+  assert.deepEqual(partsOf({ gapPct: 0, floorPct: 4.6296, costRatio: 0.11 / 1.42519, p50: 738, refP50: 1617 }), { quality: 100, cost: 92, speed: 54 });
+  // at the allowed difference quality is 50, and at twice it 0, never below
+  assert.equal(partsOf({ gapPct: 4.6296, floorPct: 4.6296, costRatio: 0.5 }).quality, 50);
+  assert.equal(partsOf({ gapPct: 10, floorPct: 4.6296, costRatio: 0.5 }).quality, 0);
+  // dearer than the original model saves nothing, and slower gains nothing
+  assert.equal(partsOf({ gapPct: 0, floorPct: 3, costRatio: 1.3 }).cost, 0);
+  assert.equal(partsOf({ gapPct: 0, floorPct: 3, costRatio: 0.2, p50: 2300, refP50: 2014 }).speed, 0);
+  // what cannot be known is null, never a zero
+  assert.deepEqual(partsOf({ gapPct: null, floorPct: 3, costRatio: null, p50: null, refP50: null }), { quality: null, cost: null, speed: null });
+  assert.equal(partsOf({ gapPct: 1, floorPct: 0, costRatio: 0.2 }).quality, null, 'no allowed difference, no quality score');
+  /* but where the original model was timed, a setup with no time of its own has no speed to its credit: left out, it
+     scored on quality and cost alone, and beat every timed setup where speed counts most */
+  assert.equal(partsOf({ gapPct: 0, floorPct: 3, costRatio: 0.2, p50: null, refP50: 2014 }).speed, 0);
+  const timed = scoreOf({ quality: 90, cost: 80, speed: 0 }, 'speed').exact;
+  const untimed = scoreOf(partsOf({ gapPct: 0.6, floorPct: 3, costRatio: 0.2, p50: null, refP50: 2014 }), 'speed').exact;
+  assert.equal(untimed, timed, `the same quality and cost, timed slower or not timed: ${untimed} against ${timed}`);
+  // never 100 while it costs anything or takes any time: 99.6% less reads "99% less" on every other screen
+  assert.equal(partsOf({ gapPct: 0, floorPct: 3, costRatio: 0.004 }).cost, 99);
+  assert.equal(partsOf({ gapPct: 0, floorPct: 3, costRatio: 0 }).cost, 100, 'free is free');
+  assert.equal(partsOf({ gapPct: 0, floorPct: 3, costRatio: 0.2, p50: 4, refP50: 2014 }).speed, 99);
 });
 
-test('a workload\'s routing priority is its own, then its workspace\'s, then the deployment\'s', () => {
-  assert.equal(routingModeOf({ routing_mode: 'cautious' }, { default_routing_mode: 'savings' }), 'cautious');
-  assert.equal(routingModeOf({ routing_mode: null }, { default_routing_mode: 'savings' }), 'savings');
-  assert.equal(routingModeOf({}, {}, 'balanced'), 'balanced');
-  assert.equal(routingModeOf({ routing_mode: 'reckless' }, null, 'balanced'), 'balanced', 'anything else is read as the default');
+test('the score is the parts weighted by what the workload optimizes for, built from the rounded parts', () => {
+  const gemma = { quality: 100, cost: 92, speed: 54 };
+  assert.equal(scoreOf(gemma, 'balance').score, 84, '100 x 40% + 92 x 30% + 54 x 30%');
+  assert.equal(scoreOf(gemma, 'quality').score, 92);
+  assert.equal(scoreOf(gemma, 'cost').score, 88);
+  assert.equal(scoreOf(gemma, 'speed').score, 71);
+  for (const w of Object.values(PRESETS)) assert.equal(w.quality + w.cost + w.speed, 100);
+  // a model that was not timed is scored on the other two, which then count for all of it
+  const untimed = scoreOf({ quality: 100, cost: 92, speed: null }, 'balance');
+  assert.ok(Math.abs(untimed.exact - (40 * 100 + 30 * 92) / 70) < 1e-9);
+  // with quality or cost unknown there is no score at all
+  assert.equal(scoreOf({ quality: null, cost: 92, speed: 54 }, 'balance'), null);
+  assert.equal(scoreOf({ quality: 100, cost: null, speed: 54 }, 'balance'), null);
+});
+
+test('on the tool-call test the best balance is gemma, not the cheapest', () => {
+  const rows = [
+    res('google/gemma-4-31b-it', 0, 0.110, 738, TOOL), res('qwen/qwen3-coder', 0, 0.304, 1038, TOOL),
+    res('nvidia/nemotron-3-ultra-550b-a55b', 0, 0.714, 705, TOOL), res('openai/gpt-3.5-turbo-0613', 0.9259, 0.434, 921, TOOL),
+  ];
+  const r = rankByScore(rows, { optimize: 'balance', floorPct: TOOL.floorPct, refP50: TOOL.refP50 });
+  assert.deepEqual(r.order.map((x) => x.model_id), ['google/gemma-4-31b-it', 'qwen/qwen3-coder', 'nvidia/nemotron-3-ultra-550b-a55b', 'openai/gpt-3.5-turbo-0613']);
+  assert.deepEqual(r.order.map((x) => r.scores.get(x).score.score), [84, 75, 72, 70]);
+  // the cheapest model tested, $0.013 a thousand, 4.63% of its answers different: right at the limit, 70
+  const cheapest = res('upstage/solar-mini4', 4.6296, 0.013, 540, TOOL);
+  assert.equal(rankByScore([cheapest], { floorPct: TOOL.floorPct, refP50: TOOL.refP50 }).scores.get(cheapest).score.score, 70);
+});
+
+test('on the invoice test balance picks the much faster model, and cost the checked one, never simply the cheapest', () => {
+  const rows = [
+    res('inclusionai/ling-3.0-flash-vl', 0, 0.041, 2297, INVOICE), res('upstage/solar-mini4', 0, 0.054, 1763, INVOICE),
+    res('bytedance-seed/seed-2.0-mini', 0, 0.103, 1120, INVOICE), res('cascade:inception/mercury-2.5', 0, 0.125, 886, INVOICE),
+    res('inception/mercury-2', 0, 0.245, 678, INVOICE),
+  ];
+  const top = (optimize) => rankByScore(rows, { optimize, floorPct: INVOICE.floorPct, refP50: INVOICE.refP50 }).order[0].model_id;
+  assert.equal(top('balance'), 'inception/mercury-2');
+  assert.equal(top('cost'), 'cascade:inception/mercury-2.5');
+  assert.equal(top('speed'), 'inception/mercury-2');
+  // quality and cost both 100 and near 95 for all of them: the tie between the two Mercury setups goes to the exact figure
+  assert.equal(top('quality'), 'inception/mercury-2');
+  // the cheapest, slower than GPT-5.4, comes last on balance
+  const order = rankByScore(rows, { optimize: 'balance', floorPct: INVOICE.floorPct, refP50: INVOICE.refP50 }).order;
+  assert.equal(order[order.length - 1].model_id, 'inclusionai/ling-3.0-flash-vl');
+});
+
+test('optimizing for quality leaves out what it is not sure enough of, and the order does not depend on arrival', () => {
+  const sure = res('sure', 0, 0.3, 900, TOOL, { chance: 0.995 });
+  const unsure = res('unsure', 0, 0.1, 700, TOOL, { chance: 0.93 });
+  const q = rankByScore([sure, unsure], { optimize: 'quality', floorPct: TOOL.floorPct, refP50: TOOL.refP50, cautiousChance: 0.99 });
+  assert.deepEqual(q.order.map((x) => x.model_id), ['sure']);
+  assert.deepEqual(q.left.map((x) => x.row.model_id), ['unsure']);
+  assert.match(q.left[0].why, /not sure enough for a workload optimized for quality/);
+  // any other choice keeps both
+  assert.equal(rankByScore([sure, unsure], { optimize: 'balance', floorPct: TOOL.floorPct, refP50: TOOL.refP50 }).order.length, 2);
+  const many = [sure, unsure, res('a', 1, 0.2, 800, TOOL), res('b', 1, 0.2, 800, TOOL), res('c', 0.5, 0.25, 1500, TOOL)];
+  const once = rankByScore(many, { floorPct: TOOL.floorPct, refP50: TOOL.refP50 }).order.map((x) => x.model_id);
+  assert.deepEqual(rankByScore([...many].reverse(), { floorPct: TOOL.floorPct, refP50: TOOL.refP50 }).order.map((x) => x.model_id), once);
+  // one with no score (not priced) comes after every one with one
+  const unpriced = { model_id: 'unpriced', gap_pct: 0, cost_ratio: null, latency_p50: 500, chance: 0.999 };
+  assert.equal(rankByScore([unpriced, ...many], { floorPct: TOOL.floorPct, refP50: TOOL.refP50 }).order.at(-1).model_id, 'unpriced');
+  // streamed workloads are timed to the first word
+  assert.equal(p50Of({ latency_p50: 4000, ttft_p50: 300 }, 'ttft'), 300);
+  assert.equal(p50Of({ latency_p50: 4000, ttft_p50: null }, 'ttft'), 4000);
+});
+
+test('what serves is only replaced by a setup that scores clearly better', () => {
+  const s = (exact) => ({ score: { exact, score: Math.round(exact) } });
+  assert.equal(beatsServing(s(86), s(84), { margin: 3 }), false, 'two points ahead is not enough');
+  assert.equal(beatsServing(s(87), s(84), { margin: 3 }), true);
+  // with either score unknown, the older rule: only something cheaper
+  assert.equal(beatsServing(s(99), { score: null }, { margin: 3, cheaper: false }), false);
+  assert.equal(beatsServing({ score: null }, s(50), { margin: 3, cheaper: true }), true);
+});
+
+test('the page names as the pick what a test switches to: past a first in line its second look could not stand behind', () => {
+  // a test page's rows as runPageOf gives them: scores per choice, whether each could be picked, and how its looks went
+  const cand = (key, balance, extra = {}) => ({ key, scores: { balance, quality: balance, cost: balance, speed: balance }, eligible: true,
+    sure: true, confirmed: false, serving: false, parts: { quality: 90, cost: 90, speed: 50 }, tone: 'ok', ...extra });
+  const top = cand('top', 90);
+  const twice = cand('twice', 85, { confirmed: true });
+  const third = cand('third', 80);
+  // the test looked at "top" again and had too few new requests to go on, so it switched to "twice", next in line
+  assert.equal(bestFor([top, twice, third], 'balance', { settled: true }), 'twice');
+  // for a choice the test did not make, the best score, its second look still to come
+  assert.equal(bestFor([top, twice, third], 'cost'), 'top');
+  // nothing looked at twice (the test was cut short): the best score, waiting for its look
+  assert.equal(bestFor([top, third], 'balance', { settled: true }), 'top');
+  // what served when the test ran keeps serving unless one scores clearly better: 88 is not 3 points over 86
+  const inUse = cand('inUse', 86);
+  const held = { settled: true, inUse: 'inUse' };
+  assert.deepEqual(pickFor([cand('a', 88, { confirmed: true }), inUse], 'balance', held), { key: 'inUse', kept: true });
+  assert.deepEqual(pickFor([cand('a', 89, { confirmed: true }), inUse], 'balance', held), { key: 'a', kept: false });
+  // one clearly better whose look could not be read, and what serves after it: what serves, as the test left it
+  assert.equal(bestFor([cand('a', 95), inUse], 'balance', held), 'inUse');
+  // the best of all, kept: nothing scores more, so it is simply the best
+  assert.deepEqual(pickFor([cand('a', 80, { confirmed: true }), inUse], 'balance', held), { key: 'inUse', kept: false });
+  // optimized for quality, what serves keeps serving though it is not sure enough to be picked afresh
+  const unsure = cand('unsure', 86, { sure: false });
+  assert.equal(bestFor([cand('b', 87, { confirmed: true }), unsure], 'quality', { settled: true, inUse: 'unsure' }), 'unsure');
+  // what serves with no score: only a cheaper one is looked at in its place, as before there were scores
+  const unscored = cand('unscored', null, { costMonth: 20 });
+  assert.equal(bestFor([cand('dearer', 95, { costMonth: 30, confirmed: true }), unscored], 'balance', { settled: true, inUse: 'unscored' }), 'unscored');
+  assert.equal(bestFor([cand('cheaper', 70, { costMonth: 10, confirmed: true }), unscored], 'balance', { settled: true, inUse: 'unscored' }), 'cheaper');
+  // what the test wrote down that it chose is its pick, for what it optimized for, whatever the rows say
+  assert.equal(bestFor([top, twice, third], 'balance', { settled: true, chosen: 'third' }), 'third');
+  assert.equal(bestFor([top, twice, third], 'cost', { chosen: 'third' }), 'top', 'for another choice, the rule');
+  // one that could not be picked at all never is, and with none that could, there is no pick
+  assert.equal(bestFor([cand('failed', 99, { eligible: false }), third], 'balance'), 'third');
+  assert.equal(bestFor([cand('failed', 99, { eligible: false })], 'balance'), null);
+});
+
+test('what a workload optimizes for is its own, then its workspace\'s, then the deployment\'s, and the old names still read', () => {
+  assert.equal(optimizeFor({ routing_mode: 'speed' }, { default_routing_mode: 'cost' }), 'speed');
+  assert.equal(optimizeFor({ routing_mode: null }, { default_routing_mode: 'cost' }), 'cost');
+  assert.equal(optimizeFor({}, {}, 'balance'), 'balance');
+  assert.equal(optimizeFor({ routing_mode: 'reckless' }, null, 'balance'), 'balance', 'anything else is read as the default');
+  // the routing priorities from before
+  assert.equal(optimizeValue('balanced'), 'balance');
+  assert.equal(optimizeValue('cautious'), 'quality');
+  assert.equal(optimizeValue('savings'), 'cost');
+  assert.equal(optimizeFor({ routing_mode: 'cautious' }, { default_routing_mode: 'savings' }), 'quality');
+  assert.equal(optimizeValue(' Speed '), 'speed');
+  assert.equal(optimizeValue(null), null);
 });
 
 /* A workload with two kinds of request: short "where is my order" questions a cheap model gets right,
