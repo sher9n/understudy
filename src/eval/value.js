@@ -7,6 +7,7 @@ import { trafficOf } from './promote.js';
 import { cadenceOf } from './schedule.js';
 import { barNeed, usableCalls } from './plan.js';
 import { OUTCOME_OF } from './outcome.js';
+import { optimizeValue } from './score.js';
 import { COUNTED, GROUPS, grouped, settledAt } from '../learn/views.js';
 import { zdrFor } from '../workspace.js';
 
@@ -322,7 +323,8 @@ async function eventsOf(w, firstSeen, t, via) {
       tried: results.length, passed: passed.length,
       best: best ? nameOf(best) : null,
       chosen: chosen ? nameOf(chosen) : null,
-      chosenKept: !!chosen && (written ? !!record.chosenKept : chosen.model_id === kept), mode: r.routing_mode ?? null,
+      // what it optimized for, by today's names: a test from before scores has the routing priority it ran under
+      chosenKept: !!chosen && (written ? !!record.chosenKept : chosen.model_id === kept), mode: optimizeValue(r.routing_mode),
       spend: round8(withFeeOn(Number(r.spend_usd) || 0, config.ROUTING_FEE_PCT)),
       bar: r.floor_pct === null ? null : Number(r.floor_pct),
     });

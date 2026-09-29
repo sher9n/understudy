@@ -96,7 +96,7 @@ function gradedRec(g) {
 }
 
 /**
- * @param {object} st  { serving, base, runners: [{ id, fair, graded?, ratio, verdict, ageDays? }], detection, hasEvents, days? }
+ * @param {object} st  { serving, base, runners: [{ id, fair, graded?, ratio, verdict, ageDays?, rank? }], detection, hasEvents, days? }
  *                     serving and base are { id, fair, graded?, ageDays? }: ageDays is how long a record has
  *                     been gathering evidence; without it, `days` is how long the workload has
  * @returns [{ kind: 'revert' | 'promote' | 'rest', armId, by, range }]
@@ -138,7 +138,10 @@ export function decide(st, opts = {}) {
     }
   }
 
-  const runners = [...(st.runners || [])].filter((r) => r.id !== serving.id).sort((x, y) => (x.ratio ?? 1) - (y.ratio ?? 1));
+  /* Looked at in the order given, where one is (`rank`, best score first: worthTrying in src/learn/explore.js), else
+     the cheapest first; the first shown as good is the one switched to. */
+  const runners = [...(st.runners || [])].filter((r) => r.id !== serving.id)
+    .sort((x, y) => (x.rank ?? 0) - (y.rank ?? 0) || (x.ratio ?? 1) - (y.ratio ?? 1));
   for (const r of runners) {
     const sv = seenRange(r, serving);
     const gv = gradedRange(r, serving);

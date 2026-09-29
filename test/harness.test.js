@@ -104,6 +104,18 @@ test('the decision rule: nothing on too little, nothing by default, and the cust
   assert.equal(gradedBad[0]?.by, 'graded');
 });
 
+test('of two runners-up both shown as good, the one first in the order given is switched to, not the cheaper', () => {
+  const rec = (n, s, prior = { mean: 0.97, strength: 4 }) => posterior({ live: [{ ageDays: 0, n, s }] }, { prior, quantiles: false });
+  const serving = { id: 's', fair: rec(3000, 2910) };
+  const base = { id: 'b', fair: rec(2000, 1940) };
+  const dearer = { id: 'dearer', fair: rec(3000, 2940), ratio: 0.5, verdict: 'cleared' };
+  const cheapest = { id: 'cheapest', fair: rec(3000, 2940), ratio: 0.2, verdict: 'cleared' };
+  // given in score order (worthTrying in src/learn/explore.js): the better score, though dearer
+  assert.equal(decide({ serving, base, runners: [{ ...cheapest, rank: 1 }, { ...dearer, rank: 0 }], detection: 1 })[0]?.armId, 'dearer');
+  // with no order given, the cheaper first, as the simulations read it
+  assert.equal(decide({ serving, base, runners: [dearer, cheapest], detection: 1 })[0]?.armId, 'cheapest');
+});
+
 test('the ranges hold at every look: about three standard errors, growing slowly', () => {
   assert.ok(zSeq(300) > 2.9 && zSeq(300) < 3.4, `${zSeq(300)}`);
   assert.ok(zSeq(30000) > zSeq(300), 'looked at longer, the range is a little wider in standard errors');
@@ -151,42 +163,42 @@ test('cross-fitting reports a held-out gap, not the one the threshold was tuned 
   assert.ok([0.5, 0.6, 0.7, 0.8, 0.9].includes(cf.threshold));
 });
 
-/* Which setup is switched to (src/eval/confidence.js), and the second look that stands behind it. The
+/* Which setup is switched to (src/eval/score.js), and the second look that stands behind it. The
    numbers the How models are routed page quotes come from these, with more workloads. */
 const between = (rng, a, b) => a + (b - a) * rng();
 
-test('of two setups that save about the same, balanced switches to the faster, for under a point of saving', () => {
+test('of two setups that save about the same, balance switches to the much faster, for under a point of saving', () => {
   const setups = () => [
     { id: 'slow', rate: 0.001, ratio: 0.2, p50: 1.8 }, { id: 'fast', rate: 0.001, ratio: 0.206, p50: 0.5 },
     { id: 'bad', rate: 0.06, ratio: 0.05, p50: 0.6 }, { id: 'dear', rate: 0.005, ratio: 0.4, p50: 0.9 },
   ];
-  const old = choiceSim({ setups, mode: 'savings', tries: 2, trials: 1500, seed: 11, best: () => 'fast' });
-  const bal = choiceSim({ setups, mode: 'balanced', tries: 3, trials: 1500, seed: 11, best: () => 'fast' });
-  assert.ok(bal.right >= 0.75, `balanced picked the faster ${bal.right}`);
+  const old = choiceSim({ setups, mode: 'cheapest', tries: 2, trials: 1500, seed: 11, best: () => 'fast' });
+  const bal = choiceSim({ setups, mode: 'balance', tries: 3, trials: 1500, seed: 11, best: () => 'fast' });
+  assert.ok(bal.right >= 0.75, `balance picked the faster ${bal.right}`);
   assert.ok(old.right <= 0.2, `cheapest first picked it ${old.right}`);
   assert.ok(old.saving - bal.saving < 0.01, `and gave up ${((old.saving - bal.saving) * 100).toFixed(2)} points of saving`);
   assert.ok(bal.speed < old.speed / 2, `for answers ${old.speed / bal.speed}x as fast`);
 });
 
-test('the second look stops the setup that passed by luck, in every routing priority', () => {
+test('the second look stops the setup that passed by luck, whatever the workload optimizes for', () => {
   // ten setups each a quarter past the pass mark, and one that is well inside it but dearer
   const setups = (rng) => [
     ...Array.from({ length: 10 }, (_, i) => ({ id: `edge${i}`, rate: 0.0375, ratio: between(rng, 0.03, 0.15), p50: 1 })),
     { id: 'good', rate: 0.002, ratio: 0.3, p50: 1 },
   ];
-  const once = choiceSim({ setups, mode: 'savings', secondLook: false, trials: 1500, seed: 11 });
+  const once = choiceSim({ setups, mode: 'cheapest', secondLook: false, trials: 1500, seed: 11 });
   assert.ok(once.broken >= 0.05, `tested once, a lucky one was switched to ${once.broken}`);
-  for (const mode of ['savings', 'balanced', 'cautious']) {
+  for (const mode of ['cheapest', 'balance', 'quality', 'cost', 'speed']) {
     const r = choiceSim({ setups, mode, tries: 3, trials: 1500, seed: 11 });
     assert.ok(r.broken <= 0.002, `${mode}: switched past the mark ${r.broken}`);
   }
 });
 
-test('cautious switches less often than balanced, and never to more that break the promise', () => {
+test('optimizing for quality switches less often than balance, and never to more that break the promise', () => {
   const setups = (rng) => Array.from({ length: 8 }, (_, i) => ({ id: `m${i}`, rate: between(rng, 0, 0.06), ratio: between(rng, 0.03, 0.6), p50: between(rng, 0.3, 2) }));
-  const bal = choiceSim({ setups, mode: 'balanced', trials: 1500, seed: 11 });
-  const cau = choiceSim({ setups, mode: 'cautious', trials: 1500, seed: 11 });
-  assert.ok(cau.switched < bal.switched, `cautious ${cau.switched} against balanced ${bal.switched}`);
+  const bal = choiceSim({ setups, mode: 'balance', trials: 1500, seed: 11 });
+  const cau = choiceSim({ setups, mode: 'quality', trials: 1500, seed: 11 });
+  assert.ok(cau.switched < bal.switched, `quality ${cau.switched} against balance ${bal.switched}`);
   assert.ok(cau.broken <= bal.broken, `and breaks the promise no more often: ${cau.broken} against ${bal.broken}`);
 });
 

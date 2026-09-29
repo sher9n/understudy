@@ -56,12 +56,18 @@ const MODES = [
   { value: 'ask', label: 'Ask me first', note: 'Understudy tells you what passed and waits for your yes.' },
   { value: 'off', label: 'Never switch', note: 'Understudy only tests and reports. Nothing changes.' },
 ];
-/* Which of the models that pass a workload's test it switches to (src/eval/confidence.js), for every workload that has
-   not chosen for itself. */
-const ROUTING = [
-  { value: 'cautious', label: 'Cautious', note: 'Switch only when Understudy is very sure the answers stay as good. You save a little less.' },
-  { value: 'balanced', label: 'Balanced', note: 'Pick the biggest saving Understudy is sure of. When two save about the same, pick the faster one.' },
-  { value: 'savings', label: 'Most savings', note: 'Pick the cheapest model that passes, as long as it is fast enough.' },
+/* What every workload that has not chosen for itself optimizes for (src/eval/score.js): each model a test tries is scored
+   out of 100 for quality, cost and speed, and the best overall score is switched to, rather than the cheapest. */
+/* What the workloads optimize for when the models a test tries are scored (src/eval/score.js): the rule every choice
+   shares (RULE), said once, then what the chosen one weighs. It said "the best score is picked" under Balance only, and
+   not which models can be picked, or that a model in use stays unless another scores clearly more. */
+const OPTIMIZE_RULE = 'Each model that passes a test and costs less than your own is scored out of 100 for quality, cost and speed, and the best score is picked, not simply the cheapest model.';
+const OPTIMIZE_KEEP = 'A model already in use stays unless another scores at least 3 more.';
+const OPTIMIZE = [
+  { value: 'balance', label: 'Balance', note: 'Quality counts 40%, cost 30% and speed 30%.' },
+  { value: 'quality', label: 'Quality', note: 'Quality counts 70%, cost 15% and speed 15%, and Understudy only switches to a model it is almost certain about, with a stricter second test.' },
+  { value: 'cost', label: 'Cost', note: 'Cost counts 60%, quality 25% and speed 15%.' },
+  { value: 'speed', label: 'Speed', note: 'Speed counts 60%, quality 25% and cost 15%.' },
 ];
 const money = (v) => (v === null || v === undefined || v === '' ? '' : String(v));
 /* An amount as typed: empty for none, or dollars with at most two places. Anything else is refused
@@ -112,14 +118,14 @@ export default function Settings({ data, reload }) {
   );
 }
 
-/* What happens when a cheaper model passes a test, how careful to be, and how often to test again: one choice each for
+/* What happens when a cheaper model passes a test, what to optimize for, and how often to test again: one choice each for
    the whole workspace, which every workload follows (each workload's page shows the first as a chip that links here).
    The four settings changed least wait under More options. */
 function Switching({ data, busy, run }) {
   const [applyRouting, setApplyRouting] = useState(false);
   const [open, setOpen] = useState(false);
   const mode = MODES.find((m) => m.value === data.defaultOptimizeMode) || MODES[0];
-  const routing = ROUTING.find((r) => r.value === data.defaultRoutingMode) || ROUTING[1];
+  const routing = OPTIMIZE.find((r) => r.value === data.defaultRoutingMode) || OPTIMIZE[0];
   const own = Number(data.routingOwn) || 0;
   const retest = data.measureEveryDays;
   return (
@@ -135,10 +141,10 @@ function Switching({ data, busy, run }) {
         <Choices label="When a cheaper model passes a test" options={MODES} chosen={mode.value} busy={busy}
           onChoose={(v) => run(() => more.setDefaultMode(v, true), `Every workload now follows: ${MODES.find((m) => m.value === v).label}.`)()} />
       </Row>
-      <Row label="How careful to be" id="st-routing"
+      <Row label="Optimize for" id="st-routing"
         say={(
           <>
-            {routing.note}
+            {`${OPTIMIZE_RULE} ${routing.note} ${OPTIMIZE_KEEP}`}
             {own > 0 && (
               <label className="st-check">
                 <input type="checkbox" checked={applyRouting} onChange={(e) => setApplyRouting(e.target.checked)} />
@@ -147,8 +153,8 @@ function Switching({ data, busy, run }) {
             )}
           </>
         )}>
-        <Choices label="How careful to be" options={ROUTING} chosen={routing.value} busy={busy}
-          onChoose={(v) => run(() => api.setDefaultRouting(v, applyRouting), `Workloads now pick: ${ROUTING.find((r) => r.value === v).label}.`)()} />
+        <Choices label="Optimize for" options={OPTIMIZE} chosen={routing.value} busy={busy}
+          onChoose={(v) => run(() => api.setDefaultRouting(v, applyRouting), `Workloads now optimize for ${OPTIMIZE.find((r) => r.value === v).label}.`)()} />
       </Row>
       <Row label="How often to re-test" id="st-retest"
         say={retest

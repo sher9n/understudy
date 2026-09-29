@@ -20,7 +20,8 @@ import { structureOf, jevCheck, requestText, answerText as checkedText } from '.
 import { simulateCascade, simulateRouter, bestOf, crossFit } from '../learn/simulate.js';
 import { featuresOf, predict } from '../learn/router.js';
 import { featuresRaw, crossFitRouter, simulateRoutes, routeOf, ROUTER_VERSION } from '../learn/kinds.js';
-import { chanceWithin, safeSaving, rankCleared, routingModeOf } from './confidence.js';
+import { chanceWithin, safeSaving } from './confidence.js';
+import { optimizeFor, rankByScore, rowScore, beatsServing, PRESETS } from './score.js';
 import { askOf } from './ask.js';
 import { labelOf, armById, leadModel, nameOfResult, armsFor, setStatus } from '../learn/arms.js';
 import { servingKey, keyOfSpec } from './promote.js';
@@ -77,6 +78,9 @@ const asText = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 const short = (m) => String(m || '').split('/').pop();
 // what a workload's status says when what cleared once did not hold up on calls it had never seen (failedSecondLook)
 const SECOND_LOOK_FAILED = 'A candidate passed once, but not on new requests';
+/* Cleared, and left out as not sure enough by a workload optimizing for quality (src/eval/score.js). Read back by the
+   workload list's label (src/api.js), which also knows the words from before, when this was the Cautious priority. */
+export const QUALITY_NOT_SURE = 'A candidate cleared, but not surely enough for a workload optimized for quality';
 
 /** Whether what serves keeps serving, read as it serves: its verdict on the readings that settled, `settled` of the `answered`
     calls it answered. Clearly worse switches it back for good, so only on readings that settled for at least half of those
@@ -1352,12 +1356,12 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
 
   const refMonthly = await monthlyOn(workloadId, reference);
   const reviewBand = config.EVAL_REVIEW_BAND;
-  /* The workload's routing priority (see src/eval/confidence.js): which of the setups that clear it
-     switches to, and how strict the second look is. A cautious workload's second look is held to a
-     one-sided 97.5% bound rather than 95%. */
+  /* What the workload optimizes for (see src/eval/score.js): how much quality, cost and speed each count when the
+     setups that clear it are scored, and how strict the second look is. One optimizing for quality holds its second
+     look to a one-sided 97.5% bound rather than 95%. */
   const workspaceRow = await db.prepare('SELECT default_routing_mode FROM workspaces WHERE id = ?').get(workload.workspace_id);
-  const routingMode = routingModeOf(workload, workspaceRow, config.ROUTING_MODE_DEFAULT);
-  const confirmZ = routingMode === 'cautious' ? config.CAUTIOUS_Z : undefined;
+  const optimize = optimizeFor(workload, workspaceRow, config.ROUTING_MODE_DEFAULT);
+  const confirmZ = optimize === 'quality' ? config.CAUTIOUS_Z : undefined;
   const results = [];
   let halt = null;
 
@@ -2556,50 +2560,62 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   const cleared = [];
   for (const r of clearedAll) if (!await everReverted(workloadId, r.model_id)) cleared.push(r);
 
-  /* In what order the setups that cleared are looked at again and switched to: the workload's routing
-     priority (src/eval/confidence.js). Balanced, where nobody chose, is the biggest saving we can be
-     sure of, and within a point of each other the faster; savings is the cheapest; cautious leaves out
-     what we are not sure enough of. The order, and why, is kept with the run, so the page can say why
-     the one switched to was chosen. */
-  const ranked = rankCleared(cleared, { mode: routingMode, metric, cautiousChance: config.CAUTIOUS_MIN_CHANCE });
-  /* What serves now is only ever replaced by something cheaper: a setup ranked above it on a slightly
-     surer reading of one sample, and dearer, would switch a workload back and forth for nothing. */
-  // read as it serves (keepOf): whether it still clears decides that only something cheaper takes its place
+  /* In what order the setups that cleared are looked at again and switched to: the best score first, for what the
+     workload optimizes for (src/eval/score.js). Each is scored out of 100 for quality, cost and speed against the
+     customer's own model on these very calls, and one optimizing for quality leaves out what it is not sure enough of.
+     The order and every score are kept with the run, so the page can say why the one switched to was chosen. */
+  const ranked = rankByScore(cleared, { optimize, floorPct: floor, refP50, metric, cautiousChance: config.CAUTIOUS_MIN_CHANCE });
+  const scoreFor = (r) => ranked.scores.get(r) ?? rowScore(r, { floorPct: floor, refP50, metric, optimize });
+  // read as it serves (keepOf): whether it still clears decides whether anything else is looked at in its place
   const servingCleared = results.find((r) => r.model_id === servingNow && keepOf(r) === 'cleared' && priced(r)) || null;
-  /* One that could not be judged this time (setups too busy to answer) still serves, and is held to the same
-     rule: only something cheaper is looked at in its place. */
+  /* One that could not be judged this time (setups too busy to answer) still serves, and is held to the older rule: only
+     something cheaper is looked at in its place. */
   const servingUnread = results.find((r) => r.model_id === servingNow && keepOf(r) === 'insufficient') || null;
   const holding = servingCleared || servingUnread;
+  /* What serves now is only replaced by something that scores clearly better, SCORE_SWITCH_MARGIN points or more: a setup
+     a point ahead on one sample would switch a workload back and forth for nothing. With no score to go on for what
+     serves, only something cheaper is looked at in its place, as before there were scores. */
+  const servingScore = servingCleared ? scoreFor(servingCleared) : null;
   let order = holding
-    ? ranked.order.filter((r) => r === servingCleared || Number(r.cost_month_usd) < Number(holding.cost_month_usd))
+    ? ranked.order.filter((r) => r === servingCleared || beatsServing(scoreFor(r), servingScore?.score ? servingScore : null, {
+      margin: config.SCORE_SWITCH_MARGIN, cheaper: Number(r.cost_month_usd) < Number(holding.cost_month_usd),
+    }))
     : ranked.order;
-  /* What serves and still clears keeps serving, even where a cautious priority would not switch to it
-     afresh: that priority is about what to switch to. Left out of the order, it was reported as "nothing
-     cleared your bar" while it went on serving. */
+  /* What serves and still clears keeps serving, even where optimizing for quality would not switch to it afresh: that
+     is about what to switch to. Left out of the order, it was reported as "nothing cleared your bar" while it went on
+     serving. */
   if (servingCleared && !order.includes(servingCleared)) order = [...order, servingCleared];
   for (const [k, r] of ranked.order.entries()) {
     r.choice_rank = k + 1;
     await db.prepare('UPDATE eval_results SET choice_rank = ? WHERE id = ?').run(k + 1, r.id);
   }
-  /* What a cautious workload leaves out, as not sure enough: never looked at again, never offered as the
+  /* What a workload optimizing for quality leaves out, as not sure enough: never looked at again, never offered as the
      candidate, never tried on live calls. Marked "not reached", it was all three. */
   const leftOut = ranked.left.map((x) => x.row).filter((r) => r !== servingCleared);
   for (const r of leftOut) {
     r.confirm_verdict = 'left_out';
     await db.prepare(`UPDATE eval_results SET confirm_verdict = 'left_out' WHERE id = ?`).run(r.id);
   }
-  const choiceOf = (r) => ({
-    model: r.model_id, label: r.arm_json ? nameOfResult(r).label : r.model_id,
-    saving: r.cost_ratio === null ? null : round8(Math.max(0, 1 - Number(r.cost_ratio) * (1 + config.ROUTING_FEE_PCT / 100))),
-    chance: r.chance ?? null, safeSaving: r.safe_saving ?? null,
-    p50: metric === 'ttft' ? (r.ttft_p50 ?? r.latency_p50 ?? null) : (r.latency_p50 ?? null), better: r.better_pct ?? null,
-  });
+  const choiceOf = (r) => {
+    const s = scoreFor(r);
+    return {
+      model: r.model_id, label: r.arm_json ? nameOfResult(r).label : r.model_id,
+      saving: r.cost_ratio === null ? null : round8(Math.max(0, 1 - Number(r.cost_ratio) * (1 + config.ROUTING_FEE_PCT / 100))),
+      chance: r.chance ?? null, safeSaving: r.safe_saving ?? null,
+      p50: metric === 'ttft' ? (r.ttft_p50 ?? r.latency_p50 ?? null) : (r.latency_p50 ?? null), better: r.better_pct ?? null,
+      parts: s.parts, score: s.score ? s.score.score : null, exact: s.score ? round8(s.score.exact) : null,
+    };
+  };
   const choice = {
-    mode: routingMode, metric, cautiousChance: config.CAUTIOUS_MIN_CHANCE,
+    mode: optimize, weights: PRESETS[optimize], metric, refP50: refP50 ?? null, margin: config.SCORE_SWITCH_MARGIN,
+    cautiousChance: config.CAUTIOUS_MIN_CHANCE,
     order: ranked.order.map(choiceOf), left: ranked.left.map((x) => ({ ...choiceOf(x.row), why: x.why })),
     servingKept: servingCleared ? servingCleared.model_id : null,
+    // what served and was held to, cleared or not read this time (the page's pick is worked out against it: bestFor)
+    holding: holding ? holding.model_id : null,
+    servingScore: servingScore?.score ? servingScore.score.score : null,
   };
-  await db.prepare('UPDATE eval_runs SET routing_mode = ?, choice_json = ? WHERE id = ?').run(routingMode, JSON.stringify(choice), run.id);
+  await db.prepare('UPDATE eval_runs SET routing_mode = ?, choice_json = ? WHERE id = ?').run(optimize, JSON.stringify(choice), run.id);
 
   /* A second look before anything is switched. Up to ten models race and the first in line that cleared
      wins, which is ten chances to be lucky: in simulation, ten models each half as bad again as the bar
@@ -2768,7 +2784,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   const servingClose = !best && !second && !unlooked && keepOf(servingRow) === 'review';
   // what serves could not be judged this time: some of the calls routed to its setups went unanswered
   const servingUnjudged = !best && !second && !unlooked && !servingClose && keepOf(servingRow) === 'insufficient' ? servingRow : null;
-  // what cleared was all left out by a cautious priority, as not sure enough to switch to
+  // what cleared was all left out by optimizing for quality, as not sure enough to switch to
   const leftOnly = !best && !second && !unlooked && !servingClose && !servingUnjudged && leftOut.length > 0 ? leftOut : null;
   /* How this workload switches: on its own ('auto'), when a person approves ('ask'), or never
      ('off': measured, never switched on its own and never asked about, though a person may still
@@ -2802,7 +2818,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
       kind: 'ok',
       title: `${shown(best)} still clears your bar on ${workload.slug}`,
       detail: `${Number(keepGap(best)).toFixed(2)}% against a ${floor.toFixed(2)}% bar, on calls it had not answered before`
-        + (failedLooks.length ? `. ${failedLooks.length === 1 ? failedLooks[0].r.model_id : `${failedLooks.length} cheaper models`} cleared once and did not hold up on a second look, so nothing changed` : ''),
+        + (failedLooks.length ? `. ${failedLooks.length === 1 ? failedLooks[0].r.model_id : `${failedLooks.length} models that scored higher`} cleared once and did not hold up on a second look, so nothing changed` : ''),
       workloadId,
     });
   } else if (best) {
@@ -2853,17 +2869,17 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
       workloadId,
     });
   } else if (leftOnly) {
-    /* Something cleared, and this workload's priority, cautious, would not switch to it: said as that. It
+    /* Something cleared, and this workload optimizes for quality, which would not switch to it: said as that. It
        used to read "the measurement ended before it could look at it again", and offered it as the candidate. */
     const r = [...leftOnly].sort((a, b) => (Number(b.chance) || 0) - (Number(a.chance) || 0))[0];
-    await settleStatus('no_match', 'A candidate cleared, but not surely enough for a cautious workload');
+    await settleStatus('no_match', QUALITY_NOT_SURE);
     await addActivity(workload.workspace_id, {
       kind: 'floor',
-      title: `${shown(r)} cleared your bar on ${workload.slug}, but not surely enough for a cautious workload`,
+      title: `${shown(r)} cleared your bar on ${workload.slug}, but not surely enough for a workload optimized for quality`,
       detail: `${r.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar. We are ${r.chance === null || r.chance === undefined ? 'not'
-        : `${(Math.floor(Number(r.chance) * 1000) / 10).toFixed(1)}%`} sure it keeps your bar, and this workload's routing priority, Cautious, `
+        : `${(Math.floor(Number(r.chance) * 1000) / 10).toFixed(1)}%`} sure it keeps your bar, and this workload optimizes for quality, which `
         + `only switches at ${Math.round(config.CAUTIOUS_MIN_CHANCE * 100)}% or more. Nothing was switched. The next measurement looks again, `
-        + 'and choosing Balanced on the workload page lets it be looked at again then.',
+        + 'and choosing Balance under Optimize for, on the workload page, lets it be looked at again then.',
       workloadId,
     });
   } else if (second || unlooked) {
@@ -2925,7 +2941,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   /* What cleared or came close, and costs less than the customer's own model, is kept as a runner-up
      live experiments can try; what this measurement no longer vouches for is set aside. */
   await markTrying(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId),
-    { runId: run.id, results, refMonthly, floor });
+    { runId: run.id, results, refMonthly, floor, metric, refP50 });
   /* The next measurement: the workspace's rhythm when this one changed something or somebody asked for
      it, further out when it only found what the last one did. */
   await scheduleNext(workloadId, {
@@ -3001,13 +3017,13 @@ export async function restingStatus(workloadId) {
     return { status: 'certified', note: confirmed(ready[0]) ? null : 'A candidate cleared once and needs a second look', routed };
   }
   /* cleared once and did not hold up on calls it had never seen: never offered, and said as that (see failedSecondLook);
-     read before one a cautious priority left out, in the order the run itself says them at its end */
+     read before one left out by optimizing for quality, in the order the run itself says them at its end */
   if (results.some((r) => r.verdict === 'cleared' && failedSecondLook(r))) {
     return { status: 'no_match', note: SECOND_LOOK_FAILED, routed };
   }
-  // cleared, and left out by a cautious priority as not sure enough: what the run itself said at its end
+  // cleared, and left out by optimizing for quality as not sure enough: what the run itself said at its end
   if (results.some((r) => r.verdict === 'cleared' && r.confirm_verdict === 'left_out')) {
-    return { status: 'no_match', note: 'A candidate cleared, but not surely enough for a cautious workload', routed };
+    return { status: 'no_match', note: QUALITY_NOT_SURE, routed };
   }
   if (results.some((r) => r.verdict === 'review')) {
     return { status: 'certified', note: 'A candidate is close and needs a look', routed };

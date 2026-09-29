@@ -202,15 +202,19 @@ export const config = {
   EVAL_CONFIRM_TRIES: num('EVAL_CONFIRM_TRIES', 3),
   EVAL_CONFIRM_MIN: num('EVAL_CONFIRM_MIN', 30),
   EVAL_CONFIRM_MULTIPLE: num('EVAL_CONFIRM_MULTIPLE', 2),
-  /* Which of the setups that cleared a workload switches to (src/eval/confidence.js): 'balanced', the
-     biggest saving we can be sure of, with near ties going to the faster; 'cautious', the same among the
-     setups we are at least CAUTIOUS_MIN_CHANCE sure of, with the second look held to a one-sided bound of
-     CAUTIOUS_Z (1.96 is 97.5%) rather than 95%; or 'savings', the cheapest that cleared. A workload and a
-     workspace choose for themselves; this is what they have until they do. */
-  ROUTING_MODE_DEFAULT: ['cautious', 'balanced', 'savings'].includes(str('ROUTING_MODE_DEFAULT', 'balanced'))
-    ? str('ROUTING_MODE_DEFAULT', 'balanced') : 'balanced',
+  /* What a workload optimizes for when it and its workspace have not chosen (src/eval/score.js): 'balance', the
+     default, 'quality', 'cost' or 'speed', each weighing a setup's quality, cost and speed scores its own way. The
+     routing priorities from before, 'balanced', 'cautious' and 'savings', read as balance, quality and cost.
+     Optimizing for quality also switches only to setups at least CAUTIOUS_MIN_CHANCE sure to keep the allowed
+     difference, with the second look held to a one-sided bound of CAUTIOUS_Z (1.96 is 97.5%) rather than 95%. */
+  ROUTING_MODE_DEFAULT: ({ balance: 'balance', quality: 'quality', cost: 'cost', speed: 'speed', balanced: 'balance', cautious: 'quality',
+    savings: 'cost' })[str('ROUTING_MODE_DEFAULT', 'balance').trim().toLowerCase()] || 'balance',
   CAUTIOUS_MIN_CHANCE: num('CAUTIOUS_MIN_CHANCE', 0.99),
   CAUTIOUS_Z: num('CAUTIOUS_Z', 1.96),
+  /* What serves a workload now is only replaced by a setup whose score is at least this many points higher: two a point
+     apart on one test would otherwise switch a workload back and forth for nothing. Live experiments after a switch are
+     held to it as well. */
+  SCORE_SWITCH_MARGIN: num('SCORE_SWITCH_MARGIN', 3),
   /* Judging a difference three ways (src/eval/judge.js): where a candidate's written answer differs from
      the customer's model's only in wording or in what it includes, Jev is asked, in both orders, whether it
      serves the person worse, as well or better. It is forgiven only when both readings put the chance the

@@ -39,16 +39,16 @@ export function outcomeOf(r) {
    times dearer could be switched to; with nothing to compare against, nothing is a candidate.
 
    One the second look confirmed before one it did not: a person may still approve that one, but it is
-   never what is offered first. Then in the order the run itself chose from (choice_rank, by the
-   workload's routing priority: see src/eval/confidence.js), and cheapest first where a run kept no order
-   (every run before routing priorities). */
+   never what is offered first. Then in the order the run itself chose from (choice_rank: the best score
+   for what the workload optimizes for, see src/eval/score.js), and cheapest first where a run kept no
+   order (every run before routing priorities). */
 export function cheaperCleared(results, feePct = config.ROUTING_FEE_PCT) {
   const ref = results.find((r) => r.verdict === 'reference');
   const refCost = ref?.cost_month_usd ?? null;
   const ceiling = 1 / (1 + (Number(feePct) || 0) / 100);
   const rank = (r) => (r.choice_rank === null || r.choice_rank === undefined ? Infinity : Number(r.choice_rank));
-  /* One a cautious workload left out as not sure enough is never offered: offered, approving with no
-     model named switched to exactly what the workload's own priority had turned down. Nor one its second look
+  /* One a workload optimizing for quality left out as not sure enough is never offered: offered, approving with
+     no model named switched to exactly what the workload's own setting had turned down. Nor one its second look
      did not hold up (failedSecondLook). */
   return results.filter((r) => r.verdict === 'cleared' && r.cost_month_usd != null && refCost != null
     && Number(r.cost_month_usd) < Number(refCost)

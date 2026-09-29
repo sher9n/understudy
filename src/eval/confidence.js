@@ -1,18 +1,11 @@
-/* How sure a measurement can be that a setup keeps the promise, and which of the setups that
- * cleared to switch to. Pure, so every number on a certificate can be checked by hand.
+/* How sure a measurement can be that a setup keeps the promise. Pure, so every number on a certificate
+ * can be checked by hand.
  *
- * A setup clears when even the top of its range is inside the pass mark (see verdictWith). Among
- * the ones that clear, the cheapest used to win outright. That is right when "cleared" is certain,
- * and a measurement is a sample: two setups can both clear while one of them is much surer to keep
- * the promise than the other, or answer much faster. So the choice depends on the workload's
- * routing priority:
- *
- *   savings   the cheapest that cleared, as it always was;
- *   balanced  the biggest saving we can be sure of: what it saves, times the chance its true rate of
- *             worse or different answers is inside the pass mark; setups within a point of each
- *             other go to the faster one, then the cheaper one;
- *   cautious  the same ranking, among setups we are at least CAUTIOUS_MIN_CHANCE sure of, and the
- *             second look is held to a stricter bound (see run.js).
+ * A setup clears when even the top of its range is inside the pass mark (see verdictWith). A measurement
+ * is a sample, so two setups can both clear while one of them is much surer to keep the promise than the
+ * other. That chance is kept with each result: a workload optimizing for quality only switches to setups it
+ * is at least CAUTIOUS_MIN_CHANCE sure of, and the router by kind of request weighs its savings by it. Which
+ * of the setups that cleared is switched to is src/eval/score.js: the best score for quality, cost and speed.
  *
  * The chance comes from the calls themselves: with k worse or different answers in n (a score of a
  * half counts as half of one), the true rate is taken as Beta(k + 1/2, n - k + 1/2), which is what
@@ -94,53 +87,4 @@ export function safeSaving(costRatio, chance, feePct = 1) {
   if (chance === null || chance === undefined || !Number.isFinite(Number(chance))) return null;
   const saving = Math.max(0, 1 - Number(costRatio) * (1 + (Number(feePct) || 0) / 100));
   return saving * Math.max(0, Math.min(1, Number(chance)));
-}
-
-export const ROUTING_MODES = ['cautious', 'balanced', 'savings'];
-
-/** A workload's routing priority: its own choice, else its workspace's, else the deployment's. */
-export function routingModeOf(workload, workspace = null, fallback = 'balanced') {
-  const pick = (m) => (ROUTING_MODES.includes(m) ? m : null);
-  return pick(workload?.routing_mode) || pick(workspace?.default_routing_mode) || pick(fallback) || 'balanced';
-}
-
-/* The speed a setup is ranked on: time to the first word where the workload is timed that way,
-   otherwise time to the whole answer. A setup with no timing sorts after one with. */
-const speedOf = (r, metric) => {
-  const v = Number(metric === 'ttft' ? (r.ttft_p50 ?? r.latency_p50) : r.latency_p50);
-  return Number.isFinite(v) && v > 0 ? v : Infinity;
-};
-
-/**
- * The setups that cleared, in the order they are looked at again and switched to.
- * rows: eval_results rows with cost_month_usd, cost_ratio, chance, safe_saving and timings.
- * Answers { order, left }: `left` are the ones a cautious workload would not switch to, with why.
- */
-export function rankCleared(rows, { mode = 'balanced', metric = 'latency', cautiousChance = 0.99, bucket = 0.01 } = {}) {
-  const all = [...(rows || [])];
-  const byCost = (a, b) => (Number(a.cost_month_usd) - Number(b.cost_month_usd));
-  if (mode === 'savings') return { order: all.sort(byCost), left: [] };
-  const left = [];
-  let pool = all;
-  if (mode === 'cautious') {
-    pool = all.filter((r) => Number(r.chance) >= cautiousChance);
-    for (const r of all) if (!(Number(r.chance) >= cautiousChance)) left.push({ row: r, why: 'not sure enough for a cautious workload' });
-  }
-  const safe = (r) => {
-    const s = Number(r.safe_saving);
-    return Number.isFinite(s) ? s : -1;
-  };
-  /* Within a point of saving of each other counts as a tie, and a tie goes to the faster one. Grouped
-     from the top: each group is the setups within `bucket` of the surest saving still left, so the
-     order is the same however the setups arrive, and two a hair apart are never split by rounding. */
-  const bySafe = [...pool].sort((a, b) => (safe(b) - safe(a)) || byCost(a, b));
-  const groups = [];
-  for (const r of bySafe) {
-    const g = groups[groups.length - 1];
-    if (g && safe(g[0]) - safe(r) <= bucket + 1e-12) g.push(r);
-    else groups.push([r]);
-  }
-  const order = groups.flatMap((g) => g.sort((a, b) => (speedOf(a, metric) - speedOf(b, metric))
-    || (safe(b) - safe(a)) || byCost(a, b)));
-  return { order, left };
 }

@@ -71,6 +71,7 @@ const { buildUpstream } = await import('../src/openrouter.js');
 const { routeFor } = await import('../src/learn/serve.js');
 const { cheaperCleared } = await import('../src/eval/outcome.js');
 const { zdrFor } = await import('../src/workspace.js');
+const { runPageOf } = await import('../src/workloadPage.js');
 const { default: config } = await import('../src/config.js');
 
 await migrate({ quiet: true });
@@ -90,6 +91,14 @@ const COST = { [REF]: 0.002, [THIN]: 0.0002, [QUICK]: 0.000205, [CHEAP]: 0.0001,
 // how long each takes to answer, beyond the stand-in's own time
 // slow enough that a busy test machine never hides it (GitHub's runners are far slower than a laptop)
 const DELAY = { [THIN]: 90 };
+/* How long the customer's own model takes, for the scenarios about what a workload optimizes for: a speed score is how
+   much sooner a model answers than the customer's own, which the stand-in otherwise answers at once, so nothing could be
+   sooner. The rest of the tests leave it at nothing, so they take no longer. */
+let refDelay = 0;
+const withRefDelay = async (ms, fn) => {
+  refDelay = ms;
+  try { return await fn(); } finally { refDelay = 0; }
+};
 const JEV_COST = 0.00001;
 
 /* The requests. A third of the order workload's requests are long complaints about a refund, the rest
@@ -230,7 +239,7 @@ const server = http.createServer((req, res) => {
       res.write(chunk({ content: content.slice(10) }));
       res.write(`data: ${JSON.stringify({ id, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage })}\n\n`);
       res.end('data: [DONE]\n\n');
-    }, DELAY[model] || 0);
+    }, (DELAY[model] || 0) + (model === REF ? refDelay : 0));
   });
 });
 
@@ -327,17 +336,17 @@ const callRow = async (callId) => {
   throw new Error(`call ${callId} was never recorded`);
 };
 
-/* 1. The routing priority ------------------------------------------------------------------------ */
+/* 1. What a workload optimizes for (src/eval/score.js) --------------------------------------------- */
 
 let balanced = null;
 
-test('balanced switches to the biggest saving we are sure of, and of two that save about the same, the faster', async () => {
+test('balance switches to the best score: of two that save about the same, the much faster, and it keeps every score', async () => {
   balanced = await seed({ enabled: [THIN, QUICK] });
-  const out = await runEvaluation(balanced.workload.id);
+  const out = await withRefDelay(150, () => runEvaluation(balanced.workload.id));
   assert.equal(out.ok, true, JSON.stringify(out));
   balanced.runId = out.runId;
   const run = await runOf(out.runId);
-  assert.equal(run.routing_mode, 'balanced', 'nobody chose, so the default');
+  assert.equal(run.routing_mode, 'balance', 'nobody chose, so the default');
   const thin = await resultOf(out.runId, THIN);
   const quick = await resultOf(out.runId, QUICK);
   assert.equal(thin.verdict, 'cleared');
@@ -349,35 +358,101 @@ test('balanced switches to the biggest saving we are sure of, and of two that sa
     assert.ok(Number(r.chance) > 0.99, `${r.model_id}: sure it keeps the bar, ${r.chance}`);
     assert.ok(Math.abs(Number(r.safe_saving) - (1 - Number(r.cost_ratio) * 1.01) * Number(r.chance)) < 1e-6, `${r.model_id}: safe saving ${r.safe_saving}`);
   }
-  assert.ok(Number(thin.safe_saving) - Number(quick.safe_saving) < 0.01, 'within a point of each other');
   assert.equal(quick.choice_rank, 1, 'the faster one comes first');
   assert.equal(thin.choice_rank, 2);
   const choice = JSON.parse(run.choice_json);
+  assert.equal(choice.mode, 'balance');
+  assert.deepEqual(choice.weights, { quality: 40, cost: 30, speed: 30 });
   assert.deepEqual(choice.order.map((x) => x.model), [QUICK, THIN]);
+  // every score kept with the run, each part out of 100 and the score built from the rounded parts
+  for (const x of choice.order) {
+    const { quality, cost, speed } = x.parts;
+    assert.ok([quality, cost, speed].every((v) => Number.isInteger(v) && v >= 0 && v <= 100), JSON.stringify(x.parts));
+    assert.equal(x.score, Math.round((40 * quality + 30 * cost + 30 * speed) / 100));
+  }
+  const [q, t] = choice.order;
+  assert.equal(q.parts.cost, t.parts.cost, `they save about the same: ${q.parts.cost} and ${t.parts.cost}`);
+  assert.ok(q.parts.speed > t.parts.speed + 20, `the quick one is much sooner: ${q.parts.speed} against ${t.parts.speed}`);
+  assert.ok(q.score > t.score, `${q.score} against ${t.score}`);
   assert.equal(choice.chosen, QUICK, 'what the test chose is written down as it was decided');
   assert.equal(choice.chosenKept, false, 'a switch, not a setup kept');
   assert.equal(quick.confirm_verdict, 'cleared', 'it passed its second look');
   assert.equal(thin.confirm_verdict, 'not_reached', 'and the one after it never needed one');
   const w = await load(balanced.workload.id);
   assert.equal(w.routed_model, QUICK, 'switched to the faster one');
+  // and the test's page names it the pick, as the best balance, first in its order
+  const page = await runPageOf(w, run);
+  assert.equal(page.bestBy.balance, QUICK);
+  assert.equal(page.keptBy.balance, false);
+  assert.equal(page.orderBy.balance[0], QUICK);
 });
 
-test('most savings switches to the cheapest that clears, whatever its speed', async () => {
-  const shop = await seed({ enabled: [THIN, QUICK], routing: 'savings' });
-  const out = await runEvaluation(shop.workload.id);
+let costly = null;
+
+test('optimizing for cost switches to the cheaper of two that pass, where balance would take the much faster', async () => {
+  // enough requests for two tests and two second looks on requests no test has drawn
+  costly = await seed({ enabled: [THIN, STEADY], routing: 'cost', n: 700 });
+  const out = await withRefDelay(150, () => runEvaluation(costly.workload.id));
   assert.equal(out.ok, true, JSON.stringify(out));
-  assert.equal((await runOf(out.runId)).routing_mode, 'savings', 'the workload\'s own choice');
+  const run = await runOf(out.runId);
+  assert.equal(run.routing_mode, 'cost', 'the workload\'s own choice');
+  const choice = JSON.parse(run.choice_json);
+  assert.deepEqual(choice.order.map((x) => x.model), [THIN, STEADY], JSON.stringify(choice.order));
   assert.equal((await resultOf(out.runId, THIN)).choice_rank, 1);
-  assert.equal((await load(shop.workload.id)).routed_model, THIN);
+  assert.equal((await load(costly.workload.id)).routed_model, THIN);
+  // the same two, read for balance: the steady one is dearer, and so much sooner that it scores higher
+  const [t, st] = choice.order;
+  const balance = (x) => Math.round((40 * x.parts.quality + 30 * x.parts.cost + 30 * x.parts.speed) / 100);
+  assert.ok(balance(st) >= balance(t) + 3, `balance would switch to the steady one: ${balance(st)} against ${balance(t)}`);
+  costly.firstRun = out.runId;
 });
 
-test('cautious, from the workspace, holds the second look to a stricter bound on the same number of calls', async () => {
-  const shop = await seed({ enabled: [THIN, QUICK], workspaceRouting: 'cautious' });
-  const out = await runEvaluation(shop.workload.id);
+test('a clearly better score takes the place of a cheaper model that serves, once the workload optimizes for balance', async () => {
+  const { workload } = costly;
+  // the workload lets go of its own choice and follows the workspace, which has none: balance
+  await db.prepare('UPDATE workloads SET routing_mode = NULL WHERE id = ?').run(workload.id);
+  forgetState(workload.id);
+  const out = await withRefDelay(150, () => runEvaluation(workload.id, { trigger: 'automatic' }));
   assert.equal(out.ok, true, JSON.stringify(out));
-  assert.equal((await runOf(out.runId)).routing_mode, 'cautious', 'the workspace\'s choice, the workload having none');
+  const run = await runOf(out.runId);
+  assert.equal(run.routing_mode, 'balance');
+  const choice = JSON.parse(run.choice_json);
+  assert.equal(choice.servingKept, THIN, 'what serves still passed');
+  assert.ok(Number.isInteger(choice.servingScore), `and has a score: ${choice.servingScore}`);
+  const steady = choice.order.find((x) => x.model === STEADY);
+  assert.ok(steady.score >= choice.servingScore + choice.margin, `the steady one scores clearly higher: ${steady.score} against ${choice.servingScore}`);
+  const look = await resultOf(out.runId, STEADY);
+  assert.equal(choice.chosen, STEADY, `looked at again (${look.confirm_verdict}, ${look.confirm_runs} new requests), and switched to`);
+  const w = await load(workload.id);
+  assert.equal(w.routed_model, STEADY, 'dearer than what served, and better on balance');
+  // its page names the one it switched to; the test before it still names what it chose, whatever serves since
+  assert.equal((await runPageOf(w, run)).bestBy.balance, STEADY);
+  const before = await runPageOf(w, await runOf(costly.firstRun));
+  assert.equal(before.bestBy.cost, THIN, 'what that test chose, optimizing for cost');
+  assert.equal(before.bestBy.balance, STEADY, 'and what it would have, for balance, with nothing serving then');
+});
+
+test('a score only a point or two higher never takes the place of what serves', async () => {
+  const { workload } = balanced;
+  // quick serves; thin saves the same and, with the customer's model as quick as they are, scores the same: nothing moves
+  const out = await runEvaluation(workload.id, { trigger: 'automatic' });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const choice = JSON.parse((await runOf(out.runId)).choice_json);
+  assert.equal(choice.servingKept, QUICK);
+  const thin = choice.order.find((x) => x.model === THIN);
+  assert.ok(!thin || thin.score < choice.servingScore + choice.margin, JSON.stringify(choice.order));
+  assert.equal(choice.chosen, QUICK, 'kept');
+  assert.equal(choice.chosenKept, true);
+  assert.equal((await load(workload.id)).routed_model, QUICK);
+});
+
+test('optimizing for quality, read from the Cautious the workspace chose before, holds the second look to a stricter bound', async () => {
+  const shop = await seed({ enabled: [THIN, QUICK], workspaceRouting: 'cautious' });
+  const out = await withRefDelay(150, () => runEvaluation(shop.workload.id));
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal((await runOf(out.runId)).routing_mode, 'quality', 'the workspace\'s choice, the workload having none, under its new name');
   const quick = await resultOf(out.runId, QUICK);
-  assert.equal(quick.choice_rank, 1, 'both are sure enough, so the faster comes first');
+  assert.equal(quick.choice_rank, 1, 'both are sure enough, so the better score comes first');
   assert.equal(quick.confirm_verdict, 'cleared');
   const easy = await resultOf(balanced.runId, QUICK);
   assert.equal(quick.confirm_runs, easy.confirm_runs, `the same number of calls as a balanced look: ${quick.confirm_runs} and ${easy.confirm_runs}`);
@@ -408,7 +483,7 @@ test('a measurement finds the kinds of request a cheap model gets right, and swi
   assert.deepEqual(spec.options.map((o) => o.model), [CHEAP, STEADY], 'only the setups its table uses');
   const rank = JSON.parse(router.rank_json);
   assert.ok(rank.kindsZ >= 1.645, `its kinds mattered: ${rank.kindsZ}`);
-  assert.equal(router.choice_rank, 1, 'the biggest saving we are sure of');
+  assert.equal(router.choice_rank, 1, 'the best score');
   assert.equal(router.confirm_verdict, 'cleared', 'it passed a second look of its own');
   const arm = await armOf(kinds.workload.id);
   assert.equal(arm.kind, 'router', 'switched to it');
@@ -902,14 +977,14 @@ test('a router whose spec names a setup it does not have, or none at all, sends 
   assert.equal(old.use.model, REF);
 });
 
-/* 7. A cautious workload with nothing it is sure enough of ------------------------------------------------ */
+/* 7. A workload optimizing for quality with nothing it is sure enough of --------------------------------- */
 
-test('what a cautious workload is not sure enough of is never looked at again, offered or tried, and it says so', async () => {
+test('what a workload optimizing for quality is not sure enough of is never looked at again, offered or tried, and it says so', async () => {
   const sure = config.CAUTIOUS_MIN_CHANCE;
   // surer than 120 clean calls can ever make anything, so both setups that clear are left out
   config.CAUTIOUS_MIN_CHANCE = 0.9999;
   try {
-    const shop = await seed({ enabled: [THIN, QUICK], workspaceRouting: 'cautious' });
+    const shop = await seed({ enabled: [THIN, QUICK], workspaceRouting: 'quality' });
     const out = await runEvaluation(shop.workload.id);
     assert.equal(out.ok, true, JSON.stringify(out));
     const rows = await resultsOf(out.runId);
@@ -922,9 +997,10 @@ test('what a cautious workload is not sure enough of is never looked at again, o
     assert.deepEqual(cheaperCleared(rows), [], 'nothing is offered to approve');
     const w = await load(shop.workload.id);
     assert.equal(w.routed_model, null, 'nothing switched');
-    assert.equal(w.status_note, 'A candidate cleared, but not surely enough for a cautious workload');
+    assert.equal(w.status_note, 'A candidate cleared, but not surely enough for a workload optimized for quality');
     const said = await db.prepare(`SELECT title, detail FROM activity WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1`).get(shop.workload.id);
-    assert.match(said.title, /not surely enough for a cautious workload/);
+    assert.match(said.title, /not surely enough for a workload optimized for quality/);
+    assert.match(said.detail, /choosing Balance under Optimize for, on the workload page/);
     assert.doesNotMatch(said.detail, /most one measurement may spend/, 'never put down to money');
     const trying = await db.prepare(`SELECT COUNT(*) AS n FROM arms WHERE workload_id = ? AND status = 'trying'`).get(shop.workload.id);
     assert.equal(Number(trying.n), 0, 'and not tried on live calls, where an experiment could switch to it');

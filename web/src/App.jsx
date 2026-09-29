@@ -579,7 +579,7 @@ export default function App() {
       return <ModelPage wid={openId} runId={test} model={model} go={go} goTo={goTo} key={`${openId}:${test}:${model}`} />;
     }
     if (openId) {
-      return <WorkloadDetail id={openId} onBack={() => go('work')}
+      return <WorkloadDetail key={openId} id={openId} onBack={() => go('work')}
         onChanged={() => load('work')} go={go} goTo={goTo} />;
     }
     if (err) {

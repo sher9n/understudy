@@ -9,7 +9,8 @@ import { valueOf, optimizingSince, paceOf } from './eval/value.js';
 import { routedSavings } from './eval/actual.js';
 import { cadenceOf, waitOf } from './eval/schedule.js';
 import { HANDED_OVER } from './jobs.js';
-import { outcomeOf, failedSecondLook, DID_NOT_HOLD_UP } from './eval/outcome.js';
+import { outcomeOf, failedSecondLook, DID_NOT_HOLD_UP, confirmed } from './eval/outcome.js';
+import { OPTIMIZE_FOR, PRESETS, optimizeFor, optimizeValue, partsOf, scoreOf, p50Of } from './eval/score.js';
 import { canJudge } from './eval/judge.js';
 import { servingKey } from './eval/promote.js';
 import { controlRecord, barOf } from './learn/control.js';
@@ -462,7 +463,7 @@ function secondWhy(r, differs) {
   return `${first} ${on}${close} it ${differs}${fig}${allowed}. So it isn't switched to, and the next test looks again.`;
 }
 
-function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = false, floorPct = null, quality = false, names = new Map(), speed = null }) {
+function candOf(r, { sample, serving, refPer, refP50 = null, metric, avg, switchRun, unsure = false, floorPct = null, quality = false, names = new Map(), speed = null }) {
   const name = nameOfResult(r);
   const n = Number(r.runs) || 0;
   const isServing = !!serving && r.model_id === serving;
@@ -511,12 +512,28 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
   const [tone, verdict, why] = out;
   const ratio = r.cost_ratio === null || r.cost_ratio === undefined ? null : Number(r.cost_ratio);
   const perCall = ratio !== null && refPer ? ratio * refPer : (name.kind === 'model' ? avg.get(r.model_id) ?? null : null);
-  const ms = metric === 'ttft' ? Number(r.ttft_p50) || null : Number(r.latency_p50) || null;
+  // timed as its speed is scored (p50Of): to the first word, or its whole answer where it came in one piece
+  const ms = p50Of(r, metric);
   const pct = (x) => (x === null || x === undefined ? null : round8(Number(x) / 100));
   /* A model failed as unable to keep up only once it had answered every request of this test (its provider gave out on its
      second look, or on another's) was judged on all of them, and its figure says how its answers compared. One stopped part
      way, or failed for errors, has no figure that means anything. */
   const judged = (r.verdict !== 'failed' || (r.stopped === 'busy' && n >= sample)) && r.gap_pct !== null && r.gap_pct !== undefined && n > 0;
+  /* Its quality, cost and speed out of 100, and its overall score for each thing the workload can optimize for (see
+     src/eval/score.js): the page shows the one the workload uses, and changing it re-sorts the table on the spot. Costed
+     from the same requests as the original model where it can be, else from its own answers' average. */
+  const costRatio = ratio ?? (perCall !== null && refPer ? perCall / refPer : null);
+  const parts = partsOf({ gapPct: judged ? r.gap_pct : null, floorPct, costRatio, p50: p50Of(r, metric), refP50 });
+  const scores = Object.fromEntries(OPTIMIZE_FOR.map((k) => {
+    const sc = scoreOf(parts, k);
+    return [k, sc ? round8(sc.exact) : null];
+  }));
+  /* Whether it could be picked, by the rule a test switches on: it passed, costs less than the original model once our
+     fee is added, and was not found wanting on a second look or left out as not sure enough. A workload optimizing for
+     quality also asks that it be CAUTIOUS_MIN_CHANCE sure (sure). */
+  const feeCeiling = 1 / (1 + config.ROUTING_FEE_PCT / 100);
+  const eligible = r.verdict === 'cleared' && costRatio !== null && costRatio < feeCeiling && !failedSecondLook(r)
+    && r.confirm_verdict !== 'left_out';
   const label = name.kind === 'model' ? r.model_id
     : name.kind === 'cascade' ? `${name.first}, checked`
       : name.kind === 'router' && name.version === 2 ? name.short
@@ -549,7 +566,15 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
        and could not keep up is not. */
     failed: r.verdict === 'failed',
     serving: isServing,
+    parts,
+    scores,
+    eligible,
+    sure: Number(r.chance) >= config.CAUTIOUS_MIN_CHANCE,
     twice: verdict === 'Passed twice',
+    // its second look stood behind it (passed again, or a strategy trying live): what a test switches to (bestFor)
+    confirmed: confirmed(r) === 1,
+    // what it would cost a month, which is what the older rule compares when what serves has no score (bestFor)
+    costMonth: r.cost_month_usd === null || r.cost_month_usd === undefined ? null : Number(r.cost_month_usd),
     confirmRuns: Number(r.confirm_runs) || 0,
     // the new requests its second look was read on, which decided its outcome as well (lookAgain in src/eval/run.js)
     second: Number(r.confirm_runs) || 0,
@@ -557,6 +582,51 @@ function candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure = f
 }
 
 const TONE_ORDER = { ok: 0, warn: 1, bad: 2, mut: 3 };
+
+/* The table's order for what a workload optimizes for: the models that could be picked first (for quality, only the ones
+   sure enough), best score first; then the rest, best score first; one with no score last, by its outcome, difference
+   and cost as the table always was. Ties go to the better quality, then the cheaper, then the faster. */
+const pickable = (c, k) => c.eligible && (k !== 'quality' || c.sure);
+export const byScoreFor = (k) => (a, b) => {
+  const pa = pickable(a, k) ? 0 : 1;
+  const pb = pickable(b, k) ? 0 : 1;
+  if (pa !== pb) return pa - pb;
+  const sa = a.scores?.[k] ?? null;
+  const sb = b.scores?.[k] ?? null;
+  if (sa !== null && sb !== null && sa !== sb) return sb - sa;
+  if ((sa === null) !== (sb === null)) return sa === null ? 1 : -1;
+  const d = (x) => (b.parts?.[x] ?? -1) - (a.parts?.[x] ?? -1);
+  return d('quality') || d('cost') || d('speed') || (TONE_ORDER[a.tone] - TONE_ORDER[b.tone])
+    || ((a.gap ?? 2) - (b.gap ?? 2)) || ((a.perCall ?? 1) - (b.perCall ?? 1)) || String(a.label).localeCompare(String(b.label));
+};
+
+/* The model a test's page names the pick for one choice, by the rule a test switches on (run.js): the best score among
+   the ones that could be picked; but what served when the test ran, where it passed (`inUse`), keeps serving unless one
+   scores clearly better, by SCORE_SWITCH_MARGIN points, even where optimizing for quality would not pick it afresh, and
+   where it has no score, unless one is cheaper, as before there were scores. For what the test itself optimized for
+   (`settled`), it is the first of those, best score first, that its second look stood behind, or what serves where that
+   comes first: one ahead of it whose second look had too few new requests to go on, or was never reached, waits for the
+   next test, and naming it the pick named one the test did not switch to. { key, kept }: key null where none could be
+   picked; kept where it is what serves, kept although one that could be picked scores more. */
+export function pickFor(cands, k, { settled = false, inUse = null, chosen = null } = {}) {
+  const has = (c) => c.scores?.[k] !== null && c.scores?.[k] !== undefined;
+  const held = inUse ? cands.find((c) => c.key === inUse) || null : null;
+  const higher = (p) => cands.some((c) => c !== p && pickable(c, k) && has(c) && (!has(p) || c.scores[k] > p.scores[k]));
+  // what the test wrote down that it chose, where it did (choice.chosen in run.js): that, for what it optimized for
+  const wrote = settled && chosen ? cands.find((c) => c.key === chosen) : null;
+  if (wrote) return { key: wrote.key, kept: wrote === held && higher(wrote) };
+  let pool = cands.filter((c) => c !== held && pickable(c, k) && has(c));
+  if (held) {
+    pool = pool.filter((c) => (has(held) ? c.scores[k] >= held.scores[k] + config.SCORE_SWITCH_MARGIN
+      : c.costMonth !== null && held.costMonth !== null && c.costMonth < held.costMonth));
+    pool.push(held);
+  }
+  pool.sort(byScoreFor(k));
+  if (!pool.length) return { key: null, kept: false };
+  const pick = (settled && pool.find((c) => c.confirmed || c === held)) || pool[0];
+  return { key: pick.key, kept: pick === held && higher(pick) };
+}
+export const bestFor = (cands, k, opts) => pickFor(cands, k, opts).key;
 const z2 = 1.6449 ** 2;
 const pctWords = (x) => `${Math.round(x * 1000) / 10}%`;
 
@@ -681,12 +751,15 @@ function mainTake(run, cands, w, { small = null, refName }) {
       + `requests takes at least ${small.need}.${wait}`;
   }
   // stayed within the allowed difference as the judge read it, and held back only because the judge was not trusted
-  const unsure = cands.find((c) => c.verdict === 'Passed, judge unsure' && c.gap !== null);
+  /* The closest by how often it differed, whatever the table's order: sorted by score, the first was the cheapest or
+     the quickest, and the sentence called it the closest match while a closer one sat below it. */
+  const closest = (pick) => cands.filter(pick).reduce((a, c) => (a === null || c.gap < a.gap ? c : a), null);
+  const unsure = closest((c) => c.verdict === 'Passed, judge unsure' && c.gap !== null);
   if (unsure) {
     return `${said}${unsure.said} stayed within the allowed difference as the judge read it: ${quality ? 'clearly worse' : 'different'} on `
       + `${pctWords(unsure.gap)} of the requests tested, where at most ${barWords} is allowed.`;
   }
-  const close = cands.find((c) => c.tone === 'warn' && c.gap !== null);
+  const close = closest((c) => c.tone === 'warn' && c.gap !== null);
   if (close) {
     const did = quality
       ? `Its answer was clearly worse than the original model's on ${pctWords(close.gap)} of the requests tested.`
@@ -769,9 +842,40 @@ export async function runPageOf(w, run) {
         GROUP BY model_id`).all(speed.limits.p90, run.id, slow);
     for (const x of rows) speed.over.set(x.model_id, { n: Number(x.n), over: Number(x.over) });
   }
-  const cands = results.map((r) => candOf(r, { sample, serving, refPer, metric, avg, switchRun, unsure, floorPct, quality, names, speed }))
-    .sort((a, b) => (TONE_ORDER[a.tone] - TONE_ORDER[b.tone])
-      || ((a.gap ?? 2) - (b.gap ?? 2)) || ((a.perCall ?? 1) - (b.perCall ?? 1)));
+  /* What the workload optimizes for now (src/eval/score.js), which the table is sorted by; each model carries its score
+     for every choice, and the pick for each is said below, so changing it re-sorts the table without asking again. */
+  const workspaceRow = await db.prepare('SELECT default_routing_mode FROM workspaces WHERE id = ?').get(w.workspace_id);
+  const optimize = optimizeFor(w, workspaceRow, config.ROUTING_MODE_DEFAULT);
+  const cands = results.map((r) => candOf(r, { sample, serving, refPer, refP50: refP50 || null, metric, avg, switchRun, unsure, floorPct, quality, names, speed }))
+    .sort(byScoreFor(optimize));
+  /* The pick for each choice, by what the test itself kept (choice_json in run.js): the setups it could switch to at all
+     are the ones it ranked (passed, priced, cheaper than the original model once the fee is added, and never switched
+     back from), with the ones optimizing for quality left out as not sure enough, which any other choice could pick;
+     one its second look then found wanting is not among them. What served when it ran is the one a challenger has to
+     score clearly better than, not whatever serves now: a later test's switch moved the pick of every test before it.
+     A test with no such record (from before routing priorities) is read by the same rule from its rows. Where it
+     optimized for a choice with scores (kept with its weights), its second looks followed that order, so its pick for
+     that choice is the one they stood behind; a test from before scores looked in another order. A test a person
+     stopped switched nothing, and names no pick. */
+  let choice = null;
+  try { choice = run.choice_json ? JSON.parse(run.choice_json) : null; } catch { choice = null; }
+  if (choice && Array.isArray(choice.order)) {
+    const ranked = new Set([...choice.order, ...(Array.isArray(choice.left) ? choice.left : [])].map((x) => x.model));
+    const byKey = new Map(results.map((r) => [r.model_id, r]));
+    for (const c of cands) c.eligible = ranked.has(c.key) && !failedSecondLook(byKey.get(c.key));
+    cands.sort(byScoreFor(optimize));
+  }
+  const inUse = choice ? (choice.holding ?? choice.servingKept ?? null)
+    : cands.some((c) => c.serving && c.eligible) ? serving : null;
+  const settledMode = choice?.weights ? optimizeValue(choice.mode) : null;
+  const chosen = choice?.chosen ?? null;
+  const picks = Object.fromEntries(OPTIMIZE_FOR.map((k) => [k, run.status === 'stopped' ? { key: null, kept: false }
+    : pickFor(cands, k, { settled: k === settledMode, inUse, chosen })]));
+  const bestBy = Object.fromEntries(OPTIMIZE_FOR.map((k) => [k, picks[k].key]));
+  // where the pick is what served, kept although another scores more: the page says so rather than "best"
+  const keptBy = Object.fromEntries(OPTIMIZE_FOR.map((k) => [k, picks[k].kept]));
+  // the table's order for each choice, by key, so the page re-sorts on a change without a rule of its own
+  const orderBy = Object.fromEntries(OPTIMIZE_FOR.map((k) => [k, [...cands].sort(byScoreFor(k)).map((c) => c.key)]));
   /* A test too small to show anything: what it would have taken, the count the full test waits for where the workload
      still waits for it, and how many it has (card 1's figures). */
   let small = null;
@@ -796,6 +900,12 @@ export async function runPageOf(w, run) {
       p50: metric === 'ttft' ? Number(run.ref_ttft_p50) || null : Number(run.ref_latency_p50) || null,
     },
     cands: cands.map(({ twice, confirmRuns, said, ...c }) => c),
+    // what the workload optimizes for now, how much each part counts for each choice, and the model each would pick
+    optimize,
+    weights: PRESETS,
+    bestBy,
+    keptBy,
+    orderBy,
     // how many requests the test sampled, which each model's count of answered ones is read against
     sample,
     // how often the original model differed from itself (or was clearly worse than itself): the allowed difference is set from it

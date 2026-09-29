@@ -7,7 +7,8 @@
 import { verdictWith, verdictFor, callsToClear } from './compare.js';
 import { posterior, rngFrom } from '../learn/bandit.js';
 import { decide, DEFAULTS } from '../learn/decide.js';
-import { chanceWithin, safeSaving, rankCleared } from './confidence.js';
+import { chanceWithin, safeSaving } from './confidence.js';
+import { rankByScore, optimizeValue } from './score.js';
 import { featuresRaw, crossFitRouter, simulateRoutes } from '../learn/kinds.js';
 
 /**
@@ -108,20 +109,21 @@ export function learnRates(params, { trials = 200, seed = 100 } = {}) {
 /* Which setup is switched to --------------------------------------------------------------------- */
 
 /**
- * Which of a workload's cheaper setups a measurement switches to, under a routing priority. `setups(rng)`
+ * Which of a workload's cheaper setups a measurement switches to, for what the workload optimizes for. `setups(rng)`
  * makes one workload's setups with their truths: [{ id, rate, ratio, p50 }], where `rate` is the true share
  * of worse or different answers, `ratio` what it costs against the customer's model, and `p50` its typical
  * time against the customer's model's (1). Each is measured on `n` calls against a pass mark of
- * `floorPct`, the ones that cleared are ranked by `mode` (rankCleared), and the first `tries` in line are
- * looked at again on `fresh` calls they have never seen, as run.js does. Over `trials` workloads: how often
- * anything was switched to; how often what was switched to truly breaks the promise (its true rate is past
- * the pass mark); the true saving, after the fee, averaged over every workload; how fast what was switched
- * to is; and how often it was the one `best(setups)` names, for scenarios with a right answer.
+ * `floorPct`, the ones that cleared are ranked by `mode` (rankByScore in src/eval/score.js: balance, quality,
+ * cost or speed; 'cheapest' is the old rule, cheapest first, kept here to compare with), and the first `tries`
+ * in line are looked at again on `fresh` calls they have never seen, as run.js does. Over `trials` workloads:
+ * how often anything was switched to; how often what was switched to truly breaks the promise (its true rate
+ * is past the pass mark); the true saving, after the fee, averaged over every workload; how fast what was
+ * switched to is; and how often it was the one `best(setups)` names, for scenarios with a right answer.
  */
-export function choiceSim({ setups, mode = 'balanced', tries = 3, n = 120, fresh = null, floorPct = 3, trials = 2000,
+export function choiceSim({ setups, mode = 'balance', tries = 3, n = 120, fresh = null, floorPct = 3, trials = 2000,
   seed = 1, confirmZ = null, cautiousChance = 0.99, feePct = 1, reviewBand = 1.25, best = null, secondLook = true }) {
   const rng = rngFrom(seed);
-  const z = confirmZ ?? (mode === 'cautious' ? 1.96 : 1.6449);
+  const z = confirmZ ?? (mode !== 'cheapest' && optimizeValue(mode) === 'quality' ? 1.96 : 1.6449);
   // as many fresh calls as run.js takes: twice the fewest a perfect run needs at the usual strictness, never fewer than the first look
   const look = fresh ?? Math.max(30, Math.ceil(2 * callsToClear(floorPct)), n);
   const draw = (rate, m) => {
@@ -139,15 +141,17 @@ export function choiceSim({ setups, mode = 'balanced', tries = 3, n = 120, fresh
     const rows = [];
     for (const s of ss) {
       const scores = draw(s.rate, n);
-      if (verdictWith(scores, floorPct, { reviewBand }).verdict !== 'cleared') continue;
+      const v = verdictWith(scores, floorPct, { reviewBand });
+      if (v.verdict !== 'cleared') continue;
       if (!(s.ratio < 1 / (1 + feePct / 100))) continue;
       const chance = chanceWithin(scores, floorPct);
-      rows.push({ model_id: s.id, truth: s, cost_month_usd: s.ratio, cost_ratio: s.ratio, chance,
+      rows.push({ model_id: s.id, truth: s, cost_month_usd: s.ratio, cost_ratio: s.ratio, chance, gap_pct: v.gap,
         safe_saving: safeSaving(s.ratio, chance, feePct), latency_p50: s.p50 * (0.9 + 0.2 * rng()) });
     }
     let chosen = null;
     let looked = 0;
-    const order = rankCleared(rows, { mode, cautiousChance }).order;
+    const order = mode === 'cheapest' ? [...rows].sort((a, b) => a.cost_ratio - b.cost_ratio)
+      : rankByScore(rows, { optimize: mode, floorPct, refP50: 1, cautiousChance }).order;
     // with no second look, the first in line is switched to on its first look alone, as it once was
     if (!secondLook && order.length) chosen = order[0].truth;
     for (const r of secondLook ? order : []) {

@@ -70,6 +70,9 @@ await migrate({ quiet: true });
 const REF = 'openai/gpt-5.4';
 const STEADY = 'vendor/steady';
 const CHEAPER = 'vendor/cheaper';
+// two more a later measurement finds, for which runners-up are worth trying (only ever marked, never served)
+const FAR = 'vendor/far';
+const THIN = 'vendor/thin';
 const COST = { [REF]: 0.002, [STEADY]: 0.0004, [CHEAPER]: 0.0001 };
 const right = (i) => ({ total: 100 + i, currency: 'USD' });
 // the cheaper runner-up gets one call in four wrong, which a background answer shows
@@ -128,6 +131,8 @@ test.before(async () => {
     { model_id: REF, name: 'gpt-5.4', context_len: 200000, price_in: 2.5e-6, price_out: 15e-6, open_weights: 0, zdr: 1 },
     { model_id: STEADY, name: 'steady', context_len: 128000, price_in: 0.4e-6, price_out: 1e-6, open_weights: 1, zdr: 1 },
     { model_id: CHEAPER, name: 'cheaper', context_len: 128000, price_in: 0.1e-6, price_out: 0.3e-6, open_weights: 1, zdr: 1 },
+    { model_id: FAR, name: 'far', context_len: 128000, price_in: 0.06e-6, price_out: 0.2e-6, open_weights: 1, zdr: 1 },
+    { model_id: THIN, name: 'thin', context_len: 128000, price_in: 0.38e-6, price_out: 0.95e-6, open_weights: 1, zdr: 1 },
   ]);
 });
 
@@ -254,6 +259,38 @@ test('a measurement leaves its runners-up behind: cleared and cheaper ones are t
   // a later measurement that no longer vouches for it sets it aside
   await markTrying(s.workload, { runId: null, results: [], refMonthly: 100, floor: 4 });
   assert.equal((await armOf(s.workload.id, CHEAPER)).status, 'resting');
+});
+
+test('a runner-up is tried only where live calls could show it the better choice for what the workload optimizes for', async () => {
+  const s = await shop('scored');
+  /* A later measurement finds two more that cleared: FAR saves the most, but differed on 3.9% of calls against the 4%
+     allowed; THIN differs as seldom as what serves and saves a little more. Scored out of 100 (src/eval/score.js; no
+     timings here, so quality and cost only), on Balance: steady 80.6 (81 quality, 80 cost), cheaper 79.6 (68, 95),
+     far 70.7 (51, 97), thin 81.0 (81, 81). */
+  const row = (model_id, ratio, gap) => ({ model_id, verdict: 'cleared', stopped: null, cost_month_usd: ratio * 100, cost_ratio: ratio,
+    gap_pct: gap, runs: 80, arm_json: null, recipe_json: null });
+  await markTrying(s.workload, { runId: null, refMonthly: 100, floor: 4,
+    results: [row(STEADY, 0.2, 1.5), row(CHEAPER, 0.05, 2.6), row(FAR, 0.03, 3.9), row(THIN, 0.19, 1.5)] });
+  const tried = async () => {
+    forgetState(s.workload.id);
+    const view = await learningView(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(s.workload.id));
+    return Object.fromEntries(view.others.map((o) => [o.key, o.tryable]));
+  };
+  let t = await tried();
+  assert.equal(t[CHEAPER], true, `a point from steady, and 87 if shown as good: worth trying ${JSON.stringify(t)}`);
+  assert.equal(t[FAR], false, `clearly below the best score, 81.0 against 70.7: a measurement has already told it apart ${JSON.stringify(t)}`);
+  assert.equal(t[THIN], false, `shown as good as steady it would still score 81.0 against 80.6: nothing to switch for ${JSON.stringify(t)}`);
+  // optimized for quality, cheaper's quality counts for far more: 72.8 against the best, 81.0, and no longer tried
+  await db.prepare('UPDATE workloads SET routing_mode = ? WHERE id = ?').run('quality', s.workload.id);
+  t = await tried();
+  assert.equal(t[CHEAPER], false, `optimized for quality ${JSON.stringify(t)}`);
+  assert.equal(t[FAR], false);
+  // optimized for cost, cheaper is the best score (87.1) and far is still clearly below it (83.5)
+  await db.prepare('UPDATE workloads SET routing_mode = ? WHERE id = ?').run('cost', s.workload.id);
+  t = await tried();
+  assert.equal(t[CHEAPER], true, `optimized for cost ${JSON.stringify(t)}`);
+  assert.equal(t[FAR], false, `optimized for cost ${JSON.stringify(t)}`);
+  assert.equal(t[THIN], false);
 });
 
 test('a switched workload tries a small share of its calls elsewhere, and every call says what chance it had', async () => {
