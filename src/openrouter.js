@@ -144,6 +144,16 @@ function withCacheHint(body) {
   return { ...body, messages: msgs };
 }
 
+/* The room a recipe gives above a request's cap: only on a cap tight enough to need it (under EVAL_THINKING_ROOM_TOKENS, as
+   thinkingFit judges a cap tight), since a roomier one already has room to think. Added to a cap of 16,000, it asked for
+   more than the model could write, and the provider refused. */
+export function roomFor(recipe, body) {
+  const room = Math.floor(Number(recipe?.room) || 0);
+  if (!(room > 0)) return 0;
+  const cap = Number(body?.max_completion_tokens ?? body?.max_tokens);
+  return Number.isFinite(cap) && cap > 0 && cap < config.EVAL_THINKING_ROOM_TOKENS ? room : 0;
+}
+
 export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHint = false, priceCaps = null } = {}) {
   const out = { ...(cacheHint && hintApplies(body, model) ? withCacheHint(body) : body), model };
   delete out.stream_options;
@@ -158,7 +168,7 @@ export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHin
      src/eval/select.js): the cap on thinking and answer together is raised by it, under the name the request used, so
      the answer itself still has the whole cap. A request with no cap is left as it is, since it already has the room.
      The call's hold counts the room too (holdFor in src/proxy.js), so what is set aside still bounds what it costs. */
-  const room = Math.floor(Number(recipe?.room) || 0);
+  const room = roomFor(recipe, out);
   if (room > 0) {
     for (const f of ['max_completion_tokens', 'max_tokens']) {
       const cap = Number(out[f]);

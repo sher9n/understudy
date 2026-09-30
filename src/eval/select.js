@@ -97,9 +97,13 @@ export function thinkingFit(model, profile, room, refThinks = null, allowance = 
       if (!(allowance > 0)) {
         return { ok: false, reason: `thinks before every answer and cannot be told not to, and your answers are capped at ${cap} tokens` };
       }
+      /* The room goes on every request with a cap below `room` (buildUpstream), so the largest of those caps with the room
+         has to fit what it can write: checked against the smallest cap alone, a workload capped at 900 on some requests
+         and 3,000 on others sent 5,000 to a model that writes 4,096. */
+      const most = Math.max(cap, Math.min(Number(profile.outCapMax) || cap, room - 1));
       const writes = Number(model.maxOutput) || null;
-      if (writes && cap + allowance > writes) {
-        return { ok: false, reason: `thinks before every answer and writes at most ${fmt(writes)} tokens, too few to think in and still give your ${fmt(cap)}-token answers` };
+      if (writes && most + allowance > writes) {
+        return { ok: false, reason: `thinks before every answer and writes at most ${fmt(writes)} tokens, too few to think in and still give your ${fmt(most)}-token answers` };
       }
       const lightest = LIGHT.find((e) => efforts.includes(e)) || null;
       const reasoning = lightest && lightest !== r.default_effort ? { effort: lightest } : null;
@@ -108,6 +112,8 @@ export function thinkingFit(model, profile, room, refThinks = null, allowance = 
         thinks: true,
         mustThink: true,
         recipe: { ...(reasoning ? { reasoning } : {}), room: Math.floor(allowance) },
+        // the most it will be asked to write on one request: the largest cap the room goes on, and the room
+        need: most + Math.floor(allowance),
         note: `has to think before every answer, so it is measured thinking as little as it allows, with room to think beyond your ${fmt(cap)}-token cap`,
       };
     }
@@ -197,6 +203,21 @@ export function eligibility(model, ctx) {
   }
   const think = thinkingFit(model, profile, room, ctx.refThinks ?? null, ctx.allowance ?? 0);
   if (!think.ok) return { ok: false, step: 'thinking', reason: think.reason };
+  /* Given room above the cap, it has to be able to take it: at a provider that keeps nothing, each of which can write less
+     than the model's entry says, and within what it can read, the longest prompt beside it. */
+  if (think.need) {
+    const writesAt = (e) => Number(e.max_output ?? model.maxOutput) || Infinity;
+    if (routes) {
+      routes = routes.filter((e) => writesAt(e) >= think.need);
+      if (!routes.length) {
+        return { ok: false, step: 'thinking', reason: `thinks before every answer, and its providers that keep nothing write too few tokens to think in and still give your answers` };
+      }
+    }
+    const window = Number(model.contextLen) || null;
+    if (window && (profile.promptMax || 0) + think.need > window) {
+      return { ok: false, step: 'thinking', reason: `thinks before every answer, and can read ${fmt(window)} tokens, too few for your longest prompt and room to think` };
+    }
+  }
   if (model.expiresAt && model.expiresAt - at < expiryMs) {
     return { ok: false, step: 'retiring', reason: 'is being retired soon' };
   }
@@ -234,10 +255,12 @@ export function chanceOf(model, ctx) {
       ? (hist.stopped ? undefined : 0.9)
       : { cleared: 0.95, review: 0.6, missed: 0.1 }[hist.verdict];
     let note = hist.verdict === 'slower' ? 'matched' : hist.verdict;
-    /* Unless the answers it did give, before it was stopped, were far outside the bar: twice what is allowed is a miss
-       whatever stopped it. llama-3.1-8b, stopped for speed on the museum guide with 96% of its answers worse against
-       20.8% allowed, read as never tested, and was put sixth in line for the next test. */
-    if (p === undefined && Number.isFinite(hist.gap) && Number(hist.floor) > 0 && hist.gap >= 2 * hist.floor) {
+    /* Unless it was stopped for being too slow, after answering enough of the requests to read (ten, as a verdict needs:
+       verdictWith in src/eval/compare.js), with those answers twice outside the bar: that is a miss. llama-3.1-8b,
+       stopped for speed on the museum guide with 96% of 25 answers worse against 20.8% allowed, read as never tested,
+       and was put sixth in line for the next test. Never one its provider failed: a call nobody answered is written as
+       a 100% difference, which says nothing about the model. */
+    if (p === undefined && missedBeforeStop(hist)) {
       p = 0.1;
       note = 'missed before it was stopped';
     }
@@ -300,6 +323,12 @@ export function chanceOf(model, ctx) {
   return { chance, parts, family };
 }
 
+/** Whether a result stopped for speed says its answers missed: enough of them read, twice outside the bar. */
+export function missedBeforeStop(h) {
+  return !!h && h.verdict === 'slower' && h.stopped === 'speed' && Number(h.runs) >= 10
+    && Number.isFinite(h.gap) && Number(h.floor) > 0 && h.gap >= 2 * h.floor;
+}
+
 /* How strong a model is, on one scale: its rating on the public leaderboard where it has one, and otherwise one read from
  * its price along a line drawn through the rated models (a dearer model is a stronger one, on the whole; only a line
  * that rises with price is drawn). A read rating is rough and is marked as read. Answers a function of a model id, which
@@ -341,14 +370,16 @@ export function workloadCurve(own, strength, reference, scale = 60) {
   if (!ref || !own) return null;
   const pts = [];
   for (const [id, h] of own) {
-    // "slower" at the end matched, and was too slow; stopped for speed, or failed, it was never judged on its answers
+    /* "slower" at the end matched, and was too slow; stopped for speed, or failed, it was never judged on its answers,
+       unless enough of them missed by far before the stop, which reads as a miss here as it does for the model itself */
     const y = h.verdict === 'cleared' ? 1 : h.verdict === 'review' ? 0.5 : h.verdict === 'missed' ? 0
-      : h.verdict === 'slower' && !h.stopped ? 1 : null;
+      : h.verdict === 'slower' && !h.stopped ? 1 : missedBeforeStop(h) ? 0 : null;
     if (y === null) continue;
-    /* A model that thinks, measured with its thinking switched off, is not the model its rating describes: on the museum
-       guide deepseek-v4-pro and grok-4.3 missed that way, and read at their ratings they said a model had to be far
-       stronger than gpt-5.4 to pass there. Its own result still counts for it (chanceOf); only the curve leaves it out. */
-    if (h.thinkingOff) continue;
+    /* A model that thinks, measured with its thinking switched off or turned down, is not the model its rating describes:
+       on the museum guide deepseek-v4-pro and grok-4.3 missed that way, and read at their ratings they said a model had
+       to be far stronger than gpt-5.4 to pass there. Its own result still counts for it (chanceOf); the curve leaves it
+       out. (thinkingOff is how a record from before said it.) */
+    if (h.thinking === 'off' || h.thinking === 'light' || h.thinkingOff) continue;
     const s = strength(id);
     if (!s) continue;
     pts.push({ x: s.value - ref.value, y, w: s.read ? 0.5 : 1 });
@@ -573,7 +604,8 @@ export function selectCandidates(input) {
   }
   ctx.strength = strength;
   /* The last test of this workload that compared models found nothing to switch to (lastFailed in src/eval/history.js),
-     so this one climbs: it tries the models likeliest to pass first, and the cheaper of two about as likely, rather than
+     so this one climbs: it tries the models likeliest to pass first, and of two about as likely the one expected to save
+     more (which, as likely, is the cheaper), rather than
      the next cheapest ones, which are the least likely of all to do what the cheapest could not. */
   const climb = !!history?.lastFailed;
 
@@ -624,6 +656,14 @@ export function selectCandidates(input) {
      always when it is what serves the workload now, measured the way it is served, like any model
      serving: whatever the catalogue says about its thinking today, a strategy left serving unmeasured
      is the one that can quietly cost the customer. */
+  /* A fixed guess for the customer's own model asked another way, moved by what it did on this workload before, as any
+     model's is: left at the guess, one that missed here came first again after a test that found nothing, since a test
+     that climbs puts the likeliest first. */
+  const ownChance = (key, guess) => {
+    const h = history?.own?.get(key);
+    const p = !h ? undefined : h.verdict === 'slower' ? (h.stopped ? undefined : 0.9) : { cleared: 0.95, review: 0.6, missed: 0.1 }[h.verdict];
+    return p === undefined ? guess : (6 * p + guess) / 7;
+  };
   const lighterKey = `${reference}#lighter`;
   const servesLighter = servingAs === lighterKey;
   if (refModel && refPrice && (servesLighter || (refThinks === true && !profile.reasoningSet && !reverted.has(lighterKey)))) {
@@ -642,7 +682,7 @@ export function selectCandidates(input) {
     if (servesLighter && servingRecipe?.reasoning) reasoning = servingRecipe.reasoning;
     if (reasoning) {
       const price = refPrice * 0.6;
-      const chance = 0.6;
+      const chance = ownChance(lighterKey, 0.6);
       ranked.push({
         model: reference, key: `${reference}#lighter`, label: `${short(reference)}, thinking less`, name: refModel.name,
         price, refPrice, savingShare: 0.4, chance, answerChance: chance, speedChance: null, speedMeasured: null, busy: false,
@@ -674,9 +714,9 @@ export function selectCandidates(input) {
       : byPrice.length >= 2 && byPrice[0].price < refPrice * 0.9 ? byPrice[0] : null;
     if (pick) {
       const { e, price } = pick;
-      /* A fixed guess, not a reading of any evidence: it is not written down as a raw chance, so the
-         record of how often chances came true (src/eval/calibrate.js) never counts it. */
-      const chance = 0.8;
+      /* A fixed guess, not a reading of any evidence, unless it was tested here before: it is not written down as a raw
+         chance, so the record of how often chances came true (src/eval/calibrate.js) never counts it. */
+      const chance = ownChance(cheapestKey, 0.8);
       const where = e.provider || e.tag || 'its cheapest provider';
       ranked.push({
         model: reference, key: cheapestKey, label: `${short(reference)}, from ${where}`, name: refModel.name,
@@ -700,10 +740,16 @@ export function selectCandidates(input) {
      at the back. The strongest by the leaderboard first, one read from its price only where too few rated ones are left;
      never one that already missed here, which has said what it can do, nor the customer's own model asked another way.
      They go to the front, before the rest, and say so. */
-  const places = Math.max(0, Math.floor(Number(config.EVAL_STRONG_PLACES) || 0));
+  /* Never more than a third of the models a test measures to the end, so a workspace testing three models a time still
+     tries two cheap ones; and never one the evidence already holds back: its provider too busy lately (it would only be
+     turned away again, and a model that cannot keep up is out of this workload for good), too unlikely to be quick
+     enough, or read from this workload as a miss, however strong the leaderboard says it is. */
+  const places = Math.min(Math.max(0, Math.floor(Number(config.EVAL_STRONG_PLACES) || 0)), Math.floor(want / 3));
   const strong = [];
   if (places) {
-    const worth = ranked.filter((r) => !r.key && r.model !== serving && strength(r.model)
+    const heldBack = (r) => r.busy || (r.speedChance !== null && r.speedChance !== undefined && r.speedChance < 0.3)
+      || (r.parts || []).some((x) => x.source === 'before' && x.p <= 0.1);
+    const worth = ranked.filter((r) => !r.key && r.model !== serving && strength(r.model) && !heldBack(r)
       && ctx.history?.own?.get(r.model)?.verdict !== 'missed');
     const rated = worth.filter((r) => !strength(r.model).read);
     const read = worth.filter((r) => strength(r.model).read);

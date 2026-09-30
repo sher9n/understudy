@@ -76,8 +76,10 @@ const MUST = 'vendor/must-think';
 const SMALL = 'vendor/small-wrong';
 // dearer than the customer's model on these calls: left out on price, which the page names
 const DEAR = 'vendor/dear';
+// has to think too, and given the room writes answers longer than the customer's own cap allows
+const LONG = 'vendor/long-winded';
 const JUDGE = 'judge/small';
-const MODELS = [MUST, SMALL, DEAR];
+const MODELS = [MUST, SMALL, DEAR, LONG];
 const CAP = 300;
 const ROOM = config.EVAL_THINK_ALLOWANCE_TOKENS;
 
@@ -111,6 +113,11 @@ const provider = http.createServer((req, res) => {
       return send(JSON.stringify(right(i)), { prompt_tokens: 800, completion_tokens: 460, completion_tokens_details: { reasoning_tokens: 400 }, cost: 0.0006 });
     }
     if (m === SMALL) return send(JSON.stringify({ total: 0, currency: 'EUR', lines: 0 }), { prompt_tokens: 800, completion_tokens: 20, cost: 0.00005 });
+    // the right figures, in an answer of 500 tokens after 400 of thinking: 200 more than the customer's cap allows
+    if (m === LONG) {
+      if (!cap || cap < 900) return send('', { prompt_tokens: 800, completion_tokens: cap || 0, cost: 0.0004 }, 'length');
+      return send(JSON.stringify(right(i)), { prompt_tokens: 800, completion_tokens: 900, completion_tokens_details: { reasoning_tokens: 400 }, cost: 0.0009 });
+    }
     return send(JSON.stringify(right(i)), { prompt_tokens: 800, completion_tokens: 60, cost: m === REF ? 0.002 : 0.004 });
   });
 });
@@ -127,6 +134,8 @@ test.before(async () => {
     { model_id: MUST, name: 'Vendor: Must Think', context_len: 128000, price_in: 3e-7, price_out: 1.2e-6, open_weights: 0, zdr: 1,
       max_output: 16000, reasoning_json: JSON.stringify({ mandatory: true, supported_efforts: ['low', 'high'], default_effort: 'high' }) },
     { model_id: SMALL, name: 'Vendor: Small', context_len: 128000, price_in: 5e-8, price_out: 1e-7, open_weights: 0, zdr: 1 },
+    { model_id: LONG, name: 'Vendor: Long Winded', context_len: 128000, price_in: 2e-7, price_out: 8e-7, open_weights: 0, zdr: 1,
+      max_output: 16000, reasoning_json: JSON.stringify({ mandatory: true, supported_efforts: ['low', 'high'], default_effort: 'high' }) },
     { model_id: DEAR, name: 'Vendor: Dear', context_len: 128000, price_in: 5e-6, price_out: 3e-5, open_weights: 0, zdr: 1 },
     { model_id: JUDGE, name: 'judge', context_len: 128000, price_in: 5e-8, price_out: 1e-7, open_weights: 0, zdr: 1 },
   ]);
@@ -178,7 +187,7 @@ async function seeded({ n = 300, models }) {
 let passed = null;
 
 test('a model that has to think is tried with room above a 300-token cap, and passes, where before it was left out', async () => {
-  const { workspace, workload: w } = await seeded({ models: [MUST] });
+  const { workspace, workload: w } = await seeded({ models: [MUST, LONG] });
   forgetFleet();
   const plan = await planFor(w, { canRoute: true });
   const planned = plan.order.find((o) => o.model === MUST);
@@ -196,6 +205,12 @@ test('a model that has to think is tried with room above a 300-token cap, and pa
   assert.ok(sent.length >= 100, `${sent.length} requests`);
   assert.ok(sent.every((x) => x.cap === CAP + ROOM), `every request had the cap and the room: ${[...new Set(sent.map((x) => x.cap))]}`);
   assert.ok(sent.every((x) => x.reasoning?.effort === 'low'), 'each asked to think as little as it allows');
+  // one that answers past the customer's own cap with the room is read as the cut-off answer it would have been
+  const long = (await rowsOf(out.runId)).get(LONG);
+  assert.ok(long, 'measured');
+  assert.notEqual(long.verdict, 'cleared', `writing past the cap is never a pass: ${long.verdict} ${long.gap_pct}`);
+  const stored = await db.prepare(`SELECT response_json FROM replay_cache WHERE model_id = ? AND response_json IS NOT NULL LIMIT 1`).get(LONG);
+  assert.equal(JSON.parse(stored.response_json).understudy_past_cap?.cap, CAP, 'and kept as cut off, with why');
   passed = { workspace, w, runId: out.runId };
 });
 
@@ -219,15 +234,14 @@ test('switched to it, a live call is sent the same way, and what the call sets a
   assert.equal(live.length, 1, 'the live call went to it');
   assert.equal(live[0].cap, CAP + ROOM, 'with the room it was measured with');
   assert.equal(live[0].reasoning?.effort, 'low');
-  /* What it set aside is at least what the call can cost at the raised cap, on the dearest model it can reach: held at the
-     request's own 300 tokens, a model writing 2,300 could spend past it. */
+  /* What it set aside covers what the call can cost: the switched model at the raised cap, and the customer's model it can
+     fall back to at the request's own (it is sent no room). Held at 300 tokens for the first, a model writing 2,300 could
+     spend past it; held at 2,300 for the second, several times what the call could cost was held. */
   const shape = await callShape(body);
-  let atRoom = 0;
-  for (const m of [MUST, REF]) {
-    const b = await callBound(m, { ...shape, cap: CAP + ROOM }, { zdr: true });
-    atRoom = Math.max(atRoom, boundAt(b.parts, b.ceiling));
-  }
-  assert.ok(live[0].held >= withFee(atRoom) - 1e-9, `held ${live[0].held} against ${withFee(atRoom)} at the raised cap`);
+  const at = async (m, cap) => { const b = await callBound(m, { ...shape, cap }, { zdr: true }); return boundAt(b.parts, b.ceiling); };
+  const worst = Math.max(await at(MUST, CAP + ROOM), await at(REF, CAP));
+  assert.ok(live[0].held >= withFee(worst) - 1e-9, `held ${live[0].held} against ${withFee(worst)}`);
+  assert.ok(live[0].held < withFee(await at(REF, CAP + ROOM)), `never the customer's model at the raised cap: ${live[0].held}`);
   await learningSettled();
 });
 
@@ -241,6 +255,10 @@ test('a test that finds nothing makes the next one climb, and its page says whic
   assert.equal(rows.get(SMALL)?.verdict, 'missed');
   assert.equal(rows.has(DEAR), false, 'dearer than the customer model: never tried');
   assert.equal(await lastFailedOn(w.id), true, 'the newest test that compared models found nothing to switch to');
+  // one cut short at the most it could spend did not finish, and says nothing either way
+  await db.prepare('UPDATE eval_runs SET error = ? WHERE id = ?').run('reached its limit of $0.50 while testing models', out.runId);
+  assert.equal(await lastFailedOn(w.id), false);
+  await db.prepare('UPDATE eval_runs SET error = NULL WHERE id = ?').run(out.runId);
   assert.equal((await historyFor(await load(w.id))).lastFailed, true);
   forgetFleet();
   const next = await planFor(await load(w.id), { canRoute: true });

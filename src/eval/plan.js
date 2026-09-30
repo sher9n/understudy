@@ -555,7 +555,8 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
  * The race: the models measured to the end answer every call, and the ones dropped early the few
  * calls they answered first.
  *
- * The second look: up to EVAL_CONFIRM_TRIES of the cheapest that clear, each on calls no measurement
+ * The second look: up to EVAL_CONFIRM_TRIES of the finalists, priced at the dearest (a test looks again at the best
+ * scores first, and the strongest models, kept places at the front, are the likeliest to be those), each on calls no measurement
  * of this workload has looked at, as many as the run would take, with the customer's model answering
  * them too (once: every look in a run is on the same calls). It used to price one look though a run
  * takes two.
@@ -631,7 +632,9 @@ function estimate(plan, profile, facts, workload) {
     : workload.shape_kind === 'free_text' ? config.EVAL_FIRST_FLOOR_TEXT_PCT : config.EVAL_FLOOR_MIN_PCT;
   const sizeBar = Number(workload.floor_pct) > 0 ? Number(workload.floor_pct) : config.EVAL_FLOOR_MIN_PCT;
   const unseen = Math.max(0, Math.round(plan.unseenPool ?? plan.pool ?? 0) - s);
-  const looked = [...finalists].sort((a, b) => a.price - b.price).slice(0, Math.max(0, config.EVAL_CONFIRM_TRIES));
+  /* priced at the dearest finalists: at the cheapest, a test whose strongest models passed first ran out of its limit before
+     it could look at them again, and spent everything for nothing */
+  const looked = [...finalists].sort((a, b) => b.price - a.price).slice(0, Math.max(0, config.EVAL_CONFIRM_TRIES));
   if (looked.length && unseen >= callsToClear(looseBar)) {
     const looks = Math.min(unseen, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(sizeBar)), s));
     // the customer's model on the looked-at calls, and its two answers compared, once for every look

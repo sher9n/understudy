@@ -534,9 +534,14 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
     ruledOut: Object.values([...plan.excluded].sort((x, y) => (y.strength ?? -Infinity) - (x.strength ?? -Infinity)).reduce((a, e) => {
       a[e.step] = a[e.step] || { step: e.step, count: 0, examples: [] };
       a[e.step].count += 1;
+      /* Priced out for costing more, apart from the ones with no price to reach them at, or cheaper by less than our fee:
+         a page saying "cost more" of all of them said it of a model 3% cheaper. */
+      if (e.step === 'price') a[e.step].dearer = (a[e.step].dearer || 0) + (/^costs /.test(String(e.reason || '')) ? 1 : 0);
       if (a[e.step].examples.length < 6) a[e.step].examples.push({ model: e.model, reason: e.reason, strength: e.strength ?? null });
       return a;
     }, {})),
+    // the customer's own requests ask for zero data retention, whatever the workspace chose (profile.zdrAsked)
+    zdrAsked: !!plan.profile?.zdrAsked,
     // what this workload's own results said (workloadCurve), whether this test climbed after one that found nothing, and
     // the places kept for the strongest models it could afford
     here: plan.here ?? null, climb: !!plan.climb, strong: plan.strong ?? [], difficultyGuess: plan.difficultyGuess ?? null,

@@ -12,9 +12,10 @@ process.env.JOBS_ENABLED = 'false';
 process.env.JEV_VIA = 'off';
 process.env.TYPESAFE_API_KEY = '';
 process.env.ALERTS_ENABLED = 'false';
-const { thinkingFit, chanceOf, selectCandidates, strengthScale, workloadCurve } = await import('../src/eval/select.js');
+const { thinkingFit, eligibility, chanceOf, selectCandidates, strengthScale, workloadCurve } = await import('../src/eval/select.js');
 const { buildUpstream } = await import('../src/openrouter.js');
-const { roomOf } = await import('../src/proxy.js');
+const { roomOf, roomsOf } = await import('../src/proxy.js');
+const { pastCap } = await import('../src/eval/replay.js');
 const { strongerKeptOut } = await import('../src/workloadPage.js');
 const { default: config } = await import('../src/config.js');
 
@@ -65,6 +66,50 @@ test('a model that has to think is given room above a tight cap, rather than lef
   assert.deepEqual(thinkingFit(optional, capped, 4000, false, 2000).recipe, { reasoning: { effort: 'none' } });
   // a roomy cap, or none, is as before: no room added
   assert.equal(thinkingFit(must, profile({ outCap: 8000 }), 4000, false, 2000).recipe?.room, undefined);
+  /* the room goes on every request capped below 4,000, so the largest of those has to fit: 3,000 and 2,000 more is 5,000,
+     more than a model that writes 4,096 can */
+  const mixed = profile({ outCap: 900, outCapMax: 3000 });
+  assert.equal(thinkingFit(model('x/4k', { maxOutput: 4096, reasoning: { mandatory: true } }), mixed, 4000, false, 2000).ok, false);
+  assert.equal(thinkingFit(model('x/8k', { maxOutput: 8192, reasoning: { mandatory: true } }), mixed, 4000, false, 2000).need, 5000);
+  // requests above the room get none, so a cap of 16,000 elsewhere asks nothing more of it
+  assert.equal(thinkingFit(model('x/8k', { maxOutput: 8192, reasoning: { mandatory: true } }), profile({ outCap: 900, outCapMax: 16000 }), 4000, false, 2000).need, 5999);
+});
+
+test('given room, a model has to take it at a provider that keeps nothing, and within what it can read', () => {
+  const ctx = { profile: profile({ outCap: 900 }), reference: REF, zdrKnown: true, zdrOnly: true, room: 4000, allowance: 2000,
+    expiryMs: 30 * 86400000, at: Date.now(), minUptime: 99 };
+  const must = (over) => model('x/must', { reasoning: { mandatory: true }, ...over });
+  // its only provider that keeps nothing writes 2,400: too few for 900 and 2,000
+  const short = eligibility(must({ endpoints: [ep({ max_output: 2400 })] }), ctx);
+  assert.equal(short.ok, false);
+  assert.equal(short.step, 'thinking');
+  assert.match(short.reason, /providers that keep nothing write too few tokens/);
+  // one of two can: that one is kept, the other left
+  const two = eligibility(must({ endpoints: [ep({ tag: 'a', max_output: 2400 }), ep({ tag: 'b', max_output: 8000 })] }), ctx);
+  assert.equal(two.ok, true);
+  assert.deepEqual(two.routes.map((e) => e.tag), ['b']);
+  // a window too small for the longest prompt and the room
+  const narrow = eligibility(must({ contextLen: 2500 }), { ...ctx, profile: profile({ outCap: 900, promptMax: 200 }) });
+  assert.equal(narrow.ok, false);
+  assert.match(narrow.reason, /too few for your longest prompt and room to think/);
+});
+
+test("an answer given room is read as cut off where it runs past the customer's own cap", () => {
+  const json = (content) => ({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }] });
+  const body = { max_tokens: 900 };
+  const room = { room: 2000 };
+  // 1,200 written, 200 of it thinking: a 1,000-token answer where 900 are allowed
+  const past = pastCap({ json: json('long'), completionTokens: 1200, reasoningTokens: 200 }, body, room);
+  assert.equal(past.choices[0].finish_reason, 'length');
+  assert.deepEqual(past.understudy_past_cap, { cap: 900, written: 1000 });
+  // an 800-token answer is within it
+  assert.equal(pastCap({ json: json('ok'), completionTokens: 1000, reasoningTokens: 200 }, body, room).choices[0].finish_reason, 'stop');
+  // no thinking said: read from its length, with a tenth to spare
+  assert.equal(pastCap({ json: json('x'.repeat(4 * 1000)), completionTokens: null, reasoningTokens: null }, body, room).choices[0].finish_reason, 'length');
+  assert.equal(pastCap({ json: json('x'.repeat(4 * 950)), completionTokens: null, reasoningTokens: null }, body, room).choices[0].finish_reason, 'stop');
+  // no room given, or a cap roomy enough to have none: as it came
+  assert.equal(pastCap({ json: json('long'), completionTokens: 1200, reasoningTokens: 200 }, body, null).choices[0].finish_reason, 'stop');
+  assert.equal(pastCap({ json: json('long'), completionTokens: 9000, reasoningTokens: 0 }, { max_tokens: 8000 }, room).choices[0].finish_reason, 'stop');
 });
 
 test('a test tries it, priced with its thinking: one that thinking makes dearer than the customer model is left out', () => {
@@ -96,17 +141,23 @@ test('the room reaches the request as sent, and nothing else about the request c
   assert.equal(newer.max_tokens, undefined);
   // no cap: it already has the room, and nothing is added
   assert.equal(buildUpstream({ model: REF, messages }, 'x/must', { room: 2000 }).max_tokens, undefined);
+  // a roomy cap already has room to think: nothing added, which asked more than a model could write
+  assert.equal(buildUpstream({ model: REF, messages, max_tokens: 16000 }, 'x/must', { room: 2000 }).max_tokens, 16000);
   // no room: as ever
   assert.equal(buildUpstream(body, 'x/m', { reasoning: { effort: 'none' } }).max_tokens, 900);
   assert.equal(buildUpstream(body, 'x/m', null).max_tokens, 900);
 });
 
-test("the room is counted in a live call's hold, whichever setup of a strategy takes it", () => {
-  assert.equal(roomOf({ recipe: { room: 2000 } }), 2000);
-  assert.equal(roomOf({ recipe: { reasoning: { effort: 'none' } } }), 0);
-  assert.equal(roomOf({ recipe: null, strategy: null }), 0);
+test("the room is counted in a live call's hold for the setup given it, and never for the customer's own model", () => {
+  assert.equal(roomOf({ served: 'x/must', recipe: { room: 2000 } }), 2000);
+  assert.equal(roomOf({ served: 'x/m', recipe: { reasoning: { effort: 'none' } } }), 0);
+  assert.equal(roomOf({ served: REF, recipe: null, strategy: null }), 0);
   const cascade = { spec: { kind: 'cascade', first: { model: 'x/must', recipe: { room: 1500 } }, fallback: { model: REF } } };
-  assert.equal(roomOf({ recipe: { room: 1500 }, strategy: cascade }), 1500);
+  assert.equal(roomOf({ served: 'x/must', recipe: { room: 1500 }, strategy: cascade }), 1500);
+  // by model: the one given room is held at the raised cap, the customer's model it falls back to at the request's own
+  const rooms = roomsOf({ served: 'x/must', recipe: { room: 1500 }, strategy: cascade });
+  assert.equal(rooms.get('x/must'), 1500);
+  assert.equal(rooms.has(REF), false);
   // a router by kind of request can send a call to any of its setups
   const router = { spec: { kind: 'router', options: [{ model: 'x/a' }, { model: 'x/must', recipe: { room: 2000 } }] } };
   assert.equal(roomOf({ recipe: null, strategy: router }), 2000);
@@ -183,19 +234,26 @@ test('with those results, a strong untried model is likelier to pass there than 
 test('a model stopped before its answers were all read counts as a miss where those it gave were far outside the bar', () => {
   const m = model('x/stopped');
   const read = (h) => chanceOf(m, { reference: REF, history: { own: new Map([['x/stopped', h]]), shape: new Map() } });
-  // stopped for speed with 96% worse against 20.8% allowed, as llama-3.1-8b was on the museum guide: a miss
-  const far = read({ verdict: 'slower', stopped: 'speed', gap: 96, floor: 20.8 });
+  // stopped for speed with 96% of 25 answers worse against 20.8% allowed, as llama-3.1-8b was on the museum guide: a miss
+  const far = read({ verdict: 'slower', stopped: 'speed', gap: 96, floor: 20.8, runs: 25 });
   assert.deepEqual(far.parts.map((p) => [p.source, p.p, p.note]), [['before', 0.1, 'missed before it was stopped']]);
+  // on three answers, too few to read: nothing, as a verdict needs ten
+  assert.equal(read({ verdict: 'slower', stopped: 'speed', gap: 66, floor: 20.8, runs: 3 }).parts.length, 0);
   // stopped with its answers inside twice the bar says nothing about them, as before
-  assert.equal(read({ verdict: 'slower', stopped: 'speed', gap: 18.5, floor: 20.8 }).parts.length, 0);
-  // and a provider that failed it, with nothing judged, says nothing either
-  assert.equal(read({ verdict: 'failed', stopped: 'errors', gap: null, floor: 20.8 }).parts.length, 0);
+  assert.equal(read({ verdict: 'slower', stopped: 'speed', gap: 18.5, floor: 20.8, runs: 27 }).parts.length, 0);
+  // a provider that failed it is written as a 100% difference, which says nothing about the model
+  assert.equal(read({ verdict: 'failed', stopped: 'errors', gap: 100, floor: 20.8, runs: 2 }).parts.length, 0);
+  assert.equal(read({ verdict: 'failed', stopped: 'refused', gap: 100, floor: 20.8, runs: 30 }).parts.length, 0);
   // with the workload's results to read, one that said nothing is read from them, like one never tested
   const strength = strengthScale(ladderModels(), ladderArena());
   const here = { n: 8, ref: 1452, curve: () => 0.2 };
   const quiet = chanceOf(model('v5/large-235b'), { reference: REF, strength, here,
-    history: { own: new Map([['v5/large-235b', { verdict: 'slower', stopped: 'speed', gap: 18.5, floor: 20.8 }]]), shape: new Map() } });
+    history: { own: new Map([['v5/large-235b', { verdict: 'slower', stopped: 'speed', gap: 18.5, floor: 20.8, runs: 27 }]]), shape: new Map() } });
   assert.deepEqual(quiet.parts.map((p) => p.source), ['here']);
+  // and so is one its provider failed
+  const failed = chanceOf(model('v5/large-235b'), { reference: REF, strength, here,
+    history: { own: new Map([['v5/large-235b', { verdict: 'failed', stopped: 'errors', gap: 100, floor: 20.8, runs: 2 }]]), shape: new Map() } });
+  assert.deepEqual(failed.parts.map((p) => p.source), ['here']);
 });
 
 test("a model measured with its thinking switched off is left out of the workload's curve, not of its own reading", () => {
@@ -210,6 +268,12 @@ test("a model measured with its thinking switched off is left out of the workloa
   assert.equal(here.n, 4);
   const withThem = workloadCurve(new Map([...own].map(([k, v]) => [k, { ...v, thinkingOff: false }])), strength, REF, 60);
   assert.ok(withThem.theta > here.theta + 20, `counted, they push the even chance up: ${withThem.theta} against ${here.theta}`);
+  // asked to think as little as it allows is not the model its rating describes either
+  const light = new Map([...own].map(([k, v]) => [k, v.thinkingOff ? { verdict: v.verdict, thinking: 'light' } : v]));
+  assert.equal(workloadCurve(light, strength, REF, 60).n, 4);
+  // one stopped for speed after missing by far reads as the miss it is, here as for itself
+  const stopped = new Map([...own, ['v4/mid-70b', { verdict: 'slower', stopped: 'speed', gap: 96, floor: 20.8, runs: 25 }]]);
+  assert.equal(workloadCurve(stopped, strength, REF, 60).n, 5);
 });
 
 test('after a test that found nothing, the next tries the likeliest to pass first, the cheaper of two as likely first', () => {
@@ -228,6 +292,17 @@ test('after a test that found nothing, the next tries the likeliest to pass firs
     'the two likeliest first, as likely as each other, so the cheaper of them first');
 });
 
+test("the customer's own model from its cheapest provider is read from what it did here, not a fixed guess", () => {
+  // gpt-5.4 at two providers, one a good deal cheaper: the cheaper is tried as the customer's own model from it
+  const two = model(REF, { price: 2.5e-6, endpoints: [ep({ tag: 'dear', price_in: 2.5e-6, price_out: 1.5e-5 }), ep({ tag: 'cheap', price_in: 1e-6, price_out: 6e-6 })] });
+  const run = (own) => selectCandidates({ facts: factsOf([two, model('x/other')]), profile: profile(), reference: REF, enabled: null, want: 10,
+    tryMultiple: 3, config, at: Date.now(), history: { own, shape: new Map(), lastFailed: true } });
+  const fresh = run(new Map()).ranked.find((r) => r.key === `${REF}#cheapest`);
+  assert.equal(fresh?.chance, 0.8, 'never tried here: the guess');
+  const missed = run(new Map([[`${REF}#cheapest`, { verdict: 'missed' }]])).ranked.find((r) => r.key === `${REF}#cheapest`);
+  assert.ok(Math.abs(missed.chance - (6 * 0.1 + 0.8) / 7) < 1e-9, `missed here: ${missed.chance}`);
+});
+
 test('places are kept in every test for the strongest models a workload can afford, whatever they save', () => {
   const list = [...ladderModels(), model('v13/missed-here', { price: 1.3e-6 })];
   const arena = new Map([...ladderArena(), ['v13/missed-here', 1490]]);
@@ -241,6 +316,12 @@ test('places are kept in every test for the strongest models a workload can affo
     assert.match(r.note, /one of the strongest models you can afford/);
   }
   assert.equal(sel.strong.includes('v13/missed-here'), false, 'one that already missed here has said what it can do');
+  // none that the evidence holds back: its provider busy lately, or unlikely to be quick enough
+  const busy = select(list, { arena, history: { own, shape: new Map() }, busy: new Map([['v10/strong', { n: 2, at: Date.now() }]]) });
+  assert.equal(busy.strong.includes('v10/strong'), false);
+  // never more than a third of the models measured to the end
+  const three = select(list, { arena, history: { own, shape: new Map() }, want: 3 });
+  assert.equal(three.strong.length, 1);
   // one from each maker: three versions of one model never take every place
   const same = select([model('g/flash-3.8', { price: 1.4e-6 }), model('g/flash-3.7', { price: 1.3e-6 }), model('g/flash-3.6', { price: 1.2e-6 }),
     model('k/kimi', { price: 1e-6 }), model('z/glm', { price: 9e-7 }), ...ladderModels().slice(0, 4)],
@@ -256,13 +337,14 @@ test('a test that found nothing says which settings kept models out, naming one 
   const plan = { ruledOut: [
     { step: 'private', count: 90, examples: [{ model: 'anthropic/claude-fable-5.1', reason: 'has no provider that keeps nothing' }] },
     { step: 'thinking', count: 3, examples: [{ model: 'x-ai/grok-4.5', reason: 'thinks before every answer and writes at most 1,200 tokens, too few to think in and still give your 900-token answers' }] },
-    { step: 'price', count: 12, examples: [{ model: 'anthropic/claude-sonnet-4.6', reason: 'costs 2% more' }] },
+    { step: 'price', count: 13, dearer: 12, examples: [{ model: 'anthropic/claude-sonnet-4.6', reason: 'costs 2% more than what gpt-5.4 does' },
+      { model: 'x/fee', reason: 'would save less than our 5% fee on your calls' }] },
     { step: 'health', count: 15, examples: [{ model: 'x/flaky' }] },
   ] };
   const nothing = [{ key: 'v1', tone: 'bad', confirmed: false }, { key: 'v2', tone: 'ok', confirmed: false }];
   const said = strongerKeptOut(plan, nothing, 'gpt-5.4');
   assert.match(said, /^Some models were not tried: 90 have no provider that deletes requests right away, which Zero data retention requires \(for example anthropic\/claude-fable-5\.1\)/);
-  assert.match(said, /3 think before every answer and cannot fit it in your 900-token answers \(for example x-ai\/grok-4\.5\)/);
+  assert.match(said, /3 think before every answer and cannot write or read enough to think and still give your answers \(for example x-ai\/grok-4\.5\)/);
   assert.match(said, /and 12 cost more than gpt-5\.4 on your requests, so switching to them could not save anything \(for example anthropic\/claude-sonnet-4\.6\)\./);
   assert.match(said, /Turning off Zero data retention, under Privacy in Settings, lets those be tried\./);
   // one that cannot write enough to think and answer is not helped by a higher cap, so nothing is suggested for it
@@ -270,8 +352,16 @@ test('a test that found nothing says which settings kept models out, naming one 
   // left out for having to think at all, in a test from before the room: the next test gives it the room
   const older = strongerKeptOut({ ruledOut: [{ step: 'thinking', count: 48, examples: [{ model: 'google/gemini-3.8-flash',
     reason: 'thinks before every answer and cannot be told not to, and your answers are capped at 900 tokens' }] }] }, nothing, 'gpt-5.4');
-  assert.equal(older, 'Some models were not tried: 48 think before every answer and cannot fit it in your 900-token answers '
-    + '(for example google/gemini-3.8-flash). The next test tries those that think, with room to think beyond that cap.');
+  assert.equal(older, 'Some models were not tried: 48 think before every answer, and your answers are capped at 900 tokens '
+    + '(for example google/gemini-3.8-flash). The next test can try those that think, with room to think beyond that cap.');
+  // requests that ask for zero retention themselves: the setting would not let those in, and the page says so
+  assert.match(strongerKeptOut({ ...plan, zdrAsked: true }, nothing, 'gpt-5.4'), /Your own requests ask for zero data retention too/);
+  // cheaper by less than the fee is not "costs more": with only those, nothing is said of price
+  assert.equal(strongerKeptOut({ ruledOut: [{ step: 'price', count: 2, dearer: 0, examples: [{ model: 'x/fee', reason: 'would save less than our 5% fee' }] }] }, nothing, 'gpt-5.4'), null);
+  // a test that did not count them apart says "some" where its examples do not settle how many
+  assert.match(strongerKeptOut({ ruledOut: [{ step: 'price', count: 9, examples: [{ model: 'x/fee', reason: 'would save less than our 5% fee' },
+    { model: 'x/dear', reason: 'costs 40% more than what gpt-5.4 does' }] }] }, nothing, 'gpt-5.4'),
+  /^Some models were not tried: some cost more than gpt-5\.4 on your requests, so switching to them could not save anything \(for example x\/dear\)\.$/);
   assert.doesNotMatch(said, /flaky|answering reliably/, 'only what a setting of theirs decides');
   // something passed twice, or what serves still passes: nothing to say
   assert.equal(strongerKeptOut(plan, [...nothing, { key: 'v3', tone: 'ok', confirmed: true }], 'gpt-5.4'), null);
@@ -280,6 +370,6 @@ test('a test that found nothing says which settings kept models out, naming one 
   assert.equal(strongerKeptOut({}, nothing, 'gpt-5.4'), null);
   assert.equal(strongerKeptOut({ ruledOut: [{ step: 'health', count: 2, examples: [] }] }, nothing, 'gpt-5.4'), null);
   // one of a kind reads as one
-  assert.match(strongerKeptOut({ ruledOut: [{ step: 'price', count: 1, examples: [{ model: 'x/dear' }] }] }, nothing, 'gpt-5.4'),
+  assert.match(strongerKeptOut({ ruledOut: [{ step: 'price', count: 1, dearer: 1, examples: [{ model: 'x/dear', reason: 'costs 9% more' }] }] }, nothing, 'gpt-5.4'),
     /1 costs more than gpt-5\.4 on your requests, so switching to it could not save anything/);
 });

@@ -400,7 +400,7 @@ export const config = {
      points, over which the chance goes from about one in four to three in four (workloadCurve in src/eval/select.js). */
   EVAL_HERE_SCALE: num('EVAL_HERE_SCALE', 60),
   /* After a test that found nothing, the next one tries the models likeliest to pass first: chances within this much of
-     each other count as equal, and the cheaper of them goes first. */
+     each other count as equal, and the one expected to save the most of them goes first. */
   EVAL_CLIMB_BAND: num('EVAL_CLIMB_BAND', 0.05),
   /* A model retiring within this many days is not worth switching anybody to. */
   EVAL_EXPIRY_DAYS: num('EVAL_EXPIRY_DAYS', 30),
