@@ -686,7 +686,8 @@ api.get('/workloads/:id', async (req, res) => {
     selection: !plan.funnel.length ? null : {
       want: plan.models,
       funnel: plan.funnel,
-      ruledOut: Object.values(plan.excluded.reduce((a, e) => {
+      // each group with its strongest first (strength from src/eval/select.js), as a test records them
+      ruledOut: Object.values([...plan.excluded].sort((x, y) => (y.strength ?? -Infinity) - (x.strength ?? -Infinity)).reduce((a, e) => {
         a[e.step] = a[e.step] || { step: e.step, count: 0, examples: [] };
         a[e.step].count += 1;
         if (a[e.step].examples.length < 5) a[e.step].examples.push({ model: e.model, reason: e.reason });

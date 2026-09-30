@@ -154,6 +154,17 @@ export function buildUpstream(body, model, recipe = null, { zdr = null, cacheHin
     if (Object.keys(meta).length) out.metadata = meta; else delete out.metadata;
   }
   if (recipe?.reasoning) out.reasoning = { ...recipe.reasoning };
+  /* Room to think beyond the customer's cap, for a model that has to think before every answer (thinkingFit in
+     src/eval/select.js): the cap on thinking and answer together is raised by it, under the name the request used, so
+     the answer itself still has the whole cap. A request with no cap is left as it is, since it already has the room.
+     The call's hold counts the room too (holdFor in src/proxy.js), so what is set aside still bounds what it costs. */
+  const room = Math.floor(Number(recipe?.room) || 0);
+  if (room > 0) {
+    for (const f of ['max_completion_tokens', 'max_tokens']) {
+      const cap = Number(out[f]);
+      if (Number.isFinite(cap) && cap > 0) out[f] = Math.floor(cap) + room;
+    }
+  }
   /* served only by the providers it was measured on, where a switch says so; or by them first and by others
      when they cannot, where it says they are preferred (a cascade's cheap model, whose answers are checked) */
   const pinnedTo = Array.isArray(recipe?.providers) && recipe.providers.length ? recipe.providers : null;

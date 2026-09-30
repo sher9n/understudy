@@ -413,11 +413,22 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
      used to read them whenever a workload page was opened, which spent money nobody was charged for. */
   const { fits, difficulty, cost: fitCost } = await fitsFor(profile, survivors, facts, { compute: forRun });
   plan.fitCost = Number(fitCost) || 0;
-  const arena = await ratingsFor([workload.reference_model, ...survivors], facts, { link: forRun });
+  /* The leaderboard's ratings of the survivors, and of every model already tested on this workload, since what those did
+     here is what says how strong a model has to be to pass on these calls (workloadCurve in src/eval/select.js), and of
+     the models ruled out, so what a page says of them names the strongest (read from links already made, never asked). */
+  const tested = [...(history.own?.keys() || [])].filter((id) => facts.models.has(id));
+  const arena = await ratingsFor([workload.reference_model, ...survivors, ...tested], facts, { link: forRun });
+  const outRatings = await ratingsFor(first.excluded.map((e) => e.model), facts, { link: false });
+  for (const [id, r] of outRatings) if (!arena.has(id)) arena.set(id, r);
   plan.pendingJev = jevUsable() ? survivors.filter((id) => !fits.has(id)).length : 0;
-  plan.difficulty = difficulty;
 
   const sel = selectCandidates({ ...base, fits, arena, difficulty });
+  // the difficulty the order was worked out at: the one guessed from the task, moved by what this workload's tests found
+  plan.difficulty = sel.difficulty ?? difficulty;
+  plan.difficultyGuess = difficulty;
+  plan.here = sel.here;
+  plan.climb = sel.climb;
+  plan.strong = sel.strong;
   plan.funnel = sel.funnel;
   plan.excluded = sel.excluded;
   plan.order = [...sel.order];

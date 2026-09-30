@@ -78,9 +78,14 @@ const LIGHT = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
  * it is measured with, it is routed with if it wins, because that is the model that cleared.
  *
  * A tight cap on the answer decides first: on most providers the notes count against it, so a
- * model that thinks runs out of room before it answers. If it cannot be told not to think, it
- * is left out. */
-export function thinkingFit(model, profile, room, refThinks = null) {
+ * model that thinks runs out of room before it answers. One that can be told not to think is
+ * told so. One that cannot is measured thinking as little as it allows, with `allowance` tokens
+ * more than the cap to think in (recipe.room, which buildUpstream adds to the request's cap, and
+ * the call's hold counts), so its answer still has the whole cap; it is left out only when it
+ * cannot write that many tokens, or with no allowance at all. Left out whatever the cap, the
+ * strongest models there are were never tried on a workload capped at 900 tokens (30 Sep 2026):
+ * the three that ran out of a 180-token cap on the first real measurement had no room above it. */
+export function thinkingFit(model, profile, room, refThinks = null, allowance = 0) {
   const r = model.reasoning;
   if (!r || !thinksByDefault(r)) return { ok: true, recipe: null };
   const efforts = Array.isArray(r.supported_efforts) ? r.supported_efforts : [];
@@ -88,7 +93,23 @@ export function thinkingFit(model, profile, room, refThinks = null) {
   const tight = profile.outCap !== null && profile.outCap !== undefined && profile.outCap < room;
   if (tight) {
     if (r.mandatory === true) {
-      return { ok: false, reason: `thinks before every answer and cannot be told not to, and your answers are capped at ${profile.outCap} tokens` };
+      const cap = Math.floor(profile.outCap);
+      if (!(allowance > 0)) {
+        return { ok: false, reason: `thinks before every answer and cannot be told not to, and your answers are capped at ${cap} tokens` };
+      }
+      const writes = Number(model.maxOutput) || null;
+      if (writes && cap + allowance > writes) {
+        return { ok: false, reason: `thinks before every answer and writes at most ${fmt(writes)} tokens, too few to think in and still give your ${fmt(cap)}-token answers` };
+      }
+      const lightest = LIGHT.find((e) => efforts.includes(e)) || null;
+      const reasoning = lightest && lightest !== r.default_effort ? { effort: lightest } : null;
+      return {
+        ok: true,
+        thinks: true,
+        mustThink: true,
+        recipe: { ...(reasoning ? { reasoning } : {}), room: Math.floor(allowance) },
+        note: `has to think before every answer, so it is measured thinking as little as it allows, with room to think beyond your ${fmt(cap)}-token cap`,
+      };
     }
     return { ok: true, thinks: true, recipe: off, note: 'measured with its thinking switched off, because your answers are capped' };
   }
@@ -174,7 +195,7 @@ export function eligibility(model, ctx) {
     const why = cannotServe(model, profile);
     if (why) return { ok: false, step: 'features', reason: why };
   }
-  const think = thinkingFit(model, profile, room, ctx.refThinks ?? null);
+  const think = thinkingFit(model, profile, room, ctx.refThinks ?? null, ctx.allowance ?? 0);
   if (!think.ok) return { ok: false, step: 'thinking', reason: think.reason };
   if (model.expiresAt && model.expiresAt - at < expiryMs) {
     return { ok: false, step: 'retiring', reason: 'is being retired soon' };
@@ -204,15 +225,41 @@ export function eligibility(model, ctx) {
 export function chanceOf(model, ctx) {
   const parts = [];
   const hist = ctx.history?.own?.get(model.id);
+  let measured = false;
   if (hist) {
     /* Only what the verdict says about its answers. "Slower" at the end means they matched and
        the time did not, and speed is weighed on its own below; "slower" in the first calls, or
        "failed" because its provider was busy or refused it, says nothing about the answers. */
-    const p = hist.verdict === 'slower'
+    let p = hist.verdict === 'slower'
       ? (hist.stopped ? undefined : 0.9)
       : { cleared: 0.95, review: 0.6, missed: 0.1 }[hist.verdict];
+    let note = hist.verdict === 'slower' ? 'matched' : hist.verdict;
+    /* Unless the answers it did give, before it was stopped, were far outside the bar: twice what is allowed is a miss
+       whatever stopped it. llama-3.1-8b, stopped for speed on the museum guide with 96% of its answers worse against
+       20.8% allowed, read as never tested, and was put sixth in line for the next test. */
+    if (p === undefined && Number.isFinite(hist.gap) && Number(hist.floor) > 0 && hist.gap >= 2 * hist.floor) {
+      p = 0.1;
+      note = 'missed before it was stopped';
+    }
     // measured on these very calls, so it outweighs everything else put together
-    if (p !== undefined) parts.push({ source: 'before', p, w: 6, note: hist.verdict === 'slower' ? 'matched' : hist.verdict });
+    if (p !== undefined) {
+      parts.push({ source: 'before', p, w: 6, note });
+      measured = true;
+    }
+  }
+  /* What this workload's own results say about a model of its strength (workloadCurve): the models tested here, each
+     placed on one scale of strength, show how strong a model has to be to pass on these very calls. Only for a model not
+     tested here itself, whose own result says more. Before this, a model never tested here was read from the task and
+     the leaderboard alone, which rated an 8-billion-parameter model and claude-haiku-4.5 about the same (0.44 and 0.47)
+     on a workload where every small model had missed by far; a strength read from a price counts for half. Tested here
+     with nothing its answers can be read from (stopped early, failed), it is read from the curve like one never tested. */
+  const here = ctx.here;
+  if (here && !measured) {
+    const s = ctx.strength ? ctx.strength(model.id) : null;
+    if (s) {
+      parts.push({ source: 'here', p: here.curve(s.value - here.ref), w: Math.min(4, here.n / 4) * (s.read ? 0.5 : 1),
+        note: `${here.n} models tested here` });
+    }
   }
   const shape = ctx.history?.shape?.get(model.id);
   if (shape && shape.n) {
@@ -251,6 +298,80 @@ export function chanceOf(model, ctx) {
     parts.push({ source: 'live', p: null, w: 0, note });
   }
   return { chance, parts, family };
+}
+
+/* How strong a model is, on one scale: its rating on the public leaderboard where it has one, and otherwise one read from
+ * its price along a line drawn through the rated models (a dearer model is a stronger one, on the whole; only a line
+ * that rises with price is drawn). A read rating is rough and is marked as read. Answers a function of a model id, which
+ * gives { value, read } or null where nothing can be said. */
+export function strengthScale(models, arena) {
+  const blend = (m) => Number(m?.priceIn || 0) + Number(m?.priceOut || 0);
+  const pts = [];
+  for (const m of models) {
+    const r = Number(arena?.get(m.id));
+    if (r > 0 && blend(m) > 0) pts.push([Math.log10(blend(m)), r]);
+  }
+  let line = null;
+  if (pts.length >= 8) {
+    const n = pts.length;
+    const mx = pts.reduce((a, p) => a + p[0], 0) / n;
+    const my = pts.reduce((a, p) => a + p[1], 0) / n;
+    const sxx = pts.reduce((a, p) => a + (p[0] - mx) ** 2, 0);
+    const sxy = pts.reduce((a, p) => a + (p[0] - mx) * (p[1] - my), 0);
+    if (sxx > 0 && sxy > 0) line = { a: my - (sxy / sxx) * mx, b: sxy / sxx };
+  }
+  const byId = new Map(models.map((m) => [m.id, m]));
+  return (id) => {
+    const r = Number(arena?.get(id));
+    if (r > 0) return { value: r, read: false };
+    const p = blend(byId.get(id));
+    return line && p > 0 ? { value: line.a + line.b * Math.log10(p), read: true } : null;
+  };
+}
+
+/* What a workload's own results say about how strong a model has to be to pass there. Each model tested on it that was
+ * judged on its answers is placed on the strength scale against the customer's own model: passed (1), came close (a
+ * half) or missed (0). One number is fitted, the strength at which a model has an even chance on these calls, and the
+ * chance falls away either side of it, from three in four to one in four over `scale` points. Two imagined results
+ * anchor it where the real ones say little: a model clearly stronger than the customer's that passed, and one far
+ * weaker that missed. With the curve, the share of them that missed, which is what a task's difficulty turns out to be.
+ * Null with fewer than four placed. */
+export function workloadCurve(own, strength, reference, scale = 60) {
+  const ref = strength(reference);
+  if (!ref || !own) return null;
+  const pts = [];
+  for (const [id, h] of own) {
+    // "slower" at the end matched, and was too slow; stopped for speed, or failed, it was never judged on its answers
+    const y = h.verdict === 'cleared' ? 1 : h.verdict === 'review' ? 0.5 : h.verdict === 'missed' ? 0
+      : h.verdict === 'slower' && !h.stopped ? 1 : null;
+    if (y === null) continue;
+    /* A model that thinks, measured with its thinking switched off, is not the model its rating describes: on the museum
+       guide deepseek-v4-pro and grok-4.3 missed that way, and read at their ratings they said a model had to be far
+       stronger than gpt-5.4 to pass there. Its own result still counts for it (chanceOf); only the curve leaves it out. */
+    if (h.thinkingOff) continue;
+    const s = strength(id);
+    if (!s) continue;
+    pts.push({ x: s.value - ref.value, y, w: s.read ? 0.5 : 1 });
+  }
+  if (pts.length < 4) return null;
+  const k = (2 * Math.log(3)) / scale;
+  const sig = (z) => 1 / (1 + Math.exp(-z));
+  const all = [...pts, { x: scale, y: 1, w: 1 }, { x: -3 * scale, y: 0, w: 1 }];
+  let best = null;
+  for (let theta = -800; theta <= 400; theta += 5) {
+    let ll = 0;
+    for (const p of all) {
+      const q = Math.min(1 - 1e-9, Math.max(1e-9, sig(k * (p.x - theta))));
+      ll += p.w * (p.y * Math.log(q) + (1 - p.y) * Math.log(1 - q));
+    }
+    if (!best || ll > best.ll) best = { theta, ll };
+  }
+  const weight = pts.reduce((a, p) => a + p.w, 0);
+  return {
+    n: pts.length, ref: ref.value, theta: best.theta,
+    curve: (x) => sig(k * (x - best.theta)),
+    difficulty: 1 - pts.reduce((a, p) => a + p.w * p.y, 0) / weight,
+  };
 }
 
 /* The chance a model keeps to the workload's speed setting, or null when speed does not matter.
@@ -311,6 +432,7 @@ export function selectCandidates(input) {
   const zdrOnly = input.zdrOnly ?? config.ZDR_ONLY;
   const ctx = {
     profile, reference, zdrKnown: facts.zdrKnown, zdrOnly, room: config.EVAL_THINKING_ROOM_TOKENS,
+    allowance: config.EVAL_THINK_ALLOWANCE_TOKENS ?? 0,
     expiryMs: config.EVAL_EXPIRY_DAYS * 86400000, at, minUptime: config.EVAL_MIN_UPTIME_PCT,
     history, fits, arena, difficulty, refThinks,
   };
@@ -319,10 +441,15 @@ export function selectCandidates(input) {
   const pout = profile.outAvg || 0;
   /* The price a routed call would really cost: through a provider that keeps nothing, when we
      know which those are. When that list has never been read, the catalogue's price is the best
-     there is, and ruling every model out for want of a list would measure nothing. */
-  const priceOf = (m, routes = null) => (zdrOnly && facts.zdrKnown
-    ? routedCallPrice(routes ? { ...m, endpoints: routes } : m, pin, pout, profile.hours, { zdrOnly })
-    : callPrice(m, pin, pout, profile.hours));
+     there is, and ruling every model out for want of a list would measure nothing. `out` is the
+     tokens it is expected to write. */
+  const priceOf = (m, routes = null, out = pout) => (zdrOnly && facts.zdrKnown
+    ? routedCallPrice(routes ? { ...m, endpoints: routes } : m, pin, out, profile.hours, { zdrOnly })
+    : callPrice(m, pin, out, profile.hours));
+  /* A model given room to think beyond the cap (thinkingFit) is billed for its thinking like its answer, so it is priced
+     with some: about four times the answer, and never more than the room. The measurement finds what it really costs;
+     priced on the answer alone, one dearer than the customer's model once it thinks took a place it could never win. */
+  const thinkingOut = (k) => (k.recipe?.room ? Math.min(k.recipe.room, Math.max(200, 4 * pout)) : 0);
   // the customer's model, through the providers that can serve these requests
   const refRoutes = refModel ? (refModel.endpoints || []).filter((e) => cannotServe(
     { params: e.params ?? refModel.params, contextLen: e.context_len ?? refModel.contextLen, maxOutput: e.max_output ?? refModel.maxOutput },
@@ -376,7 +503,7 @@ export function selectCandidates(input) {
   // cheaper, at the price we would actually pay
   const priced = [];
   for (const k of kept) {
-    const price = priceOf(k.m, k.routes);
+    const price = priceOf(k.m, k.routes, pout + thinkingOut(k));
     const isServing = k.m.id === serving;
     if (isServing) {
       // measured again whatever it costs now: the measurement finds out what it really costs
@@ -433,6 +560,22 @@ export function selectCandidates(input) {
     return true;
   });
   if (speed && speed.factor) count('speed', 'quick enough for your speed setting', quick.length);
+
+  /* What this workload's own results say about strength (workloadCurve), and what they make the task's difficulty: read
+     from the models tested here, the difficulty a task was guessed to have beforehand counts as five of them. The museum
+     guide was guessed fairly easy (0.37), which lifted every weak model's leaderboard reading, when all but one of the
+     models tested on it had missed. */
+  const strength = strengthScale(all, arena);
+  const here = workloadCurve(history?.own, strength, reference, config.EVAL_HERE_SCALE ?? 60);
+  if (here) {
+    ctx.here = here;
+    ctx.difficulty = ((difficulty ?? 0.5) * 5 + here.difficulty * here.n) / (5 + here.n);
+  }
+  ctx.strength = strength;
+  /* The last test of this workload that compared models found nothing to switch to (lastFailed in src/eval/history.js),
+     so this one climbs: it tries the models likeliest to pass first, and the cheaper of two about as likely, rather than
+     the next cheapest ones, which are the least likely of all to do what the cheapest could not. */
+  const climb = !!history?.lastFailed;
 
   /* Rank by expected saving: what it saves if it works out, times the chance that it does.
      Its answers have to match and it has to be quick enough, so the two chances multiply. A
@@ -547,7 +690,39 @@ export function selectCandidates(input) {
       });
     }
   }
-  ranked.sort((a, b) => b.expected - a.expected || a.price - b.price);
+  const band = config.EVAL_CLIMB_BAND || 0.05;
+  ranked.sort(climb
+    ? (a, b) => Math.floor(b.chance / band) - Math.floor(a.chance / band) || b.expected - a.expected || a.price - b.price
+    : (a, b) => b.expected - a.expected || a.price - b.price);
+
+  /* Places kept for the strongest models the workload can afford, whatever each would save (EVAL_STRONG_PLACES): ranked
+     on saving, every place in the museum guide's tests went to small cheap models, and the strong ones it needed waited
+     at the back. The strongest by the leaderboard first, one read from its price only where too few rated ones are left;
+     never one that already missed here, which has said what it can do, nor the customer's own model asked another way.
+     They go to the front, before the rest, and say so. */
+  const places = Math.max(0, Math.floor(Number(config.EVAL_STRONG_PLACES) || 0));
+  const strong = [];
+  if (places) {
+    const worth = ranked.filter((r) => !r.key && r.model !== serving && strength(r.model)
+      && ctx.history?.own?.get(r.model)?.verdict !== 'missed');
+    const rated = worth.filter((r) => !strength(r.model).read);
+    const read = worth.filter((r) => strength(r.model).read);
+    const byStrength = (a, b) => strength(b.model).value - strength(a.model).value || a.price - b.price;
+    /* one from each maker: kept by strength alone, every place on every workload went to three versions of one maker's
+       model, and the rule of two from a maker in front then kept one of them back */
+    const makers = new Set();
+    for (const r of [...rated.sort(byStrength), ...read.sort(byStrength)]) {
+      if (strong.length >= places) break;
+      if (makers.has(vendorOf(r.model))) continue;
+      makers.add(vendorOf(r.model));
+      strong.push(r);
+    }
+    for (const r of strong) {
+      r.strongPlace = true;
+      r.note = [r.note, 'given a place as one of the strongest models you can afford'].filter(Boolean).join('; ');
+    }
+    ranked.splice(0, ranked.length, ...strong, ...ranked.filter((r) => !strong.includes(r)));
+  }
 
   /* At most two from one maker in the list, so one family's shared weakness cannot take every
      place; the rest of that family waits behind everybody else rather than being dropped. The
@@ -569,6 +744,11 @@ export function selectCandidates(input) {
   }
   const order = [...first, ...later];
   const limit = Math.max(want, Math.round(want * tryMultiple));
+  // how strong each ruled-out model is, so what a page says of them names the strongest first (noteRuledOut in run.js)
+  for (const e of excluded) {
+    const s = strength(e.model);
+    e.strength = s ? Math.round(s.value) : null;
+  }
   return {
     funnel,
     excluded,
@@ -577,6 +757,11 @@ export function selectCandidates(input) {
     waiting: Math.max(0, order.length - limit),
     refPrice,
     refHealth,
+    // what the workload's own results said (workloadCurve), whether this test climbs, and the places kept for strength
+    here: here ? { n: here.n, theta: here.theta, difficulty: Math.round(here.difficulty * 1000) / 1000 } : null,
+    difficulty: ctx.difficulty ?? null,
+    climb,
+    strong: strong.map((r) => r.key || r.model),
   };
 }
 

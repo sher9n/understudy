@@ -279,9 +279,28 @@ function modelsOf(ready) {
    and a quarter more for a cascade's check. A model the call can reach that cannot be priced refuses the
    call; nothing is held at a guess. The request itself is never changed but for the price ceiling it
    carries, which is what makes the hold a bound. */
+/* The most room to think any setup this call can reach is given beyond the request's cap (recipe.room: see buildUpstream
+   in src/openrouter.js), on what serves and on every step of a strategy's chain. */
+export function roomOf(ready) {
+  let most = Number(ready?.recipe?.room) || 0;
+  for (let s = ready?.strategy, n = 0; s && n < 4; s = s.fallback, n += 1) {
+    const spec = s.spec;
+    if (!spec) continue;
+    const recipes = spec.kind === 'cascade' ? [spec.first?.recipe, spec.fallback?.recipe]
+      : spec.kind === 'router' ? [spec.cheap?.recipe, spec.strong?.recipe, ...(Array.isArray(spec.options) ? spec.options : []).map((o) => o?.recipe)]
+        : [spec.recipe];
+    for (const r of recipes) most = Math.max(most, Number(r?.room) || 0);
+  }
+  return Math.floor(most);
+}
+
 async function holdFor(wsId, body, ready) {
-  const shape = await callShape(body, { owner: wsId });
-  if (shape.refuse) return { ok: false, refused: shape.refuse, busy: !!shape.busy };
+  const asked = await callShape(body, { owner: wsId });
+  if (asked.refuse) return { ok: false, refused: asked.refuse, busy: !!asked.busy };
+  /* A setup given room to think beyond the cap writes up to that much more than the request allows, so what the call can
+     cost is worked out at the raised cap: held at the request's own, a thinking model could spend past what was set aside. */
+  const room = roomOf(ready);
+  const shape = room > 0 && asked.cap !== null ? { ...asked, cap: asked.cap + room } : asked;
   // the models the request itself names to fall back to: any of them may answer a request, and be paid for
   const fallbacks = Array.isArray(body.models) ? body.models.filter((m) => typeof m === 'string') : [];
   // each of these is sent a request of its own, carrying those fallbacks

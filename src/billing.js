@@ -593,8 +593,10 @@ export async function gateEval(workspaceId, { estimatedUsd = 0 } = {}) {
   const left = await allowanceLeft(workspaceId);
   const a = await available(workspaceId);
   if (left + Math.max(0, a.free) >= estimatedUsd) return { ok: true, allowance: left, free: a.free };
+  /* What is free is said when it is short too: without it, a workload page told a workspace with $1.33 free that "$0.00 of
+     balance are free" (planFor's reason reads these). */
   return {
-    ok: false, code: 'no_balance',
+    ok: false, code: 'no_balance', allowance: left, free: a.free,
     message: left > 0
       ? `This would cost about $${usd(estimatedUsd).toFixed(2)}: $${left.toFixed(2)} of this month's allowance is left, `
         + 'and your balance covers the rest only with a little more credit. Add credit in Settings and it starts again on its own.'

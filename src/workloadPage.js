@@ -663,7 +663,51 @@ function takeOf(run, cands, w, opts) {
     notes.push(`The judge was first tested on ${planted} answers whose right verdict is already known, and it got ${check.errors} wrong, `
       + 'so nothing is switched on its word. The next test checks the judge again.');
   }
+  const kept = compared && cands.length ? strongerKeptOut(plan, cands, opts.refName) : null;
+  if (kept) notes.push(kept);
   return [main, ...notes].join(' ');
+}
+
+/* When a test found nothing to switch to, which of the customer's own settings kept models out of it, and how many:
+   providers that keep nothing (Zero data retention, under Privacy in Settings), the cap on answers their requests carry,
+   and the price of their own model, each with a model it kept out, the strongest for a test that recorded strength
+   (planRecord.ruledOut in src/eval/run.js). And what changing each would do, where the customer can change it: a
+   deployment that requires zero retention for everybody is said as that. Nothing when something passed, or a test from
+   before these were recorded. Before this, a test that tried only small models said nothing of the strong ones it never
+   could, and the page read as if nothing better existed (30 Sep 2026). */
+export function strongerKeptOut(plan, cands, refName) {
+  if (cands.some((c) => c.confirmed || (c.serving && c.tone === 'ok'))) return null;
+  const groups = new Map((Array.isArray(plan?.ruledOut) ? plan.ruledOut : []).map((g) => [g.step, g]));
+  const example = (g) => (g.examples?.[0]?.model ? ` (for example ${g.examples[0].model})` : '');
+  const few = (n, one, many) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`;
+  const parts = [];
+  const tips = [];
+  const priv = groups.get('private');
+  if (priv?.count) {
+    parts.push(`${few(priv.count, 'has', 'have')} no provider that deletes requests right away, which Zero data retention requires${example(priv)}`);
+    tips.push(config.ZDR_FORCED ? 'This deployment requires Zero data retention for every workspace.'
+      : 'Turning off Zero data retention, under Privacy in Settings, lets those be tried.');
+  }
+  const think = groups.get('thinking');
+  if (think?.count) {
+    // the cap the customer's requests carry, as the reason says it: never a model's own limit, which it may name first
+    const said = String(think.examples?.[0]?.reason || '').match(/your (\d[\d,]*)-token answers|capped at (\d[\d,]*) tokens/);
+    const cap = said ? (said[1] || said[2]) : null;
+    parts.push(`${few(think.count, 'thinks', 'think')} before every answer and cannot fit it in ${cap ? `your ${cap}-token answers` : 'the length your answers are capped at'}${example(think)}`);
+    /* Left out for having to think at all (a test from before the room above the cap): the next test gives them that room,
+       unless it is turned off. Left out now, one cannot write enough to think and answer, and a higher cap would not help. */
+    if (/cannot be told not to/.test(String(think.examples?.[0]?.reason || ''))) {
+      tips.push(Number(config.EVAL_THINK_ALLOWANCE_TOKENS) > 0 ? 'The next test tries those that think, with room to think beyond that cap.'
+        : 'A higher max_tokens in your requests lets those be tried.');
+    }
+  }
+  const price = groups.get('price');
+  if (price?.count) {
+    parts.push(`${few(price.count, 'costs', 'cost')} more than ${refName || 'your model'} on your requests, so switching to ${price.count === 1 ? 'it' : 'them'} could not save anything${example(price)}`);
+  }
+  if (!parts.length) return null;
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join('; ')}; and ${parts[parts.length - 1]}`;
+  return `Some models were not tried: ${list}. ${tips.join(' ')}`.trim();
 }
 
 function mainTake(run, cands, w, { small = null, refName }) {
