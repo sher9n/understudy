@@ -529,15 +529,25 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
 
   const planRecord = {
     funnel: plan.funnel,
-    ruledOut: Object.values(plan.excluded.reduce((a, e) => {
+    /* each group with the strongest of it first (strength from src/eval/select.js), so what the page says of the models a
+       setting kept out names the ones that matter (strongerKeptOut in src/workloadPage.js) */
+    ruledOut: Object.values([...plan.excluded].sort((x, y) => (y.strength ?? -Infinity) - (x.strength ?? -Infinity)).reduce((a, e) => {
       a[e.step] = a[e.step] || { step: e.step, count: 0, examples: [] };
       a[e.step].count += 1;
-      if (a[e.step].examples.length < 6) a[e.step].examples.push({ model: e.model, reason: e.reason });
+      /* Priced out for costing more, apart from the ones with no price to reach them at, or cheaper by less than our fee:
+         a page saying "cost more" of all of them said it of a model 3% cheaper. */
+      if (e.step === 'price') a[e.step].dearer = (a[e.step].dearer || 0) + (/^costs /.test(String(e.reason || '')) ? 1 : 0);
+      if (a[e.step].examples.length < 6) a[e.step].examples.push({ model: e.model, reason: e.reason, strength: e.strength ?? null });
       return a;
     }, {})),
+    // the customer's own requests ask for zero data retention, whatever the workspace chose (profile.zdrAsked)
+    zdrAsked: !!plan.profile?.zdrAsked,
+    // what this workload's own results said (workloadCurve), whether this test climbed after one that found nothing, and
+    // the places kept for the strongest models it could afford
+    here: plan.here ?? null, climb: !!plan.climb, strong: plan.strong ?? [], difficultyGuess: plan.difficultyGuess ?? null,
     order: queue.map((r) => ({
       model: r.model, key: r.key ?? null, label: r.label ?? null, price: r.price, savingShare: r.savingShare, chance: r.chance,
-      expected: r.expected, parts: r.parts, family: r.family, recipe: r.recipe, note: r.note,
+      expected: r.expected, parts: r.parts, family: r.family, recipe: r.recipe, note: r.note, strongPlace: !!r.strongPlace,
     })),
     want, judge: plan.judge, difficulty: plan.difficulty, speed,
     // the measurement a second-look run looks again for, and the models it waited for (pendingSecondLook)

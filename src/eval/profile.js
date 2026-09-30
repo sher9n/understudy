@@ -95,6 +95,8 @@ export function profileFromRows(workload, rows) {
 
   let streamed = 0;
   let withBody = 0;
+  // requests that ask for zero data retention themselves, which a workspace's own setting cannot take away
+  let zdrAsked = 0;
   let tools = false;
   let toolChoice = false;
   let json = 'none';
@@ -111,6 +113,7 @@ export function profileFromRows(workload, rows) {
     try { b = JSON.parse(r.request_json); } catch { continue; }
     withBody += 1;
     if (b.stream === true) streamed += 1;
+    if (b.provider?.zdr === true) zdrAsked += 1;
     if (Array.isArray(b.tools) && b.tools.length) tools = true;
     if (b.tool_choice && b.tool_choice !== 'auto' && b.tool_choice !== 'none') toolChoice = true;
     const rf = b.response_format?.type;
@@ -164,6 +167,11 @@ export function profileFromRows(workload, rows) {
     /* The tightest cap the customer sets on answers, when most calls set one: a thinking model
        has to fit its thinking and its answer under it. */
     outCap: caps.length >= Math.max(1, withBody * 0.5) ? Math.min(...caps) : null,
+    // and the largest, which a model given room to think above the cap has to fit too (thinkingFit in src/eval/select.js)
+    outCapMax: caps.length ? Math.max(...caps) : null,
+    /* Whether its requests ask for zero data retention themselves (provider.zdr), which buildUpstream keeps whatever the
+       workspace chose: then turning the setting off lets nothing more be tried (strongerKeptOut in src/workloadPage.js). */
+    zdrAsked: withBody > 0 && zdrAsked > 0,
     promptAvg: pin.length ? pin.reduce((a, b) => a + b, 0) / pin.length : 0,
     promptP95: pct(pin, 0.95) ?? 0,
     promptMax: pin.length ? Math.max(...pin) : 0,

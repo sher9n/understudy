@@ -1,6 +1,7 @@
 import { db, now } from '../db/index.js';
 import { recipeKind } from './select.js';
 import { heldBack } from './promote.js';
+import { OUTCOME_OF } from './outcome.js';
 
 /* What earlier measurements found, as evidence for ranking the next one.
  *
@@ -15,12 +16,26 @@ const HOUR = 3600000;
 
 export async function historyFor(workload) {
   const own = new Map();
+  /* With how far from the bar each came, which is what a workload's own results say about the models not tested on it
+     yet (workloadCurve in src/eval/select.js). */
   const rows = await db.prepare(
-    `SELECT r.model_id, r.verdict, r.stopped, e.created_at FROM eval_results r JOIN eval_runs e ON e.id = r.run_id
+    `SELECT r.model_id, r.verdict, r.stopped, r.gap_pct, r.runs, r.recipe_json, e.floor_pct, e.created_at FROM eval_results r
+       JOIN eval_runs e ON e.id = r.run_id
       WHERE e.workload_id = ? AND r.verdict <> 'reference' AND e.created_at >= ?
       ORDER BY e.created_at DESC`).all(workload.id, now() - 60 * DAY);
   for (const r of rows) {
-    if (!own.has(r.model_id)) own.set(r.model_id, { verdict: r.verdict, stopped: r.stopped || null, at: r.created_at });
+    if (!own.has(r.model_id)) {
+      let recipe = null;
+      try { recipe = r.recipe_json ? JSON.parse(r.recipe_json) : null; } catch { recipe = null; }
+      own.set(r.model_id, { verdict: r.verdict, stopped: r.stopped || null, at: r.created_at,
+        gap: r.gap_pct === null || r.gap_pct === undefined ? null : Number(r.gap_pct),
+        floor: r.floor_pct === null || r.floor_pct === undefined ? null : Number(r.floor_pct),
+        // how many of the test's requests it answered, which is what its difference was read from
+        runs: Number(r.runs) || 0,
+        /* how it was asked to think: switched off, or as little as it allows, is not the model its leaderboard rating
+           describes (workloadCurve) */
+        thinking: recipeKind(recipe) });
+    }
   }
 
   /* Whether the answers matched, elsewhere. "Slower" at the end of a measurement matched and was
@@ -44,7 +59,31 @@ export async function historyFor(workload) {
   // switched back for good, or for something that can change within its cool-off, which grows each time
   const reverted = await heldBack(workload.id);
   return { own, shape, reverted, cantKeepUp: await cantKeepUpOn(workload.id),
-    live: liveElsewhere(await liveRates(workload.shape_kind), workload.workspace_id) };
+    live: liveElsewhere(await liveRates(workload.shape_kind), workload.workspace_id),
+    lastFailed: await lastFailedOn(workload.id) };
+}
+
+/* Whether the newest test of a workload that compared models found nothing to switch to: no model passed twice (or, for
+   a strategy, went on live), and what serves did not pass again either. What that test wrote down it chose says so where
+   it wrote it (choice.chosen in src/eval/run.js); an older one is read from its rows. The next test then climbs to the
+   models likeliest to pass (selectCandidates). A test cut short at the most it could spend, or by the balance, found
+   nothing because it did not finish, and says nothing either way, so the one before it decides; so does a test that
+   could not read what serves (held to, not judged: choice.holding without choice.servingKept), and one stopped or unable
+   to measure is never a comparison at all. */
+export async function lastFailedOn(workloadId) {
+  const last = await db.prepare(
+    `SELECT id, choice_json FROM eval_runs WHERE workload_id = ? AND status = 'done' AND ${OUTCOME_OF()} = 'compared'
+        AND COALESCE(error, '') NOT LIKE 'reached%' AND COALESCE(error, '') NOT LIKE 'balance ran out%'
+      ORDER BY created_at DESC LIMIT 1`).get(workloadId);
+  if (!last) return false;
+  let choice = null;
+  try { choice = last.choice_json ? JSON.parse(last.choice_json) : null; } catch { choice = null; }
+  if (choice?.holding && !choice.servingKept) return false;
+  if (choice && Object.prototype.hasOwnProperty.call(choice, 'chosen')) return !choice.chosen;
+  const found = await db.prepare(
+    `SELECT 1 AS hit FROM eval_results WHERE run_id = ? AND verdict = 'cleared' AND confirm_verdict IN ('cleared', 'live') LIMIT 1`)
+    .get(last.id);
+  return !found;
 }
 
 /* The models a test of this workload failed because their provider could not keep up with its requests (stopped 'busy':

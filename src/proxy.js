@@ -279,16 +279,50 @@ function modelsOf(ready) {
    and a quarter more for a cascade's check. A model the call can reach that cannot be priced refuses the
    call; nothing is held at a guess. The request itself is never changed but for the price ceiling it
    carries, which is what makes the hold a bound. */
+/* The room to think each model this call can reach is given beyond the request's cap (recipe.room: see roomFor in
+   src/openrouter.js), by the recipe it is sent with: what serves, and every step of a strategy's chain. The customer's own
+   model is sent their request as it is, and is given none. */
+export function roomsOf(ready) {
+  const out = new Map();
+  const add = (model, recipe) => {
+    const r = Math.floor(Number(recipe?.room) || 0);
+    if (model && r > 0) out.set(model, Math.max(out.get(model) || 0, r));
+  };
+  add(ready?.served, ready?.recipe);
+  for (let s = ready?.strategy, n = 0; s && n < 4; s = s.fallback, n += 1) {
+    const spec = s.spec;
+    if (!spec) continue;
+    if (spec.kind === 'cascade') {
+      add(spec.first?.model, spec.first?.recipe);
+      add(spec.fallback?.model, spec.fallback?.recipe);
+    } else if (spec.kind === 'router') {
+      add(spec.cheap?.model, spec.cheap?.recipe);
+      add(spec.strong?.model, spec.strong?.recipe);
+      for (const o of Array.isArray(spec.options) ? spec.options : []) add(o?.model, o?.recipe);
+    } else add(spec.model, spec.recipe);
+  }
+  return out;
+}
+/** The most room any model this call can reach is given. */
+export const roomOf = (ready) => Math.max(0, ...roomsOf(ready).values());
+
 async function holdFor(wsId, body, ready) {
   const shape = await callShape(body, { owner: wsId });
   if (shape.refuse) return { ok: false, refused: shape.refuse, busy: !!shape.busy };
+  /* A setup given room to think beyond a tight cap writes up to that much more than the request allows, so what a call to
+     it can cost is worked out at the raised cap, and only for it: held at the request's own, a thinking model could spend
+     past what was set aside; raised for every model the call can reach, the customer's own model at its price was held
+     for 2,300 tokens it is never sent, several times what the call could cost, and calls met a daily limit early. */
+  const rooms = roomsOf(ready);
+  const tight = shape.cap !== null && shape.cap < config.EVAL_THINKING_ROOM_TOKENS;
+  const shapeFor = (m) => (tight && rooms.get(m) ? { ...shape, cap: shape.cap + rooms.get(m) } : shape);
   // the models the request itself names to fall back to: any of them may answer a request, and be paid for
   const fallbacks = Array.isArray(body.models) ? body.models.filter((m) => typeof m === 'string') : [];
   // each of these is sent a request of its own, carrying those fallbacks
   const senders = modelsOf(ready);
   const bounds = {};
   for (const m of new Set([...senders, ...fallbacks])) {
-    const b = await callBound(m, shape, { zdr: ready.zdr });
+    const b = await callBound(m, shapeFor(m), { zdr: ready.zdr });
     /* A model the call can reach that cannot be priced (the catalogue changed a moment ago) is not
        held at a guess: the call is refused, and the next one finds the catalogue as it is now. */
     if (!b) return { ok: false, unpriced: m };

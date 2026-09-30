@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import config from '../config.js';
 import { db, now } from '../db/index.js';
-import { chat, streamCollect, UpstreamError, reasonOf, priceCall } from '../openrouter.js';
+import { chat, streamCollect, UpstreamError, reasonOf, priceCall, roomFor } from '../openrouter.js';
 import { recordCall } from '../traffic.js';
 import { zdrFor } from '../workspace.js';
 
@@ -39,6 +39,26 @@ const answeredChars = (json) => {
  * catalogue price. Never nothing for a call that was made: read as `usage.cost ?? 0`, an answer that
  * came back without a cost on it was recorded, and charged to the customer's optimizing, as free.
  */
+/* A model given room to think beyond the customer's cap (roomFor in src/openrouter.js) may write an answer longer than the
+   cap itself. That is an answer the customer's own cap would have cut off, so it is read as one, as a provider marks an
+   answer that ran into its cap (finish_reason "length", which extract in src/eval/compare.js counts as cut off), and a
+   model that runs past the cap is never switched to on it. How long the answer is comes from the tokens the provider
+   counted, less its thinking; where it said nothing of its thinking, from the answer's length, with a tenth to spare. */
+export function pastCap(out, body, recipe) {
+  const json = out?.json;
+  if (!json || !(roomFor(recipe, body) > 0)) return json;
+  const cap = Number(body?.max_completion_tokens ?? body?.max_tokens);
+  const choice = json.choices?.[0];
+  if (!choice || !(cap > 0)) return json;
+  const counted = Number.isFinite(out.completionTokens) && Number.isFinite(out.reasoningTokens)
+    ? out.completionTokens - out.reasoningTokens : null;
+  const text = typeof choice.message?.content === 'string' ? choice.message.content : '';
+  const over = counted !== null ? counted > cap : Math.ceil(text.length / 4) > cap * 1.1;
+  if (!over) return json;
+  return { ...json, choices: [{ ...choice, finish_reason: 'length' }, ...json.choices.slice(1)],
+    understudy_past_cap: { cap, written: counted ?? Math.ceil(text.length / 4) } };
+}
+
 export async function costOfCall({ json, model, request = null, workspaceId = null }) {
   const usage = json?.usage || null;
   const said = Number(usage?.cost);
@@ -189,6 +209,7 @@ export async function replayOnce({ body, callId = null, model, recipe = null, sl
   }
   // an answer came back, so it was paid for, whether or not it says what it cost
   if (out.ok) out.cost = await costOfCall({ json: out.json, model, request: clean, workspaceId: workload.workspace_id });
+  if (out.ok) out.json = pastCap(out, clean, recipe);
 
   if (out.ok || lasting(out.status)) {
     await remember(key, {

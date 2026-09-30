@@ -413,11 +413,22 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
      used to read them whenever a workload page was opened, which spent money nobody was charged for. */
   const { fits, difficulty, cost: fitCost } = await fitsFor(profile, survivors, facts, { compute: forRun });
   plan.fitCost = Number(fitCost) || 0;
-  const arena = await ratingsFor([workload.reference_model, ...survivors], facts, { link: forRun });
+  /* The leaderboard's ratings of the survivors, and of every model already tested on this workload, since what those did
+     here is what says how strong a model has to be to pass on these calls (workloadCurve in src/eval/select.js), and of
+     the models ruled out, so what a page says of them names the strongest (read from links already made, never asked). */
+  const tested = [...(history.own?.keys() || [])].filter((id) => facts.models.has(id));
+  const arena = await ratingsFor([workload.reference_model, ...survivors, ...tested], facts, { link: forRun });
+  const outRatings = await ratingsFor(first.excluded.map((e) => e.model), facts, { link: false });
+  for (const [id, r] of outRatings) if (!arena.has(id)) arena.set(id, r);
   plan.pendingJev = jevUsable() ? survivors.filter((id) => !fits.has(id)).length : 0;
-  plan.difficulty = difficulty;
 
   const sel = selectCandidates({ ...base, fits, arena, difficulty });
+  // the difficulty the order was worked out at: the one guessed from the task, moved by what this workload's tests found
+  plan.difficulty = sel.difficulty ?? difficulty;
+  plan.difficultyGuess = difficulty;
+  plan.here = sel.here;
+  plan.climb = sel.climb;
+  plan.strong = sel.strong;
   plan.funnel = sel.funnel;
   plan.excluded = sel.excluded;
   plan.order = [...sel.order];
@@ -544,7 +555,8 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
  * The race: the models measured to the end answer every call, and the ones dropped early the few
  * calls they answered first.
  *
- * The second look: up to EVAL_CONFIRM_TRIES of the cheapest that clear, each on calls no measurement
+ * The second look: up to EVAL_CONFIRM_TRIES of the finalists, priced at the dearest (a test looks again at the best
+ * scores first, and the strongest models, kept places at the front, are the likeliest to be those), each on calls no measurement
  * of this workload has looked at, as many as the run would take, with the customer's model answering
  * them too (once: every look in a run is on the same calls). It used to price one look though a run
  * takes two.
@@ -620,7 +632,9 @@ function estimate(plan, profile, facts, workload) {
     : workload.shape_kind === 'free_text' ? config.EVAL_FIRST_FLOOR_TEXT_PCT : config.EVAL_FLOOR_MIN_PCT;
   const sizeBar = Number(workload.floor_pct) > 0 ? Number(workload.floor_pct) : config.EVAL_FLOOR_MIN_PCT;
   const unseen = Math.max(0, Math.round(plan.unseenPool ?? plan.pool ?? 0) - s);
-  const looked = [...finalists].sort((a, b) => a.price - b.price).slice(0, Math.max(0, config.EVAL_CONFIRM_TRIES));
+  /* priced at the dearest finalists: at the cheapest, a test whose strongest models passed first ran out of its limit before
+     it could look at them again, and spent everything for nothing */
+  const looked = [...finalists].sort((a, b) => b.price - a.price).slice(0, Math.max(0, config.EVAL_CONFIRM_TRIES));
   if (looked.length && unseen >= callsToClear(looseBar)) {
     const looks = Math.min(unseen, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(sizeBar)), s));
     // the customer's model on the looked-at calls, and its two answers compared, once for every look

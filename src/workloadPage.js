@@ -663,7 +663,70 @@ function takeOf(run, cands, w, opts) {
     notes.push(`The judge was first tested on ${planted} answers whose right verdict is already known, and it got ${check.errors} wrong, `
       + 'so nothing is switched on its word. The next test checks the judge again.');
   }
+  const kept = compared && cands.length ? strongerKeptOut(plan, cands, opts.refName) : null;
+  if (kept) notes.push(kept);
   return [main, ...notes].join(' ');
+}
+
+/* When a test found nothing to switch to, which of the customer's own settings kept models out of it, and how many:
+   providers that keep nothing (Zero data retention, under Privacy in Settings), the cap on answers their requests carry,
+   and the price of their own model, each with a model it kept out, the strongest for a test that recorded strength
+   (planRecord.ruledOut in src/eval/run.js). And what changing each would do, where the customer can change it: a
+   deployment that requires zero retention for everybody is said as that. Nothing when something passed, or a test from
+   before these were recorded. Before this, a test that tried only small models said nothing of the strong ones it never
+   could, and the page read as if nothing better existed (30 Sep 2026). */
+export function strongerKeptOut(plan, cands, refName) {
+  if (cands.some((c) => c.confirmed || (c.serving && c.tone === 'ok'))) return null;
+  const groups = new Map((Array.isArray(plan?.ruledOut) ? plan.ruledOut : []).map((g) => [g.step, g]));
+  const example = (g, pick = () => true) => {
+    const e = (g.examples || []).find((x) => x?.model && pick(x));
+    return e ? ` (for example ${e.model})` : '';
+  };
+  const few = (n, one, many) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`;
+  const parts = [];
+  const tips = [];
+  const priv = groups.get('private');
+  if (priv?.count) {
+    parts.push(`${few(priv.count, 'has', 'have')} no provider that deletes requests right away, which Zero data retention requires${example(priv)}`);
+    /* A setting can let them in only where the requests themselves do not ask for zero retention too (profile.zdrAsked):
+       buildUpstream keeps what a request asks, whatever the workspace chose. */
+    tips.push(plan.zdrAsked ? 'Your own requests ask for zero data retention too, so turning the setting off would not let those be tried.'
+      : config.ZDR_FORCED ? 'This deployment requires Zero data retention for every workspace.'
+        : 'Turning off Zero data retention, under Privacy in Settings, lets those be tried.');
+  }
+  const think = groups.get('thinking');
+  if (think?.count) {
+    const reason = String(think.examples?.[0]?.reason || '');
+    // the cap the customer's requests carry, as the reason says it: never a model's own limit, which it may name first
+    const said = reason.match(/your (\d[\d,]*)-token answers|capped at (\d[\d,]*) tokens/);
+    const cap = said ? (said[1] || said[2]) : null;
+    if (/cannot be told not to/.test(reason)) {
+      /* left out for having to think at all, in a test from before the room above the cap: the cap was the reason, and the
+         next test can give them that room, unless it is turned off */
+      parts.push(`${few(think.count, 'thinks', 'think')} before every answer${cap ? `, and your answers are capped at ${cap} tokens` : ', and your answers are capped'}${example(think)}`);
+      tips.push(Number(config.EVAL_THINK_ALLOWANCE_TOKENS) > 0 ? 'The next test can try those that think, with room to think beyond that cap.'
+        : 'A higher max_tokens in your requests lets those be tried.');
+    } else {
+      // left out now for what the model itself can write or read: a higher cap would not help, and none is suggested
+      parts.push(`${few(think.count, 'thinks', 'think')} before every answer and cannot write or read enough to think and still give your answers${example(think)}`);
+    }
+  }
+  const price = groups.get('price');
+  if (price?.count) {
+    /* Only the ones that cost more: the group also holds models with no price to reach them at, and ones cheaper by less
+       than our fee. A test that did not count them apart says "some" when its examples do not settle it. */
+    const dearer = Number.isFinite(price.dearer) ? price.dearer
+      : (price.examples || []).length === price.count && (price.examples || []).every((e) => /^costs /.test(String(e.reason || ''))) ? price.count : null;
+    const costs = (e) => /^costs /.test(String(e.reason || ''));
+    if (dearer === null && (price.examples || []).some(costs)) {
+      parts.push(`some cost more than ${refName || 'your model'} on your requests, so switching to them could not save anything${example(price, costs)}`);
+    } else if (dearer) {
+      parts.push(`${few(dearer, 'costs', 'cost')} more than ${refName || 'your model'} on your requests, so switching to ${dearer === 1 ? 'it' : 'them'} could not save anything${example(price, costs)}`);
+    }
+  }
+  if (!parts.length) return null;
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join('; ')}; and ${parts[parts.length - 1]}`;
+  return `Some models were not tried: ${list}. ${tips.join(' ')}`.trim();
 }
 
 function mainTake(run, cands, w, { small = null, refName }) {

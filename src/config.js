@@ -380,10 +380,28 @@ export const config = {
      of its calls over the last day. */
   EVAL_MIN_UPTIME_PCT: num('EVAL_MIN_UPTIME_PCT', 99),
   /* A model that thinks before it answers needs room to think. When a workload caps its
-     answers below this, a thinking model is measured with its thinking switched off, or
-     left out when it cannot be switched off. (Without a cap, it is asked to think the way
-     the customer's own model does: see thinkingFit in src/eval/select.js.) */
+     answers below this, a thinking model is measured with its thinking switched off, or,
+     when it cannot be switched off, with room to think given above the cap (the allowance
+     below). (Without a cap, it is asked to think the way the customer's own model does: see
+     thinkingFit in src/eval/select.js.) */
   EVAL_THINKING_ROOM_TOKENS: num('EVAL_THINKING_ROOM_TOKENS', 4000),
+  /* A model that has to think before every answer, on a workload that caps its answers below the room above: it is
+     measured thinking as little as it allows, with this many tokens more than the cap to think in, so its answer still
+     has the whole cap (the customer's words stay theirs; only the cap on thinking plus answer is raised). Served the
+     same way if it wins, and what the thinking costs and how long it takes are measured and scored like everything
+     else. Left out, the strongest models there are (gpt-5-mini, gemini-3.1-pro, claude-sonnet-5.5) were never tried
+     on a workload capped at 900 tokens (30 Sep 2026). 0 leaves them out, as before. */
+  EVAL_THINK_ALLOWANCE_TOKENS: num('EVAL_THINK_ALLOWANCE_TOKENS', 2000),
+  /* Places in every test kept for the strongest models the workload can afford, whatever each would save: ranked on
+     saving alone, a test's places went to the smallest models there are, and the strong ones it needed were never
+     tried (see strongPlaces in src/eval/select.js). */
+  EVAL_STRONG_PLACES: num('EVAL_STRONG_PLACES', 3),
+  /* How sharply a workload's own results say a stronger model is likelier to pass there: the rating gap, in leaderboard
+     points, over which the chance goes from about one in four to three in four (workloadCurve in src/eval/select.js). */
+  EVAL_HERE_SCALE: num('EVAL_HERE_SCALE', 60),
+  /* After a test that found nothing, the next one tries the models likeliest to pass first: chances within this much of
+     each other count as equal, and the one expected to save the most of them goes first. */
+  EVAL_CLIMB_BAND: num('EVAL_CLIMB_BAND', 0.05),
   /* A model retiring within this many days is not worth switching anybody to. */
   EVAL_EXPIRY_DAYS: num('EVAL_EXPIRY_DAYS', 30),
   /* How much slower than the customer's own model a switched-to model may be, by setting.
