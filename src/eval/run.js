@@ -3,7 +3,7 @@ import config, { canRoute } from '../config.js';
 import { priceCall } from '../openrouter.js';
 import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval, hold, release as releaseHold, allowanceLeft, withFee } from '../billing.js';
-import { planFor, ownArmKey, barNeed } from './plan.js';
+import { planFor, ownArmKey, barNeed, sampleSizeFor } from './plan.js';
 import { judgeBarPair, judgeCandidate, judgeQuality, canJudge, translated, openEndedOf, numbersDiffer, numbersOf } from './judge.js';
 import { checklistFor, breakOne } from './checklist.js';
 import { extract, disagreement, gates, floorFrom, marginFloor, verdictWith, sampleCalls, barIsMeaningful, structuredCompare, proseText, callsToClear,
@@ -27,7 +27,8 @@ import { labelOf, armById, leadModel, nameOfResult, armsFor, setStatus } from '.
 import { servingKey, keyOfSpec } from './promote.js';
 import { markTrying } from '../learn/explore.js';
 import { forgetBar } from '../learn/control.js';
-import { scheduleNext, deferAutomatic, deferAfterStop, deferAfterFailure, cadenceOf, waitForCalls, pendingSecondLook, bookSecondLook } from './schedule.js';
+import { scheduleNext, deferAutomatic, deferAfterStop, deferAfterFailure, cadenceOf, waitForCalls, pendingSecondLook, bookSecondLook,
+  sharperNeed, deferSecondLook } from './schedule.js';
 import { notify } from '../notify.js';
 import { HANDED_OVER, HANDED_OVER_DEPLOY, requeueDead } from '../jobs.js';
 
@@ -408,9 +409,10 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   }
   const pending = secondLook ? await pendingSecondLook(workloadId) : null;
   if (secondLook && !pending) {
-    /* Answered since it was booked (a person switched, or a measurement ran): looked at again in the workspace's rhythm.
-       Left as the call that started it booked it, an hour out, a whole measurement followed within the hour. */
-    await deferAutomatic(workloadId);
+    /* Answered since it was booked (a person switched, or a measurement ran): looked at again when it is next due, at
+       least some hours out (deferSecondLook). Left as the call that started it booked it, an hour out, a whole
+       measurement followed within the hour; booked a whole rhythm from now, the next test came later than it was due. */
+    await deferSecondLook(workloadId);
     if (workload.status === 'measuring') await rest(workloadId);
     return { ok: false, reason: 'Nothing waits for a second look any more.' };
   }
@@ -423,9 +425,10 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
          when that will be. For anything else, looked at again in its time. */
       // and only for a count it has not reached, so what could start it again never turns it down again
       /* A second look that cannot run (the model it waited for switched off, retiring, or priced out) is looked at again
-         in the workspace's rhythm, not in six hours as a whole measurement, and never waits for a count of usable calls,
-         since what it waits for is counted as calls no measurement has drawn (waitOf in src/eval/schedule.js). */
-      if (secondLook) await deferAutomatic(workloadId);
+         when the workload is next due (deferSecondLook: the booking it had, at least some hours out), never a whole rhythm
+         from now, and never waits for a count of usable calls, since what it waits for is counted as calls no
+         measurement has drawn (waitOf in src/eval/schedule.js). */
+      if (secondLook) await deferSecondLook(workloadId);
       else if (plan.needCalls > plan.pool) await waitForCalls(workloadId, plan.needCalls);
       else await deferAutomatic(workloadId, { waitMs: plan.notWorth ? null : 6 * 3600000 });
       await noteSkip(workload, plan);
@@ -2638,6 +2641,19 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   const confirmations = [];
   const sampled = new Set(samples.map((x) => x.id));
   const fresh = pool.filter((c) => !sampled.has(c.id));
+  /* A second-look run looks again only at what it waited for (pending.keys). A model it raced only to build a setup it
+     waited for again (a cascade's cheap model, a router's options) is not one of those, and one that measurement had
+     already found wanting on its own second look keeps that verdict here: raced and looked at twice again, it could pass
+     on a fresh draw and be offered, or switched to, after its second look had turned it down. */
+  if (pending) {
+    const before = await db.prepare('SELECT model_id, confirm_verdict FROM eval_results WHERE run_id = ?').all(pending.runId);
+    const wanting = new Map(before.filter((x) => DID_NOT_HOLD_UP.includes(x.confirm_verdict)).map((x) => [x.model_id, x.confirm_verdict]));
+    for (const r of results) {
+      if (r.verdict !== 'cleared' || pending.keys.includes(r.model_id) || !wanting.has(r.model_id)) continue;
+      r.confirm_verdict = wanting.get(r.model_id);
+      await db.prepare('UPDATE eval_results SET confirm_verdict = ? WHERE id = ?').run(r.confirm_verdict, r.id);
+    }
+  }
   /* What serves the workload now is not looked at twice: its live calls are watched every hour, and a
      second look would pay again to learn what they already show. The ones in line before it are tried
      first, and the one serving ends the search when it is reached. */
@@ -2651,6 +2667,9 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
          it was ranked in before any look. It takes none of the looks either. A strategy found out this way says so on its
          row: left as it was, it read as cleared and never reached, and live experiments went on trying it. */
       if (r.verdict !== 'cleared') continue;
+      // a second-look run's looks are for what it waited for alone, never one found wanting (above)
+      if (pending && !pending.keys.includes(r.model_id)) continue;
+      if (DID_NOT_HOLD_UP.includes(r.confirm_verdict)) continue;
       if (partsOfRow(r).some((k) => failedBusy.has(k))) { await failBusy(r.model_id); continue; }
       if (tries >= config.EVAL_CONFIRM_TRIES) continue;
       tries += 1;
@@ -2672,7 +2691,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
      look" off its workload, and was what an approval with no model named switched to. */
   const reached = new Set(confirmations.map((x) => x.r.id));
   for (const r of results) {
-    if (r.verdict !== 'cleared' || reached.has(r.id) || r.model_id === servingNow || r.confirm_verdict === 'left_out') continue;
+    if (r.verdict !== 'cleared' || reached.has(r.id) || r.model_id === servingNow || r.confirm_verdict === 'left_out'
+      || DID_NOT_HOLD_UP.includes(r.confirm_verdict)) continue;
     r.confirm_verdict = 'not_reached';
     await db.prepare(`UPDATE eval_results SET confirm_verdict = 'not_reached' WHERE id = ? AND confirm_verdict IS NULL`).run(r.id);
   }
@@ -2806,7 +2826,31 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
      pendingSecondLook, which book exactly that); anything else, by the next measurement. */
   const measuresItself = (await cadenceOf(workload.workspace_id)) > 0;
   const onOwnModel = !workload.routed_model || switchedBack;
-  const againWhen = measuresItself && onOwnModel && second?.c.verdict === 'insufficient'
+  /* What passed once and was never looked at twice (pendingSecondLook: short of new calls, or never reached) is tested
+     again the moment enough new calls arrive, however this test ended (bookSecondLook, below), and said so wherever it is
+     said. It used to be only when the first second look this test took was short of calls. */
+  const owedLook = !best && measuresItself && onOwnModel && !!(await pendingSecondLook(workloadId));
+  /* One that came close on fewer calls than a test can take waits for the calls a test on twice as many needs
+     (sharperNeed, below), rather than for a whole rhythm. */
+  // on its own model now, not only when the test began: a person may have approved a switch while it ran
+  const onOwnModelNow = onOwnModel && !(await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(workloadId))?.routed_model;
+  const sharper = !best && !owedLook && measuresItself && onOwnModelNow
+    ? sharperNeed(await db.prepare('SELECT sample_size FROM eval_runs WHERE id = ?').get(run.id),
+      await db.prepare('SELECT * FROM eval_results WHERE run_id = ?').all(run.id))
+    : null;
+  /* A measurement on too few calls for its own bar, as a person's Measure now on a new workload can be, could not
+     have switched anything, even to a model that matched every answer. Booked a whole rhythm out like one that
+     could, the measurement that can was a month away however soon its calls came. It waits for them instead
+     (waitForCalls, below), so the call that brings them starts it, with the rhythm kept as the fallback. Never in a
+     workspace that measures only when asked, and never for a bar no sample could clear. One that came close waits for
+     the more of that and what a test on twice as many needs, so the test they start can switch and reads each model more
+     closely; said as the sample it gives. */
+  const need = callsToClear(floor);
+  const small = kept.length < need && need <= config.EVAL_SAMPLE_MAX && measuresItself
+    ? barNeed(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId)).calls : 0;
+  const waitFor = Math.max(small, sharper?.calls || 0);
+  const sharperWords = sharper ? `It is tested again by itself on ${sampleSizeFor(waitFor)} requests once enough new ones arrive` : null;
+  const againWhen = owedLook
     ? 'It is tested again on new requests as soon as enough of them arrive'
     : 'The next measurement looks again';
   const nextStep = mode === 'off' ? `This workload is set never to switch. ${againWhen}.`
@@ -2888,7 +2932,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
       title: `${shown(r)} cleared your bar on ${workload.slug}, but not surely enough for a workload optimized for quality`,
       detail: `${r.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar. We are ${r.chance === null || r.chance === undefined ? 'not'
         : `${(Math.floor(Number(r.chance) * 1000) / 10).toFixed(1)}%`} sure it keeps your bar, and this workload optimizes for quality, which `
-        + `only switches at ${Math.round(config.CAUTIOUS_MIN_CHANCE * 100)}% or more. Nothing was switched. The next measurement looks again, `
+        + `only switches at ${Math.round(config.CAUTIOUS_MIN_CHANCE * 100)}% or more. Nothing was switched. `
+        + `${sharperWords || 'The next measurement looks again'}, `
         + 'and choosing Balance under Optimize for, on the workload page, lets it be looked at again then.',
       workloadId,
     });
@@ -2898,7 +2943,12 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
        or the next measurement does. */
     const r = second ? second.r : unlooked;
     const cut = halt === 'balance' ? 'your balance ran out' : `it reached its limit of $${(Number(plan.atMostUsd) || capLimit).toFixed(2)}`;
-    const why = unlooked ? `the measurement ended before it could look at it again on calls it had never seen (${cut})`
+    /* Cut short only when it was: past the looks a test takes, or raced in a second look only to build the setup it
+       waited for, it was said to have "reached its limit" of a test that had not. */
+    const cutShort = halt === 'balance' || halt === 'budget' || (overQuote && finished < want);
+    const why = unlooked
+      ? (cutShort ? `the measurement ended before it could look at it again on calls it had never seen (${cut})`
+        : 'it has not yet been looked at again on calls it had never seen')
       : second.c.note
         || `on ${second.c.runs} calls it had never seen it differed ${second.c.gap.toFixed(2)}% of the time, and could be as high as ${second.c.hi.toFixed(2)}% against a ${second.c.floor.toFixed(2)}% bar`;
     /* Looked at again and found wanting is never offered (failedSecondLook), so it is said as that and nobody is asked for
@@ -2916,8 +2966,10 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
         kind: 'floor',
         title: `${shown(r)} passed once on ${workload.slug}, but not on new requests`,
         detail: `${r.gap_pct.toFixed(2)}% against a ${floor.toFixed(2)}% bar the first time, but ${why}. It is not switched to or offered. `
-          + (offered ? `${shown(offered)} passed once too and was not tested again, so it waits for a second look. ` : '')
-          + 'The next measurement looks again.',
+          + (offered && owedLook
+            ? `${shown(offered)} passed once too and was not tested again, so it is tested again on new requests as soon as enough of them arrive.`
+            : offered ? `${shown(offered)} passed once too and was not tested again, so it waits for a second look. The next measurement looks again.`
+              : `${sharperWords || 'The next measurement looks again'}.`),
         workloadId,
       });
     } else {
@@ -2944,7 +2996,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
     } : {
       kind: 'floor', title: `Nothing cleared your bar on ${workload.slug}`,
       detail: `${results.length} models tried against a ${floor.toFixed(2)}% bar`
-        + (dropped ? `, ${dropped} of them stopped early once they could not win` : ''),
+        + (dropped ? `, ${dropped} of them stopped early once they could not win` : '')
+        + (sharperWords ? `. ${sharperWords}.` : ''),
       workloadId,
     });
   }
@@ -2957,20 +3010,16 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   await scheduleNext(workloadId, {
     changed: !automatic || switchedBack || !!second || !!unlooked || servingClose || !!servingUnjudged || !!leftOnly || (!!best && !stillServing),
   });
-  /* A measurement on too few calls for its own bar, as a person's Measure now on a new workload can be, could not
-     have switched anything, even to a model that matched every answer. Booked a whole rhythm out like one that
-     could, the measurement that can was a month away however soon its calls came. It waits for them instead
-     (waitForCalls), so the call that brings them starts it, with the rhythm kept as the fallback. Never in a
-     workspace that measures only when asked, and never for a bar no sample could clear. */
-  const need = callsToClear(floor);
-  if (kept.length < need && need <= config.EVAL_SAMPLE_MAX && (await cadenceOf(workload.workspace_id)) > 0) {
-    await waitForCalls(workloadId, barNeed(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId)).calls);
-  }
-  /* What passed once and had too few new calls for its second look is looked at again the moment enough have arrived
-     (bookSecondLook), rather than at the next measurement a whole rhythm out, which drew its own first look from those
-     very calls first. The calls a second look needs that no measurement has drawn, against those there are now. */
-  if (!best && second?.c.verdict === 'insufficient') {
-    await bookSecondLook(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId), { least: callsToClear(floor, confirmZ) });
+  // what it waits for, if anything (small and sharper, above)
+  // the booking scheduleNext has just made kept as the fallback, doubled after re-checks that changed nothing
+  if (waitFor > 0) await waitForCalls(workloadId, waitFor, { keepBooking: true });
+  /* What passed once and was never looked at twice, short of new calls or never reached, is looked at again the moment
+     enough have arrived (bookSecondLook), rather than at the next measurement a whole rhythm out, which drew its own first
+     look from those very calls first. The calls a second look needs that no measurement has drawn, against those there
+     are now. However the looks this test took ended: one that found the first in line wanting left the rest a month. */
+  if (!best) {
+    await bookSecondLook(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId),
+      { least: callsToClear(floor, confirmZ), keepBooking: true });
   }
   return { ok: true, runId: run.id, floor, results: results.length, partial: halt === 'balance', reused: reusedCount };
 }
@@ -3169,8 +3218,17 @@ export async function stopMeasuring(workload, { actorUserId = null } = {}) {
         AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.job_id = jobs.id)`).run(workload.id)).changes;
   /* A measurement taken out of the queue was stopped by a person as surely as a running one: the
      next one nobody asks for waits a whole rhythm. Otherwise a new workload's first measurement,
-     booked an hour ahead, was started again by the hourly pass as soon as that hour was up. */
-  if (cancelled) await deferAfterStop(workload.id);
+     booked an hour ahead, was started again by the hourly pass as soon as that hour was up. It is
+     noted on the workload too, since it leaves no run of its own: what sets a workload waiting to
+     look again (waitToLookAgain in src/proxy.js) reads the note, and would otherwise set the look it
+     was waiting for queued again within the hour. */
+  if (cancelled) {
+    await deferAfterStop(workload.id);
+    /* and whatever it was waiting for is answered too: a wait for calls left in place started a second look by itself
+       on the call that brought the count, after the person had stopped the test queued before it */
+    await db.prepare('UPDATE workloads SET test_skip_json = ?, measure_at_calls = NULL WHERE id = ?')
+      .run(JSON.stringify({ reason: 'stopped', short: null, text: null, at: now() }), workload.id);
+  }
   /* Every run of it, not only the newest: one asked for and one on schedule can be running at
      once, and stopping the workload means stopping both. */
   const runs = await db.prepare(

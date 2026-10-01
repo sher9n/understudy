@@ -464,7 +464,8 @@ test("a model's second look, on new requests, is shown apart from its first and 
   assert.equal(first.look, 1);
   assert.equal(first.total, 3, 'the first look, on the test\'s own requests');
   // with the second look's own figures, which a model's page says in its first paragraph without reading the second look
-  assert.deepEqual(first.looks, { first: 3, second: 2, kept: 2, ended: "it didn't pass", verdict: 'missed', figure: 0.5, bar: 0.1 });
+  // (and, for one the second looks never came to, why: here it had one, so none)
+  assert.deepEqual(first.looks, { first: 3, second: 2, kept: 2, ended: "it didn't pass", notReached: null, tries: 3, verdict: 'missed', figure: 0.5, bar: 0.1 });
   const second = await runAnswersOf(w, r, CHEAP, { look: 2 });
   assert.equal(second.look, 2);
   assert.equal(second.total, 2);

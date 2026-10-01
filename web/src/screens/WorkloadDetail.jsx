@@ -568,15 +568,20 @@ function Waiting({ w, cand, busy, copiesOnly, act, go, goTo }) {
       : cand.heldBack ? "It was switched back before, so it won't switch by itself again."
         : 'It has to pass a second test, on new requests it has never seen, before it switches by itself.';
   /* Where it stands on that second test, when it has not passed one: one that did not hold up there is never offered
-     (failedSecondLook in src/eval/outcome.js), so it is either waiting for enough new requests (booked to run the moment
-     they arrive, see bookSecondLook in src/eval/run.js) or was not reached. */
-  const waitingFor = w.measure?.waitingFor || null;
-  const moreCalls = waitingFor ? Math.max(1, Number(waitingFor.calls) - Number(waitingFor.have)) : null;
+     (failedSecondLook in src/eval/outcome.js), so it is waiting for enough new requests, short of them or never reached,
+     and booked to run the moment they arrive (bookSecondLook in src/eval/schedule.js), or it waits for the next test. The
+     requests it waits for already in, it starts shortly: it said "as soon as 1 more arrive". */
+  // (and only where the workspace tests by itself: one that tests only when asked starts nothing, whatever arrives)
+  const waitingFor = Number(w.measure?.everyDays) > 0 && w.measure?.waitingFor?.secondLook ? w.measure.waitingFor : null;
+  const moreCalls = waitingFor ? Math.max(0, Number(waitingFor.calls) - Number(waitingFor.have)) : null;
   const second = confirmedLook(cand.confirm) ? null
     : cand.confirm?.verdict === 'insufficient'
-      ? (moreCalls ? `It has passed one test. There weren't enough new requests to test it again yet, so that runs by itself as soon as ${num(moreCalls)} more arrive.`
-        : "It has passed one test. There weren't enough new requests to test it again yet, so the next test does.")
-      : "It has passed one test, and hasn't been tested again on new requests yet.";
+      ? (moreCalls === 0 ? "It has passed one test. There weren't enough new requests to test it again before, and now there are, so that runs by itself shortly."
+        : moreCalls ? `It has passed one test. There weren't enough new requests to test it again yet, so that runs by itself as soon as ${num(moreCalls)} more arrive.`
+          : "It has passed one test. There weren't enough new requests to test it again yet, so the next test does.")
+      : moreCalls === 0 ? 'It has passed one test, and is tested again on new requests by itself shortly.'
+        : moreCalls ? `It has passed one test, and is tested again by itself as soon as ${num(moreCalls)} more new requests arrive.`
+          : "It has passed one test, and hasn't been tested again on new requests yet.";
   const to = runId ? modelHref(w.id, runId, cand.model) : null;
   const open = () => { if (goTo) goTo(to); else window.location.assign(to); };
   return (
