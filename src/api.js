@@ -15,7 +15,7 @@ import { notifyPrefs, NOTIFY_KINDS } from './notify.js';
 import { routedSavings } from './eval/actual.js';
 import { adviceFor } from './eval/advice.js';
 import { planFor, forgetPlan, forgetPlanAll } from './eval/plan.js';
-import { cadenceOf, waitOf } from './eval/schedule.js';
+import { cadenceOf, waitOf, rebookForRhythm } from './eval/schedule.js';
 import { recipeKind } from './eval/select.js';
 import { outcomeSummary, outcomeTotals, tasksFor } from './learn/views.js';
 import { nameOfResult, armById } from './learn/arms.js';
@@ -1717,7 +1717,12 @@ const MEASURE_OPTIONS = MEASURE_CHOICES.map((days) => ({ days, label: measureLab
 api.post('/settings/measure-every', async (req, res) => {
   const days = Math.round(Number(req.body?.days));
   if (!MEASURE_CHOICES.includes(days)) return fail(res, 400, 'That is not one of the choices.');
+  // the rhythm in force until now (the default when none was chosen), so every workload is booked again from it
+  const was = await cadenceOf(req.workspace.id);
   await db.prepare('UPDATE workspaces SET measure_every_days = ? WHERE id = ?').run(days, req.workspace.id);
+  /* Each workload is booked again from its last test at the new rhythm (rebookForRhythm): the bookings already made kept
+     the old one, so a workload tested three weeks before "Every 5 days" was chosen still waited out its month. */
+  await rebookForRhythm(req.workspace.id, was, days);
   await addActivity(req.workspace.id, {
     kind: 'connect',
     title: days ? `Measuring every ${days} ${days === 1 ? 'day' : 'days'}` : 'Measuring only when you ask',

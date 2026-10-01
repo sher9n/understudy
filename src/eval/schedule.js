@@ -2,6 +2,8 @@ import { db, now } from '../db/index.js';
 import config from '../config.js';
 import { FOUND, OUTCOME_OF, cheaperCleared, confirmed } from './outcome.js';
 import { wouldTry, usableCalls, unseenCalls } from './plan.js';
+import { callsToClear } from './compare.js';
+import { optimizeFor } from './score.js';
 import { HANDED_OVER } from '../jobs.js';
 
 /* When a workload is next measured by itself.
@@ -55,36 +57,62 @@ export async function scheduleNext(workloadId, { changed }) {
    arrives looks at that count (measureWhenReady in src/proxy.js): the one that reaches it starts the measurement.
    It used to be booked for when they were guessed to arrive, from the pace so far and never sooner than six
    hours, and a new workload that had them within the hour waited the six. It is booked a whole rhythm out as
-   well, so the hourly pass still looks at one whose calls stop coming. */
-export async function waitForCalls(workloadId, calls) {
-  const w = await db.prepare('SELECT workspace_id FROM workloads WHERE id = ?').get(workloadId);
+   well, so the hourly pass still looks at one whose calls stop coming. Where it already has a booking that a test made
+   (`keepBooking`: the end of a test, which has just made it, and waitToLookAgain in src/proxy.js), that booking is kept as
+   the fallback: made again a single rhythm out, it threw away the doubling after re-checks that changed nothing, and on a
+   steady workload, whose count of calls stays level and may never reach what it waits for, the fallback came every
+   rhythm instead of backing off; nor may waiting for calls push a test later than it was booked. */
+export async function waitForCalls(workloadId, calls, { keepBooking = false } = {}) {
+  const w = await db.prepare('SELECT workspace_id, recheck_after FROM workloads WHERE id = ?').get(workloadId);
   if (!w) return null;
   const cadence = (await cadenceOf(w.workspace_id)) || 7;
-  const at = Math.round(now() + cadence * DAY);
+  const had = w.recheck_after === null || w.recheck_after === undefined ? null : Number(w.recheck_after);
+  const at = keepBooking && had !== null ? had : Math.round(now() + cadence * DAY);
   await db.prepare('UPDATE workloads SET measure_at_calls = ?, recheck_after = ? WHERE id = ?').run(Math.round(calls), at, workloadId);
   return at;
 }
 
-/* What waits for a second look for want of new calls: the newest measurement that compared anything found a second look short
-   of calls it had never seen ('insufficient') for something it would still offer (cheaperCleared: priced, cheaper, never
-   found wanting on a second look). What a second-look run then races is everything it still offers that no second look has
-   stood behind yet, the ones the looks never reached included: its results are what the page offers from then on, and
-   racing only the ones found short dropped the rest off the page. Only for a workload still on its customer's own model:
-   one switched is re-checked, with what serves it, by the usual measurement. Answers { runId, keys, models, sampled } or
-   null: the rows by name, the setups a second-look run races by the name each one's result carries (a strategy's by its
-   parts, rebuilt by the run as usual), and the calls that measurement drew, which the second-look run's first look draws
-   again, answered from what it already bought. */
+/** The newest measurement of a workload that compared models: what a second look and a sharper test are read from. */
+export async function latestCompared(workloadId) {
+  return (await db.prepare(
+    `SELECT id, created_at, finished_at, sample_size, floor_pct, choice_json, trigger FROM eval_runs
+      WHERE workload_id = ? AND status = 'done' AND ${OUTCOME_OF()} = 'compared'
+      ORDER BY created_at DESC LIMIT 1`).get(workloadId)) || null;
+}
+
+/* How a second look can end without the model having been found wanting, so that it is still owed one: there were too few
+   calls it had never seen ('insufficient'), or the test never reached it ('not_reached': past the EVAL_CONFIRM_TRIES a
+   test looks at twice, or the test was cut short). Not a row with nothing written: the setup serving a workload is never
+   looked at twice and keeps none, and read as owed it was looked at again as a candidate once it was switched back. */
+export const OWED_LOOKS = ['insufficient', 'not_reached'];
+
+/* What is owed a second look: in the newest measurement that compared anything, what it would still offer (cheaperCleared:
+   priced, cheaper, never found wanting on a second look) whose second look never came (OWED_LOOKS). However the test
+   ended: it used to be owed only when the first second look it took was short of calls, so one whose first look found the
+   first in line wanting, and never reached the five behind it that had matched every answer, left them for a whole rhythm
+   (an invoice workload on 25 Sep 2026). Nothing is owed once one of them passed both looks: that one is offered, or was
+   switched to. What a second-look run then races is everything owed, the ones the looks never reached included: its
+   results are what the page offers from then on, and racing only the ones found short dropped the rest off the page. Only
+   for a workload still on its customer's own model: one switched is re-checked, with what serves it, by the usual
+   measurement. Answers { runId, keys, models, sampled } or null: the rows by name, the setups a second-look run races by
+   the name each one's result carries (a strategy's by its parts, rebuilt by the run as usual), and the calls that
+   measurement drew, which the second-look run's first look draws again, answered from what it already bought. */
 export async function pendingSecondLook(workloadId) {
   const w = await db.prepare('SELECT routed_model FROM workloads WHERE id = ?').get(workloadId);
   if (!w || w.routed_model) return null;
-  const last = await db.prepare(
-    `SELECT id FROM eval_runs WHERE workload_id = ? AND status = 'done' AND ${OUTCOME_OF()} = 'compared'
-      ORDER BY created_at DESC LIMIT 1`).get(workloadId);
+  const last = await latestCompared(workloadId);
   if (!last) return null;
+  /* Nor from a test taken while a setup served the workload and held up there (the run's choice: holding, servingKept):
+     the looks stop at what serves, so what stood behind it was never reached for want of a look, and a switch back
+     afterwards (the live watch) is no reason to look at them again before the next test. */
+  let choice = null;
+  try { choice = JSON.parse(last.choice_json || 'null'); } catch { choice = null; }
+  if (choice?.holding || choice?.servingKept) return null;
   const results = await db.prepare('SELECT * FROM eval_results WHERE run_id = ?').all(last.id);
   const offered = cheaperCleared(results);
-  if (!offered.some((r) => r.confirm_verdict === 'insufficient')) return null;
-  const waiting = offered.filter((r) => !confirmed(r));
+  if (offered.some((r) => confirmed(r))) return null;
+  const waiting = offered.filter((r) => OWED_LOOKS.includes(r.confirm_verdict ?? null));
+  if (!waiting.length) return null;
   const models = new Set();
   for (const r of waiting) {
     let spec = null;
@@ -105,12 +133,49 @@ export async function pendingSecondLook(workloadId) {
    (measure_at_calls), and counted against the calls no measurement has drawn (unseenCalls), which only grow while calls
    arrive. Booked against every usable call instead, a steady workload whose old calls leave the thirty days as new ones
    come never reached it. Only where the workspace measures by itself. Answers when it is booked for, or null. */
-export async function bookSecondLook(workload, { least }) {
+export async function bookSecondLook(workload, { least, keepBooking = false }) {
   if (!(await cadenceOf(workload.workspace_id))) return null;
   if (!(await pendingSecondLook(workload.id))) return null;
   const need = Math.max(1, Math.ceil(least));
   if (need > config.EVAL_POOL_MAX) return null;
-  return waitForCalls(workload.id, need);
+  return waitForCalls(workload.id, need, { keepBooking });
+}
+
+/* The fewest calls no measurement has drawn that a second look at a `floorPct` bar needs, as the run that takes it counts
+   them (lookAgain in src/eval/run.js): a perfect run's, held to a one-sided 97.5% bound for a workload optimizing for
+   quality and 95% otherwise. */
+export async function secondLookLeast(workload, floorPct) {
+  const ws = await db.prepare('SELECT default_routing_mode FROM workspaces WHERE id = ?').get(workload.workspace_id);
+  const z = optimizeFor(workload, ws, config.ROUTING_MODE_DEFAULT) === 'quality' ? config.CAUTIOUS_Z : undefined;
+  return callsToClear(Number(floorPct), z);
+}
+
+/* A test that could have said more with more calls: it found nothing to switch to, and something came close. A model
+   straddled the bar ('review', "Close to clearing"), passed once and came close on its second look without passing there
+   ('review' again, "passed once, but not on new requests"), or passed and was left out as not sure enough by a workload
+   optimizing for quality. On a sample smaller than a test can take (EVAL_SAMPLE_MAX), a test on twice as many calls reads
+   each model's rate far more closely, so the next one waits for the calls that give it that sample rather than for a
+   whole rhythm: a summary workload on 26 Sep 2026 was close on 27 calls, had 154 four days later, and was booked a month
+   out. Every test takes half the calls there are (sampleSizeFor in src/eval/plan.js), so a sample of S needs 2S of them.
+   Answers { calls, sample }, how many usable calls to wait for and the sample they give, or null: none when something is
+   offered (a second look, or a person's yes, answers that), when the sample was already as big as a test takes, and when
+   nothing came close (one found clearly worse, too slow or unable to keep up is not read more closely by more calls).
+   Only one that would save anything counts as close: one priced at or above the customer's own model, our fee
+   included, could never be offered however closely it was read (the price rule of cheaperCleared). */
+export function sharperNeed(run, results) {
+  const sample = Number(run?.sample_size) || 0;
+  if (!(sample > 0) || sample >= config.EVAL_SAMPLE_MAX) return null;
+  if (cheaperCleared(results).length) return null;
+  const refCost = results.find((r) => r.verdict === 'reference')?.cost_month_usd;
+  const ceiling = 1 / (1 + (Number(config.ROUTING_FEE_PCT) || 0) / 100);
+  const cheaper = (r) => r.cost_month_usd != null && refCost != null && Number(r.cost_month_usd) < Number(refCost)
+    && (r.cost_ratio == null || Number(r.cost_ratio) < ceiling);
+  const close = results.some((r) => cheaper(r) && (r.verdict === 'review'
+    || (r.verdict === 'cleared' && (r.confirm_verdict === 'review' || r.confirm_verdict === 'left_out'))));
+  if (!close) return null;
+  const target = Math.min(config.EVAL_SAMPLE_MAX, 2 * sample);
+  const calls = Math.ceil(target / config.EVAL_SAMPLE_SHARE);
+  return calls <= config.EVAL_POOL_MAX ? { calls, sample: target } : null;
 }
 
 /* What a workload waiting for calls waits for, and has: calls no measurement has drawn for a second look (bookSecondLook),
@@ -144,6 +209,15 @@ async function putOff(workloadId, at) {
     `UPDATE workloads SET recheck_after = GREATEST(COALESCE(recheck_after, 0), ?::bigint)
       WHERE id = ? RETURNING recheck_after`).run(Math.round(at), workloadId);
   return r.rows[0] ? Number(r.rows[0].recheck_after) : null;
+}
+
+/* A second look that did not run, because nothing waited for it any more or what it waited for could no longer be
+   tested: the booking the workload had is kept (the call that started it no longer brings it in, see startIfReady in
+   src/proxy.js), and is at least SECOND_LOOK_RETRY_HOURS out, so no whole test follows within the hour. It used to be booked
+   a whole rhythm from now, which put the workload's next test later than it had been booked for. */
+const SECOND_LOOK_RETRY_HOURS = 6;
+export async function deferSecondLook(workloadId) {
+  return putOff(workloadId, now() + SECOND_LOOK_RETRY_HOURS * HOUR);
 }
 
 /* A person stopped a measurement, or took one out of the queue before it started. The next one
@@ -200,6 +274,48 @@ export async function dueForRecheck(workspaceId, days) {
         AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'eval_run' AND j.status IN ('queued', 'claimed')
                           AND (j.payload::jsonb ->> 'workloadId') = w.id)`)
     .all(workspaceId, now(), now() - days * DAY);
+}
+
+/* The workspace chose another rhythm in Settings: every workload tested before is booked again from its last test, as the
+   end of that test would have booked it had the new rhythm been in place (scheduleNext: the rhythm, doubled for each
+   re-check in a row that changed nothing). A booking already made was kept as it was, so "Every 5 days" left a workload
+   tested three weeks ago waiting out the month it had been given. A shorter rhythm never books one later than it was: a
+   retry after a failure, a wait for calls or a nudge that comes sooner keeps its time. A longer one never books one sooner
+   than the new rhythm allows, since Settings promises tests at most that often, except a retry after a test that failed
+   or ran out of balance, which keeps its time: it retries what the rhythm had already allowed. One never tested is left to
+   its first calls, and one being tested, or waiting in the queue, to the end of that test, which books its own. "Only
+   when I ask" changes no booking: nothing starts by itself then, and choosing a rhythm again books every one afresh.
+   Answers how many moved. */
+export async function rebookForRhythm(workspaceId, fromDays, toDays) {
+  if (!(toDays > 0) || Number(fromDays) === Number(toDays)) return 0;
+  const rows = await db.prepare(
+    `SELECT w.id, w.recheck_after, w.recheck_streak, w.measure_at_calls,
+            (SELECT MAX(COALESCE(r.finished_at, r.created_at)) FROM eval_runs r
+              WHERE r.workload_id = w.id AND r.status <> 'running') AS last,
+            (SELECT CASE WHEN r.status = 'failed' OR ${OUTCOME_OF('r.')} = 'no_balance' THEN 1 ELSE 0 END FROM eval_runs r
+              WHERE r.workload_id = w.id AND r.status <> 'running' ORDER BY r.created_at DESC LIMIT 1) AS failed
+       FROM workloads w
+      WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL
+        AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.workload_id = w.id AND r.status = 'running')
+        AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'eval_run' AND j.status IN ('queued', 'claimed')
+                          AND (j.payload::jsonb ->> 'workloadId') = w.id)`).all(workspaceId);
+  let moved = 0;
+  for (const w of rows) {
+    if (w.last === null || w.last === undefined) continue;
+    const streak = Math.min(config.EVAL_BACKOFF_MAX_DOUBLINGS, Number(w.recheck_streak || 0));
+    /* One waiting for calls (a second look's, or a closer test's) has its booking only as the fallback, a whole rhythm
+       out: made due at once by a shorter rhythm, a whole test ran first and drew the very calls the look waited for. */
+    const waiting = w.measure_at_calls !== null && w.measure_at_calls !== undefined;
+    const due = Math.round(Math.max(Number(w.last) + toDays * DAY * 2 ** streak, waiting ? now() + toDays * DAY : -Infinity));
+    const had = w.recheck_after === null || w.recheck_after === undefined ? null : Number(w.recheck_after);
+    let at = had;
+    if (had === null || !(Number(fromDays) > 0)) at = due;
+    else if (toDays < fromDays) at = Math.min(had, due);
+    else if (!Number(w.failed)) at = Math.max(had, due);
+    if (at === had) continue;
+    moved += (await db.prepare('UPDATE workloads SET recheck_after = ? WHERE id = ?').run(at, w.id)).changes;
+  }
+  return moved;
 }
 
 /* Something changed that could matter: the next measurement of these workloads comes forward to

@@ -81,7 +81,14 @@ function leadOf(c, got, rp) {
   } else if (L.verdict === 'insufficient') {
     out.push("There weren't enough new requests for a second look yet, so nothing switches to it until there are.");
   } else if (L.verdict === 'not_reached') {
-    out.push("Its second look wasn't reached, because another model passed first.");
+    /* why no second look came to it (notReachedWhy in src/workloadPage.js), and, where none passed instead, that it still
+       has one to come */
+    out.push(L.notReached === 'cut' ? "Its second look wasn't reached, because the test ended before it got there."
+      : L.notReached === 'tries' ? `Its second look wasn't reached, because each test gives a second look to only the first ${num(L.tries || 3)} models in line.`
+        : L.notReached === 'part' ? "Its second look wasn't reached, because this second look was only for the setup it was tested as part of."
+          : L.notReached === 'held' ? "Its second look wasn't reached, because this workload was switched back from it before, so it isn't switched to by itself again."
+            : "Its second look wasn't reached, because another model passed first.");
+    if (['cut', 'tries', 'part'].includes(L.notReached)) out.push('It is tested again on new requests before anything switches to it.');
   } else if (c.verdict === 'Passed once') {
     out.push('It is tested again on new requests before anything switches to it.');
   } else if (c.why && !(c.gap === 0 && /allowed difference/.test(c.why))) {

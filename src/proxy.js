@@ -17,7 +17,7 @@ import { serveWith, writeAsStream, routeFor } from './learn/serve.js';
 import { leadModel } from './learn/arms.js';
 import { zdrFor, cacheHintFor } from './workspace.js';
 import { estimateCost } from './trueup.js';
-import { cadenceOf, waitOf } from './eval/schedule.js';
+import { cadenceOf, waitOf, latestCompared, pendingSecondLook, bookSecondLook, secondLookLeast, sharperNeed, waitForCalls } from './eval/schedule.js';
 import { planFor, barNeed } from './eval/plan.js';
 import { callsToClear } from './eval/compare.js';
 import { OUTCOME_OF } from './eval/outcome.js';
@@ -831,9 +831,14 @@ async function startIfReady(workload) {
      calls arrive, and otherwise calls a measurement can use */
   const wait = await waitOf(workload);
   if (!wait || wait.have < need) return false;
+  /* Held an hour for it to start. A second look's claim never brings its booking in, though: the workload's next test
+     was booked by the test the look continues, and a look that does not run in the end (deferSecondLook in
+     src/eval/schedule.js) leaves it where it was. */
   const claimed = await db.prepare(
-    `UPDATE workloads SET measure_at_calls = NULL, recheck_after = ? WHERE id = ? AND measure_at_calls IS NOT NULL RETURNING id`)
-    .run(now() + 3600000, workload.id);
+    `UPDATE workloads SET measure_at_calls = NULL,
+            recheck_after = CASE WHEN ?::boolean THEN GREATEST(COALESCE(recheck_after, 0), ?::bigint) ELSE ?::bigint END
+      WHERE id = ? AND measure_at_calls IS NOT NULL RETURNING id`)
+    .run(!!wait.secondLook, now() + 3600000, now() + 3600000, workload.id);
   if (!claimed.rows?.length) return false;
   /* What it waited for: the calls a second look needs, for models that passed once (pendingSecondLook), which it then takes
      alone; otherwise a measurement of its own. */
@@ -897,8 +902,55 @@ export async function convertWaits({ plan = planFor } = {}) {
     }
   }
   waiting += await waitAfterSmall();
+  waiting += await waitToLookAgain();
   started += await startWaiting();
   return { looked: rows.length, started, waiting };
+}
+
+/* Workloads whose newest test left something to look at again, each set waiting for the calls that start it: what passed
+   once and was never looked at twice (pendingSecondLook) waits for the calls no test has drawn that its second look needs
+   (secondLookLeast), and a test that came close on fewer calls than a test can take waits for the calls a test on twice
+   as many needs (sharperNeed). The end of a test books both; this finds the ones a test ended before it did, as every test
+   before 30 Sep 2026 did, and one an old process finished during a deploy: an invoice workload had nine models match every
+   answer on 25 Sep and the hundred new calls their second looks needed on 29 Sep, and waited for 25 Oct. Only live ones on
+   their customer's own model, in a workspace that measures by itself, none being measured, waiting in the queue or already
+   waiting for calls. Only where that test is the newest to have ended: one a person stopped since is left to their word
+   (deferAfterStop), and one that failed, ran out of balance or found the workload could not be measured is left to what
+   that ending booked. And none with a note since that newest test (test_skip_json): a test nobody asked for turned down
+   (noteSkip in src/eval/run.js), whose calls would start it only to be turned down again, every hour; or a person's
+   stop of one still in the queue (stopMeasuring), which writes no run of its own and would otherwise be queued again
+   within the hour. Its own booking brings it back. The booking it has is kept as the fallback (keepBooking), backoff
+   and all. Run when a server starts and on the hourly pass; running it again changes nothing. Answers how many it set
+   waiting. */
+export async function waitToLookAgain() {
+  let waiting = 0;
+  const rows = await db.prepare(
+    `SELECT w.* FROM workloads w
+      WHERE w.state = 'live' AND w.merged_into IS NULL AND w.routed_model IS NULL AND w.measure_at_calls IS NULL
+        AND w.status IN ('certified', 'no_match')
+        AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.workload_id = w.id AND r.status = 'running')
+        AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'eval_run' AND j.status IN ('queued', 'claimed')
+                          AND (j.payload::jsonb ->> 'workloadId') = w.id)`).all();
+  for (const w of rows) {
+    if (!(await cadenceOf(w.workspace_id))) continue;
+    const last = await latestCompared(w.id);
+    if (!last) continue;
+    const ended = await db.prepare(`SELECT id FROM eval_runs WHERE workload_id = ? AND status <> 'running'
+        ORDER BY created_at DESC LIMIT 1`).get(w.id);
+    if (ended?.id !== last.id) continue;
+    let skip = null;
+    try { skip = JSON.parse(w.test_skip_json || 'null'); } catch { skip = null; }
+    if (skip && Number(skip.at) >= Number(last.finished_at ?? last.created_at)) continue;
+    let set = null;
+    if (await pendingSecondLook(w.id)) {
+      set = await bookSecondLook(w, { least: await secondLookLeast(w, last.floor_pct), keepBooking: true });
+    } else {
+      const sharper = sharperNeed(last, await db.prepare('SELECT * FROM eval_results WHERE run_id = ?').all(last.id));
+      if (sharper) set = await waitForCalls(w.id, sharper.calls, { keepBooking: true });
+    }
+    if (set) waiting += 1;
+  }
+  return waiting;
 }
 
 /* Workloads whose last measurement was on too few calls for its own bar, measured before such a measurement went

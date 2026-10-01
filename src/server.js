@@ -12,7 +12,7 @@ import { planFor, onMissingFits } from './eval/plan.js';
 import { reportCallFailure, reportCrash, canAlert, flushAllAlerts } from './alerts.js';
 
 import { slug, shapeSignals } from './classify.js';
-import { routeOnce, convertWaits, startWaiting } from './proxy.js';
+import { routeOnce, convertWaits, startWaiting, waitToLookAgain } from './proxy.js';
 import { runEvaluation, closeAbandoned, settleOutcomes, rest, handOver } from './eval/run.js';
 import { trueUp } from './trueup.js';
 import { parse as parseRoute } from '../web/src/router.js';
@@ -441,6 +441,9 @@ handle('recheck', async () => {
   await watchLive();
   // and one that can no longer be served at all goes back before its calls start failing
   await watchCatalogue();
+  /* What a test left to look at again, a second look still owed or a closer look at one that came close, waits for the
+     calls that start it, the ones a test ended before it booked them included (waitToLookAgain). */
+  await waitToLookAgain().catch((err) => console.error(`setting workloads waiting to look again failed: ${err?.message || err}`));
   /* A workload waiting for calls is started by the call that brings them (measureWhenReady); one whose last call
      came as a server stopped, before it counted them again, is started here instead of at its fallback booking. */
   await startWaiting().catch((err) => console.error(`starting workloads waiting for calls failed: ${err?.message || err}`));

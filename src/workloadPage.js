@@ -12,7 +12,7 @@ import { HANDED_OVER } from './jobs.js';
 import { outcomeOf, failedSecondLook, DID_NOT_HOLD_UP, confirmed } from './eval/outcome.js';
 import { OPTIMIZE_FOR, PRESETS, optimizeFor, optimizeValue, partsOf, scoreOf, p50Of } from './eval/score.js';
 import { canJudge } from './eval/judge.js';
-import { servingKey } from './eval/promote.js';
+import { servingKey, everReverted } from './eval/promote.js';
 import { controlRecord, barOf } from './learn/control.js';
 import { nameOfResult, armById, labelOf } from './learn/arms.js';
 
@@ -455,6 +455,11 @@ function secondWhy(r, differs) {
   const on = n ? `on ${n} new requests it had never seen` : 'on new requests it had never seen';
   const pct = (x) => `${Math.round(Number(x) * 10) / 10}%`;
   const first = "It stayed within the allowed difference on this test's requests, but";
+  /* a verdict a second-look run carried over from the test it continued, for a model it raced only to build a setup:
+     this test took no second look of it, so it is said as the earlier one's, with no figures of its own */
+  if (!n && ['review', 'missed', 'slower'].includes(r.confirm_verdict)) {
+    return `${first} it didn't hold up when an earlier test looked at it again on new requests, so it isn't switched to.`;
+  }
   if (r.confirm_verdict === 'slower') return `${first} ${on} it was too slow, so it isn't switched to.`;
   if (r.confirm_verdict === 'busy') return `${first} ${on} its provider couldn't keep up, so it isn't switched to.`;
   const fig = r.confirm_gap === null || r.confirm_gap === undefined ? '' : ` on ${pct(r.confirm_gap)} of them`;
@@ -1019,8 +1024,43 @@ const DIFF_WORDS = {
 // how a model's second look ended (confirm_verdict, written by lookAgain in src/eval/run.js)
 const CONFIRM_WORDS = {
   cleared: 'it passed', missed: "it didn't pass", review: "it came close, but didn't pass", slower: 'it was too slow on them',
-  insufficient: "there weren't yet enough new requests to look again", not_reached: "it wasn't reached, because another model passed first",
+  insufficient: "there weren't yet enough new requests to look again", not_reached: "it wasn't reached",
   live: 'it passed on live requests', busy: "its provider couldn't keep up with the requests",
+};
+
+/* Why a model that passed its first look got no second look in a test ('not_reached', marked where the looks end in
+   src/eval/run.js): another passed first, the one the test chose (choice.chosen, which is also what serves when it held
+   up, or for a test from before it was written, one whose second look passed); a test looks again at only its first
+   EVAL_CONFIRM_TRIES in line, and took them all; or it took fewer, so the test ended before it got there (its limit, the
+   balance, a person's stop, a deploy handing it over). Counted from the looks it took rather than read from the error a
+   test ends with, which says "reached its limit" of one that went over its quote after every look was taken, and says
+   nothing of a stop. It was said as the first of these whatever happened, over an invoice test on 25 Sep 2026 where
+   nothing had passed at all and the last five were simply past the three. */
+async function notReachedWhy(run, modelId) {
+  let chosen;
+  try { chosen = JSON.parse(run.choice_json || 'null')?.chosen; } catch { chosen = undefined; }
+  const passed = chosen !== undefined ? chosen !== null
+    : !!(await db.prepare(`SELECT 1 FROM eval_results WHERE run_id = ? AND confirm_verdict IN ('cleared', 'live') LIMIT 1`).get(run.id));
+  if (passed) return 'passed';
+  // switched back from before, so never switched to by itself again: no test looks at it twice (heldBack)
+  if (await everReverted(run.workload_id, modelId)) return 'held';
+  // raced in a second-look run only to build the setup it waited for (plan_json.secondLookOf, see src/eval/run.js)
+  let waited = null;
+  try { waited = JSON.parse(run.plan_json || 'null')?.secondLookOf?.keys ?? null; } catch { waited = null; }
+  if (run.trigger === 'second_look' && Array.isArray(waited) && !waited.includes(modelId)) return 'part';
+  /* the looks this test took: a verdict a second-look run carried over from the test it continued took none, and has
+     no calls of its own (confirm_runs); one short of calls took a look and found too few */
+  const looks = await db.prepare(`SELECT COUNT(*) AS n FROM eval_results WHERE run_id = ?
+      AND (confirm_verdict = 'insufficient' OR (COALESCE(confirm_runs, 0) > 0
+        AND confirm_verdict IN ('cleared', 'review', 'missed', 'slower', 'busy')))`).get(run.id);
+  return Number(looks?.n || 0) >= config.EVAL_CONFIRM_TRIES ? 'tries' : 'cut';
+}
+const NOT_REACHED_WORDS = {
+  passed: "it wasn't reached, because another model passed first",
+  cut: "it wasn't reached, because the test ended before it got there",
+  tries: `it wasn't reached, because each test gives a second look to only the first ${config.EVAL_CONFIRM_TRIES} models in line`,
+  part: "it wasn't reached, because this second look was only for the setup it was tested as part of",
+  held: "it wasn't reached, because this workload was switched back from it before, so it isn't switched to by itself again",
 };
 
 /* Whether an answer counted towards the model's figure, as the test wrote down, or for an answer kept before it did,
@@ -1115,6 +1155,8 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
   const second = Number(look) === 2 && !built;
   const keptSecond = built ? 0 : Number((await db.prepare(
     'SELECT COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND model_id = ? AND slot = 0 AND look = 2').get(run.id, r.model_id))?.n) || 0;
+  // and, for one the second looks never came to, why (notReachedWhy)
+  const reachedWhy = r.confirm_verdict === 'not_reached' ? await notReachedWhy(run, r.model_id) : null;
   /* The answers its row was read from. A model dropped part way can be finished later in the same test for a way of
      serving built on it (the strategies in src/eval/run.js), and its row still counts only the requests it answered
      before it was dropped: its first `runs` answers, in the order it gave them. A way of serving built on a model reads
@@ -1214,7 +1256,11 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
       first: Number(r.runs) || 0,
       second: Number(r.confirm_runs) || 0,
       kept: keptSecond,
-      ended: r.confirm_verdict ? (CONFIRM_WORDS[r.confirm_verdict] ?? null) : null,
+      ended: r.confirm_verdict === 'not_reached' ? NOT_REACHED_WORDS[reachedWhy]
+        : r.confirm_verdict ? (CONFIRM_WORDS[r.confirm_verdict] ?? null) : null,
+      // why a second look never came to it (notReachedWhy): 'passed', 'cut' or 'tries', and how many a test looks at twice
+      notReached: reachedWhy,
+      tries: config.EVAL_CONFIRM_TRIES,
       // how the second look went, in its own figures, so a page can say it without reading the second look's answers
       verdict: r.confirm_verdict || null,
       figure: r.confirm_gap === null || r.confirm_gap === undefined ? null : round8(Number(r.confirm_gap) / 100),
