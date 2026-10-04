@@ -193,7 +193,19 @@ const SHARE_TOPS = [0.08, 0.12, 0.2, 0.4, 0.6, 0.8, 1];
  * differently from the customer's own model, or worse: the bar, the region that is cheaper and as good, and the
  * customer's own model. Numbered as the table under it.
  */
+/* How a model falling short is said, by the yardstick the test held it to: how often it did, what it did on a share of the
+   requests, what the allowed line is, and what that line is set from. */
+const SHORT_WORDS = {
+  agreement: { often: 'how often it was different', on: 'different', most: 'the most another model may differ from the original model',
+    from: 'how often the original model differs from itself' },
+  quality: { often: 'how often it was clearly worse', on: 'clearly worse', most: 'the most often another model may be clearly worse',
+    from: "how often the original model's answer is clearly worse than its own other answer, plus a margin" },
+  keeps: { often: 'how often it missed something that matters', on: 'missed something that matters',
+    most: 'the most often another model may miss something that matters',
+    from: "how often the original model's own third answer missed something its other two kept, plus a margin" },
+};
 export function CompareChart({ run, tip = null }) {
+  const sw = SHORT_WORDS[run.yardstick] || SHORT_WORDS.agreement;
   // laid out for the width it has, so it runs the row's full width with its words at the size they are written at
   const [ref, , room] = useWidthOf(600, 320);
   const W = Math.max(320, Math.round(room));
@@ -269,7 +281,7 @@ export function CompareChart({ run, tip = null }) {
     <>
     {/* a group rather than a picture where its circles are buttons: a picture's insides are hidden from a screen reader */}
     <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role={tip ? 'group' : 'img'}
-      aria-label={`The models tested, by what a request costs on each and how often it was ${String(run.axis).toLowerCase()}`}>
+      aria-label={`The models tested, by what a request costs on each and ${sw.often}`}>
       {yours && run.bar > 0 && <rect x={L} y={y(run.bar)} width={zoneW} height={zoneH} fill="var(--okq)" />}
       {/* "as good" said more than the test measures: it measures how close the answers are, within the allowed difference */}
       {yours && run.bar > 0 && zoneW > 290 && zoneH > 20 && <text x={L + 8} y={y(run.bar) + 14} className="t-ok ui">Cheaper and within the allowed difference</text>}
@@ -295,7 +307,7 @@ export function CompareChart({ run, tip = null }) {
       <text x="14" y={T + h / 2} textAnchor="middle" className="ui" transform={`rotate(-90 14 ${T + h / 2})`}>{run.axis}</text>
       {run.bar > 0 && (
         <g>
-          <title>{`Allowed difference, ${barPct}%: the most another model may differ from the original model, set from how often the original model differs from itself`}</title>
+          <title>{`Allowed difference, ${barPct}%: ${sw.most}, set from ${sw.from}`}</title>
           <line x1={L} x2={W - R} y1={y(run.bar)} y2={y(run.bar)} stroke="var(--ok)" strokeWidth="1.6" strokeDasharray="6 4" />
           <text x={W - R} y={y(run.bar) - 6} textAnchor="end" className="t-ok t-bold halo">Allowed difference · {barPct}%</text>
         </g>
@@ -310,7 +322,7 @@ export function CompareChart({ run, tip = null }) {
         </g>
       )}
       {pts.map((c) => {
-        const said = `${c.no}. ${c.label}: ${c.verdict}, ${String(run.axis).split(' ')[0].toLowerCase()} on ${(c.gap * 100).toFixed(1)}% of requests`;
+        const said = `${c.no}. ${c.label}: ${c.verdict}, ${sw.on} on ${(c.gap * 100).toFixed(1)}% of requests`;
         // pointed at, it shows; a click or a tap keeps it until a tap elsewhere, and a second one on it closes it
         const hover = (on) => setOpen((o) => (o?.pinned ? o : on ? { key: c.key, pinned: false } : o?.key === c.key ? null : o));
         const pin = () => setOpen((o) => (o?.pinned && o.key === c.key ? null : { key: c.key, pinned: true }));
@@ -543,7 +555,8 @@ export function CostBars({ before, after, fmt }) {
   );
 }
 
-/** The share of checked answers worse than (or different from) the customer's own, each day, against the bar. */
+/** The share of checked answers that fell short of the customer's own (different, worse, or missing something that matters,
+    by the yardstick), each day, against the bar. */
 export function QualitySpark({ daily, bar }) {
   const [ref, W] = useWidthOf(260, 130);
   const H = 58; const T = 6; const B = 6; const h = H - T - B;
@@ -554,7 +567,7 @@ export function QualitySpark({ daily, bar }) {
   const pts = daily.map((v, i) => `${x(i)},${y(v)}`).join(' ');
   const area = `0,${y(0)} ${pts} ${x(n - 1)},${y(0)}`;
   return (
-    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Share of checked requests that differed from the original model, each day, against the allowed difference">
+    <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Share of checked answers that fell short of the original model's, each day, against the allowed difference">
       {n > 1 && <polygon points={area} fill="var(--okq)" />}
       {n > 1 && <polyline points={pts} fill="none" stroke="var(--ok)" strokeWidth="1.8" />}
       <line x1="0" x2={W - 30} y1={y(bar)} y2={y(bar)} stroke="var(--bad)" strokeDasharray="4 3" strokeWidth="1.2" />

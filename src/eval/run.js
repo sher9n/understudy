@@ -5,7 +5,7 @@ import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval, hold, release as releaseHold, allowanceLeft, withFee } from '../billing.js';
 import { planFor, ownArmKey, barNeed, sampleSizeFor } from './plan.js';
 import { judgeBarPair, judgeCandidate, judgeQuality, canJudge, translated, readRequests, numbersDiffer, numbersOf } from './judge.js';
-import { factsFor, keepsCheck } from './keeps.js';
+import { factsFor, keepsCheck, keepsRequest } from './keeps.js';
 import { checklistFor, breakOne } from './checklist.js';
 import { extract, disagreement, gates, floorFrom, marginFloor, verdictWith, sampleCalls, barIsMeaningful, structuredCompare, proseText, callsToClear,
   heldFieldChanged, stablePaths } from './compare.js';
@@ -162,16 +162,17 @@ async function inParallel(items, n, fn) {
    them: both of the customer's own model's answers are kept, or its own recorded answer is one of
    the two (`recorded` says whether a call has one) and the other is kept. A measurement that was
    stopped or cut short leaves exactly these behind, and the one after it uses them again rather than
-   buying another bar. */
+   buying another bar. The two are its first and second answers by name: "keeps what matters" keeps a third (slot 2), and
+   a call holding only that and one other still has a bar answer to buy. */
 async function paidForCalls(model, calls, recorded) {
   if (!calls.length) return new Set();
   const byId = new Map(calls.map((c) => [c.id, c]));
   const rows = await db.prepare(
-    `SELECT call_id, COUNT(DISTINCT slot) AS slots, bool_or(slot = 1) AS second FROM replay_cache
+    `SELECT call_id, bool_or(slot = 0) AS first, bool_or(slot = 1) AS second FROM replay_cache
       WHERE model_id = ? AND status = 200 AND created_at >= ? AND recipe_json IS NULL AND call_id = ANY(?)
       GROUP BY call_id`)
     .all(model, now() - config.REPLAY_REUSE_DAYS * DAY, [...byId.keys()]);
-  return new Set(rows.filter((r) => Number(r.slots) >= 2 || (r.second && recorded(byId.get(r.call_id))))
+  return new Set(rows.filter((r) => r.second && (r.first || recorded(byId.get(r.call_id))))
     .map((r) => r.call_id));
 }
 
@@ -222,13 +223,18 @@ function sameReadingsOf(j) {
   if (Array.isArray(d.named)) out.named = d.named;
   if (Array.isArray(d.votes)) out.votes = d.votes;
   if (Array.isArray(d.three) && d.three.length) {
-    out.three = d.three.map((t) => ({ ref: t.ref, verdict: t.verdict, pRef: (t.pRef || []).map(r2), pCand: (t.pCand || []).map(r2) }));
+    // with the averages it was decided on, as they were, so a page never rounds 0.2975 up to the line it fell under
+    out.three = d.three.map((t) => ({ ref: t.ref, verdict: t.verdict, pRef: (t.pRef || []).map(r2), pCand: (t.pCand || []).map(r2),
+      ...(Number.isFinite(Number(t.avgRef)) ? { avgRef: Number(t.avgRef) } : {}), ...(Number.isFinite(Number(t.avgCand)) ? { avgCand: Number(t.avgCand) } : {}) }));
     // the line the average chance the original's answer is the better has to stay under for a difference to be forgiven
     out.forgive = config.THREE_WAY_FORGIVE_MAX;
   }
   if (String(j.judgedBy || '').includes('+numbers')) out.figures = true;
-  if (Number(d.refuses) >= 0.8) out.refuses = r2(d.refuses);
-  if (Number(d.cutOff) >= 0.8) out.cut = r2(d.cutOff);
+  // which of the original model's answers a figure in it differs from
+  if (Array.isArray(d.figuresAgainst) && d.figuresAgainst.length) out.figuresAgainst = d.figuresAgainst;
+  // a refusal, or an answer cut short, only where that is what counted it as different (judgeCandidate)
+  if (d.kind === 'refusal') out.refuses = r2(d.refuses);
+  if (d.kind === 'cut off') out.cut = r2(d.cutOff);
   return JSON.stringify(out);
 }
 
@@ -239,13 +245,23 @@ function sameReadingsOf(j) {
 function keepsReadingsOf(j) {
   const d = j?.detail;
   if (!d) return null;
-  const out = { way: 'keeps', facts: (d.facts || []).map((f) => ({ say: f.say, kept: !!f.kept, p: f.p ?? null, by: f.by ?? null,
-    ...(f.missing?.length ? { missing: f.missing } : {}), ...(f.llm !== undefined ? { llm: f.llm } : {}) })) };
+  const out = { way: 'keeps', facts: (d.facts || []).map((f) => ({ say: f.say, kept: f.kept === null || f.kept === undefined ? null : !!f.kept,
+    p: f.p ?? null, by: f.by ?? null, ...(f.missing?.length ? { missing: f.missing } : {}), ...(f.llm !== undefined ? { llm: f.llm } : {}),
+    ...(f.lean ? { lean: true } : {}) })) };
+  // decided before it was read (a broken rule of the instruction, or the customer's own answer word for word): not checked
+  if (d.read === false) out.read = false;
+  if (d.same) out.same = true;
   if (d.wrong !== undefined) out.wrong = d.wrong;
   if (d.language !== undefined) out.language = d.language;
+  // the language model's word on its language, where Jev was unsure of it
+  if (d.languageLlm !== undefined) out.languageLlm = d.languageLlm;
   // what was decided of each: it gets something wrong, it is in another language than the customer's answer
   if (d.isWrong) out.isWrong = true;
   if (d.otherLanguage) out.otherLanguage = true;
+  // where the second reading due did not come back and Jev's lean stood, and so whether the verdict rested on one
+  if (d.wrongLean) out.wrongLean = true;
+  if (d.languageLean) out.languageLean = true;
+  if (d.unsettled) out.unsettled = true;
   if (d.broke) out.broke = String(d.broke).slice(0, 160);
   if (d.kind) out.kind = d.kind;
   return JSON.stringify(out);
@@ -773,7 +789,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
      it state (p.facts, listed as the bar was set), and read against the request, by the judge the planted answers chose. A
      request with no list (one of the customer's answers failed, or the list did not come back) says nothing about any answer. */
   const keepsOf = (p, answer) => (Array.isArray(p.facts)
-    ? keepsCheck(askOf(p.body), asText(answer), { facts: p.facts, reference: asText(p.a.ok ? p.a.value : p.b.value),
+    ? keepsCheck(keepsRequest(p.body), asText(answer), { facts: p.facts, reference: asText(p.a.ok ? p.a.value : p.b.value),
       scope: workload.workspace_id, prefer: judgePrefer, checklist })
     : Promise.resolve({ score: null, judgedBy: null, detail: null, cost: 0, transient: true, unlisted: true }));
   /* Under "at least as good", an answer that changes a figure the customer's model states the same both times is worse
@@ -961,7 +977,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
      since "keeps what matters" asks the customer's model a third time on every request, to see how often its own answers
      miss something that matters. A workload read so by its newest test stays so at a lower share (EVAL_*_KEEP_SHARE), so a
      workload of mixed requests is not judged one way at one test and the other way at the next. */
-  const keepsOn = config.EVAL_KEEPS && shape === 'free_text' && canJudge();
+  // the facts are listed by the language model (factsFor), so without one there is nothing to hold an answer to
+  const keepsOn = config.EVAL_KEEPS && shape === 'free_text' && !!config.EVAL_JUDGE_MODEL;
   // a choice for written work only: answers with a shape are compared field by field, as their fields decide
   const judgeMode = shape === 'free_text' && ['same', 'quality', ...(keepsOn ? ['keeps'] : [])].includes(workload.judge_mode) ? workload.judge_mode : 'auto';
   let workRead = null;
@@ -1107,7 +1124,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
     await scheduleNext(workloadId, { changed: !automatic });
     return { ok: true, runId: run.id, floor: null, results: 0, refused: true };
   }
-  const kept = bar.filter((p) => p.a.ok || p.b.ok);
+  let kept = bar.filter((p) => p.a.ok || p.b.ok);
 
   /* Held to "keeps what matters", the customer's model's answers are not compared with each other for sameness at all: its
      bar is how often its third answer misses something its other two keep (below). */
@@ -1218,18 +1235,38 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   }
   const judgeReason = keepsWay ? (judgeMode === 'keeps' ? 'chosen' : 'sourced')
     : judgeMode === 'same' ? null : judgeMode === 'quality' ? 'chosen' : varied ? 'varied' : openRead?.yes ? 'open-ended' : null;
-  // what decided it, kept with the measurement so its page can say why each model was judged the way it was
+  /* What decided it, kept with the measurement so its page can say why each model was judged the way it was. The reading of
+     whether its requests are open-ended writing is the one made after the bar, or, where they were read as built from
+     supplied text and so read as open-ended already before any answer was bought, that one: a summary workload read as
+     open-ended goes to "at least as good", and its page says so either way. */
+  const openShown = openRead ?? (workRead?.open ? { ...workRead.open, facts: null, kept: wasReason === 'open-ended' } : null);
   planRecord.judging = {
     mode: judgeMode, reason: judgeReason,
     // with the chance each request read was given, so what decided it can be seen request by request
-    openEnded: openRead && { yes: !!openRead.yes, share: openRead.share, n: openRead.n, judge: openRead.judgedBy,
-      ps: openRead.ps ?? [], factsShare: round8(openRead.facts), ...(openRead.kept ? { kept: true } : {}) },
+    openEnded: openShown && { yes: !!openShown.yes, share: openShown.share, n: openShown.n, judge: openShown.judgedBy,
+      ps: openShown.ps ?? [], factsShare: openShown.facts === null || openShown.facts === undefined ? null : round8(openShown.facts),
+      ...(openShown.kept ? { kept: true } : {}) },
     // and whether they ask for an answer built from text they supply (readRequests), however that came out
     sourced: workRead?.sourced ? { yes: !!workRead.sourced.yes, share: workRead.sourced.share, n: workRead.sourced.n,
       judge: workRead.sourced.judgedBy, ps: workRead.sourced.ps ?? [], ...(wasReason === 'sourced' ? { kept: true } : {}) } : null,
   };
   if (keepsWay) {
     const pairs = kept.filter((p) => p.a.ok && p.b.ok);
+    /* A bar set from a handful of requests is no bar. The calls where the provider was too busy to give one of the customer's
+       model's answers are counted here, as "the same answer" counts its busy pairs, so a busy provider is an outage the run
+       tries again after rather than a bar read from what was left: four third answers can only read 0, 25, 50, 75 or 100%. */
+    const busyOn = (p) => [[p.ra, p.a], [p.rb, p.b], [p.rc, p.c]].some(([r, x]) => r && !r.recorded && r.transient && !x?.ok);
+    const busyKeeps = kept.filter(busyOn).length;
+    const tooFew = (n, of) => n < Math.min(10, of) && n * 2 < of;
+    const tooBusy = () => interrupt(`The provider was too busy to answer ${reference} on ${busyKeeps} of the first `
+      + `${bar.length} calls, so the bar could not be set.`);
+    if (busyKeeps > 0 && tooFew(pairs.length, kept.length)) return await tooBusy();
+    /* Its own answers could be read both times on too few calls for a list of what they keep: a request with only one
+       readable answer has no list, so it is left out for everybody, and a bar is not read from what is left. */
+    if (tooFew(pairs.length, kept.length)) {
+      return await interrupt(`${reference} gave two readable answers on only ${pairs.length} of the ${kept.length} calls, `
+        + 'so the bar could not be set.');
+    }
     // what the workload's instruction asks of every answer, read once for each version of it
     if (await step(0, 'Reading what your instruction asks of every answer')) return await endStopped();
     checklist = await checklistFor(workload, kept.map((p) => p.body), { charge: addJudge });
@@ -1244,7 +1281,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
         if (await halted()) { stopped = true; return; }
         const room = outOfRoom(perCallUsd());
         if (room) { capped = room; return; }
-        const f = await factsFor(askOf(p.body), [p.a.value, p.b.value], { scope: workload.workspace_id });
+        const f = await factsFor(keepsRequest(p.body), [p.a.value, p.b.value], { scope: workload.workspace_id });
         addJudge(f.cost);
         if (await step(1, listing)) stopped = true;
         if (!f.facts) { judgeMisses += 1; return; }
@@ -1265,9 +1302,9 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
         + 'requests, so the bar could not be set.');
     }
     /* The judge is chosen on answers whose verdict is known before it is asked (plantedKeeps): the customer's own answer with
-       its spacing changed must keep everything, and one that says nothing of substance, another request's answer, one that
-       ignores the instruction and one put into another language must each miss something. Jev reads them first; where it
-       misses one, the language model reads them too. Where both miss, nothing either settles is switched to on its own. */
+       its spacing changed must keep everything, and one that says nothing of substance, another request's answer and one put
+       into another language must each miss something. Jev reads them first; where it misses one, the language model reads
+       them too. Where both miss, or nothing could be planted, nothing either settles is switched to on its own. */
     if (await step(0, 'Checking the judge on answers whose right verdict is known')) return await endStopped();
     const chosen = await chooseKeepsJudge(listed, { scope: workload.workspace_id, addJudge, checklist });
     judgePrefer = chosen.prefer;
@@ -1278,11 +1315,22 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
     const own = `Checking whether ${reference}'s own third answers keep what matters`;
     if (await step(0, own)) return await endStopped();
     const missed = [];
+    let thirdBusy = 0;
     try {
       await inParallel(listed, 6, async (p) => {
         if (stopped || capped) return;
-        // a third answer that did not come back, or cannot be read, says nothing about how often the model misses something
-        if (!p.rc?.ok || !p.c?.ok) return;
+        // a third answer the provider was too busy to give says nothing about how often the model misses something
+        if (!p.c?.ok && p.rc?.transient) { thirdBusy += 1; return; }
+        /* One that came back refused or unreadable (cut off at the length limit, empty) is the model's own, and misses what
+           matters, as a candidate's would (tryModel) and as "the same answer" counts the customer's own: left out, a
+           customer's model cut off on 5% of its answers set a bar 5 points stricter than its candidates were held to. */
+        if (!p.rc?.ok || !p.c?.ok) {
+          p.noise = 1;
+          missed.push(1);
+          await db.prepare(`UPDATE eval_replays SET score = 1, scored = 1, difference = ? WHERE run_id = ? AND call_id = ? AND model_id = ? AND slot = 2`)
+            .run(p.rc?.ok ? (p.c?.reason || 'unreadable') : 'refused', run.id, p.s.id, reference);
+          return;
+        }
         if (await halted()) { stopped = true; return; }
         const room = outOfRoom(perCallUsd());
         if (room) { capped = room; return; }
@@ -1303,7 +1351,9 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
     }
     if (stopped) return await endStopped();
     if (capped) return await endCapped(capped, `checking whether ${reference}'s own third answers keep what matters`);
-    if (!missed.length || (missed.length < Math.min(10, listed.length) && missed.length * 2 < listed.length)) {
+    if (!missed.length || tooFew(missed.length, listed.length)) {
+      // mostly the provider, not answering a third time, or mostly the judge, not reading what came back
+      if (thirdBusy * 2 >= listed.length - missed.length) return await tooBusy();
       return await interrupt(`The judge read ${reference}'s own third answers on only ${missed.length} of the ${listed.length} `
         + 'requests, so the bar could not be set.');
     }
@@ -1460,6 +1510,12 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   const refThinks = thought.length >= 3
     ? thought.filter((r) => r.reasoningTokens > 0).length / thought.length >= 0.3
     : plan.refThinks;
+  /* Held to "keeps what matters", only a request with a list of what to keep says anything about an answer to it (keepsOf),
+     so every other model is asked those alone: asked the rest too, each paid for answers nobody could judge, its page said
+     "on all N requests" where fewer were read, and a cascade or router read each of those calls as the customer's own
+     average. Narrowed once the customer's model's own speed and thinking are read from every call it answered (above). */
+  const barCalls = kept.length;
+  if (yardstick === 'keeps') kept = kept.filter((p) => Array.isArray(p.facts));
   const served = (() => {
     try { return workload.routed_recipe ? JSON.parse(workload.routed_recipe) : null; } catch { return null; }
   })();
@@ -1907,7 +1963,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
       // how sure we are it keeps the promise, what it saves times that, and how often its answer was the better one
       chance: chance === null ? null : round8(chance),
       safe_saving: ratio === null || chance === null ? null : round8(safeSaving(ratio, chance, config.ROUTING_FEE_PCT)),
-      better_pct: st.counted ? round8((st.better / st.counted) * 100) : null,
+      // none under "keeps what matters", which never reads which answer is the better (0 would say it never was)
+      better_pct: st.counted && yardstick !== 'keeps' ? round8((st.better / st.counted) * 100) : null,
     };
     /* The model that is itself what serves is judged as it serves as well, without the differences a reading left
        unsettled: kept beside its row and never written, that alone decides whether it keeps serving (keepOf). Its
@@ -2019,7 +2076,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
     let facts = null;
     if (keeps && refs.length === 2) {
       // what both keep, listed as the first look's were, and the third answer held to it as the first look's third answers were
-      const f = await factsFor(askOf(body), [refs[0].value, refs[1].value], { scope: workload.workspace_id });
+      const f = await factsFor(keepsRequest(body), [refs[0].value, refs[1].value], { scope: workload.workspace_id });
       addJudge(f.cost);
       if (f.cost > 0) sent += 1;
       facts = f.facts ?? null;
@@ -2037,6 +2094,11 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
                 WHERE run_id = ? AND call_id = ? AND model_id = ? AND slot = 2`)
               .run(j.score, j.judgedBy ?? null, j.score > 0 ? j.detail?.kind ?? null : null, keepsReadingsOf(j), run.id, c.id, reference);
           }
+        } else if (rc && !(rc.transient && !rc.ok)) {
+          // refused or unreadable, as the first look counts it: the model's own, and it misses what matters
+          noise = 1;
+          await db.prepare(`UPDATE eval_replays SET score = 1, scored = 1, difference = ? WHERE run_id = ? AND call_id = ? AND model_id = ? AND slot = 2`)
+            .run(rc.ok ? (third?.reason || 'unreadable') : 'refused', run.id, c.id, reference);
         }
       }
     } else if (refs.length === 2) {
@@ -2952,7 +3014,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
               VALUES (?, ?, ?, ?, 0, ?, 'reference', 100, 100, 100, 100, 0, ?, ?, ?, ?, ?)
               ON CONFLICT (run_id, model_id) DO UPDATE SET runs = excluded.runs,
                 cost_month_usd = excluded.cost_month_usd, created_at = excluded.created_at`)
-    .run(id('res'), run.id, reference, kept.length * 2, refMonthly, now(),
+    // its answers on every call the bar read: two a call, and a third under "keeps what matters"
+    .run(id('res'), run.id, reference, barCalls * (yardstick === 'keeps' ? 3 : 2), refMonthly, now(),
          refSpeed.latencyP50, refSpeed.latencyP90, refSpeed.ttftP50, refSpeed.ttftP90);
 
   /* A model already serving this workload that no longer holds up goes back to the customer's
@@ -3651,23 +3714,53 @@ async function readPlanted(planted, { scope, addJudge, prefer }) {
 
 /* Answers planted for "keeps what matters" (see chooseKeepsJudge), built from the customer's model's own answers to sampled
    requests that have a list of what to keep, at most two of each:
-   - its spacing changed, which keeps everything (every fact on the list is in it), so a judge that cannot find a fact said
-     the way the customer's model says it is caught;
+   - its spacing changed (a space between two words doubled, away from its first line), which keeps everything (every fact on
+     the list is in it), so a judge that cannot find a fact said the way the customer's model says it is caught;
    - one that says nothing of substance, which keeps none of it;
    - another request's answer, to a request that asked something else, which keeps none of this one's;
-   - one made to break a requirement of the workload's own instruction (breakOne), which misses what was asked of it;
-   - one put into another language, which a reader of the customer's answers could not use. */
+   - one put into another language, which a reader of the customer's answers could not use.
+   The one that says nothing is held to the facts that give no figure, where the request has any: a fact with a figure the
+   answer does not give is decided in code (routeFacts in src/eval/keeps.js), so held to those, it would test code and never
+   a judge. Another request's answer is held to them all: where requests are alike (one support summary after
+   another), what sets them apart is their figures, and a fact without one ("the duplicate charge was refunded") is often
+   true of both, so a judge finding it there would be right. No answer is planted to break the instruction: what code checks
+   of it (src/eval/checklist.js) is decided before any judge reads, so it would test nothing, and the planted answers are read
+   without those checks for the same reason (chooseKeepsJudge). */
 const HOLLOW = 'Thanks for getting in touch. This has been looked into, and it is being handled.';
-async function plantedKeeps(listed, { checklist = [], addJudge }) {
-  const pool = listed.filter((p) => p.a?.ok && typeof p.a.value === 'string' && p.a.value.trim().length > 20);
+/* The answer with one space between two words doubled, the last such space away from its first line, where an instruction's
+   opening words sit; null if there is none. Between two letters, so never inside a figure: doubled beside one ("$2.5  million",
+   "12  500"), the space would change how the figure reads, and a correct judge would be marked wrong for it. */
+export function respaced(t) {
+  const lines = String(t).split('\n');
+  for (let k = lines.length - 1; k >= 0; k -= 1) {
+    if (k === 0 && lines.length > 1) break;
+    const line = lines[k];
+    for (let at = line.length - 2; at > 0; at -= 1) {
+      if (line[at] === ' ' && /\p{L}/u.test(line[at - 1]) && /\p{L}/u.test(line[at + 1])) {
+        lines[k] = `${line.slice(0, at)} ${line.slice(at)}`;
+        return lines.join('\n');
+      }
+    }
+  }
+  return null;
+}
+const plainFacts = (p) => {
+  const plain = p.facts.filter((f) => !(f.figures || []).length);
+  return plain.length ? plain : p.facts;
+};
+async function plantedKeeps(listed, { addJudge }) {
+  const pool = listed.filter((p) => p.a?.ok && typeof p.a.value === 'string' && p.a.value.trim());
   const withFacts = pool.filter((p) => p.facts.length > 0);
   const out = [];
-  for (const p of pool.slice(0, 2)) {
-    const t = p.a.value;
-    const variant = t.replace(/\s+/, '  ');
-    if (variant.trim() !== t.trim()) out.push({ p, answer: variant, expect: 0, kind: 'spacing' });
+  let spaced = 0;
+  for (const p of pool) {
+    if (spaced >= 2) break;
+    const variant = respaced(p.a.value);
+    if (!variant || variant.trim() === p.a.value.trim()) continue;
+    out.push({ p, answer: variant, expect: 0, kind: 'spacing' });
+    spaced += 1;
   }
-  for (const p of withFacts.slice(0, 2)) out.push({ p, answer: HOLLOW, expect: 1, kind: 'hollow' });
+  for (const p of withFacts.slice(0, 2)) out.push({ p, answer: HOLLOW, facts: plainFacts(p), expect: 1, kind: 'hollow' });
   const sameAnswer = (x, y) => x.a.value.trim().toLowerCase() === y.a.value.trim().toLowerCase();
   let others = 0;
   for (let k = 0; k < withFacts.length && others < 2; k += 1) {
@@ -3676,14 +3769,6 @@ async function plantedKeeps(listed, { checklist = [], addJudge }) {
     if (!q) continue;
     out.push({ p, answer: q.a.value, expect: 1, kind: 'another request' });
     others += 1;
-  }
-  let broken = 0;
-  for (const p of pool) {
-    if (broken >= 2) break;
-    const b = breakOne(checklist, p.a.value);
-    if (!b) continue;
-    out.push({ p, answer: b.text, expect: 1, kind: 'ignored instruction', note: b.item.say });
-    broken += 1;
   }
   let langs = 0;
   let tries = 0;
@@ -3705,25 +3790,34 @@ const PLANTED_KEEPS_WORDS = {
   spacing: () => 'an answer with only its spacing changed read as missing something that matters',
   hollow: () => 'an answer that states none of the facts read as keeping what matters',
   'another request': () => "another request's answer read as keeping what matters",
-  'ignored instruction': (x) => `an answer that ignores the instruction (${String(x.note).toLowerCase()}) read as keeping what matters`,
   'wrong language': (x) => `the answer put into ${x.note} read as keeping what matters`,
 };
 
+/* Whether the judge read a planted answer wrongly. The answer with only its spacing changed is the customer's own answer, so
+   whatever that answer says beyond the request is in it too: it is read wrongly only where a fact on the list reads as left
+   out, its language as another, or it reads as missing what the instruction asks; never for what it gets wrong. */
+const plantMisread = (x, j) => (x.kind === 'spacing'
+  ? (j.detail?.facts || []).some((f) => f.kept === false) || !!j.detail?.otherLanguage || !!j.detail?.broke
+  : j.score !== x.expect);
+
 /* Which judge reads "keeps what matters" on this workload, as chooseJudge does for "at least as good": Jev first, the
    language model where Jev misses a planted answer or answers too few, and whichever missed fewer reads the run. Where the one
-   chosen missed any, nothing it settles is switched to on its word alone (unsure). */
+   chosen missed any, or no answer could be planted to test it, nothing it settles is switched to on its word alone (unsure).
+   The planted answers are read with what only a reading can check of the instruction, the rest being code's (plantedKeeps),
+   and a reading a lean decided (unsettled) is not counted as read either way. */
 async function chooseKeepsJudge(listed, { scope, addJudge, checklist }) {
-  const planted = await plantedKeeps(listed, { checklist, addJudge });
+  const planted = await plantedKeeps(listed, { addJudge });
   const kinds = [...new Set(planted.map((x) => x.kind))];
+  const reading = (checklist || []).filter((x) => x.kind === 'ask');
   const read = async (prefer) => {
     const out = { judge: prefer, read: 0, errors: 0, same: 0, different: 0, cases: [] };
     await inParallel(planted, 4, async (x) => {
-      const j = await keepsCheck(askOf(x.p.body), x.answer, { facts: x.p.facts, reference: x.p.a.value, scope, prefer, checklist });
+      const j = await keepsCheck(keepsRequest(x.p.body), x.answer, { facts: x.facts || x.p.facts, reference: x.p.a.value, scope, prefer, checklist: reading });
       addJudge(j.cost);
-      if (j.transient || j.score === null || j.score === undefined) return;
+      if (j.transient || j.unsettled || j.score === null || j.score === undefined) return;
       out.read += 1;
       if (x.expect === 0) out.same += 1; else out.different += 1;
-      if (j.score !== x.expect) { out.errors += 1; out.cases.push(PLANTED_KEEPS_WORDS[x.kind](x)); }
+      if (plantMisread(x, j)) { out.errors += 1; out.cases.push(PLANTED_KEEPS_WORDS[x.kind](x)); }
     });
     return out;
   };
@@ -3732,7 +3826,8 @@ async function chooseKeepsJudge(listed, { scope, addJudge, checklist }) {
     planted: planted.length, kinds, judge: best ? (best.judge === 'llm' ? 'llm' : 'jev') : null,
     tried: tried.map((t) => ({ judge: t.judge === 'llm' ? 'llm' : 'jev', read: t.read, errors: t.errors })), ...extra,
   });
-  if (!planted.length) return { prefer: null, unsure: false, check: record(null, []) };
+  // nothing to test the judge on: its word is untested, so nothing it settles is switched to on its own
+  if (!planted.length) return { prefer: null, unsure: true, check: record(null, [], { cases: ['no answers could be planted to test the judge'] }) };
   const tried = [];
   // Jev, with the language model settling what Jev is unsure of, as the run would read with it (keepsCheck)
   if (jevUsable()) tried.push(await read(null));

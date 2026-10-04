@@ -295,8 +295,10 @@ export default function ModelPage({ wid, runId, model, go, goTo }) {
                 <rect x="0" y="12" width="200" height="8" rx="4" className="tr" />
                 <line x1={at(rp.bar)} y1="6" x2={at(rp.bar)} y2="26" className="lim" />
                 <circle cx={at(c.gap)} cy="16" r="5" className={c.gap <= rp.bar ? 'dot' : 'dot bad'} />
-                <text x="0" y="35" className="lb">0%</text>
-                <text x={at(rp.bar)} y="35" className="lb" textAnchor="middle">{pct1(rp.bar)} allowed</text>
+                {/* the allowed mark near either end is labelled from that end, so it never runs over "0%" or off the tile */}
+                {at(rp.bar) >= 70 && <text x="0" y="35" className="lb">0%</text>}
+                <text x={at(rp.bar) < 70 ? Math.max(0, at(rp.bar) - 4) : at(rp.bar) > 130 ? Math.min(200, at(rp.bar) + 4) : at(rp.bar)} y="35" className="lb"
+                  textAnchor={at(rp.bar) < 70 ? 'start' : at(rp.bar) > 130 ? 'end' : 'middle'}>{pct1(rp.bar)} allowed</text>
               </svg>
             )}
           </div>
@@ -385,7 +387,7 @@ export default function ModelPage({ wid, runId, model, go, goTo }) {
                   <summary>{I.info}How is each request scored?</summary>
                   <p>
                     {keeps
-                      ? "The original model answered every request twice. The facts both of its answers give, and that matter to someone relying on the answer, such as a figure, a date, a decision or what happens next, are listed once. This model's answer scores 0 when it gives every one of those facts, in any words, and gets nothing wrong compared with the request, and 1 when it leaves one out, gets something wrong, or isn't in the original model's language."
+                      ? "The original model answered every request twice. The facts both of its answers give, and that matter to someone relying on the answer, such as a figure, a date, a decision or what happens next, are listed once. This model's answer scores 0 when it gives every one of those facts, in any words, gets nothing wrong compared with the request, and follows the request's instructions as the original model does. It scores 1 when it leaves one of those facts out, gets something wrong, isn't in the original model's language, or breaks a rule the request's instructions set."
                       : quality
                         ? "A judge reads this model's answer beside the original model's twice, once in each order. It scores 0 when this model's answer is at least as good, and 1 when both readings find it clearly worse or it breaks a rule the request's instructions set."
                         : "The original model answered every request twice, because it doesn't always give the same answer. This model's answer is compared with each of those two answers. It scores 0 when it matches both, 0.5 when it matches one of them, and 1 when it matches neither."}
@@ -623,6 +625,12 @@ function JsonView({ value, shape, decide, written }) {
 const SIDE_WORDS = { answer: "this model's answer was better", original: "the original model's answer was better", equal: 'about equally good' };
 const sureWords = (p) => (p === null || p === undefined || !Number.isFinite(Number(p)) ? '' : `, ${Math.round(Number(p) * 100)}% sure`);
 const pctOf = (p) => `${Math.round(Number(p) * 100)}%`;
+// an average a line decides on, to one decimal, so one just under the line never reads as on it
+const pctAvg = (p) => `${(Math.round(Number(p) * 1000) / 10).toFixed(1)}%`;
+// the chance Jev gave, said as a chance rather than as how sure it was, since the line it is held to is a setting
+const chanceOf = (p, what) => (p === null || p === undefined || !Number.isFinite(Number(p)) ? '' : `Jev gave it a ${pctOf(p)} chance of ${what}`);
+// who reads, named once on every block: Jev the main judge, a small model built to read meaning, and the second judge
+const JUDGES = 'Jev, the main judge, is a small model built to read meaning. Where it is unsure, the second judge, a larger language model, reads it too.';
 // what Jev named a difference, in words (the kinds in src/eval/judge.js)
 const NAMED_WORDS = {
   wording: 'only the wording', omission: 'one leaves something out', fact: 'a different fact or figure', decision: 'a different decision',
@@ -636,35 +644,48 @@ function Readings({ r, facts }) {
 
 /* What the judge said of one answer held to "the same answer" (readingsWords in src/workloadPage.js): against each of the
    original model's answers, whether Jev read the two as serving the person equally and how sure it was; where it was
-   unsure, the three votes that settled it; and where they differed only in wording or in what each includes, which one
-   serves the person better, read twice, once each way round, and averaged, which decides whether the difference counts. */
+   unsure, the three votes that settled it (or that no second reading came back, and the answer was not counted); and where
+   they differed only in wording or in what each includes, which one serves the person better, read twice, once each way
+   round, and averaged, which decides whether the difference counts. */
 function SameReadings({ r }) {
   const against = Array.isArray(r.against) ? r.against : [];
+  const two = against.length > 1;
   const line = (a, i) => {
-    const which = against.length > 1 ? (i === 0 ? "the original model's first answer" : "its second answer") : "the original model's answer";
+    const which = two ? (i === 0 ? "the original model's first answer" : "its second answer") : "the original model's answer";
     const out = [];
     if (a.votes) {
       const said = (v) => (v === 0 ? 'the same' : v === 1 ? 'different' : 'no answer');
-      const reads = (a.votes.reads || []).filter((v) => v !== null && v !== undefined);
+      const all = a.votes.reads || [];
+      const reads = all.filter((v) => v !== null && v !== undefined);
       const split = reads.length === 2 && reads[0] !== reads[1];
-      out.push(`Jev was unsure whether they serve the person equally (${pctOf(a.p)} sure they do), so a second judge read them twice, once each way round: ${(a.votes.reads || []).map(said).join(', then ')}.`
-        + (split ? ` They split, so Jev's own lean decided: ${said(a.votes.lean)}.` : ''));
+      const asked = `Jev was unsure whether they serve the person equally (${pctOf(a.p)} sure they do), so the second judge was asked to read them twice, once each way round`;
+      if (!reads.length) out.push(`${asked}, and didn't answer either time, so this answer isn't counted.`);
+      else {
+        out.push(`${asked}: ${all.map(said).join(', then ')}.`
+          + (split ? ` They split, so Jev's own lean decided: ${said(a.votes.lean)}.` : '')
+          + (reads.length === 1 ? ' Only one reading came back, so it decided this time, and the pair is read again at the next test.' : ''));
+      }
     } else if (a.p !== null && a.p !== undefined) {
       out.push(Number(a.p) >= 0.5 ? `Jev read them as serving the person equally, ${pctOf(a.p)} sure.` : `Jev read them as different, ${pctOf(1 - a.p)} sure.`);
     }
     if (a.named && NAMED_WORDS[a.named]) out.push(`The main difference it named: ${NAMED_WORDS[a.named]}.`);
+    if (a.figures) out.push('A figure in it differs from this answer.');
     if (a.three) {
       const line2 = r.forgive !== null && r.forgive !== undefined ? pctOf(r.forgive) : null;
       out.push(`Asked which serves the person better, once each way round, it gave the original model's answer ${(a.three.pRef || []).map(pctOf).join(' and ')}`
-        + `${a.three.ref !== null ? ` (${pctOf(a.three.ref)} on average)` : ''} and this one ${(a.three.pCand || []).map(pctOf).join(' and ')}. `
+        + `${a.three.ref !== null ? ` (${pctAvg(a.three.ref)} on average)` : ''} and this one ${(a.three.pCand || []).map(pctOf).join(' and ')}. `
         + (a.three.verdict === 'kept' ? `${line2 ? `That average is ${line2} or more, so the` : 'The'} difference counts.`
           : `${line2 ? `That average is under ${line2}, so the` : 'The'} difference was forgiven${a.three.verdict === 'better' ? ', and this answer counts as the better one' : ''}.`));
     }
     return { which, out };
   };
+  // a figure that differs from every one of the original model's answers, or only from some (figuresAgainst)
+  const byRef = against.filter((a) => a.figures !== null && a.figures !== undefined);
+  const figuresAll = r.figures && (!byRef.length || byRef.every((a) => a.figures));
   return (
     <div className="wp-ansblock wp-readings">
       <p className="wp-sub">What the judge said</p>
+      <p className="wp-ansnote">{JUDGES}</p>
       {against.length > 0 && (
         <ul className="wp-readlist">
           {against.map((a, i) => {
@@ -673,48 +694,108 @@ function SameReadings({ r }) {
           })}
         </ul>
       )}
-      {r.figures && <p className="wp-ansnote is-decide">A figure in it differs from the original model's, so it counts as different whatever a reading says.</p>}
+      {r.figures && (
+        <p className="wp-ansnote is-decide">
+          {figuresAll
+            ? `A figure in it differs from the original model's ${two ? 'answers' : 'answer'}, so it counts as different whatever a reading says.`
+            : "A figure in it differs from one of the original model's answers, so against that one it counts as different whatever a reading says."}
+        </p>
+      )}
       {(r.refuses || r.cut) && <p className="wp-ansnote is-decide">{r.refuses ? 'It refuses what was asked' : 'It stops before it is finished'}, so it counts as different.</p>}
     </div>
   );
 }
 
 /* What the judge found of one answer held to "keeps what matters" (readingsWords in src/workloadPage.js): each fact both of
-   the original model's answers give that matters, and whether this answer kept it, and how that was read; the supporting
-   detail they also share, which no answer had to keep; and whether it gets something wrong against the request or is in
-   another language than the original model's. */
+   the original model's answers give that matters, whether this answer kept it, and how that was read; the supporting detail
+   they also share, which no answer had to keep; whether it gets something wrong against the request or is in another
+   language than the original model's; and where it was never read (a rule of the instructions it breaks, which code checks
+   first, or the original model's own answer word for word), that nothing else was checked. A fact or rule whose words the
+   retention setting removed is named as such. */
 function KeepsReadings({ r, facts }) {
   const list = Array.isArray(r.facts) ? r.facts : [];
   const detail = Array.isArray(facts?.detail) ? facts.detail.filter((d) => d.say) : [];
-  const how = (f) => (f.by === 'figures' ? `it doesn't give ${(f.missing || []).join(', ')}`
-    : f.by === 'same text' ? 'the same text'
-      : f.by === 'jev+llm' ? `Jev was unsure (${pctOf(f.p)}), and a second judge read it`
-        : f.by === 'llm' ? 'read by a judge model' : f.p !== null && f.p !== undefined ? `Jev, ${pctOf(f.kept ? f.p : 1 - f.p)} sure` : '');
+  const read = r.read !== false;
+  const sayOf = (f) => (f.say === null || f.say === undefined ? 'a fact (its words are no longer kept, as your retention setting says)' : f.say);
+  const figuresOf = (f) => (Array.isArray(f.missing) && f.missing.length ? f.missing.join(', ') : null);
+  const how = (f) => {
+    if (f.by === 'same text') return 'the same text';
+    if (f.by === 'not read') return '';
+    const fig = figuresOf(f);
+    // decided in code, before any judge reads: a figure of the fact the answer never gives
+    if (f.by === 'figures') return fig ? `it doesn't give ${fig}` : "it doesn't give one of its figures";
+    if (f.by === 'jev+llm') {
+      return f.p === null || f.p === undefined ? 'Jev was unsure, so the second judge read it'
+        : `Jev was unsure, giving it a ${pctOf(f.p)} chance of being stated, so the second judge read it`;
+    }
+    if (f.by === 'llm') return 'read by the second judge';
+    const chance = chanceOf(f.p, 'being stated');
+    if (f.lean) return `${chance}, and the second judge didn't answer, so Jev's lean stood`;
+    return chance;
+  };
   const wrong = r.wrong || {};
   const isWrong = !!r.isWrong;
+  const wrongRead = r.wrongRead !== undefined ? !!r.wrongRead : (wrong.p !== null && wrong.p !== undefined) || (wrong.llm !== null && wrong.llm !== undefined);
   const wrongWords = wrong.llm !== null && wrong.llm !== undefined
-    ? `Jev was unsure (${pctOf(wrong.p ?? 0.5)} sure it does), and a second judge read it: ${isWrong ? 'it does' : 'it does not'}.`
-    : wrong.p !== null && wrong.p !== undefined ? `Jev, ${pctOf(isWrong ? wrong.p : 1 - wrong.p)} sure.` : '';
+    ? (wrong.p !== null && wrong.p !== undefined
+      ? `Jev was unsure, giving it a ${pctOf(wrong.p)} chance of getting something wrong, so the second judge read it: ${isWrong ? 'it does' : 'it does not'}.`
+      : `Read by the second judge: ${isWrong ? 'it does' : 'it does not'}.`)
+    : wrong.p !== null && wrong.p !== undefined
+      ? `${chanceOf(wrong.p, 'getting something wrong')}${r.wrongLean ? ", and the second judge didn't answer, so Jev's lean stood" : ''}.` : '';
+  const languageWords = r.languageLlm !== null && r.languageLlm !== undefined
+    ? ` Jev was unsure which language it is in, so the second judge read it: ${r.languageLlm ? "the original model's" : 'another'}.`
+    : r.language !== null && r.language !== undefined ? ` ${chanceOf(r.language, "being in the original model's language")}${r.languageLean ? ", and the second judge didn't answer, so Jev's lean stood" : ''}.` : '';
   return (
     <div className="wp-ansblock wp-readings">
       <p className="wp-sub">What it had to keep</p>
+      {read && <p className="wp-ansnote">{JUDGES}</p>}
+      {r.same && <p className="wp-ansnote">It is the original model's answer word for word, so it keeps everything that answer keeps. Nothing else was checked.</p>}
+      {!read && !r.same && (
+        <p className="wp-ansnote is-decide">
+          {r.broke ? `It breaks a rule in the request's instructions ("${r.broke}").`
+            : r.brokeHidden ? "It breaks a rule in the request's instructions (its words are no longer kept, as your retention setting says)."
+              : "It breaks a rule in the request's instructions."}
+          {' '}That is checked before anything is read, so its facts and what it says against the request weren't checked.
+        </p>
+      )}
       {list.length ? (
         <ul className="wp-readlist wp-factlist">
-          {list.map((f, i) => (
-            <li key={i} className={f.kept ? 'is-kept' : 'is-missed'}>
-              <b>{f.kept ? 'Kept' : 'Missed'}:</b> {f.say}{how(f) ? <span className="wp-factby"> ({how(f)})</span> : null}
-            </li>
-          ))}
+          {list.map((f, i) => {
+            const label = f.kept === null || f.kept === undefined ? 'Not checked' : f.kept ? 'Kept' : 'Missed';
+            const words = how(f);
+            return (
+              <li key={i} className={f.kept === null || f.kept === undefined ? '' : f.kept ? 'is-kept' : 'is-missed'}>
+                <b>{label}:</b> {sayOf(f)}{words ? <span className="wp-factby"> ({words})</span> : null}
+              </li>
+            );
+          })}
         </ul>
-      ) : <p className="wp-ansnote">The original model's two answers share no fact that matters on this request, so only the checks below apply.</p>}
+      ) : read ? <p className="wp-ansnote">The original model's two answers share no fact that matters on this request, so only the checks below apply.</p> : null}
       {detail.length > 0 && (
-        <p className="wp-ansnote">Also in both of the original model's answers, as supporting detail no answer has to keep: {detail.map((d) => d.say).join(' ')}</p>
+        <p className="wp-ansnote">Also in both of the original model's answers, as supporting detail no answer has to keep: {detail.map((d) => String(d.say).replace(/[.\s]+$/, '')).join('; ')}.</p>
       )}
-      <p className={`wp-ansnote${isWrong ? ' is-decide' : ''}`}>
-        {isWrong ? "It gets something wrong compared with the request, or says something the request doesn't. " : 'It gets nothing wrong compared with the request. '}{wrongWords}
-      </p>
-      {r.otherLanguage && <p className="wp-ansnote is-decide">It isn't written in the original model's language.</p>}
-      {r.broke && <p className="wp-ansnote is-decide">It breaks a rule in the request's instructions ("{r.broke}").</p>}
+      {read && wrongRead && (
+        <p className={`wp-ansnote${isWrong ? ' is-decide' : ''}`}>
+          {isWrong ? "It gets something wrong compared with the request, or says something the request doesn't. " : 'It gets nothing wrong compared with the request. '}{wrongWords}
+        </p>
+      )}
+      {read && (r.otherLanguage || languageWords) && (
+        <p className={`wp-ansnote${r.otherLanguage ? ' is-decide' : ''}`}>
+          {r.otherLanguage ? "It isn't written in the original model's language." : "It is written in the original model's language."}{languageWords}
+        </p>
+      )}
+      {read && (r.broke || r.brokeHidden) && (
+        <p className="wp-ansnote is-decide">
+          {r.broke ? `It doesn't do what the request's instructions ask ("${r.broke}"), where the original model's answer does.`
+            : "It doesn't do what the request's instructions ask (its words are no longer kept, as your retention setting says), where the original model's answer does."}
+        </p>
+      )}
+      {r.unsettled && (
+        <p className="wp-ansnote">
+          This verdict rests on Jev's lean, because the second judge didn't answer. It counts in this test, is read again at the next one,
+          and the background checks never count it against a model that is serving.
+        </p>
+      )}
     </div>
   );
 }
@@ -727,10 +808,11 @@ function QualityReadings({ r }) {
   const why = r.field ? `${what} differs from what the original model gave both times, so it counts as worse whatever a reading says.`
     : r.figures ? 'A figure in it differs from the one the original model gave both times, so it counts as worse whatever a reading says.'
     : r.broke ? `It breaks a rule in the request's instructions ("${r.broke}"), so it counts as worse whatever the readings say.`
-      : each.length !== 2 ? null
-        : both('original') ? "Both readings found the original model's answer better, so it counts as clearly worse."
-          : both('answer') ? "Both readings found this model's answer better, so it counts as at least as good, and better."
-            : "It counts as worse only when both readings find the original model's answer better, so it counts as at least as good.";
+      : r.brokeHidden ? "It breaks a rule in the request's instructions (its words are no longer kept, as your retention setting says), so it counts as worse whatever the readings say."
+        : each.length !== 2 ? null
+          : both('original') ? "Both readings found the original model's answer better, so it counts as clearly worse."
+            : both('answer') ? "Both readings found this model's answer better, so it counts as at least as good, and better."
+              : "It counts as worse only when both readings find the original model's answer better, so it counts as at least as good.";
   return (
     <div className="wp-ansblock wp-readings">
       <p className="wp-sub">What the judge said</p>
@@ -746,7 +828,7 @@ function QualityReadings({ r }) {
           ))}
         </ul>
       )}
-      {why && <p className={`wp-ansnote${r.field || r.figures || r.broke || both('original') ? ' is-decide' : ''}`}>{why}</p>}
+      {why && <p className={`wp-ansnote${r.field || r.figures || r.broke || r.brokeHidden || both('original') ? ' is-decide' : ''}`}>{why}</p>}
     </div>
   );
 }

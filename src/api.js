@@ -799,6 +799,9 @@ api.get('/workloads/:id', async (req, res) => {
     judgedAs: await judgedAsOf(w.id),
     // whether it can be chosen at all: written answers only, since answers with a set shape are compared field by field
     judgeChoice: w.shape_kind === 'free_text',
+    // the ways that can be chosen on this deployment, and whether "Automatically" may choose "keeps what matters"
+    judgeModes: JUDGE_MODES,
+    keepsAuto: !!(config.EVAL_KEEPS && config.EVAL_KEEPS_AUTO && config.EVAL_JUDGE_MODEL),
     calls: t.calls, cost: round8(t.cost),
     promotedAt: w.promoted_at,
     /* What a measurement would do, and whether it can. The button reads this rather than
@@ -1173,7 +1176,7 @@ const SPEED_PREFS = ['auto', 'same', 'slower_ok', 'any'];
    open-ended writing and for answers that vary too much for "the same answer" to mean anything, "the same answer" for the
    rest), 'same' always holds another model to the original model's answers, 'quality' always to answers at least as good,
    and 'keeps' always to keeping what matters (see judgeMode in src/eval/run.js). Stored null for 'auto'. */
-const JUDGE_MODES = ['auto', 'same', 'quality', ...(config.EVAL_KEEPS ? ['keeps'] : [])];
+const JUDGE_MODES = ['auto', 'same', 'quality', ...(config.EVAL_KEEPS && config.EVAL_JUDGE_MODEL ? ['keeps'] : [])];
 
 /** How the newest finished test judged a workload's answers, and why: { yardstick, reason, mode, closed } or null before
     any. `closed` is why it kept to the same answer when it could have chosen: 'facts' where the original model's own
@@ -1188,8 +1191,12 @@ async function judgedAsOf(workloadId) {
   // before 25 Sep a test held answers to "at least as good" only where the original model varied too much for the same answer
   const reason = plan?.judging?.reason ?? plan?.yardstick?.reason ?? (yardstick === 'quality' ? 'varied' : null);
   const open = plan?.judging?.openEnded;
+  /* 'requests' where its requests read neither as open-ended writing nor as built from text they supply; 'writing' where only
+     the first was read (a test from before the second was, with "keeps what matters" off, or where that reading read none of
+     them), so nothing is said of the other */
+  const sourcedRead = Number(plan?.judging?.sourced?.n) > 0;
   const closed = yardstick === 'agreement' && plan?.judging?.mode === 'auto' && open
-    ? (open.share === null ? 'facts' : 'requests') : null;
+    ? (open.share === null ? 'facts' : sourcedRead ? 'requests' : 'writing') : null;
   return { yardstick, reason, mode: plan?.judging?.mode ?? null, closed };
 }
 

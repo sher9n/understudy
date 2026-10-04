@@ -66,15 +66,15 @@ const { default: migrate } = await import('../src/db/migrate.js');
 const { createAccount } = await import('../src/auth.js');
 const { workloadFor, recordCall, learningSettled } = await import('../src/traffic.js');
 const { saveCatalog } = await import('../src/openrouter.js');
-const { runEvaluation } = await import('../src/eval/run.js');
+const { runEvaluation, respaced } = await import('../src/eval/run.js');
 const { planFor } = await import('../src/eval/plan.js');
 const { move } = await import('../src/billing.js');
 const { judgeCandidate } = await import('../src/eval/judge.js');
 const { factsFor, keepsCheck, cleanFacts } = await import('../src/eval/keeps.js');
-const { figuresOf } = await import('../src/eval/compare.js');
+const { figuresOf, factFigures, factNeeds, figuresMissing } = await import('../src/eval/compare.js');
 const { scoreServed, maybeControl, forgetBar } = await import('../src/learn/control.js');
 const { maybeShadow, stateOf } = await import('../src/learn/explore.js');
-const { runPageOf, runAnswersOf } = await import('../src/workloadPage.js');
+const { runPageOf, runAnswersOf, readingsWords: readingsWordsOf } = await import('../src/workloadPage.js');
 const { app } = await import('../src/server.js');
 
 await migrate({ quiet: true });
@@ -112,24 +112,43 @@ const POEM = (i, k) => `Poem ${i}\nthe sea and the light ${k % 7} of the waves\n
 const BEHAVIOUR = {
   summary: SUMMARIES,
   poem: { [REF]: (i) => { refTurn += 1; return POEM(i, refTurn); }, 'vendor/paraphrase': (i) => POEM(i, 99) },
+  versed: { [REF]: (i) => POEM(i, 0), 'vendor/paraphrase': (i) => POEM(i, 77) },
   echo: { [REF]: (i) => `The answer to request ${i} is ${i * 2}.`, 'vendor/paraphrase': (i) => `The answer to request ${i} is ${i * 2}.` },
   reply: { [REF]: (i) => `Hello customer ${i}, thank you for writing to Acme.`, 'vendor/paraphrase': (i) => `Hello customer ${i}, thank you for writing to Acme.` },
 };
-const kindOf = (user) => (/^Summarise this conversation/.test(user) ? 'summary' : /^Write a poem/.test(user) ? 'poem'
-  : /^Double request/.test(user) ? 'echo' : /^Reply kindly/.test(user) ? 'reply' : null);
+/* Summaries whose instruction says how every one opens, which code checks before any judge reads ("Case summary:"), and the
+   customer's model keeps to it: the planted answer with only its spacing changed must still keep everything (sweep A1). And
+   summaries of a provider too busy to answer the customer's model again on most of them (sweep A2). */
+const OPENING = 'Case summary:';
+const opened = (i, k) => `${OPENING} ${refSummary(i, k)}`;
+BEHAVIOUR.opened = { [REF]: (i) => { refTurn += 1; return opened(i, refTurn); }, 'vendor/paraphrase': (i) => `${OPENING} ${SUMMARIES['vendor/paraphrase'](i)}` };
+BEHAVIOUR.busy = { [REF]: (i) => refSummary(i, 1), 'vendor/paraphrase': SUMMARIES['vendor/paraphrase'] };
+const kindOf = (user) => (/^Summarise this conversation/.test(user) ? 'summary' : /^Write a poem/.test(user) ? 'poem' : /as a poem/.test(user) ? 'versed'
+  : /^Double request/.test(user) ? 'echo' : /^Reply kindly/.test(user) ? 'reply' : /^Sum up this case/.test(user) ? 'opened'
+    : /^Summarise this busy conversation/.test(user) ? 'busy' : null);
 const SYSTEMS = { summary: SUMMARY_SYSTEM, poem: 'Write a short poem about what you are asked, and end with the line: - Acme Poems',
-  echo: 'Answer with the figure asked for, in one sentence.', reply: 'You write friendly replies to the customers of Acme, in one sentence.' };
-const USERS = { summary: CONVO, poem: (i) => `Write a poem about the sea, #${i}`, echo: (i) => `Double request #${i}`, reply: (i) => `Reply kindly to customer #${i}` };
-const RECORDED = { summary: (i) => refSummary(i, 0), poem: (i) => POEM(i, 0), echo: BEHAVIOUR.echo[REF], reply: BEHAVIOUR.reply[REF] };
+  versed: 'Turn the text you are given into a short poem, and end with the line: - Acme Poems',
+  echo: 'Answer with the figure asked for, in one sentence.', reply: 'You write friendly replies to the customers of Acme, in one sentence.',
+  opened: `${SUMMARY_SYSTEM} Start every summary with "${OPENING}".`, busy: SUMMARY_SYSTEM };
+const USERS = { summary: CONVO, poem: (i) => `Write a poem about the sea, #${i}`, versed: (i) => `Rewrite this note as a poem, #${i}: the sea was calm today.`, echo: (i) => `Double request #${i}`, reply: (i) => `Reply kindly to customer #${i}`,
+  opened: (i) => `Sum up this case: ${CONVO(i).replace(/^Summarise this conversation, /, '')}`,
+  busy: (i) => CONVO(i).replace(/^Summarise this conversation/, 'Summarise this busy conversation') };
+/* (the opened workload's recorded answers also name a ticket the conversation never gives: the planted answer with only its
+   spacing changed is built from them, and reads as getting something wrong, which says nothing about the judge) */
+const RECORDED = { summary: (i) => refSummary(i, 0), poem: (i) => POEM(i, 0), versed: (i) => POEM(i, 0), echo: BEHAVIOUR.echo[REF], reply: BEHAVIOUR.reply[REF],
+  opened: (i) => `${opened(i, 0)} Ticket 77777.`, busy: (i) => refSummary(i, 0) };
 
 /* The facts a careful reader finds in a summary of case i, each with what shows it is stated: an amount, an order, the refund,
    how long it takes, and the customer's worry, which is only supporting detail. */
 const FACTS = (i) => [
   { say: `The customer was charged ${amount(i)} dollars twice.`, keep: true, shows: (t) => figuresOf(t).has(String(amount(i))) },
   { say: `The charges were for order ${order(i)}.`, keep: true, shows: (t) => figuresOf(t).has(String(order(i))) },
-  { say: 'The duplicate charge was refunded.', keep: true, shows: (t) => /refund/i.test(t), unsure: (t) => /revers/i.test(t) },
+  // Jev unsure of the refund said other ways: leaning to stated for "reversed", to not stated for "credited back"
+  { say: 'The duplicate charge was refunded.', keep: true, shows: (t) => /refund/i.test(t),
+    unsure: (t) => (/revers/i.test(t) ? 0.55 : /credited back/i.test(t) ? 0.45 : null) },
   { say: `The refund reaches the card in ${days(i)} working days.`, keep: true, shows: (t) => figuresOf(t).has(String(days(i))) },
   { say: 'The customer had been worried.', keep: false, shows: (t) => /worried/i.test(t) },
+  { say: 'The customer asked for a discount.', keep: true, shows: (t) => /discount/i.test(t) },
 ];
 const caseOf = (text) => Number((String(text).match(/case (\d+)/) || [])[1] ?? -1);
 const factOf = (say) => {
@@ -138,6 +157,12 @@ const factOf = (say) => {
 };
 const GERMAN = /\b(der|die|das|und|kunde|bestellung|erstattung)\b/i;
 const counts = { facts: 0, factReads: 0, weigh: 0, source: 0, llmRead: 0, third: 0, sourced: 0, open: 0, translate: 0 };
+/* What the tests switch: requests whose list of facts the language model does not give (`listFails`), and the customer's
+   model's answers to the busy workload, the second of each turned away as the provider being too busy (`busySeen`). An answer
+   carrying LLM_DOWN is one the language model does not answer about. */
+const flags = { listFails: () => false };
+const busySeen = new Map();
+const LLM_DOWN = 'LLM-DOWN';
 
 const fenced = (text, label) => (String(text).match(new RegExp(`<<<${label}\\n([\\s\\S]*?)\\n${label}>>>`)) || [])[1] || '';
 const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -154,8 +179,8 @@ const server = http.createServer((req, res) => {
       const s = p.state || {};
       const answers = {};
       for (const [k, v] of Object.entries(q)) {
-        if (k === 'open') { counts.open += 1; answers.open = { noul: /Write a poem/.test(String(s.request)) ? 0.95 : 0.04 }; }
-        else if (k === 'sourced') { counts.sourced += 1; answers.sourced = { noul: /Summarise this conversation/.test(String(s.request)) ? 0.96 : 0.03 }; }
+        if (k === 'open') { counts.open += 1; answers.open = { noul: /Write a poem|as a poem/.test(String(s.request)) ? 0.95 : 0.04 }; }
+        else if (k === 'sourced') { counts.sourced += 1; answers.sourced = { noul: /Summarise this conversation|as a poem/.test(String(s.request)) ? 0.96 : 0.03 }; }
         else if (/^w\d+$/.test(k)) {
           // how much a fact matters: the customer's worry is supporting detail, the rest is what the next agent needs
           counts.weigh += 1;
@@ -166,7 +191,7 @@ const server = http.createServer((req, res) => {
           counts.factReads += 1;
           const f = factOf(s.facts[Number(k.slice(1))]);
           const t = String(s.answer);
-          answers[k] = { noul: !f ? 0.05 : f.shows(t) ? 0.95 : f.unsure?.(t) ? 0.55 : 0.05 };
+          answers[k] = { noul: !f ? 0.05 : f.shows(t) ? 0.95 : f.unsure?.(t) ?? 0.05 };
         } else if (k === 'wrong') {
           counts.source += 1;
           // a figure the conversation never gives is something it gets wrong
@@ -196,13 +221,17 @@ const server = http.createServer((req, res) => {
       if (sys.includes('list the facts which EVERY one')) {
         counts.facts += 1;
         const i = caseOf(fenced(user, 'REQUEST'));
+        if (flags.listFails(i)) return send('I could not list them.');
         const answers = [fenced(user, 'ANSWER1'), fenced(user, 'ANSWER2')].filter(Boolean);
         const facts = FACTS(i).filter((f) => answers.every((a) => f.shows(a))).map((f) => ({ fact: f.say, keep: true }));
+        // now and then a fact neither answer states, as a listing model can invent: confirming it on the answers drops it
+        if (i % 10 === 0) facts.push({ fact: 'The customer asked for a discount.', keep: true });
         return send(JSON.stringify({ facts }));
       }
       if (sys.includes('You check one answer.')) {
         counts.llmRead += 1;
         const t = fenced(user, 'ANSWER');
+        if (t.includes(LLM_DOWN)) return send('Sorry, I cannot help with that.');
         const says = fenced(user, 'FACTS').split('\n').map((l) => l.replace(/^\d+\.\s*/, '')).filter((l) => l && l !== '(none)');
         const out = { facts: says.map((say) => { const f = factOf(say); return !!f && (f.shows(t) || !!f.unsure?.(t)); }) };
         if (sys.includes('gets anything wrong')) {
@@ -210,9 +239,16 @@ const server = http.createServer((req, res) => {
           out.wrong = [...figuresOf(t)].some((x) => !said.has(x) && Number(x) > 31);
         }
         if (sys.includes('same language')) out.same_language = GERMAN.test(t) === GERMAN.test(fenced(user, 'REFERENCE'));
+        // the instruction's requirements only a reader can check: met by both, in this test
+        if (sys.includes('for each numbered requirement')) {
+          out.needs = fenced(user, 'NEEDS').split('\n').filter(Boolean).map(() => ({ answer: true, reference: true }));
+        }
         return send(JSON.stringify(out));
       }
-      if (sys.includes('list the requirements')) return send(JSON.stringify({ items: [] }));
+      // the opening every summary of the "opened" workload has, which code checks (a starts_with item)
+      if (sys.includes('list the requirements')) {
+        return send(JSON.stringify({ items: user.includes(OPENING) ? [{ kind: 'starts_with', text: OPENING, say: `Start with "${OPENING}"` }] : [] }));
+      }
       if (sys.includes('Translate the text')) {
         counts.translate += 1;
         return send('Der Kunde wurde doppelt belastet und die Erstattung kommt bald, sagte der Mitarbeiter heute.');
@@ -227,9 +263,15 @@ const server = http.createServer((req, res) => {
       return send(spaced(a) === spaced(b) ? 'SAME' : 'DIFFERENT');
     }
     const kind = kindOf(user);
-    const i = kind === 'summary' ? caseOf(user) : Number((user.match(/#(\d+)/) || [])[1] || 0);
+    const i = ['summary', 'opened', 'busy'].includes(kind) ? caseOf(user) : Number((user.match(/#(\d+)/) || [])[1] || 0);
     const write = kind && BEHAVIOUR[kind][model];
     if (model === REF && kind === 'summary') counts.third += 1;
+    // the busy workload: the customer's model answers once a request, and nine requests in ten are turned away after that
+    if (model === REF && kind === 'busy') {
+      const n = (busySeen.get(i) || 0) + 1;
+      busySeen.set(i, n);
+      if (n >= 2 && i % 10 !== 0) return json(res, 503, { error: { message: 'Provider is overloaded' } });
+    }
     return send(write ? write(i) : 'nothing');
   });
 });
@@ -325,6 +367,10 @@ test('A: summaries are read as built from supplied text, the customer\'s model a
   // the facts each answer was held to: four to keep, and the customer's worry as supporting detail nobody has to keep
   const listed = samples.map((s) => JSON.parse(s.facts_json || 'null')).filter(Boolean);
   assert.ok(listed.length >= samples.length - 2, 'a list for nearly every request');
+  // a fact the listing invented, which neither answer states, is dropped on confirming, and nobody is held to it
+  const invented = listed.filter((l) => l.dropped.includes('The customer asked for a discount.'));
+  assert.ok(invented.length > 0, 'some lists carried the invented fact');
+  assert.ok(listed.every((l) => !l.facts.some((f) => f.say === 'The customer asked for a discount.')));
   const full = listed.find((l) => l.facts.length === 4);
   assert.ok(full, JSON.stringify(listed.slice(0, 2)));
   assert.ok(full.facts.every((f) => f.weight >= 1.5), JSON.stringify(full.facts));
@@ -380,6 +426,17 @@ test('B: poems stay on "at least as good", factual answers and friendly replies 
   }
 });
 
+test('B: a request to turn supplied text into a poem is open-ended writing first: "at least as good", no third answer', async () => {
+  const { workload } = await seed({ kind: 'versed', n: 60, enabled: ['vendor/paraphrase'] });
+  const out = await runEvaluation(workload.id);
+  const run = await runOf(out.runId);
+  assert.equal(run.yardstick, 'quality', `${run.outcome} ${run.error}`);
+  const p = planOf(run);
+  assert.equal(p.judging.reason, 'open-ended');
+  assert.equal(p.judging.sourced.yes, true, 'read as built from supplied text, and still judged as the writing it is');
+  assert.equal(Number((await db.prepare('SELECT COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND slot = 2').get(run.id)).n), 0);
+});
+
 /* C. The workload's own setting ----------------------------------------------------------------------------------------- */
 
 test('C: set to "keeps what matters", work that reads otherwise is held to it; set to "the same answer", summaries are not', async () => {
@@ -427,11 +484,17 @@ test('D: where Jev is unsure, the language model reads the pair twice and a spli
   const a = await judgeCandidate('user: one', 'Answer one of three.', 'Reference one of three.', null, { scope: 'd-unsure' });
   assert.deepEqual(a.detail.votes[0], [0, 1, 1]);
   assert.equal(a.score, 1);
-  // they split: Jev's lean, the same, decides
-  same.llm = ['SAME', 'DIFFERENT'];
+  // they split: Jev's lean, the same, decides, whichever reading came back first
+  same.llm = ['DIFFERENT', 'SAME'];
   const b = await judgeCandidate('user: two', 'Answer two of three.', 'Reference two of three.', null, { scope: 'd-unsure' });
-  assert.deepEqual(b.detail.votes[0], [0, 0, 1]);
+  assert.equal(b.detail.votes[0][0], 0, "Jev's lean");
+  assert.deepEqual(b.detail.votes[0].slice(1).sort(), [0, 1], 'the two readings split');
   assert.equal(b.score, 0);
+  // and leaning the other way, the lean decides that way
+  same.p = 0.4;
+  same.llm = ['SAME', 'DIFFERENT'];
+  const c = await judgeCandidate('user: three', 'Answer three of three.', 'Reference three of three.', null, { scope: 'd-unsure' });
+  assert.deepEqual([c.detail.votes[0][0], c.score], [1, 1]);
   same.llm = null;
   same.p = null;
   same.kind = 'wording';
@@ -488,6 +551,198 @@ test('E: answers read in the background are held to what the used answer keeps',
   assert.equal(short.agreement, 0);
 });
 
+/* G. What the bug sweep of 4 Oct 2026 found ---------------------------------------------------------------------------- */
+
+const keepFacts = (i) => cleanFacts({ facts: FACTS(i).filter((f) => f.keep && !/discount/.test(f.say)).map((f) => ({ fact: f.say, keep: true })) });
+
+test('G: a figure written out in words is found in code and the fact read by Jev; one the answer never gives is missed in code', async () => {
+  const i = 7;
+  const facts = keepFacts(i);
+  assert.deepEqual(facts.map((f) => f.figures), [[String(amount(i))], [String(order(i))], [], [String(days(i))]]);
+  // the amount in words (seventeen is 17), the order in digits, the refund said plainly, and nothing of how long it takes
+  const before = counts.llmRead;
+  const j = await keepsCheck(CONVO(i), `Ana was charged seventeen dollars twice for order ${order(i)}, and the duplicate was refunded.`,
+    { facts, reference: refSummary(i, 1), scope: 'g-route' });
+  const row = (k) => j.detail.facts[k];
+  assert.deepEqual([row(0).by, row(0).kept], ['jev', true], 'every figure found, so Jev read it');
+  assert.deepEqual([row(3).by, row(3).kept, row(3).missing], ['figures', false, [String(days(i))]], 'a figure it never gives: missed in code');
+  assert.equal(counts.llmRead, before, 'and no judge model was paid to read what code settled');
+  assert.deepEqual([j.score, j.detail.kind], [1, 'omission']);
+  // the days in words: found, read by Jev, kept
+  const k = await keepsCheck(CONVO(i), `Ana was charged ${amount(i)} dollars twice for order ${order(i)}; the duplicate was refunded and arrives in four working days.`,
+    { facts, reference: refSummary(i, 1), scope: 'g-route' });
+  assert.deepEqual([k.detail.facts[3].by, k.detail.facts[3].kept, k.score], ['jev', true, 0]);
+});
+
+test('G: where the judge model does not answer, the lean decides, the verdict is unsettled and read again, and the daily checks do not count it', async () => {
+  const i = 8;
+  const facts = keepFacts(i);
+  // Jev unsure whether "credited back" is the refund, leaning to not stated; the judge model that would settle it does not answer
+  const answer = `${LLM_DOWN} Ana was charged ${amount(i)} dollars twice for order ${order(i)}; the duplicate was credited back and arrives in ${days(i)} working days.`;
+  const j = await keepsCheck(CONVO(i), answer, { facts, reference: refSummary(i, 1), scope: 'g-lean' });
+  assert.deepEqual([j.score, j.unsettled], [1, true]);
+  assert.deepEqual([j.detail.facts[2].by, j.detail.facts[2].lean, j.detail.facts[2].kept], ['jev', true, false]);
+  const before = counts.llmRead;
+  await keepsCheck(CONVO(i), answer, { facts, reference: refSummary(i, 1), scope: 'g-lean' });
+  assert.ok(counts.llmRead > before, 'read again rather than answered from the cache');
+  const s = await scoreServed(bodyOf(i), asJson(answer), asJson(refSummary(i, 1)), 'free_text',
+    { scope: 'g-lean', yardstick: 'keeps', checklist: [], again: async () => ({ json: asJson(refSummary(i, 2)), cost: 0.001 }) });
+  assert.equal(s.score, null, 'a miss that rests on a lean says nothing against what serves');
+  // and the customer's own answer served word for word costs nothing to check
+  const own = await scoreServed(bodyOf(i), asJson(refSummary(i, 1)), asJson(refSummary(i, 1)), 'free_text',
+    { scope: 'g-lean', yardstick: 'keeps', checklist: [], again: async () => { throw new Error('not asked'); } });
+  assert.deepEqual([own.score, own.cost, own.twice ?? false], [0, 0, false]);
+});
+
+test('G: the daily checks list the facts as the test did, whatever judge the test chose to read the answers', async () => {
+  // the language model chosen (prefer 'llm'): the list is still weighed by Jev, so the customer's worry, supporting detail, is
+  // not required of what serves, as it was not of anything the test measured
+  const s = await scoreServed(bodyOf(11), asJson(SUMMARIES['vendor/paraphrase'](11)), asJson(refSummary(11, 1)), 'free_text',
+    { scope: 'g-prefer', yardstick: 'keeps', prefer: 'llm', checklist: [], again: async () => ({ json: asJson(refSummary(11, 2)), cost: 0.001 }) });
+  assert.deepEqual([s.score, s.judgedBy, s.twice], [0, 'llm-keeps', true], JSON.stringify(s));
+});
+
+test('G: an opening the instruction sets, which code checks, leaves the planted spacing answer keeping everything, and the judge trusted', async () => {
+  const { workload } = await seed({ kind: 'opened', n: 220, enabled: ['vendor/paraphrase'], judgeMode: 'keeps' });
+  const out = await runEvaluation(workload.id);
+  const run = await runOf(out.runId);
+  assert.equal(run.outcome, 'compared', `${run.outcome}: ${run.error}`);
+  assert.equal(run.yardstick, 'keeps');
+  assert.deepEqual(planOf(run).yardstick.checklist, [`Start with "${OPENING}"`], 'the opening is checked in code');
+  const check = JSON.parse(run.judge_check_json);
+  assert.equal(check.errors, 0, JSON.stringify(check));
+  assert.ok(check.kinds.includes('spacing') && !check.kinds.includes('ignored instruction'), JSON.stringify(check.kinds));
+  const para = await resultOf(run.id, 'vendor/paraphrase');
+  assert.equal(para.verdict, 'cleared', `${para.verdict} at ${para.gap_pct}%`);
+  assert.equal(para.better_pct, null, 'keeping what matters never reads which answer is the better');
+});
+
+test('G: a provider too busy to answer the customer\'s model again stops the test as an outage, not a bar read from what was left', async () => {
+  busySeen.clear();
+  const { workload } = await seed({ kind: 'busy', n: 80, enabled: ['vendor/paraphrase'], judgeMode: 'keeps' });
+  const out = await runEvaluation(workload.id);
+  // an interrupted test says why and is tried again later (it would be booked again by its job)
+  assert.equal(out.ok, false, JSON.stringify(out));
+  assert.match(String(out.reason), /The provider was too busy to answer/);
+  assert.doesNotMatch(String(out.reason), /judge/, 'the provider, not the judge');
+  const run = await db.prepare('SELECT * FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 1').get(workload.id);
+  assert.equal(run.outcome, 'interrupted', `${run.outcome}: ${run.error}`);
+  assert.equal(run.floor_pct, null, 'no bar was set');
+});
+
+test('G: other models are asked only the requests that have a list of what to keep', async () => {
+  flags.listFails = (i) => i % 4 === 1;
+  try {
+    const { workload } = await seed({ n: 160, enabled: ['vendor/paraphrase'] });
+    const out = await runEvaluation(workload.id);
+    const run = await runOf(out.runId);
+    assert.equal(run.yardstick, 'keeps', `${run.outcome}: ${run.error}`);
+    const first = `AND EXISTS (SELECT 1 FROM eval_replays r WHERE r.run_id = s.run_id AND r.call_id = s.call_id AND r.model_id = '${REF}'
+        AND r.slot = 1 AND r.look IS DISTINCT FROM 2)`;
+    const listed = Number((await db.prepare(`SELECT COUNT(*) AS n FROM eval_samples s WHERE s.run_id = ? AND s.facts_json IS NOT NULL ${first}`).get(run.id)).n);
+    const asked = Number((await db.prepare(`SELECT COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND model_id = 'vendor/paraphrase'
+        AND slot = 0 AND look IS DISTINCT FROM 2`).get(run.id)).n);
+    assert.ok(listed > 0 && listed < Number(run.sample_size), `${listed} of ${run.sample_size} listed`);
+    assert.equal(asked, listed, 'asked exactly the requests with a list');
+    assert.equal(Number((await resultOf(run.id, 'vendor/paraphrase')).runs), listed);
+    assert.equal(Number((await resultOf(run.id, REF)).runs), Number(run.sample_size) * 3, 'three answers a request from the customer\'s model');
+  } finally { flags.listFails = () => false; }
+});
+
+test('G: a list whose weighing Jev did not answer is asked for again rather than kept, without paying for the listing twice', async () => {
+  const { ask } = await import('../src/jev.js');
+  const request = `system: ${SUMMARY_SYSTEM}\nuser: ${CONVO(13)}`;
+  const answers = [refSummary(13, 1), refSummary(13, 2)];
+  const noWeighing = async (state, questions) => {
+    if (Object.keys(questions).some((k) => /^w\d+$/.test(k))) throw new Error('Jev did not answer');
+    return ask(state, questions);
+  };
+  const before = counts.facts;
+  const first = await factsFor(request, answers, { scope: 'g-weigh', askFn: noWeighing });
+  assert.deepEqual([first.facts, first.transient], [null, true], 'not held to the language model\'s own marks');
+  const second = await factsFor(request, answers, { scope: 'g-weigh', askFn: noWeighing });
+  assert.equal(second.transient, true, 'asked again, not answered from a kept list');
+  assert.equal(counts.facts - before, 1, 'the listing itself was kept and not bought again');
+  const third = await factsFor(request, answers, { scope: 'g-weigh', askFn: ask });
+  assert.equal(third.facts.length, 4, JSON.stringify(third));
+  assert.ok(!third.facts.some((f) => /worried/.test(f.say)), 'weighed by Jev, the worry is supporting detail');
+});
+
+test('G: a figure that differs is a difference in facts, whatever Jev named it', async () => {
+  same.p = 0.1;
+  same.kind = 'wording';
+  const j = await judgeCandidate('user: what is the total?', 'The total is 12 dollars.', 'The total is 13 dollars.', null, { scope: 'g-fig' });
+  assert.deepEqual([j.score, j.detail.kind], [1, 'fact']);
+  assert.match(j.judgedBy, /\+numbers$/);
+  same.p = null;
+});
+
+test('G: one reading of the vote counts this time, and the pair is read again next time', async () => {
+  same.p = 0.6;
+  same.kind = 'omission';
+  same.better = { second: 0.9, first: 0.9 };
+  same.llm = ['DIFFERENT', 'FAIL'];
+  const a = await judgeCandidate('user: g8', 'Answer g8 of one.', 'Reference g8 of one.', null, { scope: 'g-vote' });
+  assert.deepEqual([a.score, a.unsettled], [1, true]);
+  same.llm = ['SAME', 'SAME'];
+  const b = await judgeCandidate('user: g8', 'Answer g8 of one.', 'Reference g8 of one.', null, { scope: 'g-vote' });
+  assert.equal(b.score, 0, 'not answered from the cache: put to the vote again');
+  // a "same" read once counts as it is, and is never said to be unsettled (which would take a pass from what serves)
+  same.llm = ['SAME', 'FAIL'];
+  const c = await judgeCandidate('user: g9', 'Answer g9 of one.', 'Reference g9 of one.', null, { scope: 'g-vote' });
+  assert.deepEqual([c.score, c.unsettled, c.once], [0, false, true]);
+  same.llm = ['DIFFERENT', 'DIFFERENT'];
+  const d = await judgeCandidate('user: g9', 'Answer g9 of one.', 'Reference g9 of one.', null, { scope: 'g-vote' });
+  assert.equal(d.score, 1, 'and is not kept either: read again');
+  // a difference read once and then forgiven as no worse stands on nothing, so it is not unsettled
+  same.llm = ['DIFFERENT', 'FAIL'];
+  same.better = { second: 0.1, first: 0.1 };
+  const e = await judgeCandidate('user: g10', 'Answer g10 of one.', 'Reference g10 of one.', null, { scope: 'g-vote' });
+  assert.deepEqual([e.score, e.unsettled], [0, false]);
+  same.llm = null;
+  same.p = null;
+  same.kind = 'wording';
+  same.better = null;
+});
+
+test('G: times, numbers written out, scale words and spaced thousands read as one value, and different values never do', () => {
+  const found = (fact, answer) => !figuresMissing(factNeeds(fact), figuresOf(answer)).length;
+  for (const [fact, answer] of [['at 10:00', 'at 10am'], ['at 14:30', 'at 2:30 pm'], ['9:00-17:00', '9am to 5pm'], ['3pm', '15:00'],
+    ['250 dollars', 'two hundred and fifty dollars'], ['2500 units', 'two thousand five hundred units'], ['$2.5 million', '$2,500,000'],
+    ['$5k', '$5,000'], ['€1.2bn', '€1,200,000,000'], ['1 234,56 €', '1,234.56 €'], ['1 234,56', '1234,56'], ['10 000 items', '10000 items'],
+    ['7 days', 'a free week-long trial'], ['30 minutes', 'a half-hour call'], ['14 days', 'a 2 week trial'],
+    ['8 personnes', 'Huit personnes étaient présentes à la réunion.'], ['21 Personen', 'Es kamen einundzwanzig Personen zu der Feier.'],
+    ['32 personas', 'Vinieron treinta y dos personas a la fiesta.'], ['Total 42', 'المجموع ٤٢'],
+    // a figure given another way that counts: the hour on the other clock or as written, a grouped number by its parts
+    ['The call is at 2pm', "The call is at 2 o'clock"], ['Open 10am-2pm', 'Open from 10 to 2'], ['from 4pm to 6pm', 'from 4-6pm'],
+    ['Revenue was $3.2 million', 'Revenue reached 3.2M'], ['Phone 912 345 678', 'Phone 912-345-678'], ['rent is £8 pm', 'rent is £8 a month']]) {
+    assert.ok(found(fact, answer), `${fact} -> ${answer}`);
+  }
+  for (const [fact, answer] of [['at 10:30', 'at 10am'], ['at 14:30', 'at 4:30 pm'], ['$2.5 million', '$25 million'], ['250 dollars', 'two hundred dollars'],
+    ['5m from the door', '5,000,000 from the door'], ['7 days', 'a free two-week trial'], ['9 personnes', 'Huit personnes étaient présentes à la réunion.'],
+    // in an English text, another language's number words are words of its own: "due" is not 2
+    ['2 invoices', 'The invoices are due on Friday and the team will pay them.'],
+    ['The call is at 2pm', 'The call is at 3pm'], ['Revenue was $3.2 million', 'Revenue reached 3.2 billion'], ['Phone 912 345 678', 'Phone 912-345-679']]) {
+    assert.ok(!found(fact, answer), `${fact} must not read as ${answer}`);
+  }
+});
+
+test('G: the planted answer with its spacing changed doubles a space between two words, never one inside a figure', () => {
+  const v = respaced('Customer was double-charged.\nAmount raised: $2.5 million');
+  assert.equal(v, 'Customer was double-charged.\nAmount  raised: $2.5 million');
+  assert.deepEqual(figuresMissing(factNeeds('The amount raised is $2.5 million.'), figuresOf(v)), [], 'its figure still reads');
+  assert.equal(respaced('Montant total : 12 500'), 'Montant  total : 12 500');
+  assert.equal(respaced('42 17 99'), null, 'no space between two words: nothing planted from it');
+});
+
+test('G: what is said of a miss is what was read for certain, not a lean beside it', async () => {
+  const i = 9;
+  // in German for certain, and the refund only leaned on ("credited back"), the judge model that would settle it not answering
+  const answer = `${LLM_DOWN} Der Kunde wurde fuer Bestellung ${order(i)} doppelt mit ${amount(i)} Dollar belastet; credited back in ${days(i)} Arbeitstagen.`;
+  const j = await keepsCheck(CONVO(i), answer, { facts: keepFacts(i), reference: refSummary(i, 1), scope: 'g-kind' });
+  assert.deepEqual([j.score, j.unsettled ?? false, j.detail.kind], [1, false, 'language']);
+});
+
 /* F. The page, the route, the quote and the purge --------------------------------------------------------------------- */
 
 test('F: the page says why, and shows what each answer had to keep and which it missed', async () => {
@@ -504,7 +759,9 @@ test('F: the page says why, and shows what each answer had to keep and which it 
   assert.equal(row.difference, 'it leaves out something that matters');
   const gone = row.readings.facts.find((f) => !f.kept);
   assert.ok(gone && /charged \d+ dollars twice/.test(gone.say), JSON.stringify(row.readings.facts));
+  // its amount nowhere in the answer, in any form code reads: missed in code
   assert.equal(gone.by, 'figures');
+  assert.ok(Array.isArray(gone.missing) && gone.missing.length === 1, JSON.stringify(gone));
   assert.ok(row.facts.detail.some((d) => d.say === 'The customer had been worried.'), 'supporting detail is shown as not required');
   assert.match(row.compared, /Checked fact by fact/);
   const good = await runAnswersOf(w, run, 'vendor/paraphrase', { page: 1 });
@@ -542,6 +799,14 @@ test('F: the retention purge removes the third answers, the facts and the readin
   const { run, workload } = runs.summary;
   await db.prepare('UPDATE workspaces SET retention_days = 1 WHERE id = ?').run(workload.workspace_id);
   await db.prepare('UPDATE eval_runs SET created_at = ? WHERE id = ?').run(now() - 3 * DAY, run.id);
+  /* the instruction's own words a test keeps: what its checklist asks of every answer, the planted answers a judge misread,
+     and the rule an answer held to "at least as good" broke */
+  const plan = planOf(await runOf(run.id));
+  plan.yardstick.checklist = [`Start with "${OPENING}"`];
+  await db.prepare('UPDATE eval_runs SET plan_json = ?, judge_check_json = ? WHERE id = ?').run(JSON.stringify(plan),
+    JSON.stringify({ errors: 1, cases: [`an answer that ignores the instruction (start with "${OPENING.toLowerCase()}") read as keeping what matters`] }), run.id);
+  const one = await db.prepare(`SELECT id FROM eval_replays WHERE run_id = ? AND model_id = 'vendor/paraphrase' LIMIT 1`).get(run.id);
+  await db.prepare('UPDATE eval_replays SET readings = ? WHERE id = ?').run(JSON.stringify({ picks: ['first', 'second'], broke: `Start with "${OPENING}"` }), one.id);
   // the purge alone, as its job runs it (the tests before left other work queued, which is not what is being checked)
   const { runOnce, enqueue } = await import('../src/jobs.js');
   await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE status = 'queued'`).run();
@@ -551,6 +816,20 @@ test('F: the retention purge removes the third answers, the facts and the readin
   const readings = await db.prepare(`SELECT COUNT(*) AS n FROM eval_replays WHERE run_id = ? AND readings LIKE '{"way":"keeps"%'`).get(run.id);
   assert.equal(Number(left.kept), 0, 'no third answer or list of facts outlives the retention window');
   assert.equal(Number(readings.n), 0, 'no reading that names the facts does either');
+  const after = await runOf(run.id);
+  assert.deepEqual(planOf(after).yardstick.checklist, [], "nor the instruction's checklist");
+  assert.deepEqual([JSON.parse(after.judge_check_json).cases, JSON.parse(after.judge_check_json).errors], [[], 1], 'nor the planted cases; the count stays');
+  const r = JSON.parse((await db.prepare('SELECT readings FROM eval_replays WHERE id = ?').get(one.id)).readings);
+  assert.equal(r.broke, '-', 'nor the rule it broke, kept as a mark that one was');
+  const words = readingsWordsOf(r);
+  assert.deepEqual([words.broke, words.brokeHidden], [null, true]);
+});
+
+test('figuresOf reads figures however they are written, and numbersOf only digits', () => {
+  const has = (t, xs) => { const f = figuresOf(t); return xs.every((x) => f.has(x)); };
+  assert.ok(has('eight people, twenty-five seats, the twenty-first, a hundred units, two thousand, a dozen', ['8', '25', '21', '100', '2000', '12']));
+  assert.ok(has('due on 2 September, refund of 1.234,56 EUR, total 1,234.56 USD, 3rd of May', ['2', '9', '1234.56', '3', '5']));
+  assert.ok(!figuresOf('the sea at night').has('1'), 'no figure where none is written');
 });
 
 test('cleanFacts keeps short sentences once, their figures, and whether each must be kept', () => {

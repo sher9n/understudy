@@ -46,6 +46,8 @@ const JUDGING = [
   { mode: 'keeps', chip: 'Keeps what matters', label: 'Keeps what matters',
     note: "Another model passes when its answers keep the facts that matter, the figures, dates, decisions and next steps the original model gives every time, and get nothing wrong, however they're worded. Right for summaries and translations." },
 ];
+// "Automatically" where this deployment does not choose "keeps what matters" by itself (keepsAuto in src/api.js)
+const AUTO_WITHOUT_KEEPS = "Understudy decides at each test: at least as good for open-ended writing such as poems and stories, and wherever the original model's own answers vary too much to match; the same answer for everything else.";
 /* What a workload optimizes for when the models a test tries are scored (routing_mode; see src/eval/score.js): each model
    gets quality, cost and speed out of 100, and one score out of 100 that weighs them this way. Balance unless changed. */
 const OPTIMIZE = [
@@ -639,15 +641,18 @@ function Waiting({ w, cand, busy, copiesOnly, act, go, goTo }) {
    workspace's choices in Settings, the arrow keys moving between them. Opened from the chip under the workload's name
    and closed from its own button. Under the cards, how the newest test judged and why; a change applies from the next. */
 function Judging({ w, busy, act, onClose }) {
-  const chosen = JUDGING.some((j) => j.mode === w.judgeMode) ? w.judgeMode : 'auto';
+  // the ways this deployment offers (judgeModes in src/api.js), and "Automatically" said as it chooses here
+  const offered = JUDGING.filter((j) => !Array.isArray(w.judgeModes) || w.judgeModes.includes(j.mode))
+    .map((j) => (j.mode === 'auto' && w.keepsAuto === false ? { ...j, note: AUTO_WITHOUT_KEEPS } : j));
+  const chosen = offered.some((j) => j.mode === w.judgeMode) ? w.judgeMode : 'auto';
   const refs = useRef({});
   const choose = (mode) => { if (mode !== chosen) act(() => api.setJudging(w.id, mode))(); };
   const onKey = (e) => {
-    const i = JUDGING.findIndex((j) => j.mode === chosen);
+    const i = offered.findIndex((j) => j.mode === chosen);
     const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0;
     if (!step) return;
     e.preventDefault();
-    const next = JUDGING[(i + step + JUDGING.length) % JUDGING.length].mode;
+    const next = offered[(i + step + offered.length) % offered.length].mode;
     refs.current[next]?.focus();
     choose(next);
   };
@@ -659,7 +664,8 @@ function Judging({ w, busy, act, onClose }) {
         ? `The newest test checked for answers at least as good as the original model's${JUDGED_WHY[last.reason] ? `, because ${JUDGED_WHY[last.reason]}` : ''}.`
         : `The newest test checked for the same answers as the original model's${last.mode === 'same' ? ", as this workload's setting asked"
           : last.closed === 'facts' ? ', because its answers state figures, facts or decisions, which have to match'
-            : last.closed === 'requests' ? ", because its requests don't ask for open-ended writing like poems or stories, or for a summary or a translation" : ''}.`;
+            : last.closed === 'requests' ? ", because its requests don't ask for open-ended writing like poems or stories, or for a summary or a translation"
+              : last.closed === 'writing' ? ", because its requests don't ask for open-ended writing like poems or stories" : ''}.`;
   return (
     <section className="wp-card" id="wp-judging" aria-labelledby="wp-judging-h">
       <div className="wp-cardhead">
@@ -670,8 +676,8 @@ function Judging({ w, busy, act, onClose }) {
         <p className="wp-lead" style={{ margin: 0 }}>
           When another model is tested on this workload, each of its answers is compared with the original model's answer to the same request.
         </p>
-        <div className="wp-opts is-two" role="radiogroup" aria-labelledby="wp-judging-h" onKeyDown={onKey}>
-          {JUDGING.map((j) => (
+        <div className={`wp-opts${offered.length === 4 ? ' is-two' : ''}`} role="radiogroup" aria-labelledby="wp-judging-h" onKeyDown={onKey}>
+          {offered.map((j) => (
             <button type="button" key={j.mode} ref={(el) => { refs.current[j.mode] = el; }} className="wp-opt" role="radio"
               aria-checked={j.mode === chosen} tabIndex={j.mode === chosen ? 0 : -1} disabled={busy} onClick={() => choose(j.mode)}>
               <div className="wp-optop">

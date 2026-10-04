@@ -357,6 +357,41 @@ handle('learn', async () => {
 });
 
 /** Content ages out; the numbers the charts need do not. */
+/* The words of a workload's own instruction that a test kept beside its figures: what the instruction asks of every answer
+   (plan_json's checklist, src/eval/checklist.js), the planted answers a judge misread, which name the rule they broke
+   (judge_check_json's cases), and the rule an answer held to "at least as good" broke (its reading's `broke`, kept as a mark
+   so its page still says a rule was broken, without saying which). Taken from the requests, they go by the same clock as
+   them; the counts stay. Each row is read and written in code, so one that does not parse is left alone rather than
+   stopping the purge for everybody. Answers how many rows changed. */
+async function scrubInstructionWords(workspaceId, cutoff) {
+  let changed = 0;
+  const runs = await db.prepare(`SELECT id, plan_json, judge_check_json FROM eval_runs WHERE workspace_id = ? AND created_at < ?
+      AND (plan_json LIKE '%"checklist":["%' OR judge_check_json LIKE '%"cases":["%')`).all(workspaceId, cutoff);
+  const parsed = (t) => { try { return t ? JSON.parse(t) : null; } catch { return null; } };
+  for (const r of runs) {
+    const plan = parsed(r.plan_json);
+    const check = parsed(r.judge_check_json);
+    const planHad = Array.isArray(plan?.yardstick?.checklist) && plan.yardstick.checklist.length > 0;
+    const checkHad = Array.isArray(check?.cases) && check.cases.length > 0;
+    if (!planHad && !checkHad) continue;
+    if (planHad) plan.yardstick.checklist = [];
+    if (checkHad) check.cases = [];
+    await db.prepare('UPDATE eval_runs SET plan_json = ?, judge_check_json = ? WHERE id = ?')
+      .run(planHad ? JSON.stringify(plan) : r.plan_json, checkHad ? JSON.stringify(check) : r.judge_check_json, r.id);
+    changed += 1;
+  }
+  const readings = await db.prepare(`SELECT id, readings FROM eval_replays WHERE readings LIKE '%"broke":"%' AND readings NOT LIKE '%"broke":"-"%'
+      AND run_id IN (SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`).all(workspaceId, cutoff);
+  for (const x of readings) {
+    const r = parsed(x.readings);
+    if (!r || typeof r.broke !== 'string' || r.broke === '-') continue;
+    r.broke = '-';
+    await db.prepare('UPDATE eval_replays SET readings = ? WHERE id = ?').run(JSON.stringify(r), x.id);
+    changed += 1;
+  }
+  return changed;
+}
+
 handle('purge', async () => {
   // the next one is booked first, so one that fails still leaves the next one coming
   await enqueue('purge', {}, { runAfter: now() + 6 * 3600000, unique: true });
@@ -402,6 +437,7 @@ handle('purge', async () => {
     c += (await db.prepare(
       `UPDATE eval_replays SET readings = NULL WHERE readings LIKE '{"way":"keeps"%' AND run_id IN (
           SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`).run(ws.id, cutoff)).changes;
+    c += await scrubInstructionWords(ws.id, cutoff);
     c += (await db.prepare(
       `DELETE FROM replay_cache WHERE created_at < ? AND call_id IN (
           SELECT id FROM calls WHERE workspace_id = ? AND created_at < ?)`).run(cutoff, ws.id, cutoff)).changes;

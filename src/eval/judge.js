@@ -51,7 +51,11 @@ const SYSTEM = [
   'Reply with one word, SAME or DIFFERENT, and nothing else.',
 ].join(' ');
 
-const fence = (label, body) => `<<<${label}\n${String(body).slice(0, 4000)}\n${label}>>>`;
+// text that would close its own fence ("ANSWER>>>" inside an answer) is broken up, so the data cannot end early
+const fence = (label, body) => {
+  const t = String(body).slice(0, 4000).replaceAll(`${label}>>>`, `${label} >>>`).replaceAll(`<<<${label}`, `<<< ${label}`);
+  return `<<<${label}\n${t}\n${label}>>>`;
+};
 
 /** True when this deployment can settle a free-text comparison at all. */
 export const canJudge = () => canJev() || !!config.EVAL_JUDGE_MODEL;
@@ -163,7 +167,10 @@ async function settleUnsure(request, x, y, p) {
   const got = reads.filter((v) => v !== null);
   if (!got.length) return { score: lean, votes: [lean, null, null], cost, judged: false };
   const score = got.length === 1 ? got[0] : got[0] === got[1] ? got[0] : lean;
-  return { score, votes: [lean, ...reads], cost, judged: true };
+  /* One reading, in one order, is the order-leaning verdict the vote is here to outweigh: it counts this time, and is not kept
+     (`once`), so the pair is put to the vote again next time rather than standing on it for two weeks. Callers mark a
+     difference that stands on it alone as unsettled, which is never said against what serves; a "same" read once is not. */
+  return { score, votes: [lean, ...reads], cost, judged: true, ...(got.length === 1 ? { once: true } : {}) };
 }
 
 /* Performance, not sameness: a difference judged three ways.
@@ -254,7 +261,10 @@ export async function judgeBetter(request, cand, ref, { scope = null, askFn = as
   const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
   const forgiven = avg(pRef) < config.THREE_WAY_FORGIVE_MAX;
   const verdict = !forgiven ? 'kept' : avg(pCand) >= config.THREE_WAY_BETTER_MIN ? 'better' : 'equal';
-  const out = { verdict, pRef: pRef.map((x) => Math.round(x * 1000) / 1000), pCand: pCand.map((x) => Math.round(x * 1000) / 1000) };
+  const r4 = (x) => Math.round(x * 10000) / 10000;
+  // with the averages that decided it, so what is said of it never rounds them across the line
+  const out = { verdict, pRef: pRef.map((x) => Math.round(x * 1000) / 1000), pCand: pCand.map((x) => Math.round(x * 1000) / 1000),
+    avgRef: r4(avg(pRef)), avgCand: r4(avg(pCand)) };
   await keep(key, { score: verdict === 'kept' ? 1 : 0, judgedBy: 'jev3', detail: out });
   return { ...out, cost };
 }
@@ -269,10 +279,11 @@ const probability = (x) => {
 
 /* Whether a verdict is worth keeping. One that failed to come back is not a verdict. One that
    stands only because a later reading did not come back (unsettled: a difference that might have
-   been forgiven) counts this time and is asked again next time. And one the language model gave
-   only because Jev was resting is not kept either, so the same pair is put to Jev once it is back
-   rather than answered from the fallback for weeks. */
-const lasting = (v) => !v.transient && !v.unsettled && !(canJev() && v.judgedBy === 'llm');
+   been forgiven), or that rests on one reading of a vote of three (once), counts this time and is
+   asked again next time. And one the language model gave only because Jev was resting is not kept
+   either, so the same pair is put to Jev once it is back rather than answered from the fallback for
+   weeks. */
+const lasting = (v) => !v.transient && !v.unsettled && !v.once && !(canJev() && v.judgedBy === 'llm');
 
 /**
  * Two answers to one request, one held against the other: the customer's own model against itself,
@@ -316,8 +327,10 @@ export async function judgeBarPair(request, a, b, { scope = null, subject = 'b',
         const l = await settleUnsure(request, a, b, p);
         /* When neither second reading came back, Jev's own reading stands, and the pair is
            not kept: asked again next time, it may get the second opinion it needs. */
+        // (read once: never kept, and a difference that stands on that one reading is unsettled)
         out = l.judged
-          ? { score: l.score, judgedBy: 'jev+llm', detail: { p, kind, llm: l.score, votes: l.votes }, cost: out.cost + l.cost }
+          ? { score: l.score, judgedBy: 'jev+llm', detail: { p, kind, llm: l.score, votes: l.votes }, cost: out.cost + l.cost,
+            ...(l.once ? { once: true } : {}), ...(l.once && l.score === 1 ? { unsettled: true } : {}) }
           : { ...out, detail: { ...out.detail, votes: l.votes }, cost: out.cost + l.cost, transient: true };
       }
       // a difference only in wording or in what is included: is the judged side at least as good?
@@ -339,6 +352,8 @@ export async function judgeBarPair(request, a, b, { scope = null, subject = 'b',
             out.score = 0;
             out.judgedBy = `${out.judgedBy}+jev3`;
             out.detail.better = bt.verdict === 'better' ? 1 : 0;
+            // forgiven: no difference stands any more, on one reading or any
+            delete out.unsettled;
           } else if (kind === 'wording') {
             /* the difference stands because the other answer read as the better one, not for its wording: said as that,
                never as "only the wording differs" beside a difference that counted (what Jev named is kept as `named`) */
@@ -463,17 +478,24 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
       let cost = r.costUsd;
       let transient = false;
       let judgedBy = 'jev';
+      // read on one reading of a vote of three: counted this time and not kept (see lasting)
+      let once = false;
       for (const [i, p] of ps.entries()) {
         if (!unsure(p)) { each.push(p >= 0.5 ? 0 : 1); continue; }
         const l = await settleUnsure(request, cand, refs[i], p);
         cost += l.cost;
         votes[i] = l.votes;
-        if (l.judged) { each.push(l.score); judgedBy = 'jev+llm'; detail.llm = l.score; } else { each.push(p >= 0.5 ? 0 : 1); transient = true; }
+        if (l.judged) {
+          each.push(l.score);
+          judgedBy = 'jev+llm';
+          detail.llm = l.score;
+          // a difference that stands on that one reading is not said of what serves either; a "same" read once is
+          if (l.once) { once = true; if (l.score) open.add(i); }
+        } else { each.push(p >= 0.5 ? 0 : 1); transient = true; }
       }
       if (votes.some(Boolean)) detail.votes = votes;
       /* Where it differs from one of the customer's answers only in wording or in what it includes, and
          says no different figure, refuses nothing and stops nowhere short: is it at least as good? */
-      let unsettled = false;
       if (config.EVAL_THREE_WAY && !transient) {
         let better = 0;
         const three = [];
@@ -484,8 +506,8 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
           if (!bt) continue;
           cost += bt.cost;
           // a reading that did not come back: the difference stands and is counted, but is not kept as a verdict
-          if (bt.transient) { unsettled = true; open.add(i); continue; }
-          three.push({ ref: i, verdict: bt.verdict, pRef: bt.pRef, pCand: bt.pCand });
+          if (bt.transient) { open.add(i); continue; }
+          three.push({ ref: i, verdict: bt.verdict, pRef: bt.pRef, pCand: bt.pCand, avgRef: bt.avgRef, avgCand: bt.avgCand });
           if (bt.verdict !== 'kept') {
             each[i] = 0;
             if (bt.verdict === 'better') better += 1;
@@ -501,28 +523,43 @@ export async function judgeCandidate(request, cand, refA, refB, { scope = null }
         // how many of the customer's answers it was better than, as a share
         detail.better = better / each.length;
       }
+      /* A figure that differs from one of the customer's answers is a difference in facts against it, whatever Jev named it:
+         Jev calling it "different" in "wording" beside a different figure left the page saying only the wording differs. */
       for (const [i, n] of numbered.entries()) {
-        if (n > each[i]) { each[i] = n; kinds[i] = 'fact'; if (!judgedBy.endsWith('+numbers')) judgedBy = `${judgedBy}+numbers`; }
+        if (!n) continue;
+        if (n > each[i]) each[i] = n;
+        kinds[i] = 'fact';
+        if (!judgedBy.endsWith('+numbers')) judgedBy = `${judgedBy}+numbers`;
       }
+      // a difference forgiven after all, or one that stands on its figures, no longer rests on a reading that did not come back
+      for (const i of [...open]) if (each[i] === 0 || numbered[i]) open.delete(i);
+      // which of the customer's answers a figure in it differs from, so a page says which, not "the original model's"
+      if (numbered.some(Boolean)) detail.figuresAgainst = numbered.map((n, i) => (n ? i : null)).filter((i) => i !== null);
       /* What is said of the difference is what decided the score: the kind named against an answer the difference stood
          against, never one it was forgiven against or matched, the gravest where it stood against both. It used to be the
          kind named against the first answer whatever happened, so a difference that stood only against the second, or one
          that stood because the customer's answer read as the better one, was shown as "only the wording differs" beside a
          difference that counted (the conversation-summary test of 26 Sep 2026, request 3). */
+      // and none where nothing was named against an answer it stood against (kind1 is asked only for three-way judging)
       const standing = kinds.filter((k, i) => each[i] > 0 && k);
-      detail.kind = standing.length ? standing.sort((x, y) => graveness(x) - graveness(y))[0] : (detail.kind ?? null);
+      detail.kind = standing.length ? standing.sort((x, y) => graveness(x) - graveness(y))[0] : null;
       const mean = (xs) => xs.reduce((x, y) => x + y, 0) / xs.length;
-      out = { score: mean(each), judgedBy, detail, cost, transient, unsettled };
+      // unsettled: a difference that still stands only on a reading that did not come back, or on one reading of the vote
+      const unsettled = open.size > 0;
+      out = { score: mean(each), judgedBy, detail, cost, transient, unsettled, ...(once ? { once: true } : {}) };
       /* The reading without those differences, which is all that is said of what already serves (see readingOf in
          src/eval/run.js): held to the customer's other answer where that one was settled, and no reading at all
          where neither was. Dropped whole, a settled difference in figures went with an unsettled one in wording. */
       if (unsettled) out.settled = each.length > open.size ? mean(each.filter((_, i) => !open.has(i))) : null;
       /* A refusal or an answer that stops short is a different answer, unless Jev is sure it
          serves as well as one of the customer's own: on a workload whose right answer is to
-         decline, the customer's model declines too, and a candidate that does the same matches. */
+         decline, the customer's model declines too, and a candidate that does the same matches.
+         Jev's own sure reading decides that, so nothing about it rests on a reading left unsettled. */
       if ((detail.refuses >= 0.8 || detail.cutOff >= 0.8) && best < 0.8) {
         out.score = 1;
         detail.kind = detail.refuses >= 0.8 ? 'refusal' : 'cut off';
+        out.unsettled = false;
+        delete out.settled;
       }
     } catch {
       out = null;
@@ -837,8 +874,10 @@ export async function readRequests(requests, { scope = null, askFn = ask, kinds 
       try {
         const r = await askFn({ request: refit(request, 2500) }, Object.fromEntries(missing.map((k) => [k, WORK_READS[k].jev])));
         cost += Number(r?.costUsd) || 0;
+        // each reading Jev gave is kept on its own; one it did not give is left for the language model, below
         for (const k of missing) {
-          const p = probability(r?.answers?.[k]?.noul);
+          let p;
+          try { p = probability(r?.answers?.[k]?.noul); } catch { continue; }
           by[k].add('jev');
           got[k] = p;
           await keep(keys[k], { score: p, judgedBy: 'jev', detail: { p } });
@@ -940,23 +979,34 @@ export function judgePrices(promptTokens, answerTokens, llm) {
   const llmQuality = 2 * pair;
   const translate = llm ? callPrice(llm, 80 + answer, answer + 50) : 0;
   const checklist = llm ? callPrice(llm, 500 + request, 300) : 0;
-  /* "Keeps what matters" (src/eval/keeps.js): the facts both of the customer's answers state are listed once a call by
-     the language model, from the request and the two answers, and confirmed on each of the two; every answer held to them
-     is then read twice by Jev, once for its facts and once against the request, or once by the language model. */
-  const llmCheck = llm ? callPrice(llm, 750 + request + 2 * answer, 90) : 0;
-  const factRead = ((Math.min(Number(answerTokens) || 0, 750) + 1200) * config.JEV_PRICE_PER_MTOK) / 1e6;
-  const sourceRead = jev(2);
-  const listFacts = llm ? callPrice(llm, 450 + request + 2 * answer, 250) : 0;
+  /* "Keeps what matters" (src/eval/keeps.js), which reads far more of the request than a comparison does (a summary's
+     whole conversation: about 3,000 tokens of it for Jev, 2,000 for the language model, KEEPS_REQUEST_MAX): the facts both
+     of the customer's answers state are listed once a call by the language model, from the request and the two answers;
+     Jev weighs how much each matters, with the request beside them; and each fact is confirmed on each of the two answers,
+     the language model reading the ones with a figure code cannot find and the ones Jev is unsure of. Every answer held to
+     them is then read twice by Jev, once for its facts and once against the request, the language model settling what has
+     a figure code cannot find or what Jev is unsure of (counted on half of them, so the quote is never short), or read once
+     by the language model alone. */
+  const tokens = (x, most) => Math.min(Number(x) || 0, most);
+  const keepsAnswer = tokens(answerTokens, 750);
+  const keepsFacts = config.KEEPS_FACTS_MAX * 25;
+  const jevPrice = (n) => (n * config.JEV_PRICE_PER_MTOK) / 1e6;
+  const listFacts = llm ? callPrice(llm, 450 + tokens(promptTokens, 2000) + 2 * keepsAnswer, 400) : 0;
+  const rate = jevPrice(tokens(promptTokens, 3000) + keepsFacts + config.KEEPS_FACTS_MAX * 160);
+  const factRead = jevPrice(keepsAnswer + keepsFacts + config.KEEPS_FACTS_MAX * 90);
+  const sourceRead = jevPrice(tokens(promptTokens, 3000) + 2 * keepsAnswer + 900);
+  const llmSettle = llm ? callPrice(llm, 300 + keepsAnswer + keepsFacts, 20 + 8 * config.KEEPS_FACTS_MAX) : 0;
+  const llmCheck = llm ? callPrice(llm, 800 + tokens(promptTokens, 2000) + 2 * keepsAnswer + keepsFacts, 60 + 8 * config.KEEPS_FACTS_MAX) : 0;
   // "at least as good" is read both ways round: two readings by Jev, or two by the language model without it
   if (jevUsable()) {
     /* Where Jev is unsure whether two answers are the same, the language model reads the pair twice, once each way round
        (settleUnsure): about one comparison in ten on most work, counted as two in ten so the quote is never short. */
     return { bar: jev(2) + 0.2 * pair + 0.5 * three, candidate: jev(3) + 0.4 * pair + three, quality: 2 * jev(2) + 0.1 * pair,
       llmQuality, translate, checklist,
-      keeps: { facts: listFacts + 2 * factRead, check: factRead + sourceRead + 0.1 * llmCheck, llmCheck } };
+      keeps: { facts: listFacts + rate + 2 * (factRead + 0.5 * llmSettle), check: factRead + sourceRead + 0.5 * llmCheck, llmCheck } };
   }
   return { bar: pair, candidate: 2 * pair, quality: llmQuality, llmQuality, translate, checklist,
-    keeps: { facts: listFacts + 2 * llmCheck, check: llmCheck, llmCheck } };
+    keeps: { facts: listFacts + 2 * llmSettle, check: llmCheck, llmCheck } };
 }
 
 /* What the reading of "keeps what matters" (src/eval/keeps.js) shares with the other judgements here: the cache of

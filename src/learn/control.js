@@ -3,7 +3,7 @@ import { db, id, now } from '../db/index.js';
 import { chargeEval, account, backgroundLeft } from '../billing.js';
 import { extract, disagreement, structuredCompare, proseText, heldFieldChanged } from '../eval/compare.js';
 import { judgeCandidate, judgeBarPair, judgeQuality, numbersDiffer, numbersOf } from '../eval/judge.js';
-import { factsFor, keepsCheck } from '../eval/keeps.js';
+import { factsFor, keepsCheck, keepsRequest } from '../eval/keeps.js';
 import { askOf } from '../eval/ask.js';
 import { keptChecklist } from '../eval/checklist.js';
 import { OUTCOME_OF } from '../eval/outcome.js';
@@ -62,24 +62,31 @@ export async function scoreServed(body, served, ref, shape, { scope = null, yard
   if (!b.ok) return { score: null, better: 0, judgedBy: null, cost: 0, kind: null };
   if (!a.ok) return { score: 1, better: 0, judgedBy: 'no answer', cost: 0, kind: a.reason || 'no answer' };
   /* Held to "keeps what matters" (src/eval/keeps.js), read as the measurement read it: the customer's model is asked a second
-     time (`again`), the facts both of its answers state are what the served answer must keep, and it is read against the
-     request for anything it gets wrong, by the judge that measurement's planted answers chose. Held to the facts of one answer
-     alone, it would be held to every detail that answer happened to give, a stricter standard than the one it passed. With
-     no second answer, or no list, nothing is said of it. */
+     time (`again`), the facts both of its answers state are what the served answer must keep, listed exactly as the
+     measurement listed them (the judge its planted answers chose reads the answers, never the list, so the bar and these
+     checks hold what serves to the same facts), and it is read against the request for anything it gets wrong. Held to the
+     facts of one answer alone, it would be held to every detail that answer happened to give, a stricter standard than the
+     one it passed. With no second answer, or no list, nothing is said of it; nor of a miss that rests on a lean because the
+     second reading due did not come back (unsettled), which counts against a setup being switched to, never towards
+     switching back one that serves. A served answer word for word the customer's own keeps whatever that keeps, for free. */
   if (yardstick === 'keeps' && shape === 'free_text' && typeof a.value === 'string' && typeof b.value === 'string') {
+    if (a.value.trim() === b.value.trim()) return { score: 0, better: 0, judgedBy: 'same text', cost: 0, kind: null };
     let more = null;
     try { more = again ? await again() : null; } catch { more = null; }
+    const twice = !!again;
     let cost = Number(more?.cost) || 0;
     const c = more?.json ? extract(more.json, shape) : null;
-    if (!c?.ok || typeof c.value !== 'string') return { score: null, better: 0, judgedBy: null, cost, kind: null, twice: true };
-    const request = askOf(body);
-    const f = await factsFor(request, [b.value, c.value], { scope, prefer });
+    if (!c?.ok || typeof c.value !== 'string') return { score: null, better: 0, judgedBy: null, cost, kind: null, twice };
+    const request = keepsRequest(body);
+    const f = await factsFor(request, [b.value, c.value], { scope });
     cost += Number(f.cost) || 0;
-    if (!f.facts) return { score: null, better: 0, judgedBy: null, cost, kind: null, twice: true };
+    if (!f.facts) return { score: null, better: 0, judgedBy: null, cost, kind: null, twice };
     const j = await keepsCheck(request, a.value, { facts: f.facts, reference: b.value, scope, prefer, checklist });
     cost += Number(j.cost) || 0;
-    if (j.transient || j.score === null || j.score === undefined) return { score: null, better: 0, judgedBy: null, cost, kind: null, twice: true };
-    return { score: j.score, better: 0, judgedBy: j.judgedBy, cost, kind: j.score > 0 ? (j.detail?.kind || 'omission') : null, twice: true };
+    if (j.transient || j.score === null || j.score === undefined || (j.unsettled && j.score > 0)) {
+      return { score: null, better: 0, judgedBy: null, cost, kind: null, twice };
+    }
+    return { score: j.score, better: 0, judgedBy: j.judgedBy, cost, kind: j.score > 0 ? (j.detail?.kind || 'omission') : null, twice };
   }
   if (yardstick === 'quality') {
     let extra = 0;
@@ -326,17 +333,25 @@ export async function controlRecord(workload) {
   const half = n ? Math.sqrt((q * (1 - q)) / n) * zSeq(n, { alpha: config.LEARN_ALPHA / 2 }) : 1;
   return {
     n, otherWay, worse: Math.round(worse * 100) / 100, better: Number(r?.better) || 0, rate,
-    lo: Math.max(0, rate - half), hi: Math.min(1, rate + half), floorPct,
+    lo: Math.max(0, rate - half), hi: Math.min(1, rate + half), floorPct, yardstick,
     costUsd: Number(r?.cost) || 0, since: from, last: r?.last ? Number(r.last) : null,
     enough: n >= config.CONTROL_MIN_CHECKS,
   };
 }
+
+// what a check that counted against what serves found of its answer, by the yardstick it was held to
+const BREACH_WORDS = {
+  agreement: 'were worse or different',
+  quality: 'were worse',
+  keeps: 'missed something that matters or got something wrong',
+};
 
 /** Whether the control group says what serves is clearly worse than the pass mark allows, and why, in words. */
 export function controlBreach(rec, reference) {
   if (!rec || !rec.enough) return null;
   if (!(rec.lo * 100 > rec.floorPct)) return null;
   const worse = Number.isInteger(rec.worse) ? rec.worse : rec.worse.toFixed(1);
-  return `Checked against ${short(reference)} in the background since the switch: of ${rec.n} of its answers, ${worse} were `
-    + `worse or different (${(rec.rate * 100).toFixed(1)}%), clearly past your ${rec.floorPct.toFixed(1)}% pass mark.`;
+  return `Checked against ${short(reference)} in the background since the switch: of ${rec.n} of its answers, ${worse} `
+    + `${BREACH_WORDS[rec.yardstick] || BREACH_WORDS.agreement} (${(rec.rate * 100).toFixed(1)}%), clearly past your `
+    + `${rec.floorPct.toFixed(1)}% pass mark.`;
 }

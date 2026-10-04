@@ -173,12 +173,129 @@ export function numbersOf(text) {
   return out.sort();
 }
 
-/* The figures a text gives however they are written: the digits numbersOf reads, and, in English, a number written out
-   ("eight", "twenty-five", "a hundred"), an ordinal ("third", "twenty-first") and a month by its name ("2 September" gives
-   2 and 9). Read generously on purpose: it is used to see whether an answer gives every figure of a fact it has to keep
-   (keepsCheck in src/eval/keeps.js), where a figure found here is only the first part of the check and a judge still reads
-   the fact itself, so finding a figure that is not really there costs nothing, and missing one that is would fail an answer
-   that said "eight people" for a fact that says "8 people". Answers a Set of figures written as numbersOf writes them. */
+/* The same value written two ways reads as one figure (factFigures, figuresOf). numbersOf reads digits as they stand, so
+   "10:00" gives 10 and 0 and "10am" gives 10, "1 234,56" gives 1 and 234.56, and "$2.5 million" gives 2.5. Here:
+     - digit groups a space splits are one figure, as French, Nordic, Polish and SI writing group thousands ("1 234,56" is
+       1234.56, "10 000" is 10000), with a plain, no-break, narrow no-break or thin space before exactly three digits;
+     - a time is its hour on the 24-hour clock and its minutes, the minutes left out on the hour: "10:00", "10am" and
+       "10 a.m." are 10, "2:30 pm" and "14:30" are 14 and 30, "14h30" is 14 and 30;
+     - an amount with a scale word is its value: "$2.5 million" and "2,5 Mio." are 2500000, "$5k" is 5000, "€1.2bn" is
+       1200000000, "3 lakh" is 300000 (in a fact, "m" and "b" alone only after a currency sign or as a capital, "3.2M",
+       since "5m" is as often 5 minutes; an answer is read generously, "5m" giving both).
+   A figure a fact gives can be given another way too (`or`, factNeeds): an hour on the other clock ("2pm" is 14, or 2 as
+   "2 o'clock" and "from 10 to 2" give it) and a number grouped by spaces by all its parts ("912 345 678" is 912345678, or
+   912, 345 and 678 as "912-345-678" gives them). */
+const GAP_CHARS = /[    ]/g;
+const SPACED = /(?<![\d.,])(\d{1,3})((?:[    ]\d{3})+)(?![\d])/g;
+const MERIDIEM = '([ap])\\.?\\s?m\\.?(?![a-z])';
+const CLOCK = new RegExp(`(?<![\\d.,:])(\\d{1,2})(?::(\\d{2})(?::\\d{2})?|h(\\d{2}))(?:\\s*${MERIDIEM})?(?![\\d:])`, 'gi');
+const CLOCK_DOT = new RegExp(`(?<![\\d.,:])(\\d{1,2})\\.(\\d{2})\\s*${MERIDIEM}`, 'gi');
+const HOUR = new RegExp(`(?<![\\d.,:])(\\d{1,2})\\s*${MERIDIEM}`, 'gi');
+const SCALE_UNITS = { thousand: 1e3, thousands: 1e3, k: 1e3, million: 1e6, millions: 1e6, mn: 1e6, mio: 1e6, m: 1e6,
+  billion: 1e9, billions: 1e9, bn: 1e9, b: 1e9, trillion: 1e12, trillions: 1e12, tn: 1e12, lakh: 1e5, lakhs: 1e5, crore: 1e7,
+  crores: 1e7 };
+// (any run of spaces between the number and its scale word: "$2.5  million" is still 2500000)
+const SCALED = /(?<![\d.,])([$€£¥₹]\s*)?(\d+(?:[.,]\d+)*)\s*(thousands?|millions?|mn|mio|billions?|bn|trillions?|tn|lakhs?|crores?|k|m|b)\.?(?![a-z])/gi;
+// one written figure as a number, read the way numbersOf reads it ("2,5" is 2.5, "1,500" is 1500)
+const valueOf = (t) => Number(numbersOf(t)[0]);
+// a product without the noise of binary fractions: 1.2 × 1e9 is 1200000000, not 1199999999.9999998
+const exact = (x) => Number(x.toPrecision(12));
+/* Digits of other scripts as the digits 0 to 9 ("٤٢" and "४२" are 42, a full-width "４２" too): the first of each script's ten,
+   for the scripts whose digits run in order from it. */
+const ZEROS = [0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6, 0xD66, 0xDE6, 0xE50, 0xED0, 0xF20, 0x1040,
+  0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0xFF10];
+const asciiDigits = (s) => s.replace(/\p{Nd}/gu, (d) => {
+  const cp = d.codePointAt(0);
+  const z = cp <= 0x39 ? 0x30 : ZEROS.find((x) => cp >= x && cp <= x + 9);
+  return z === undefined ? d : String(cp - z);
+});
+// a span written in digits: "2 weeks" is 14 days, "3 hours" 180 minutes (and in words, figuresOf)
+const SPAN = /(\d+(?:[.,]\d+)?)[\s-]*(weeks?|fortnights?|hours?|hrs?)\b/gi;
+const SPAN_OF = { week: 7, fortnight: 14, hour: 60, hr: 60 };
+
+/* The text with each of those written as plain digits (`text`, what a fact must be given), the other ways the same values are
+   written (`also`, what an answer may give instead: "15:00" is also 3, "2.5 million" also 2.5, "2 weeks" 14), and the other
+   ways a fact's figure counts as given (`or`: [figure, [values all of which together give it]]). `generous` reads the way an
+   answer is read: "5m" as 5 million too. */
+const asFigure = (x) => String(Number(x));
+function figureForms(input, { generous = false } = {}) {
+  const also = [];
+  const or = [];
+  let t = asciiDigits(String(input ?? '')).replace(SPACED, (m, head, rest) => {
+    const parts = numbersOf(m.replace(GAP_CHARS, ' '));
+    const joined = head + rest.replace(GAP_CHARS, '');
+    also.push(...parts);
+    or.push([numbersOf(joined)[0], parts]);
+    return joined;
+  });
+  for (const m of t.matchAll(SPAN)) {
+    const n = valueOf(m[1]);
+    const each = SPAN_OF[m[2].toLowerCase().replace(/s$/, '')];
+    if (Number.isFinite(n) && each) also.push(exact(n * each));
+  }
+  const clock = (h, min, mer) => {
+    const hour = Number(h);
+    const minutes = min === undefined ? 0 : Number(min);
+    if (hour > 24 || minutes > 59) return null;
+    const half = String(mer || '').toLowerCase();
+    const h24 = half === 'p' ? (hour % 12) + 12 : half === 'a' ? hour % 12 : hour;
+    also.push(hour, h24, h24 % 12 || 12, minutes);
+    // "3:00" with no am or pm may be the afternoon
+    if (!half && hour >= 1 && hour <= 11) also.push(hour + 12);
+    // the hour on the other clock gives it too, and the hour as written: "2pm" is given by "2 o'clock" and "from 10 to 2"
+    for (const other of new Set([h24 % 12 || 12, hour])) if (other !== h24) or.push([asFigure(h24), [asFigure(other)]]);
+    return ` ${h24}${minutes ? ` ${minutes}` : ''} `;
+  };
+  t = t.replace(CLOCK, (m, h, min, frMin, mer) => clock(h, min ?? frMin, mer) ?? m);
+  t = t.replace(CLOCK_DOT, (m, h, min, mer) => clock(h, min, mer) ?? m);
+  t = t.replace(HOUR, (m, h, mer) => clock(h, undefined, mer) ?? m);
+  t = t.replace(SCALED, (m, sign, num, unit) => {
+    const u = unit.toLowerCase();
+    // "m" and "b" alone are a scale after a currency sign, or as a capital ("3.2M"), or in an answer read generously
+    if ((u === 'm' || u === 'b') && !sign && !generous && unit !== unit.toUpperCase()) return m;
+    const n = valueOf(num);
+    if (!Number.isFinite(n)) return m;
+    also.push(n);
+    return `${sign || ''}${exact(n * SCALE_UNITS[u])}`;
+  });
+  return { text: t, also: also.filter((x) => Number.isFinite(Number(x))).map((x) => String(Number(x))), or };
+}
+
+/** The figures a fact must be given, each once: its digits (numbersOf), with spaced thousands, times and scaled amounts read
+    as one value each (figureForms), and for each the other ways it counts as given (`or`: { figure: [[values]] }). A figure it
+    spells out is left to the judge that reads it. */
+export function factNeeds(text) {
+  const forms = figureForms(text);
+  const figures = [...new Set(numbersOf(forms.text))];
+  const or = {};
+  for (const [figure, values] of forms.or) {
+    if (!figures.includes(figure) || !values.length) continue;
+    const key = values.join(' ');
+    or[figure] = or[figure] || [];
+    if (!or[figure].some((v) => v.join(' ') === key)) or[figure].push(values);
+  }
+  return { figures, or };
+}
+export const factFigures = (text) => factNeeds(text).figures;
+
+/** The figures of a fact (`figures`, and the other ways each counts as given, `or`, from factNeeds) not found among `found`
+    (a Set from figuresOf). */
+export function figuresMissing(fact, found) {
+  const or = fact?.or && typeof fact.or === 'object' ? fact.or : {};
+  return (fact?.figures || []).filter((x) => !found.has(x) && !(or[x] || []).some((vs) => vs.length && vs.every((v) => found.has(v))));
+}
+
+/* The figures a text gives however they are written: the digits numbersOf reads, the same values written as factFigures
+   reads them and in the other ways they are written ("15:00" also gives 3), and a number written out: in English ("eight",
+   "twenty-five", "two hundred and fifty", "three million", "a dozen", "once", "twice", "half", "a week" as 7 days, "half an
+   hour" as 30 minutes), and, in a text that is not English, in French, German, Spanish, Italian, Portuguese or Dutch ("huit",
+   "dix-sept", "einundzwanzig", "treinta y dos", "ventidue", "vinte e dois", "eenentwintig"); an ordinal ("third",
+   "twenty-first") and an English month by its name ("2 September" gives 2 and 9). Read generously on purpose: it is used to
+   see whether an answer gives every figure of a fact it has to keep (keepsCheck in src/eval/keeps.js), where a figure not
+   found here is not kept, decided in code, and one found is read by Jev with the rest of the fact. The other languages' words
+   are read only in a text that is not English, since in English they are words of their own ("due" is 2 in Italian): found
+   there, a figure the answer never gives would let the fact through to Jev, who reads figures badly. Answers a Set of figures
+   written as numbersOf writes them. */
 const UNIT_WORDS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11,
   twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
 const TEN_WORDS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
@@ -187,33 +304,186 @@ const ORDINAL_WORDS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixt
   nineteenth: 19, twentieth: 20, thirtieth: 30 };
 const MONTH_WORDS = { january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7, august: 8, september: 9, october: 10,
   november: 11, december: 12, jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
-const wordOf = (table, w) => (Object.hasOwn(table, w) ? table[w] : null);
+const SCALE_WORDS = { thousand: 1e3, million: 1e6, billion: 1e9, trillion: 1e12, lakh: 1e5, crore: 1e7 };
+const TIMES_WORDS = { once: 1, twice: 2, thrice: 3 };
+// the number words of French, German, Spanish, Italian, Portuguese and Dutch, read in a text that is not English
+const FOREIGN_UNITS = {
+  // French
+  zéro: 0, un: 1, une: 1, deux: 2, trois: 3, quatre: 4, cinq: 5, sept: 7, huit: 8, neuf: 9, dix: 10, onze: 11, douze: 12,
+  treize: 13, quatorze: 14, quinze: 15, seize: 16,
+  // German
+  null: 0, ein: 1, eins: 1, eine: 1, zwei: 2, drei: 3, vier: 4, fünf: 5, sechs: 6, sieben: 7, acht: 8, neun: 9, zehn: 10, elf: 11,
+  zwölf: 12, dreizehn: 13, vierzehn: 14, fünfzehn: 15, sechzehn: 16, siebzehn: 17, achtzehn: 18, neunzehn: 19,
+  // Spanish
+  cero: 0, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10, doce: 12, trece: 13,
+  catorce: 14, dieciséis: 16, diecisiete: 17, dieciocho: 18, diecinueve: 19, veintiuno: 21, veintiún: 21, veintidós: 22,
+  veintitrés: 23, veinticuatro: 24, veinticinco: 25, veintiséis: 26, veintisiete: 27, veintiocho: 28, veintinueve: 29,
+  // Italian
+  due: 2, tre: 3, quattro: 4, cinque: 5, sei: 6, sette: 7, otto: 8, nove: 9, dieci: 10, undici: 11, dodici: 12, tredici: 13,
+  quattordici: 14, quindici: 15, sedici: 16, diciassette: 17, diciotto: 18, diciannove: 19, ventuno: 21, trentuno: 31,
+  // Portuguese
+  um: 1, uma: 1, dois: 2, duas: 2, três: 3, sete: 7, oito: 8, dez: 10, doze: 12, treze: 13, dezesseis: 16, dezasseis: 16,
+  dezessete: 17, dezassete: 17, dezoito: 18, dezenove: 19, dezanove: 19,
+  // Dutch
+  nul: 0, een: 1, één: 1, twee: 2, drie: 3, vijf: 5, zes: 6, zeven: 7, negen: 9, tien: 10, twaalf: 12, dertien: 13, veertien: 14,
+  vijftien: 15, zestien: 16, zeventien: 17, achttien: 18, negentien: 19,
+};
+const FOREIGN_TENS = {
+  vingt: 20, vingts: 20, trente: 30, quarante: 40, cinquante: 50, soixante: 60, septante: 70, octante: 80, huitante: 80, nonante: 90,
+  zwanzig: 20, dreißig: 30, dreissig: 30, vierzig: 40, fünfzig: 50, sechzig: 60, siebzig: 70, achtzig: 80, neunzig: 90,
+  veinte: 20, treinta: 30, cuarenta: 40, cincuenta: 50, sesenta: 60, setenta: 70, ochenta: 80, noventa: 90,
+  venti: 20, vent: 20, trenta: 30, quaranta: 40, cinquanta: 50, sessanta: 60, settanta: 70, ottanta: 80, novanta: 90,
+  vinte: 20, trinta: 30, quarenta: 40, sessenta: 60, oitenta: 80,
+  twintig: 20, dertig: 30, veertig: 40, vijftig: 50, zestig: 60, zeventig: 70, tachtig: 80, negentig: 90,
+};
+const FOREIGN_HUNDREDS = { cent: 100, cents: 100, hundert: 100, cien: 100, ciento: 100, cento: 100, cem: 100, honderd: 100 };
+const FOREIGN_SCALES = { mille: 1e3, tausend: 1e3, mil: 1e3, mila: 1e3, duizend: 1e3, million: 1e6, millions: 1e6, millionen: 1e6,
+  millón: 1e6, millones: 1e6, milione: 1e6, milioni: 1e6, milhão: 1e6, milhões: 1e6, miljoen: 1e6, milliard: 1e9, milliards: 1e9,
+  milliarde: 1e9, milliarden: 1e9, miljard: 1e9 };
+// "and" between the parts of a number, in each language ("vingt et un", "treinta y dos", "vinte e dois")
+const JOINERS = new Set(['and', 'et', 'und', 'y', 'e', 'en']);
+// the parts a compound written as one word is made of ("einundzwanzig", "dreihundert", "eenentwintig", "ventidue")
+const PIECES = [...new Set([...Object.keys(FOREIGN_UNITS), ...Object.keys(FOREIGN_TENS), ...Object.keys(FOREIGN_HUNDREDS),
+  ...Object.keys(FOREIGN_SCALES), 'und', 'en'])].sort((a, b) => b.length - a.length);
+function piecesOf(word) {
+  const out = [];
+  let rest = word;
+  while (rest) {
+    const p = PIECES.find((x) => rest.startsWith(x));
+    if (!p) return null;
+    out.push(p);
+    rest = rest.slice(p.length);
+  }
+  return out.length > 1 ? out : null;
+}
+/* Whether a text is written in English rather than in one of the other languages read here: more of the words that English
+   cannot do without than of theirs, or with as few of either, no letter English does not use. */
+const ENGLISH_WORDS = new Set(['the', 'and', 'of', 'to', 'is', 'a', 'in', 'that', 'it', 'for', 'you', 'with', 'on', 'are', 'this',
+  'be', 'as', 'your', 'we', 'can', 'will', 'have', 'or', 'not', 'our', 'an', 'at', 'by', 'from', 'was', 'i', 'he', 'she', 'they']);
+// (never one English uses too: "a", "is", "per", "no", "as")
+const OTHER_WORDS = new Set([
+  'le', 'la', 'les', 'des', 'du', 'de', 'et', 'est', 'une', 'un', 'pour', 'avec', 'sur', 'dans', 'qui', 'que', 'à', 'au', 'aux',
+  'ne', 'pas', 'sont', 'il', 'elle', 'nous', 'vous',
+  'der', 'die', 'das', 'und', 'ist', 'nicht', 'mit', 'für', 'auf', 'den', 'dem', 'des', 'ein', 'eine', 'zu', 'im', 'von', 'es',
+  'sie', 'wir', 'sind', 'wird', 'wurde',
+  'el', 'los', 'las', 'y', 'en', 'con', 'por', 'para', 'del', 'al', 'lo', 'se', 'más', 'como', 'son', 'una', 'muy',
+  'di', 'che', 'è', 'della', 'dei', 'gli', 'alla', 'nel', 'nella', 'sono', 'si', 'ci', 'ma', 'più', 'non',
+  'o', 'os', 'do', 'da', 'dos', 'das', 'em', 'no', 'na', 'não', 'com', 'um', 'uma', 'e', 'é', 'são',
+  'het', 'een', 'van', 'op', 'niet', 'voor', 'met', 'zijn', 'dat', 'te', 'er', 'naar', 'ook', 'wordt', 'werd',
+].filter((w) => !['a', 'is', 'per', 'no', 'as'].includes(w)));
+function inEnglish(words) {
+  const en = words.filter((w) => ENGLISH_WORDS.has(w)).length;
+  const other = words.filter((w) => OTHER_WORDS.has(w)).length;
+  if (en !== other) return en > other;
+  return !words.some((w) => /[^a-z]/.test(w));
+}
+const wordOf = (table, w) => (w !== undefined && Object.hasOwn(table, w) ? table[w] : null);
+// a whole number of these is a figure too: "a week" is 7 days, "two hours" 120 minutes
+const UNIT_SPANS = { week: 7, weeks: 7, fortnight: 14, fortnights: 14, hour: 60, hours: 60 };
+
 export function figuresOf(text) {
   const out = new Set(numbersOf(text));
-  const words = String(text ?? '').toLowerCase().match(/[a-z]+/g) || [];
+  const forms = figureForms(text, { generous: true });
+  for (const x of numbersOf(forms.text)) out.add(x);
+  for (const x of forms.also) out.add(x);
+  const raw = (String(text ?? '').toLowerCase().match(/\p{L}+/gu) || []);
+  const foreign = !inEnglish(raw);
+  const words = foreign ? raw.flatMap((w) => piecesOf(w) || [w]) : raw;
+  const unitOf = (w) => wordOf(UNIT_WORDS, w) ?? (foreign ? wordOf(FOREIGN_UNITS, w) : null);
+  const tensOf = (w) => wordOf(TEN_WORDS, w) ?? (foreign ? wordOf(FOREIGN_TENS, w) : null);
+  const hundredOf = (w) => (w === 'hundred' ? 100 : foreign ? wordOf(FOREIGN_HUNDREDS, w) : null);
+  const scaleOf = (w) => wordOf(SCALE_WORDS, w) ?? (foreign ? wordOf(FOREIGN_SCALES, w) : null);
+  const numberWord = (w) => w !== undefined && (unitOf(w) !== null || tensOf(w) !== null || wordOf(ORDINAL_WORDS, w) !== null
+    || hundredOf(w) !== null || w === 'dozen' || scaleOf(w) !== null);
+  /* A number written out, word by word: "two hundred and fifty" is 250, "two thousand five hundred" 2500, "one hundred and
+     first" 101, "quatre-vingt-dix" 90. Each word's own value is kept as well, so a reading that joins two numbers it should not
+     still finds both. */
+  let total = 0;
+  let current = 0;
+  let open = false;
+  let last = null;
+  // the number just written out, or 1 for "a" or "an" before a unit ("a week"), so a unit after it is read as its span
+  let before = null;
+  const close = () => {
+    const v = open ? exact(total + current) : null;
+    if (open) out.add(String(v));
+    total = 0; current = 0; open = false; last = null;
+    return v;
+  };
   for (let i = 0; i < words.length; i += 1) {
     const w = words[i];
     const month = wordOf(MONTH_WORDS, w);
     if (month !== null) out.add(String(month));
-    let n = null;
-    const tens = wordOf(TEN_WORDS, w);
-    if (tens !== null) {
-      n = tens;
-      // "twenty-five", "twenty five", "twenty-first"
-      const unit = wordOf(UNIT_WORDS, words[i + 1] ?? '') ?? wordOf(ORDINAL_WORDS, words[i + 1] ?? '');
-      if (unit !== null && unit > 0 && unit < 10) { n += unit; i += 1; }
-    } else if (w === 'hundred' || w === 'thousand') {
-      // "a hundred", "a thousand": a scale with no number before it ("two hundred" is read at "two", below)
-      out.add(w === 'hundred' ? '100' : '1000');
+    const times = wordOf(TIMES_WORDS, w);
+    if (times !== null) out.add(String(times));
+    if (w === 'half') { out.add('0.5'); out.add('50'); }
+    const unit = unitOf(w);
+    const tens = tensOf(w);
+    const ordinal = wordOf(ORDINAL_WORDS, w);
+    const hundred = hundredOf(w);
+    const scale = scaleOf(w);
+    if (unit !== null || tens !== null || ordinal !== null) {
+      const v = unit ?? tens ?? ordinal;
+      out.add(String(v));
+      /* "twenty five", "twenty-first", "two hundred fifty", "dix-sept" (10 and 7), "soixante-dix" (60 and 10) and
+         "quatre-vingts" (4 times 20) join; "one two", "five twenty" and "twenty thirty" are separate */
+      let joins = false;
+      if (!open || last === 'hundred' || last === 'scale' || last === 'and') joins = true;
+      else if (last === 'tens') joins = (tens === null && v > 0 && v < 10) || (foreign && unit !== null && v >= 10 && v < 20 && (current % 100 === 60 || current % 100 === 80));
+      else if (last === 'unit' && foreign && current % 100 === 10 && unit !== null && v >= 7 && v <= 9) joins = true;
+      if (last === 'unit' && foreign && current % 100 === 4 && (w === 'vingt' || w === 'vingts')) {
+        current = current - 4 + 80;
+        last = 'tens';
+        continue;
+      }
+      if (!joins) before = close();
+      current += v;
+      open = true;
+      last = tens !== null ? 'tens' : 'unit';
+      // an ordinal ends the number: "twenty-first", "one hundred and first"
+      if (ordinal !== null) before = close();
       continue;
-    } else {
-      n = wordOf(UNIT_WORDS, w) ?? wordOf(ORDINAL_WORDS, w) ?? (w === 'dozen' ? 12 : null);
     }
-    if (n === null) continue;
-    const scale = words[i + 1];
-    if (scale === 'hundred') { n *= 100; i += 1; } else if (scale === 'thousand') { n *= 1000; i += 1; }
-    out.add(String(n));
+    if (hundred !== null) {
+      out.add('100');
+      current = (current || 1) * 100;
+      open = true; last = 'hundred';
+      continue;
+    }
+    if (scale !== null) {
+      out.add(String(scale));
+      total += (current || 1) * scale;
+      current = 0;
+      open = true; last = 'scale';
+      continue;
+    }
+    if (w === 'dozen') {
+      out.add('12');
+      current = (current || 1) * 12;
+      open = true; last = 'scale';
+      continue;
+    }
+    if (JOINERS.has(w) && open && numberWord(words[i + 1])) { last = 'and'; continue; }
+    // "a hundred", "a million", "a dozen"
+    if ((w === 'a' || w === 'an') && (hundredOf(words[i + 1]) !== null || words[i + 1] === 'dozen' || scaleOf(words[i + 1]) !== null)) {
+      close();
+      current = 1; open = true; last = 'unit';
+      continue;
+    }
+    const closed = close();
+    if (closed !== null) before = closed;
+    // a span: "a week" is 7, "two weeks" 14, "half an hour" 30, "a quarter of an hour" 15, "an hour" 60 (minutes)
+    const span = wordOf(UNIT_SPANS, w);
+    if (span !== null) {
+      // (an article one word further back too: "a free week-long trial")
+      const article = (w2) => ['a', 'an', 'one', 'per', 'each', 'every'].includes(w2);
+      const q = words[i - 1] === 'half' || words[i - 2] === 'half' ? 0.5 : words[i - 1] === 'quarter' || words[i - 3] === 'quarter' ? 0.25
+        : before !== null ? before : article(words[i - 1]) || article(words[i - 2]) ? 1 : null;
+      if (q !== null) out.add(String(exact(q * span)));
+    }
+    before = (w === 'a' || w === 'an') ? 1 : null;
   }
+  close();
   return out;
 }
 

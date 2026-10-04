@@ -472,7 +472,7 @@ function candOf(r, { sample, serving, refPer, refP50 = null, metric, avg, switch
   const name = nameOfResult(r);
   const n = Number(r.runs) || 0;
   const isServing = !!serving && r.model_id === serving;
-  const differs = keeps ? 'missed something that matters, or got something wrong,'
+  const differs = keeps ? 'missed something that matters or got something wrong'
     : quality ? "gave clearly worse answers than the original model's" : 'answered differently from the original model';
   let out;
   if (r.verdict === 'failed' && r.stopped === 'busy') {
@@ -1118,26 +1118,44 @@ function comparedWords(by, shape, scored) {
      model's two readings, one each way round), and, where the difference was only in wording or in what it includes, the
      chance each reading gave the original's answer, and this one, of being the better, with their averages, which decide;
    - 'keeps', held to "keeps what matters": each fact it had to keep, whether it did and how that was read, whether it gets
-     something wrong against the request, and whether it is in the original model's language. */
-function readingsWords(r) {
+     something wrong against the request, and whether it is in the original model's language.
+   `purged`: what was asked and answered is no longer kept (the workspace's retention window), so neither is anything said in
+   its words: the facts' sentences, the figures it left out, a rule of the instruction it broke. What was decided of each stays. */
+export function readingsWords(r, { purged = false } = {}) {
   if (!r || typeof r !== 'object') return null;
+  // the words of a rule it broke, gone with the request's, or scrubbed by the purge to a mark (scrubInstructionWords)
+  const hidden = purged || r.broke === '-';
   if (r.way === 'keeps') {
     const wrong = r.wrong;
+    const wrongOf = wrong !== null && typeof wrong === 'object' ? { p: wrong.p ?? null, llm: typeof wrong.llm === 'boolean' ? wrong.llm : null }
+      : { p: wrong ?? null, llm: null };
     return {
       way: 'keeps',
-      facts: (Array.isArray(r.facts) ? r.facts : []).map((f) => ({ say: String(f.say ?? ''), kept: !!f.kept, by: f.by ?? null,
-        p: f.p ?? null, missing: Array.isArray(f.missing) ? f.missing : null, llm: typeof f.llm === 'boolean' ? f.llm : null })),
-      // Jev's chance it gets something wrong, and the language model's word where that settled it
-      wrong: wrong !== null && typeof wrong === 'object' ? { p: wrong.p ?? null, llm: typeof wrong.llm === 'boolean' ? wrong.llm : null }
-        : { p: wrong ?? null, llm: null },
-      language: r.language ?? null, broke: r.broke || null, kind: r.kind || null,
-      // what the test decided of each (keepsCheck in src/eval/keeps.js)
-      isWrong: r.isWrong === undefined ? r.kind === 'fact' : !!r.isWrong, otherLanguage: !!r.otherLanguage,
+      /* false where the answer was never read against its facts or the request: a broken rule of the instruction decided it,
+         or it is the original model's own answer word for word (`same`), which keeps whatever that answer keeps */
+      read: r.read !== false,
+      same: !!r.same,
+      facts: (Array.isArray(r.facts) ? r.facts : []).map((f) => ({ say: purged ? null : String(f.say ?? ''),
+        kept: f.kept === null || f.kept === undefined ? null : !!f.kept, by: f.by ?? null, p: f.p ?? null,
+        missing: !purged && Array.isArray(f.missing) ? f.missing : null, llm: typeof f.llm === 'boolean' ? f.llm : null,
+        // the second reading due did not come back, so Jev's lean, or for a figure code could not find, code's, stood
+        lean: !!f.lean })),
+      // Jev's chance it gets something wrong, and the language model's word where that settled it (or decided it alone)
+      wrong: wrongOf,
+      wrongRead: wrongOf.p !== null || wrongOf.llm !== null,
+      wrongLean: !!r.wrongLean,
+      // Jev's chance it is in the original model's language, and the language model's word where Jev was unsure
+      language: r.language ?? null, languageLlm: typeof r.languageLlm === 'boolean' ? r.languageLlm : null, languageLean: !!r.languageLean,
+      broke: hidden ? null : r.broke || null, brokeHidden: hidden && !!r.broke, kind: r.kind || null,
+      // what the test decided of each (keepsCheck in src/eval/keeps.js), and whether a lean decided the verdict
+      isWrong: r.isWrong === undefined ? r.kind === 'fact' : !!r.isWrong, otherLanguage: !!r.otherLanguage, unsettled: !!r.unsettled,
+      purged,
     };
   }
   if (r.way === 'same') {
+    // the average a three-way reading was decided on, as it decided (unrounded, kept with it), or worked out from its readings
     const avg = (xs) => (Array.isArray(xs) && xs.length && xs.every((x) => Number.isFinite(Number(x)))
-      ? Math.round((xs.reduce((a, b) => a + Number(b), 0) / xs.length) * 100) / 100 : null);
+      ? xs.reduce((a, b) => a + Number(b), 0) / xs.length : null);
     const p = Array.isArray(r.p) ? r.p : [];
     return {
       way: 'same',
@@ -1147,7 +1165,8 @@ function readingsWords(r) {
         return {
           p: x ?? null, named: Array.isArray(r.named) ? r.named[i] ?? null : null,
           votes: Array.isArray(v) ? { lean: v[0], reads: v.slice(1) } : null,
-          three: t ? { verdict: t.verdict, pRef: t.pRef, pCand: t.pCand, ref: avg(t.pRef), cand: avg(t.pCand) } : null,
+          three: t ? { verdict: t.verdict, pRef: t.pRef, pCand: t.pCand, ref: t.avgRef ?? avg(t.pRef), cand: t.avgCand ?? avg(t.pCand) } : null,
+          figures: Array.isArray(r.figuresAgainst) ? r.figuresAgainst.includes(i) : null,
         };
       }),
       figures: !!r.figures, refuses: r.refuses ?? null, cut: r.cut ?? null, forgive: r.forgive ?? null,
@@ -1161,7 +1180,7 @@ function readingsWords(r) {
       const leaned = Array.isArray(r.seen) ? side(r.seen[i], i) : null;
       return { side: side(p, i), leaned: leaned && leaned !== side(p, i) ? leaned : null, sure: r.chances?.[i] ?? null };
     }),
-    split: !!r.split, better: !!r.better, broke: r.broke || null, figures: !!r.figures,
+    split: !!r.split, better: !!r.better, broke: hidden ? null : r.broke || null, brokeHidden: hidden && !!r.broke, figures: !!r.figures,
     // the field of a structured answer it changed that the original model gave the same way both times (heldFieldChanged)
     field: r.field || null,
   };
@@ -1190,8 +1209,9 @@ function answerVerdict(row, yard) {
   if (s <= 0) return { tone: 'ok', text: keeps ? 'Kept what matters' : quality ? 'At least as good' : 'Same answer' };
   if (s >= 0.999) return { tone: 'bad', text: keeps ? 'Missed something' : quality ? 'Clearly worse' : 'Different' };
   // held to "the same answer": the same as one of the original model's two answers and not the other. Held to "at least
-  // as good", a split between the two readings is a tie, so a score between 0 and 1 only comes from an older reading
-  return { tone: 'warn', text: quality ? 'Partly worse' : 'Matched one of the two answers' };
+  // as good", a split between the two readings is a tie, so a score between 0 and 1 only comes from an older reading, and
+  // held to keeping what matters, a score is 0 or 1 (named as the model page names it, should one ever come between)
+  return { tone: 'warn', text: quality ? 'Partly worse' : keeps ? 'Partly missed' : 'Matched one of the two answers' };
 }
 
 /* One model in one test, request by request: what was asked, the original model's two answers (the two the test held
@@ -1409,8 +1429,9 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
         fields,
         values,
         compared: x.failure || x.error || !countedOf(x) ? null : comparedWords(x.judged_by, shape, true),
-        // what the judge said of it, by the way the test judged (readingsWords): its readings, its votes, or the facts it kept
-        readings: readingsWords(parse(x.readings)),
+        /* what the judge said of it, by the way the test judged (readingsWords): its readings, its votes, or the facts it kept,
+           without anything in the request's or the answers' own words once those are no longer kept */
+        readings: readingsWords(parse(x.readings), { purged }),
         ms: Number(ttft ? (x.ttft_ms ?? x.latency_ms) : x.latency_ms) || null,
         cost: x.cost_usd === null || x.cost_usd === undefined ? null : round8(Number(x.cost_usd)),
         reused: Number(x.reused) === 1,

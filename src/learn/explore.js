@@ -4,7 +4,7 @@ import { addActivity, track } from '../traffic.js';
 import { chargeEval } from '../billing.js';
 import { extract, disagreement, structuredCompare, proseText, heldFieldChanged } from '../eval/compare.js';
 import { judgeBarPair, judgeQuality, numbersDiffer } from '../eval/judge.js';
-import { factsFor, keepsCheck } from '../eval/keeps.js';
+import { factsFor, keepsCheck, keepsRequest } from '../eval/keeps.js';
 import { keptChecklist } from '../eval/checklist.js';
 import { promote, revert, everReverted, keyOfSpec, rollBack } from '../eval/promote.js';
 import { diffRange } from './decide.js';
@@ -515,18 +515,22 @@ async function agreementOf(body, used, other, shape, scope, bar = null) {
   /* Held to "keeps what matters" (src/eval/keeps.js): 1 when the background answer keeps the facts that matter in the one that
      was used and gets nothing wrong against the request, 0 when it misses one. There is no second answer here to show which of
      the used answer's facts its model gives every time, so all of the ones that matter are held to: read strictly, as a
-     background answer always is, since it only ever argues for switching. */
+     background answer always is, since it only ever argues for switching. Read against the request as the measurement and
+     the daily checks read it (keepsRequest: the whole conversation a summary is of, not its last message), with the facts
+     listed as they list them, and a pass that rests on a lean the second reading did not settle is not counted for it. */
   if (bar?.yardstick === 'keeps' && shape === 'free_text') {
     const a = extract(used, shape);
     const b = extract(other, shape);
     if (!a.ok) return { agreement: null, cost: 0 };
     if (!b.ok) return { agreement: 0, cost: 0, judgedBy: 'no answer' };
-    const request = requestText(body);
-    const f = await factsFor(request, [String(a.value)], { scope, prefer: bar.prefer });
+    const request = keepsRequest(body);
+    const f = await factsFor(request, [String(a.value)], { scope });
     if (!f.facts) return { agreement: null, cost: Number(f.cost) || 0, judgedBy: 'not judged' };
     const j = await keepsCheck(request, String(b.value), { facts: f.facts, reference: String(a.value), scope, prefer: bar.prefer, checklist: bar.checklist });
     const cost = (Number(f.cost) || 0) + (Number(j.cost) || 0);
-    if (j.transient || j.score === null || j.score === undefined) return { agreement: null, cost, judgedBy: 'not judged' };
+    if (j.transient || j.score === null || j.score === undefined || (j.unsettled && j.score === 0)) {
+      return { agreement: null, cost, judgedBy: 'not judged' };
+    }
     return { agreement: 1 - j.score, cost, judgedBy: j.judgedBy };
   }
   if (bar?.yardstick === 'quality') {
