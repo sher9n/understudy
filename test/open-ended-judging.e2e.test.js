@@ -189,6 +189,9 @@ const server = http.createServer((req, res) => {
         if (k === 'better') {
           counts.better += 1;
           answers.better = better(s.request, s.answers?.first, s.answers?.second);
+        } else if (k === 'sourced') {
+          // none of these requests (poems, figures, replies) is built from text it supplies (src/eval/keeps.js)
+          answers.sourced = { noul: 0.04 };
         } else if (k === 'open') {
           counts.open += 1;
           if (jev.openMode === 'none') continue;

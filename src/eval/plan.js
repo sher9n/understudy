@@ -196,7 +196,8 @@ export async function enabledSet(workspaceId) {
    stopped or cut short drew are not steered away from, and what it bought for them is used again.
    A second look never uses a call any measurement has looked at. A call's bar is paid for when both
    of the customer's model's answers are kept, or when its own recorded answer is one of them and the
-   other is kept. */
+   other is kept: its first and second answers by name, since "keeps what matters" keeps a third, and a
+   call holding only that and one other still has a bar answer to buy. */
 async function drawnFor(workload) {
   const row = await db.prepare(
     `WITH eligible AS (
@@ -209,7 +210,7 @@ async function drawnFor(workload) {
           FROM eval_samples s JOIN eval_runs r ON r.id = s.run_id
          WHERE r.workload_id = ? GROUP BY s.call_id),
       kept AS (
-        SELECT k.call_id, COUNT(DISTINCT k.slot) AS slots, bool_or(k.slot = 1) AS second
+        SELECT k.call_id, bool_or(k.slot = 0) AS first, bool_or(k.slot = 1) AS second
           FROM replay_cache k
          WHERE k.model_id = ? AND k.status = 200 AND k.recipe_json IS NULL AND k.created_at >= ?
            AND k.call_id IN (SELECT id FROM eligible)
@@ -217,8 +218,8 @@ async function drawnFor(workload) {
      SELECT COUNT(*) AS n,
             COUNT(*) FILTER (WHERE d.used) AS used,
             COUNT(*) FILTER (WHERE d.call_id IS NOT NULL) AS seen,
-            COUNT(*) FILTER (WHERE NOT COALESCE(d.used, false) AND (k.slots >= 2 OR (e.rec AND k.second))) AS paid_fresh,
-            COUNT(*) FILTER (WHERE d.used AND (k.slots >= 2 OR (e.rec AND k.second))) AS paid_used
+            COUNT(*) FILTER (WHERE NOT COALESCE(d.used, false) AND k.second AND (k.first OR e.rec)) AS paid_fresh,
+            COUNT(*) FILTER (WHERE d.used AND k.second AND (k.first OR e.rec)) AS paid_used
        FROM eligible e LEFT JOIN drawn d ON d.call_id = e.id LEFT JOIN kept k ON k.call_id = e.id`)
     .get(!!config.EVAL_USE_RECORDED, String(workload.reference_model ?? ''), workload.id, ownArmKey(workload),
       workload.id, now() - 30 * DAY, workload.id, String(workload.reference_model ?? ''), now() - config.REPLAY_REUSE_DAYS * DAY);
@@ -368,6 +369,14 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const open = lastJudging?.openEnded;
   plan.closedWork = !!(lastJudging && lastJudging.mode === 'auto' && !lastJudging.reason && open
     && (open.share === null || (Number(open.share) < config.EVAL_OPEN_ENDED_KEEP_SHARE && !open.yes)));
+  /* Whether that measurement read the requests as plainly not asking for an answer built from text they supply, or as
+     open-ended writing, either of which keeps it off "keeps what matters" when judged automatically; one read before that was
+     looked for may be held to it this time, and is quoted the dearer. */
+  // a reading that read nothing (Jev and the language model both failed) says nothing either way
+  const sourced = lastJudging?.sourced;
+  plan.notSourced = !!(lastJudging && lastJudging.mode === 'auto'
+    && (lastJudging.reason === 'open-ended'
+      || (sourced && Number(sourced.n) > 0 && !sourced.yes && Number(sourced.share) < config.EVAL_SOURCED_KEEP_SHARE)));
   /* Whether the customer's model last disagreed with itself too often for "the same answer" to be a bar: a structured
      workload is then held to "at least as good" too, which is judged, and the quote counts that judging. */
   const lastBar = await db.prepare(`SELECT noise_pct FROM eval_runs WHERE workload_id = ? AND status = 'done' AND noise_pct IS NOT NULL
@@ -599,20 +608,46 @@ function estimate(plan, profile, facts, workload) {
   /* Written work is judged as its setting says (workloads.judge_mode), and automatically as the run decides: "at least as
      good" for varied or open-ended work (see judgeMode in src/eval/run.js). Automatically, a workload last held to "the
      same answer" is quoted that alone only where its work read as plainly not open-ended (plan.closedWork). */
-  const mode = text && ['same', 'quality'].includes(workload.judge_mode) ? workload.judge_mode : 'auto';
+  // as the run allows it (keepsOn in src/eval/run.js): the facts are listed by the language model, so not without one
+  const keepsOn = text && config.EVAL_KEEPS && !!config.EVAL_JUDGE_MODEL;
+  const mode = text && ['same', 'quality', ...(keepsOn ? ['keeps'] : [])].includes(workload.judge_mode) ? workload.judge_mode : 'auto';
+  // whether the run reads if its requests are built from supplied text: on every test judged automatically
+  const readsSourced = keepsOn && config.EVAL_KEEPS_AUTO && mode === 'auto';
+  // "keeps what matters" may be chosen automatically: unless its last test read it plainly as other work (notSourced)
+  const mayKeep = readsSourced && !plan.notSourced;
+  /* Each test reads its requests afresh, so one last held to "keeps what matters" or "at least as good" may land on another
+     yardstick this time: quoted the dearest of those it can land on. */
   const yardsticks = !prices ? []
     : !text ? ['quality']
-      : !config.EVAL_QUALITY_YARDSTICK || mode === 'same' ? ['agreement']
-        : mode === 'quality' || plan.yardstick === 'quality' ? ['quality']
-          : plan.yardstick === 'agreement' && (plan.closedWork || !config.EVAL_OPEN_ENDED) ? ['agreement'] : ['agreement', 'quality'];
-  /* Reading what kind of writing the requests ask for, when judged automatically: up to EVAL_OPEN_ENDED_ASK requests, each
-     read by Jev and, where Jev cannot answer one, by the language model, at no more than one reading of a pair (half of
-     llmQuality, which is two). */
-  if (prices && text && mode === 'auto' && config.EVAL_OPEN_ENDED && config.EVAL_QUALITY_YARDSTICK) {
-    const perRead = (jevUsable() ? ((Math.min(pin, 2500) + 250) * config.JEV_PRICE_PER_MTOK) / 1e6 : 0) + prices.llmQuality / 2;
+      : mode === 'keeps' ? ['keeps']
+        : mode === 'same' ? ['agreement']
+          : !config.EVAL_QUALITY_YARDSTICK ? ['agreement', ...(mayKeep ? ['keeps'] : [])]
+            : mode === 'quality' ? ['quality']
+              : plan.yardstick === 'keeps' && mayKeep ? ['keeps', 'agreement', 'quality']
+                : plan.yardstick === 'quality' ? ['quality', 'agreement', ...(mayKeep ? ['keeps'] : [])]
+                  : plan.yardstick === 'agreement' && (plan.closedWork || !config.EVAL_OPEN_ENDED) ? ['agreement', ...(mayKeep ? ['keeps'] : [])]
+                    : ['agreement', 'quality', ...(mayKeep ? ['keeps'] : [])];
+  /* Reading what kind of work the requests ask for, when judged automatically: up to EVAL_OPEN_ENDED_ASK requests, each read
+     by Jev once for each question (whether they are built from supplied text, before any answer is bought; whether they are
+     open-ended writing, then or after the bar) and, where Jev cannot answer one, by the language model, at no more than one
+     reading of a pair (half of llmQuality, which is two) for each question. */
+  const readsOpen = config.EVAL_OPEN_ENDED && config.EVAL_QUALITY_YARDSTICK;
+  if (prices && text && mode === 'auto' && (readsOpen || readsSourced)) {
+    const questions = (readsOpen ? 1 : 0) + (readsSourced ? 1 : 0);
+    const perRead = questions * ((jevUsable() ? ((Math.min(pin, 2500) + 250) * config.JEV_PRICE_PER_MTOK) / 1e6 : 0) + prices.llmQuality / 2);
     total += Math.min(s, config.EVAL_OPEN_ENDED_ASK) * perRead;
   }
   const judging = yardsticks.map((yard) => {
+    /* "Keeps what matters": the customer's model a third time on every request, the facts both other answers keep listed and
+       confirmed, its third answer and every candidate answer read against them, and the judge tested on up to eight planted
+       answers (plantedKeeps), two of them put into another language first, each read by Jev and then by the language model,
+       with the instruction read once as a checklist. */
+    if (yard === 'keeps') {
+      const k = prices.keeps;
+      const pair = refPer + k.facts + k.check;
+      const planted = 8 * (k.check + k.llmCheck) + 2 * prices.translate + prices.checklist;
+      return { pair, answer: k.check, cost: s * pair + planted + (finalists.length * s + extra.length * screened) * k.check };
+    }
     const quality = yard === 'quality';
     const pair = quality ? prices.quality : prices.bar;
     const answer = quality ? prices.quality : prices.candidate;

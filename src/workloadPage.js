@@ -468,11 +468,12 @@ function secondWhy(r, differs) {
   return `${first} ${on}${close} it ${differs}${fig}${allowed}. So it isn't switched to, and the next test looks again.`;
 }
 
-function candOf(r, { sample, serving, refPer, refP50 = null, metric, avg, switchRun, unsure = false, floorPct = null, quality = false, names = new Map(), speed = null }) {
+function candOf(r, { sample, serving, refPer, refP50 = null, metric, avg, switchRun, unsure = false, floorPct = null, quality = false, keeps = false, names = new Map(), speed = null }) {
   const name = nameOfResult(r);
   const n = Number(r.runs) || 0;
   const isServing = !!serving && r.model_id === serving;
-  const differs = quality ? "gave clearly worse answers than the original model's" : 'answered differently from the original model';
+  const differs = keeps ? 'missed something that matters or got something wrong'
+    : quality ? "gave clearly worse answers than the original model's" : 'answered differently from the original model';
   let out;
   if (r.verdict === 'failed' && r.stopped === 'busy') {
     // its provider could not keep up (EVAL_KEEP_UP_REFUSALS): failed for good on this workload
@@ -632,6 +633,9 @@ export function pickFor(cands, k, { settled = false, inUse = null, chosen = null
   return { key: pick.key, kept: pick === held && higher(pick) };
 }
 export const bestFor = (cands, k, opts) => pickFor(cands, k, opts).key;
+/* How a test judged written answers: 'agreement' (the same answer as the original model), 'quality' (at least as good) or
+   'keeps' (keeps what matters, src/eval/keeps.js). */
+const yardOf = (run) => (['quality', 'keeps'].includes(run?.yardstick) ? run.yardstick : 'agreement');
 const z2 = 1.6449 ** 2;
 const pctWords = (x) => `${Math.round(x * 1000) / 10}%`;
 
@@ -651,7 +655,15 @@ function takeOf(run, cands, w, opts) {
   let plan = null;
   try { plan = run.plan_json ? JSON.parse(run.plan_json) : null; } catch { plan = null; }
   const why = plan?.judging?.reason ?? plan?.yardstick?.reason ?? null;
-  if (compared && run.yardstick === 'quality' && cands.length) {
+  if (compared && run.yardstick === 'keeps' && cands.length) {
+    notes.push(why === 'chosen'
+      ? "As this workload's setting asks, each model was checked for answers that keep what matters and get nothing wrong: the "
+        + "facts both of the original model's answers to a request give, which matter to someone relying on the answer, rather "
+        + 'than the same answers.'
+      : 'These requests ask for an answer built from text they supply, like a summary or a translation, so each model was '
+        + "checked for answers that keep what matters and get nothing wrong: the facts both of the original model's answers to "
+        + 'a request give, which matter to someone relying on the answer, rather than the same answers.');
+  } else if (compared && run.yardstick === 'quality' && cands.length) {
     notes.push(why === 'open-ended'
       ? 'These requests ask for open-ended writing, where many different answers are each as good, so each model was checked for '
         + "answers at least as good as the original model's, rather than the same answers."
@@ -738,6 +750,7 @@ function mainTake(run, cands, w, { small = null, refName }) {
   const outcome = outcomeOf(run);
   const n = Number(run.sample_size) || 0;
   const quality = run.yardstick === 'quality';
+  const keeps = run.yardstick === 'keeps';
   if (run.status === 'running' || run.status === 'queued') return 'Still running. Each model appears here once it has answered its requests.';
   if (outcome === 'unmeasurable') {
     // held to the same answer by the workload's own setting (planRecord.judging in src/eval/run.js), which only a person changes
@@ -810,7 +823,8 @@ function mainTake(run, cands, w, { small = null, refName }) {
   const barWords = `${Math.round(bar * 10) / 10}%`;
   // too few requests for any model to be shown close enough, however well it matched
   if (small) {
-    const what = quality ? "gives clearly worse answers than the original model's" : 'answers differently from the original model';
+    const what = keeps ? 'misses something that matters' : quality ? "gives clearly worse answers than the original model's"
+      : 'answers differently from the original model';
     const wait = small.calls
       ? ` The full test needs ${small.calls} recent requests, so the result can be checked again on new ones, and starts by itself when they're in`
         + (small.have !== null ? `: you have ${small.have} so far` : '') + '.'
@@ -824,19 +838,23 @@ function mainTake(run, cands, w, { small = null, refName }) {
   const closest = (pick) => cands.filter(pick).reduce((a, c) => (a === null || c.gap < a.gap ? c : a), null);
   const unsure = closest((c) => c.verdict === 'Passed, judge unsure' && c.gap !== null);
   if (unsure) {
-    return `${said}${unsure.said} stayed within the allowed difference as the judge read it: ${quality ? 'clearly worse' : 'different'} on `
+    return `${said}${unsure.said} stayed within the allowed difference as the judge read it: `
+      + `${keeps ? 'missed something that matters' : quality ? 'clearly worse' : 'different'} on `
       + `${pctWords(unsure.gap)} of the requests tested, where at most ${barWords} is allowed.`;
   }
   const close = closest((c) => c.tone === 'warn' && c.gap !== null);
   if (close) {
-    const did = quality
-      ? `Its answer was clearly worse than the original model's on ${pctWords(close.gap)} of the requests tested.`
-      : `It answered differently from the original model on ${pctWords(close.gap)} of the requests tested.`;
+    const did = keeps
+      ? `Its answer missed something that matters, or got something wrong, on ${pctWords(close.gap)} of the requests tested.`
+      : quality
+        ? `Its answer was clearly worse than the original model's on ${pctWords(close.gap)} of the requests tested.`
+        : `It answered differently from the original model on ${pctWords(close.gap)} of the requests tested.`;
     // the allowed difference, and where it comes from: the original model's own variation, and a little more
     const noise = run.noise_pct === null || run.noise_pct === undefined ? null : pctWords(Number(run.noise_pct) / 100);
     const allowed = noise === null ? `At most ${barWords} is allowed`
-      : quality ? `The original model's own answers are clearly worse than each other on ${noise} of requests, so at most ${barWords} is allowed`
-        : `The original model answers differently from itself on ${noise} of requests, so at most ${barWords} is allowed`;
+      : keeps ? `The original model's own third answer missed something its other two kept on ${noise} of requests, so at most ${barWords} is allowed`
+        : quality ? `The original model's own answers are clearly worse than each other on ${noise} of requests, so at most ${barWords} is allowed`
+          : `The original model answers differently from itself on ${noise} of requests, so at most ${barWords} is allowed`;
     const within = close.gap * 100 <= bar;
     const but = !within ? ", and this model wasn't close enough to replace it yet"
       : close.verdict === 'Slower than original' ? ', but it answered more slowly than this workload allows'
@@ -886,6 +904,7 @@ export async function runPageOf(w, run) {
   const unsure = Number(check?.errors) > 0;
   const floorPct = run.floor_pct === null || run.floor_pct === undefined ? null : Number(run.floor_pct);
   const quality = run.yardstick === 'quality';
+  const keeps = run.yardstick === 'keeps';
   /* The speed this test held every model to (tooSlow in src/eval/run.js): at most `factor` times the original model's
      typical time, and on its slowest tenth `slowEnd` times the original model's, each with a little slack. For a model
      too slow, how many of its answers ran past the second, which its words give (slowerWhy). */
@@ -914,7 +933,7 @@ export async function runPageOf(w, run) {
      for every choice, and the pick for each is said below, so changing it re-sorts the table without asking again. */
   const workspaceRow = await db.prepare('SELECT default_routing_mode FROM workspaces WHERE id = ?').get(w.workspace_id);
   const optimize = optimizeFor(w, workspaceRow, config.ROUTING_MODE_DEFAULT);
-  const cands = results.map((r) => candOf(r, { sample, serving, refPer, refP50: refP50 || null, metric, avg, switchRun, unsure, floorPct, quality, names, speed }))
+  const cands = results.map((r) => candOf(r, { sample, serving, refPer, refP50: refP50 || null, metric, avg, switchRun, unsure, floorPct, quality, keeps, names, speed }))
     .sort(byScoreFor(optimize));
   /* The pick for each choice, by what the test itself kept (choice_json in run.js): the setups it could switch to at all
      are the ones it ranked (passed, priced, cheaper than the original model once the fee is added, and never switched
@@ -960,7 +979,7 @@ export async function runPageOf(w, run) {
     referenceName: refName,
     take: takeOf(run, cands, w, { small, refName, check }),
     bar: round8((Number(run.floor_pct) || 0) / 100),
-    yardstick: run.yardstick === 'quality' ? 'quality' : 'agreement',
+    yardstick: yardOf(run),
     metric,
     reference: run.reference_model,
     yours: {
@@ -1018,7 +1037,12 @@ const DIFF_WORDS = {
   worse: 'it is a worse answer', unrelated: 'it answers something else', truncated: 'it ran out of room',
   instruction: "it doesn't follow the instructions in the request", empty: 'it is empty',
   'unparseable json': "it isn't valid JSON", 'no tool call': 'it calls no tool', 'unparseable arguments': "its tool's arguments aren't valid JSON",
-  refused: 'its provider refused or failed it',
+  refused: 'its provider refused or failed it', language: "it isn't in the original model's language",
+};
+// held to "keeps what matters", the kinds keepsCheck in src/eval/keeps.js names say something else
+const KEEPS_DIFF_WORDS = {
+  omission: 'it leaves out something that matters', fact: "it gets something wrong, or says something the request doesn't",
+  language: "it isn't in the original model's language", instruction: "it doesn't follow the instructions in the request",
 };
 
 // how a model's second look ended (confirm_verdict, written by lookAgain in src/eval/run.js)
@@ -1078,32 +1102,96 @@ function comparedWords(by, shape, scored) {
   if (b === 'numbers' || b.endsWith('+numbers')) return "A figure in it differs from the original model's";
   if (b === 'fields') return 'A field the original model gave the same way twice differs in it';
   if (b === 'jev-quality' || b === 'llm-quality') return 'Read by a judge model twice, once each way round';
+  if (b.includes('keeps')) return "Checked fact by fact against what both of the original model's answers keep, and against the request";
   if (b) return 'Read by a judge model';
   return scored && shape !== 'free_text' ? 'Compared field by field' : null;
 }
 
-/* The judge's two readings of one answer held to "at least as good", for its page: for each, which answer it found the
-   better ('answer', this model's; 'original'; or 'equal'), what it leaned to where a lean too slight to count was read
-   as a tie, and how sure it was; and a requirement of the instruction the answer broke, or a figure it changed. The
-   answer judged is first in the first reading and second in the second (judgeQuality in src/eval/judge.js). */
-function readingsWords(r) {
+/* What the judge said of one answer, for its page, by the way its test judged (the readings keepReplay keeps, written in
+   src/eval/run.js), each with `way`:
+   - 'quality', held to "at least as good": for each of its two readings, which answer it found the better ('answer', this
+     model's; 'original'; or 'equal'), what it leaned to where a lean too slight to count was read as a tie, and how sure it
+     was; and a requirement of the instruction the answer broke, or a figure it changed. The answer judged is first in the
+     first reading and second in the second (judgeQuality in src/eval/judge.js);
+   - 'same', held to "the same answer": against each of the original model's answers, Jev's chance the two serve the person
+     equally, what it named the difference, the three votes that settled it where Jev was unsure (its lean, then the language
+     model's two readings, one each way round), and, where the difference was only in wording or in what it includes, the
+     chance each reading gave the original's answer, and this one, of being the better, with their averages, which decide;
+   - 'keeps', held to "keeps what matters": each fact it had to keep, whether it did and how that was read, whether it gets
+     something wrong against the request, and whether it is in the original model's language.
+   `purged`: what was asked and answered is no longer kept (the workspace's retention window), so neither is anything said in
+   its words: the facts' sentences, the figures it left out, a rule of the instruction it broke. What was decided of each stays. */
+export function readingsWords(r, { purged = false } = {}) {
   if (!r || typeof r !== 'object') return null;
+  // the words of a rule it broke, gone with the request's, or scrubbed by the purge to a mark (scrubInstructionWords)
+  const hidden = purged || r.broke === '-';
+  if (r.way === 'keeps') {
+    const wrong = r.wrong;
+    const wrongOf = wrong !== null && typeof wrong === 'object' ? { p: wrong.p ?? null, llm: typeof wrong.llm === 'boolean' ? wrong.llm : null }
+      : { p: wrong ?? null, llm: null };
+    return {
+      way: 'keeps',
+      /* false where the answer was never read against its facts or the request: a broken rule of the instruction decided it,
+         or it is the original model's own answer word for word (`same`), which keeps whatever that answer keeps */
+      read: r.read !== false,
+      same: !!r.same,
+      facts: (Array.isArray(r.facts) ? r.facts : []).map((f) => ({ say: purged ? null : String(f.say ?? ''),
+        kept: f.kept === null || f.kept === undefined ? null : !!f.kept, by: f.by ?? null, p: f.p ?? null,
+        missing: !purged && Array.isArray(f.missing) ? f.missing : null, llm: typeof f.llm === 'boolean' ? f.llm : null,
+        // the second reading due did not come back, so Jev's lean, or for a figure code could not find, code's, stood
+        lean: !!f.lean })),
+      // Jev's chance it gets something wrong, and the language model's word where that settled it (or decided it alone)
+      wrong: wrongOf,
+      wrongRead: wrongOf.p !== null || wrongOf.llm !== null,
+      wrongLean: !!r.wrongLean,
+      // Jev's chance it is in the original model's language, and the language model's word where Jev was unsure
+      language: r.language ?? null, languageLlm: typeof r.languageLlm === 'boolean' ? r.languageLlm : null, languageLean: !!r.languageLean,
+      broke: hidden ? null : r.broke || null, brokeHidden: hidden && !!r.broke, kind: r.kind || null,
+      // what the test decided of each (keepsCheck in src/eval/keeps.js), and whether a lean decided the verdict
+      isWrong: r.isWrong === undefined ? r.kind === 'fact' : !!r.isWrong, otherLanguage: !!r.otherLanguage, unsettled: !!r.unsettled,
+      purged,
+    };
+  }
+  if (r.way === 'same') {
+    // the average a three-way reading was decided on, as it decided (unrounded, kept with it), or worked out from its readings
+    const avg = (xs) => (Array.isArray(xs) && xs.length && xs.every((x) => Number.isFinite(Number(x)))
+      ? xs.reduce((a, b) => a + Number(b), 0) / xs.length : null);
+    const p = Array.isArray(r.p) ? r.p : [];
+    return {
+      way: 'same',
+      against: p.map((x, i) => {
+        const t = (Array.isArray(r.three) ? r.three : []).find((y) => Number(y.ref) === i) || null;
+        const v = Array.isArray(r.votes) ? r.votes[i] : null;
+        return {
+          p: x ?? null, named: Array.isArray(r.named) ? r.named[i] ?? null : null,
+          votes: Array.isArray(v) ? { lean: v[0], reads: v.slice(1) } : null,
+          three: t ? { verdict: t.verdict, pRef: t.pRef, pCand: t.pCand, ref: t.avgRef ?? avg(t.pRef), cand: t.avgCand ?? avg(t.pCand) } : null,
+          figures: Array.isArray(r.figuresAgainst) ? r.figuresAgainst.includes(i) : null,
+        };
+      }),
+      figures: !!r.figures, refuses: r.refuses ?? null, cut: r.cut ?? null, forgive: r.forgive ?? null,
+    };
+  }
   const side = (pick, i) => (pick === 'equal' || !pick ? 'equal' : (pick === 'first') === (i === 0) ? 'answer' : 'original');
   const picks = Array.isArray(r.picks) ? r.picks : [];
   return {
+    way: 'quality',
     each: picks.map((p, i) => {
       const leaned = Array.isArray(r.seen) ? side(r.seen[i], i) : null;
       return { side: side(p, i), leaned: leaned && leaned !== side(p, i) ? leaned : null, sure: r.chances?.[i] ?? null };
     }),
-    split: !!r.split, better: !!r.better, broke: r.broke || null, figures: !!r.figures,
+    split: !!r.split, better: !!r.better, broke: hidden ? null : r.broke || null, brokeHidden: hidden && !!r.broke, figures: !!r.figures,
     // the field of a structured answer it changed that the original model gave the same way both times (heldFieldChanged)
     field: r.field || null,
   };
 }
 
 /* How one request's answer was read, in words: the score the test gave it (0 the same as the original model, 1 a
-   different answer, or clearly worse where answers are held to "at least as good"), or why there was none. */
-function answerVerdict(row, quality) {
+   different answer, clearly worse where answers are held to "at least as good", or missing something that matters where
+   they are held to keeping it), or why there was none. */
+function answerVerdict(row, yard) {
+  const quality = yard === 'quality';
+  const keeps = yard === 'keeps';
   const counted = countedOf(row);
   if (!counted && row.failure === 'refused') return { tone: 'mut', text: "Provider busy, so it doesn't count" };
   if (row.failure || row.error) {
@@ -1118,11 +1206,12 @@ function answerVerdict(row, quality) {
   if (row.score === null || row.score === undefined) return { tone: 'mut', text: "Not judged, so it doesn't count" };
   if (!counted) return { tone: 'mut', text: "Couldn't be judged, so it doesn't count" };
   const s = Number(row.score);
-  if (s <= 0) return { tone: 'ok', text: quality ? 'At least as good' : 'Same answer' };
-  if (s >= 0.999) return { tone: 'bad', text: quality ? 'Clearly worse' : 'Different' };
+  if (s <= 0) return { tone: 'ok', text: keeps ? 'Kept what matters' : quality ? 'At least as good' : 'Same answer' };
+  if (s >= 0.999) return { tone: 'bad', text: keeps ? 'Missed something' : quality ? 'Clearly worse' : 'Different' };
   // held to "the same answer": the same as one of the original model's two answers and not the other. Held to "at least
-  // as good", a split between the two readings is a tie, so a score between 0 and 1 only comes from an older reading
-  return { tone: 'warn', text: quality ? 'Partly worse' : 'Matched one of the two answers' };
+  // as good", a split between the two readings is a tie, so a score between 0 and 1 only comes from an older reading, and
+  // held to keeping what matters, a score is 0 or 1 (named as the model page names it, should one ever come between)
+  return { tone: 'warn', text: quality ? 'Partly worse' : keeps ? 'Partly missed' : 'Matched one of the two answers' };
 }
 
 /* One model in one test, request by request: what was asked, the original model's two answers (the two the test held
@@ -1146,7 +1235,9 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
         AND look IS DISTINCT FROM 2 GROUP BY model_id ORDER BY (model_id = ?) DESC, COUNT(*) DESC`).all(run.id, name.first, `${name.first}#%`, name.first);
     from = kept[0]?.model_id ?? name.first;
   }
-  const quality = run.yardstick === 'quality';
+  const yard = yardOf(run);
+  const quality = yard === 'quality';
+  const keeps = yard === 'keeps';
   const shape = run.shape_kind || w.shape_kind;
   const p = Math.max(1, Math.min(1000, Math.round(Number(page) || 1)));
   /* Its second look, on new requests it had never seen (lookAgain in src/eval/run.js), for a model on its own: a way of
@@ -1204,7 +1295,7 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
   const [calls, samples, refs] = ids.length ? await Promise.all([
     db.prepare(`SELECT id, request_json, content_purged_at, created_at, served_model, cost_usd, latency_ms, ttft_ms
         FROM calls WHERE id = ANY(?::text[])`).all(ids),
-    db.prepare('SELECT call_id, ref_a_json, ref_b_json, content_purged_at FROM eval_samples WHERE run_id = ? AND call_id = ANY(?::text[])').all(run.id, ids),
+    db.prepare('SELECT call_id, ref_a_json, ref_b_json, facts_json, content_purged_at FROM eval_samples WHERE run_id = ? AND call_id = ANY(?::text[])').all(run.id, ids),
     db.prepare(`SELECT call_id, slot, latency_ms, ttft_ms, cost_usd, status, failure FROM eval_replays WHERE run_id = ? AND model_id = ?
         AND call_id = ANY(?::text[])`).all(run.id, run.reference_model, ids),
   ]) : [[], [], []];
@@ -1234,7 +1325,7 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
     },
     reference: run.reference_model,
     referenceName: known(run.reference_model),
-    yardstick: quality ? 'quality' : 'agreement',
+    yardstick: yard,
     shape,
     metric: ttft ? 'ttft' : 'latency',
     sample: Number(run.sample_size) || 0,
@@ -1294,6 +1385,14 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
       const heldTo = quality
         ? (readRefs[0].ok ? [true, false] : [false, readRefs[1].ok])
         : readRefs.map((e) => e.ok);
+      /* held to "keeps what matters", what both of the original model's answers keep that matters, which this answer had to
+         keep, and the supporting detail they also share, which it did not (factsFor in src/eval/keeps.js) */
+      const listed = keeps && !purged ? parse(s?.facts_json) : null;
+      const factsHeld = listed ? {
+        keep: (Array.isArray(listed.facts) ? listed.facts : []).map((f) => ({ say: String(f.say ?? ''), weight: f.weight ?? null })),
+        detail: (Array.isArray(listed.detail) ? listed.detail : []).map((f) => (typeof f === 'string' ? { say: f, weight: null }
+          : { say: String(f.say ?? ''), weight: f.weight ?? null })),
+      } : null;
       // the fields that differed from each of them, read the way the test read them (a structured answer only)
       const got = !purged && x.answer !== null && !x.failure ? extract(asResponse(x.answer, shape), shape) : null;
       const fields = readRefs.map((e, i) => (shape !== 'free_text' && got?.ok && e.ok && heldTo[i] ? differingFields(got.value, e.value, shape) : null));
@@ -1324,14 +1423,15 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
         score: x.score === null || x.score === undefined ? null : round8(Number(x.score)),
         // whether its score is one of those the model's figure averages
         counted: countedOf(x),
-        verdict: answerVerdict(x, quality),
-        difference: x.difference ? (DIFF_WORDS[x.difference] || String(x.difference)) : null,
+        verdict: answerVerdict(x, yard),
+        difference: x.difference ? ((keeps && KEEPS_DIFF_WORDS[x.difference]) || DIFF_WORDS[x.difference] || String(x.difference)) : null,
+        facts: factsHeld,
         fields,
         values,
         compared: x.failure || x.error || !countedOf(x) ? null : comparedWords(x.judged_by, shape, true),
-        /* held to "at least as good", what the judge's two readings said (readingsOf in src/eval/run.js): each one's pick,
-           'answer' for this model's, 'original' or 'equal', how sure it was, and a requirement it broke or a figure it changed */
-        readings: readingsWords(parse(x.readings)),
+        /* what the judge said of it, by the way the test judged (readingsWords): its readings, its votes, or the facts it kept,
+           without anything in the request's or the answers' own words once those are no longer kept */
+        readings: readingsWords(parse(x.readings), { purged }),
         ms: Number(ttft ? (x.ttft_ms ?? x.latency_ms) : x.latency_ms) || null,
         cost: x.cost_usd === null || x.cost_usd === undefined ? null : round8(Number(x.cost_usd)),
         reused: Number(x.reused) === 1,
