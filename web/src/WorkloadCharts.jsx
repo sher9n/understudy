@@ -139,12 +139,15 @@ export function SelfPic({ self, yardstick }) {
   if (self?.noise !== null && self?.noise !== undefined) {
     const mark = self.most ?? self.bar;
     const worse = yardstick === 'quality';
-    const said = worse ? 'clearly worse than its own other answer' : 'a different answer from its own other one';
+    // held to "keeps what matters": how often its third answer missed something its other two kept
+    const keeps = yardstick === 'keeps';
+    const said = keeps ? 'a third answer that missed something its other two kept'
+      : worse ? 'clearly worse than its own other answer' : 'a different answer from its own other one';
     const markWords = self.most ? `${pctw(mark)}: above this, no steady standard` : `allowed difference ${pctw(mark)}`;
     return (
       <svg ref={ref} className="wp-sv" viewBox={`0 0 ${W} ${H}`} role="img"
-        aria-label={`Your model gave ${said} on ${pctw(self.noise)} of ${self.n} requests, each asked twice${mark !== null ? `; ${markWords}` : ''}`}>
-        <text x={L} y={T - 10} className="t-ink t-bold">{`${worse ? 'Clearly worse than itself' : 'Different from itself'} on ${pctw(self.noise)} of requests`}</text>
+        aria-label={`Your model gave ${said} on ${pctw(self.noise)} of ${self.n} requests, each asked ${keeps ? 'three times' : 'twice'}${mark !== null ? `; ${markWords}` : ''}`}>
+        <text x={L} y={T - 10} className="t-ink t-bold">{`${keeps ? 'Missed something itself' : worse ? 'Clearly worse than itself' : 'Different from itself'} on ${pctw(self.noise)} of requests`}</text>
         <rect x={L} y={T} width={w} height="16" rx="8" fill="var(--grid)" />
         {self.noise > 0 && <rect x={L} y={T} width={Math.max(16, x(self.noise) - L)} height="16" rx="8" fill={self.most ? 'var(--bad)' : 'var(--brand)'} />}
         {mark !== null && (

@@ -35,14 +35,16 @@ const KIND = {
 const MODE = { auto: 'Automatic', ask: 'Ask me first', off: 'Never switch' };
 
 /* How a workload's answers are judged when another model is tested on them (judge_mode; see judgeMode in
-   src/eval/run.js): Understudy's choice at each test, or always one of the two ways. */
+   src/eval/run.js): Understudy's choice at each test, or always one of the three ways. */
 const JUDGING = [
   { mode: 'auto', chip: 'Automatically', label: 'Automatically',
-    note: "Understudy decides at each test: at least as good for open-ended writing such as poems and stories, and wherever the original model's own answers vary too much to match; the same answer for everything else." },
+    note: "Understudy decides at each test: keeps what matters for summaries, translations and other answers built from text the request gives; at least as good for open-ended writing such as poems and stories, and wherever the original model's own answers vary too much to match; the same answer for everything else." },
   { mode: 'same', chip: 'Same answer', label: 'The same answer',
     note: "Another model passes only when it gives the same answers as the original model. Right when facts, figures or decisions have to match." },
   { mode: 'quality', chip: 'At least as good', label: 'At least as good',
     note: "Another model passes when its answers are at least as good as the original model's, even when they're worded differently. Right for creative writing." },
+  { mode: 'keeps', chip: 'Keeps what matters', label: 'Keeps what matters',
+    note: "Another model passes when its answers keep the facts that matter, the figures, dates, decisions and next steps the original model gives every time, and get nothing wrong, however they're worded. Right for summaries and translations." },
 ];
 /* What a workload optimizes for when the models a test tries are scored (routing_mode; see src/eval/score.js): each model
    gets quality, cost and speed out of 100, and one score out of 100 that weighs them this way. Balance unless changed. */
@@ -55,12 +57,21 @@ const OPTIMIZE = [
 // the words on the model a test's page picks, for what the workload optimizes for
 const bestWords = (k) => (k === 'balance' || !k ? 'Best balance' : `Best for ${k}`);
 
-// why the newest test judged answers as at least as good (planRecord.judging.reason)
+// why the newest test judged answers as at least as good, or as keeping what matters (planRecord.judging.reason)
 const JUDGED_WHY = {
   'open-ended': 'these requests ask for open-ended writing',
   varied: 'the original model answers the same request differently each time',
   chosen: "this workload's setting asks for it",
+  sourced: 'these requests ask for an answer built from text they give, like a summary or a translation',
 };
+/* The words for how a test judged answers (its yardstick: 'agreement', the same answer; 'quality', at least as good; 'keeps',
+   keeps what matters), wherever the page says what a figure counts. */
+const YARD = {
+  agreement: { axis: 'Different', long: 'Different from original model', checked: 'different' },
+  quality: { axis: 'Worse', long: 'Worse than original model', checked: 'worse' },
+  keeps: { axis: 'Missed', long: 'Missed something that matters', checked: 'missed something' },
+};
+export const yardWords = (y) => YARD[y] || YARD.agreement;
 
 const short = (m) => (m ? String(m).split('/').pop() : 'your model');
 const pct1 = (x) => `${(x * 100).toFixed(1)}%`;
@@ -436,9 +447,8 @@ function Summary({ w, pg, cand, waitsForPerson, copiesOnly, running, busy, act, 
   const next = r ? stages[at + 1] : undefined;
   const hours = r ? ((r.stageHours || [])[at] ?? (r.stageHours || []).slice(-1)[0] ?? 0) : 0;
 
-  const quality = d?.checks?.yardstick === 'quality';
   const slipNote = d?.checks?.n > 0 && d.checks.rate !== null
-    ? `Checked daily: ${pct1(d.checks.rate)} ${quality ? 'worse' : 'different'}, ${Math.round(d.checks.bar * 1000) / 10}% allowed.`
+    ? `Checked daily: ${pct1(d.checks.rate)} ${yardWords(d?.checks?.yardstick).checked}, ${Math.round(d.checks.bar * 1000) / 10}% allowed.`
     : null;
   const couldSave = cand && w.certificate?.referenceCostMonth > 0 && cand.costMonth !== null && cand.costMonth !== undefined
     ? w.certificate.referenceCostMonth - cand.costMonth : null;
@@ -562,7 +572,6 @@ function Waiting({ w, cand, busy, copiesOnly, act, go, goTo }) {
   const after = row?.perCall ?? null;
   const name = cand.name && cand.name.kind !== 'model' ? cand.name.label : cand.model;
   const refShort = short(w.reference);
-  const quality = rp?.yardstick === 'quality';
   const why = w.optimizeMode === 'ask' ? 'Your workspace asks first, so nothing switches until you say yes.'
     : w.optimizeMode === 'off' ? 'Your workspace never switches by itself.'
       : cand.heldBack ? "It was switched back before, so it won't switch by itself again."
@@ -598,7 +607,7 @@ function Waiting({ w, cand, busy, copiesOnly, act, go, goTo }) {
       )}
       <dl className="wp-inline">
         <div>
-          <dt>{quality ? 'Worse' : 'Different'}</dt>
+          <dt>{yardWords(rp?.yardstick).axis}</dt>
           <dd className="m">{cand.gap !== null && cand.gap !== undefined ? `${Number(cand.gap).toFixed(1)}%` : 'not judged'}
             {rp?.bar > 0 && <span>{Math.round(rp.bar * 1000) / 10}% allowed</span>}</dd>
         </div>
@@ -644,11 +653,13 @@ function Judging({ w, busy, act, onClose }) {
   };
   const last = w.judgedAs;
   const lastWords = !last ? 'No test has compared models on this workload yet.'
-    : last.yardstick === 'quality'
-      ? `The newest test checked for answers at least as good as the original model's${JUDGED_WHY[last.reason] ? `, because ${JUDGED_WHY[last.reason]}` : ''}.`
-      : `The newest test checked for the same answers as the original model's${last.mode === 'same' ? ", as this workload's setting asked"
-        : last.closed === 'facts' ? ', because its answers state figures, facts or decisions, which have to match'
-          : last.closed === 'requests' ? ", because its requests don't ask for open-ended writing like poems or stories" : ''}.`;
+    : last.yardstick === 'keeps'
+      ? `The newest test checked for answers that keep what matters in the original model's${JUDGED_WHY[last.reason] ? `, because ${JUDGED_WHY[last.reason]}` : ''}.`
+      : last.yardstick === 'quality'
+        ? `The newest test checked for answers at least as good as the original model's${JUDGED_WHY[last.reason] ? `, because ${JUDGED_WHY[last.reason]}` : ''}.`
+        : `The newest test checked for the same answers as the original model's${last.mode === 'same' ? ", as this workload's setting asked"
+          : last.closed === 'facts' ? ', because its answers state figures, facts or decisions, which have to match'
+            : last.closed === 'requests' ? ", because its requests don't ask for open-ended writing like poems or stories, or for a summary or a translation" : ''}.`;
   return (
     <section className="wp-card" id="wp-judging" aria-labelledby="wp-judging-h">
       <div className="wp-cardhead">
@@ -659,7 +670,7 @@ function Judging({ w, busy, act, onClose }) {
         <p className="wp-lead" style={{ margin: 0 }}>
           When another model is tested on this workload, each of its answers is compared with the original model's answer to the same request.
         </p>
-        <div className="wp-opts" role="radiogroup" aria-labelledby="wp-judging-h" onKeyDown={onKey}>
+        <div className="wp-opts is-two" role="radiogroup" aria-labelledby="wp-judging-h" onKeyDown={onKey}>
           {JUDGING.map((j) => (
             <button type="button" key={j.mode} ref={(el) => { refs.current[j.mode] = el; }} className="wp-opt" role="radio"
               aria-checked={j.mode === chosen} tabIndex={j.mode === chosen ? 0 : -1} disabled={busy} onClick={() => choose(j.mode)}>
@@ -821,6 +832,15 @@ function RunRow({ w, r, open, onToggle, goTo, optimize }) {
 
 /* What the first figure in a test's table means, in the words its information bubble says (see Help). */
 export function ColumnWords({ rp }) {
+  if (rp.yardstick === 'keeps') {
+    return (
+      <>
+        <p><b>Missed something that matters</b></p>
+        <p>How often this model's answer left out a fact that matters, or got something wrong, on the requests tested. A fact that matters is one both of the original model's answers to the request give, which someone relying on the answer would need, such as a figure, a date, a decision or what happens next.</p>
+        <p>For example, 10% means it missed something that matters on 10% of those requests.</p>
+      </>
+    );
+  }
   return rp.yardstick === 'quality' ? (
     <>
       <p><b>Worse than original model</b></p>
@@ -842,7 +862,6 @@ function DotWords({ c, rp, k = 'balance' }) {
   if (!c) return null;
   const score = c.scores?.[k] ?? null;
   const p = c.parts || {};
-  const quality = rp.yardstick === 'quality';
   const ref = rp.yours || {};
   // a saving short of the whole cost is never rounded up to all of it: 99.5% less is "99% less", not "100% less"
   const less = (x) => `${Math.min(99, Math.round(x * 100))}%`;
@@ -856,7 +875,7 @@ function DotWords({ c, rp, k = 'balance' }) {
         {score !== null && (
           <div><dt>Score</dt><dd>{Math.round(score)} of 100: quality {p.quality}, cost {p.cost}, speed {p.speed ?? 'not counted'}</dd></div>
         )}
-        <div><dt>{quality ? 'Worse than original model' : 'Different from original model'}</dt>
+        <div><dt>{yardWords(rp.yardstick).long}</dt>
           <dd>{pct1(c.gap)} of requests{rp.bar > 0 ? `, at most ${pct1(rp.bar)} allowed` : ''}</dd></div>
         <div><dt>Per 1,000 requests</dt><dd>{perK(c.perCall)}{vs}</dd></div>
         <div><dt>{rp.metric === 'ttft' ? 'Time to first word' : 'Typical time'}</dt>
@@ -872,6 +891,15 @@ function DotWords({ c, rp, k = 'balance' }) {
 function AllowedWords({ rp }) {
   const f = (x) => `${Math.round(x * 1000) / 10}%`;
   const has = rp.noise !== null && rp.noise !== undefined;
+  if (rp.yardstick === 'keeps') {
+    return (
+      <>
+        <p><b>Allowed difference</b></p>
+        <p>The original model doesn't always keep everything that matters either.{has ? ` In this test it answered each request a third time, and that third answer missed something its other two kept on ${f(rp.noise)} of requests.` : ''}</p>
+        <p>Another model counts as a close enough match when it misses something that matters on at most {f(rp.bar)} of requests{has ? ', a little more than that, because the figure one test measures moves by chance' : ''}.</p>
+      </>
+    );
+  }
   return rp.yardstick === 'quality' ? (
     <>
       <p><b>Allowed difference</b></p>
@@ -979,6 +1007,14 @@ function ScoreWords({ k, rp }) {
   );
 }
 function QualityWords({ rp }) {
+  if (rp.yardstick === 'keeps') {
+    return (
+      <>
+        <p><b>Quality</b></p>
+        <p>How rarely this model missed something that matters, or got something wrong, out of 100: 100 when it never did, 50 at the most allowed. The figure under it is how often it did.</p>
+      </>
+    );
+  }
   return rp.yardstick === 'quality' ? (
     <>
       <p><b>Quality</b></p>
@@ -1051,8 +1087,7 @@ function OptimizeFor({ optimize }) {
 }
 
 function RunDetail({ rp, wid, goTo, optimize }) {
-  const quality = rp.yardstick === 'quality';
-  const axis = quality ? 'Worse than original model' : 'Different from original model';
+  const axis = yardWords(rp.yardstick).long;
   const time = rp.metric === 'ttft' ? 'Time to first word' : 'Typical time';
   /* The table's order and its pick, for what the workload optimizes for now: sent with the test for every choice, so a
      change re-sorts it here at once. A test read before scores had none, and keeps the order it came in. */
@@ -1177,7 +1212,7 @@ function CandRow({ c, i, rp, wid, k, best, kept = false, time, goTo }) {
       </td>
       <td className={`r wp-scorecell${score === null ? ' none' : ''}`} data-label="Score">{score === null ? 'not scored' : Math.round(score)}</td>
       <td className="r" data-label="Quality">
-        <Part v={p.quality} kind="q" none="not judged" fact={c.gap === null ? null : `${pct1(c.gap)} ${quality ? 'worse' : 'differed'}`} />
+        <Part v={p.quality} kind="q" none="not judged" fact={c.gap === null ? null : `${pct1(c.gap)} ${rp.yardstick === 'keeps' ? 'missed' : quality ? 'worse' : 'differed'}`} />
       </td>
       <td className="r" data-label="Cost">
         <Part v={p.cost} kind="c" none="not priced" fact={c.perCall === null ? null : `${perK(c.perCall)} per 1,000`} />

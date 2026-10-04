@@ -1168,11 +1168,12 @@ api.post('/workloads/:id/explore', async (req, res) => {
    "auto" follows the traffic: streamed answers keep the same speed, others may be a little slower. */
 const SPEED_PREFS = ['auto', 'same', 'slower_ok', 'any'];
 
-/* How a workload's answers are judged when another model is tested on them: 'auto' lets each test choose ("at least as
-   good" for open-ended writing and for answers that vary too much for "the same answer" to mean anything, "the same
-   answer" for the rest), 'same' always holds another model to the original model's answers, and 'quality' always to
-   answers at least as good (see judgeMode in src/eval/run.js). Stored null for 'auto'. */
-const JUDGE_MODES = ['auto', 'same', 'quality'];
+/* How a workload's answers are judged when another model is tested on them: 'auto' lets each test choose ("keeps what
+   matters" for summaries, translations and other answers built from text the request supplies, "at least as good" for
+   open-ended writing and for answers that vary too much for "the same answer" to mean anything, "the same answer" for the
+   rest), 'same' always holds another model to the original model's answers, 'quality' always to answers at least as good,
+   and 'keeps' always to keeping what matters (see judgeMode in src/eval/run.js). Stored null for 'auto'. */
+const JUDGE_MODES = ['auto', 'same', 'quality', ...(config.EVAL_KEEPS ? ['keeps'] : [])];
 
 /** How the newest finished test judged a workload's answers, and why: { yardstick, reason, mode, closed } or null before
     any. `closed` is why it kept to the same answer when it could have chosen: 'facts' where the original model's own
@@ -1183,7 +1184,7 @@ async function judgedAsOf(workloadId) {
     ORDER BY created_at DESC LIMIT 1`).get(workloadId);
   if (!r) return null;
   const plan = parseJson(r.plan_json);
-  const yardstick = r.yardstick === 'quality' ? 'quality' : 'agreement';
+  const yardstick = ['quality', 'keeps'].includes(r.yardstick) ? r.yardstick : 'agreement';
   // before 25 Sep a test held answers to "at least as good" only where the original model varied too much for the same answer
   const reason = plan?.judging?.reason ?? plan?.yardstick?.reason ?? (yardstick === 'quality' ? 'varied' : null);
   const open = plan?.judging?.openEnded;

@@ -217,9 +217,10 @@ export const config = {
   SCORE_SWITCH_MARGIN: num('SCORE_SWITCH_MARGIN', 3),
   /* Judging a difference three ways (src/eval/judge.js): where a candidate's written answer differs from
      the customer's model's only in wording or in what it includes, Jev is asked, in both orders, whether it
-     serves the person worse, as well or better. It is forgiven only when both readings put the chance the
-     customer's answer is better under THREE_WAY_FORGIVE_MAX, and counted better when both put the chance
-     it is better at THREE_WAY_BETTER_MIN or more. Facts, figures and decisions are never forgiven. */
+     serves the person worse, as well or better. It is forgiven when the two readings' average chance that the
+     customer's answer is better is under THREE_WAY_FORGIVE_MAX, and counted better when their average chance that
+     it is better is THREE_WAY_BETTER_MIN or more: averaged, Jev's lean towards the answer it reads second cancels
+     out. Facts, figures and decisions are never forgiven. */
   EVAL_THREE_WAY: bool('EVAL_THREE_WAY', true),
   THREE_WAY_FORGIVE_MAX: num('THREE_WAY_FORGIVE_MAX', 0.3),
   THREE_WAY_BETTER_MIN: num('THREE_WAY_BETTER_MIN', 0.6),
@@ -301,6 +302,33 @@ export const config = {
   EVAL_OPEN_ENDED_KEEP_SHARE: num('EVAL_OPEN_ENDED_KEEP_SHARE', 0.6),
   // the most of the customer's own pairs that may differ in figures, facts or decisions for work to still count as open-ended
   EVAL_OPEN_ENDED_FACTS_MAX: num('EVAL_OPEN_ENDED_FACTS_MAX', 0.1),
+  /* "Keeps what matters" (src/eval/keeps.js), the third way of judging written work: every answer is held to the facts both
+     of the customer's model's answers to the same request state, and read against the request for anything it gets wrong.
+     EVAL_KEEPS lets a workload be set to it; EVAL_KEEPS_AUTO lets "Automatically" choose it, for requests that ask to
+     summarise, rewrite, translate or pull facts out of text they supply themselves: a workload is such work when Jev (or
+     the judge model) reads at least EVAL_SOURCED_SHARE of the requests it reads (EVAL_OPEN_ENDED_ASK) that way with a chance
+     of EVAL_SOURCED_P or more, and stays so at EVAL_SOURCED_KEEP_SHARE once its newest test read it so. Open-ended writing
+     read as such goes to "at least as good" first. */
+  EVAL_KEEPS: bool('EVAL_KEEPS', true),
+  EVAL_KEEPS_AUTO: bool('EVAL_KEEPS_AUTO', true),
+  EVAL_SOURCED_P: num('EVAL_SOURCED_P', 0.85),
+  EVAL_SOURCED_SHARE: num('EVAL_SOURCED_SHARE', 0.8),
+  EVAL_SOURCED_KEEP_SHARE: num('EVAL_SOURCED_KEEP_SHARE', 0.6),
+  /* At most this many facts are listed for one request (the most important first); a fact counts as stated when the answer
+     gives every figure of it and Jev gives it at least KEEPS_FACT_P; an answer gets something wrong when Jev gives that at
+     least KEEPS_WRONG_P; and it is in another language than the customer's answer when Jev gives the same language less
+     than KEEPS_LANGUAGE_P. */
+  KEEPS_FACTS_MAX: num('KEEPS_FACTS_MAX', 12),
+  /* A listed fact must be kept when Jev reads it as mattering this much or more, on a scale from 0 (not at all: background, a
+     reason, a step along the way) to 3 (badly: without it a reader is misled); 1.75 is nearer "clearly" than "a little". On
+     the conversation-summary test's 27 requests (3 Oct 2026) it left the customer's model's own third answer missing something
+     on 1, the two models a careful reading found complete on 1 and 2, and the one that dropped amounts and due dates on 6 of
+     16; at 1.5 facts weighed 1.5 to 1.7 ("issued invoices cannot be changed", 1.56) decided verdicts between one run and the
+     next, and at 2.0 real omissions began to pass. Every miss in the synthetic set of that day sat at 1.9 or more. */
+  KEEPS_MUST_SCORE: num('KEEPS_MUST_SCORE', 1.75),
+  KEEPS_FACT_P: num('KEEPS_FACT_P', 0.5),
+  KEEPS_WRONG_P: num('KEEPS_WRONG_P', 0.5),
+  KEEPS_LANGUAGE_P: num('KEEPS_LANGUAGE_P', 0.5),
   /* A written workload's instruction read once as a checklist of what every answer must do (a length, a shape, text
      that must or must not appear), and every answer checked against it beside the reading (src/eval/checklist.js). */
   EVAL_CHECKLIST: bool('EVAL_CHECKLIST', true),

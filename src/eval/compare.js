@@ -173,6 +173,50 @@ export function numbersOf(text) {
   return out.sort();
 }
 
+/* The figures a text gives however they are written: the digits numbersOf reads, and, in English, a number written out
+   ("eight", "twenty-five", "a hundred"), an ordinal ("third", "twenty-first") and a month by its name ("2 September" gives
+   2 and 9). Read generously on purpose: it is used to see whether an answer gives every figure of a fact it has to keep
+   (keepsCheck in src/eval/keeps.js), where a figure found here is only the first part of the check and a judge still reads
+   the fact itself, so finding a figure that is not really there costs nothing, and missing one that is would fail an answer
+   that said "eight people" for a fact that says "8 people". Answers a Set of figures written as numbersOf writes them. */
+const UNIT_WORDS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11,
+  twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const TEN_WORDS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const ORDINAL_WORDS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10,
+  eleventh: 11, twelfth: 12, thirteenth: 13, fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17, eighteenth: 18,
+  nineteenth: 19, twentieth: 20, thirtieth: 30 };
+const MONTH_WORDS = { january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7, august: 8, september: 9, october: 10,
+  november: 11, december: 12, jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
+const wordOf = (table, w) => (Object.hasOwn(table, w) ? table[w] : null);
+export function figuresOf(text) {
+  const out = new Set(numbersOf(text));
+  const words = String(text ?? '').toLowerCase().match(/[a-z]+/g) || [];
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i];
+    const month = wordOf(MONTH_WORDS, w);
+    if (month !== null) out.add(String(month));
+    let n = null;
+    const tens = wordOf(TEN_WORDS, w);
+    if (tens !== null) {
+      n = tens;
+      // "twenty-five", "twenty five", "twenty-first"
+      const unit = wordOf(UNIT_WORDS, words[i + 1] ?? '') ?? wordOf(ORDINAL_WORDS, words[i + 1] ?? '');
+      if (unit !== null && unit > 0 && unit < 10) { n += unit; i += 1; }
+    } else if (w === 'hundred' || w === 'thousand') {
+      // "a hundred", "a thousand": a scale with no number before it ("two hundred" is read at "two", below)
+      out.add(w === 'hundred' ? '100' : '1000');
+      continue;
+    } else {
+      n = wordOf(UNIT_WORDS, w) ?? wordOf(ORDINAL_WORDS, w) ?? (w === 'dozen' ? 12 : null);
+    }
+    if (n === null) continue;
+    const scale = words[i + 1];
+    if (scale === 'hundred') { n *= 100; i += 1; } else if (scale === 'thousand') { n *= 1000; i += 1; }
+    out.add(String(n));
+  }
+  return out;
+}
+
 /* Two answers carry different figures when they state the same count of them with different values,
    or, when the counts differ, when an amount (a figure with a decimal part or a thousands separator)
    in one is missing from the other: "Total 1,234.50" against "Total 1,243.50 (incl. 12% VAT)" is a

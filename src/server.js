@@ -385,8 +385,9 @@ handle('purge', async () => {
       `UPDATE calls SET request_json = NULL, response_json = NULL, content_purged_at = ?
         WHERE workspace_id = ? AND created_at < ? AND content_purged_at IS NULL`)
       .run(now(), ws.id, cutoff)).changes;
+    // (with the customer's model's third answer and the facts read from its answers, under "keeps what matters")
     b += (await db.prepare(
-      `UPDATE eval_samples SET ref_a_json = NULL, ref_b_json = NULL, content_purged_at = ?
+      `UPDATE eval_samples SET ref_a_json = NULL, ref_b_json = NULL, ref_c_json = NULL, facts_json = NULL, content_purged_at = ?
         WHERE content_purged_at IS NULL AND run_id IN (
           SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`)
       .run(now(), ws.id, cutoff)).changes;
@@ -395,6 +396,11 @@ handle('purge', async () => {
        workload shows once no call of its own still holds it. */
     c += (await db.prepare(
       `UPDATE eval_replays SET answer = NULL WHERE answer IS NOT NULL AND run_id IN (
+          SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`).run(ws.id, cutoff)).changes;
+    /* the judge's reading of an answer held to "keeps what matters" names the facts it had to keep, in the answers' words;
+       the score and the kind of difference stay, as for every other answer */
+    c += (await db.prepare(
+      `UPDATE eval_replays SET readings = NULL WHERE readings LIKE '{"way":"keeps"%' AND run_id IN (
           SELECT id FROM eval_runs WHERE workspace_id = ? AND created_at < ?)`).run(ws.id, cutoff)).changes;
     c += (await db.prepare(
       `DELETE FROM replay_cache WHERE created_at < ? AND call_id IN (

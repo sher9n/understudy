@@ -368,6 +368,12 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const open = lastJudging?.openEnded;
   plan.closedWork = !!(lastJudging && lastJudging.mode === 'auto' && !lastJudging.reason && open
     && (open.share === null || (Number(open.share) < config.EVAL_OPEN_ENDED_KEEP_SHARE && !open.yes)));
+  /* Whether that measurement read the requests as plainly not asking for an answer built from text they supply, or as
+     open-ended writing, either of which keeps it off "keeps what matters" when judged automatically; one read before that was
+     looked for may be held to it this time, and is quoted the dearer. */
+  const sourced = lastJudging?.sourced;
+  plan.notSourced = !!(lastJudging && lastJudging.mode === 'auto'
+    && (lastJudging.reason === 'open-ended' || (sourced && !sourced.yes && Number(sourced.share) < config.EVAL_SOURCED_KEEP_SHARE)));
   /* Whether the customer's model last disagreed with itself too often for "the same answer" to be a bar: a structured
      workload is then held to "at least as good" too, which is judged, and the quote counts that judging. */
   const lastBar = await db.prepare(`SELECT noise_pct FROM eval_runs WHERE workload_id = ? AND status = 'done' AND noise_pct IS NOT NULL
@@ -599,20 +605,38 @@ function estimate(plan, profile, facts, workload) {
   /* Written work is judged as its setting says (workloads.judge_mode), and automatically as the run decides: "at least as
      good" for varied or open-ended work (see judgeMode in src/eval/run.js). Automatically, a workload last held to "the
      same answer" is quoted that alone only where its work read as plainly not open-ended (plan.closedWork). */
-  const mode = text && ['same', 'quality'].includes(workload.judge_mode) ? workload.judge_mode : 'auto';
+  const keepsOn = text && config.EVAL_KEEPS;
+  const mode = text && ['same', 'quality', ...(keepsOn ? ['keeps'] : [])].includes(workload.judge_mode) ? workload.judge_mode : 'auto';
+  // "keeps what matters" may be chosen automatically: unless its last test read it plainly as other work (notSourced)
+  const mayKeep = keepsOn && config.EVAL_KEEPS_AUTO && mode === 'auto' && !plan.notSourced;
   const yardsticks = !prices ? []
     : !text ? ['quality']
-      : !config.EVAL_QUALITY_YARDSTICK || mode === 'same' ? ['agreement']
-        : mode === 'quality' || plan.yardstick === 'quality' ? ['quality']
-          : plan.yardstick === 'agreement' && (plan.closedWork || !config.EVAL_OPEN_ENDED) ? ['agreement'] : ['agreement', 'quality'];
-  /* Reading what kind of writing the requests ask for, when judged automatically: up to EVAL_OPEN_ENDED_ASK requests, each
-     read by Jev and, where Jev cannot answer one, by the language model, at no more than one reading of a pair (half of
-     llmQuality, which is two). */
-  if (prices && text && mode === 'auto' && config.EVAL_OPEN_ENDED && config.EVAL_QUALITY_YARDSTICK) {
-    const perRead = (jevUsable() ? ((Math.min(pin, 2500) + 250) * config.JEV_PRICE_PER_MTOK) / 1e6 : 0) + prices.llmQuality / 2;
+      : mode === 'keeps' ? ['keeps']
+        : !config.EVAL_QUALITY_YARDSTICK || mode === 'same' ? ['agreement']
+          : mode === 'quality' ? ['quality']
+            : plan.yardstick === 'keeps' && mayKeep ? ['keeps']
+              : plan.yardstick === 'quality' ? ['quality', ...(mayKeep ? ['keeps'] : [])]
+                : plan.yardstick === 'agreement' && (plan.closedWork || !config.EVAL_OPEN_ENDED) ? ['agreement', ...(mayKeep ? ['keeps'] : [])]
+                  : ['agreement', 'quality', ...(mayKeep ? ['keeps'] : [])];
+  /* Reading what kind of work the requests ask for, when judged automatically: up to EVAL_OPEN_ENDED_ASK requests, each
+     read by Jev (both questions in one reading) and, where Jev cannot answer one, by the language model, at no more than one
+     reading of a pair (half of llmQuality, which is two) for each question. */
+  const readsOpen = config.EVAL_OPEN_ENDED && config.EVAL_QUALITY_YARDSTICK;
+  if (prices && text && mode === 'auto' && (readsOpen || mayKeep)) {
+    const questions = (readsOpen ? 1 : 0) + (mayKeep ? 1 : 0);
+    const perRead = (jevUsable() ? ((Math.min(pin, 2500) + 250 * questions) * config.JEV_PRICE_PER_MTOK) / 1e6 : 0) + (questions * prices.llmQuality) / 2;
     total += Math.min(s, config.EVAL_OPEN_ENDED_ASK) * perRead;
   }
   const judging = yardsticks.map((yard) => {
+    /* "Keeps what matters": the customer's model a third time on every request, the facts both other answers keep listed and
+       confirmed, its third answer and every candidate answer read against them, and the judge tested on up to ten planted
+       answers, two of them put into another language first, with the instruction read once as a checklist. */
+    if (yard === 'keeps') {
+      const k = prices.keeps;
+      const pair = refPer + k.facts + k.check;
+      const planted = 10 * (k.check + k.llmCheck) + 2 * prices.translate + prices.checklist;
+      return { pair, answer: k.check, cost: s * pair + planted + (finalists.length * s + extra.length * screened) * k.check };
+    }
     const quality = yard === 'quality';
     const pair = quality ? prices.quality : prices.bar;
     const answer = quality ? prices.quality : prices.candidate;

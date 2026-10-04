@@ -3,6 +3,7 @@ import { db, id, now } from '../db/index.js';
 import { chargeEval, account, backgroundLeft } from '../billing.js';
 import { extract, disagreement, structuredCompare, proseText, heldFieldChanged } from '../eval/compare.js';
 import { judgeCandidate, judgeBarPair, judgeQuality, numbersDiffer, numbersOf } from '../eval/judge.js';
+import { factsFor, keepsCheck } from '../eval/keeps.js';
 import { askOf } from '../eval/ask.js';
 import { keptChecklist } from '../eval/checklist.js';
 import { OUTCOME_OF } from '../eval/outcome.js';
@@ -60,6 +61,26 @@ export async function scoreServed(body, served, ref, shape, { scope = null, yard
   const b = extract(ref, shape);
   if (!b.ok) return { score: null, better: 0, judgedBy: null, cost: 0, kind: null };
   if (!a.ok) return { score: 1, better: 0, judgedBy: 'no answer', cost: 0, kind: a.reason || 'no answer' };
+  /* Held to "keeps what matters" (src/eval/keeps.js), read as the measurement read it: the customer's model is asked a second
+     time (`again`), the facts both of its answers state are what the served answer must keep, and it is read against the
+     request for anything it gets wrong, by the judge that measurement's planted answers chose. Held to the facts of one answer
+     alone, it would be held to every detail that answer happened to give, a stricter standard than the one it passed. With
+     no second answer, or no list, nothing is said of it. */
+  if (yardstick === 'keeps' && shape === 'free_text' && typeof a.value === 'string' && typeof b.value === 'string') {
+    let more = null;
+    try { more = again ? await again() : null; } catch { more = null; }
+    let cost = Number(more?.cost) || 0;
+    const c = more?.json ? extract(more.json, shape) : null;
+    if (!c?.ok || typeof c.value !== 'string') return { score: null, better: 0, judgedBy: null, cost, kind: null, twice: true };
+    const request = askOf(body);
+    const f = await factsFor(request, [b.value, c.value], { scope, prefer });
+    cost += Number(f.cost) || 0;
+    if (!f.facts) return { score: null, better: 0, judgedBy: null, cost, kind: null, twice: true };
+    const j = await keepsCheck(request, a.value, { facts: f.facts, reference: b.value, scope, prefer, checklist });
+    cost += Number(j.cost) || 0;
+    if (j.transient || j.score === null || j.score === undefined) return { score: null, better: 0, judgedBy: null, cost, kind: null, twice: true };
+    return { score: j.score, better: 0, judgedBy: j.judgedBy, cost, kind: j.score > 0 ? (j.detail?.kind || 'omission') : null, twice: true };
+  }
   if (yardstick === 'quality') {
     let extra = 0;
     let twice = false;
@@ -148,7 +169,7 @@ export async function barOf(workload) {
   try { plan = row?.plan_json ? JSON.parse(row.plan_json) : null; } catch { plan = null; }
   const stable = plan?.yardstick?.stableFields;
   const bar = {
-    yardstick: row?.yardstick === 'quality' ? 'quality' : 'agreement',
+    yardstick: ['quality', 'keeps'].includes(row?.yardstick) ? row.yardstick : 'agreement',
     prefer: check?.prefer === 'llm' ? 'llm' : null,
     floorPct: Number(row?.floor_pct) > 0 ? Number(row.floor_pct)
       : Number(workload.floor_pct) > 0 ? Number(workload.floor_pct) : config.EVAL_FLOOR_MIN_PCT,
@@ -213,7 +234,7 @@ async function control(workload, { body, response, callId, decision }, { serve }
 
   // judged by the yardstick of the bar it is held to, and marked with it (see controlRecord)
   const { yardstick, prefer, stable } = await barOf(workload);
-  const checklist = yardstick === 'quality' && workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null;
+  const checklist = yardstick !== 'agreement' && workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null;
   const row = {
     id: id('ctl'), workspace_id: workload.workspace_id, workload_id: workload.id, arm_id: workload.routed_arm_id,
     call_id: callId, score: null, better: 0, judged_by: null, yardstick, detail_json: null, cost_usd: 0, latency_ms: null,
@@ -226,8 +247,9 @@ async function control(workload, { body, response, callId, decision }, { serve }
   const ownAnswer = async () => serve(referenceSpec(workload), body, { shape: workload.shape_kind, scope: workload.workspace_id,
     zdr: await zdrFor(workload.workspace_id) });
   /* asked a second time only to see whether it states a figure, or gives a field of a structured answer, the served answer
-     changed the same way again (see scoreServed) */
-  const again = yardstick === 'quality'
+     changed the same way again, and, held to "keeps what matters", always: the facts both of its answers state are what the
+     served answer must keep (see scoreServed) */
+  const again = yardstick === 'quality' || yardstick === 'keeps'
     ? async () => {
       try {
         const r = await ownAnswer();
