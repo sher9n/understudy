@@ -206,6 +206,11 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
         : waitsForPerson ? { tone: 'brand', text: 'Waiting for your yes' }
           : { tone: 'mut', text: 'Original model still in use' };
   const toSettings = go ? plainClick(() => go('settings', null, { hash: 'optimize' })) : undefined;
+  /* Under Test now: what a test would cost before anybody presses it (the most it may spend is where it stops), or why it
+     cannot run, unless that is too few requests yet, which the top of the page says. */
+  const headNote = running ? null
+    : m.canRun ? (m.atMostUsd > 0 ? `Never more than ${cents(m.atMostUsd)}` : null)
+      : m.reason && pg.enough.yes ? m.reason : null;
 
   return (
     <div className="wp-page">
@@ -213,8 +218,10 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
         <div className="wp-crumb"><a href={href('work')} onClick={plainClick(onBack)}>Workloads</a></div>
         <div>
           <div className="wp-wlhead">
-            <div>
-              <h1 className="wp-title">{w.name}</h1>
+            <h1 className="wp-title">{w.name}</h1>
+            {/* its chips, and where it stands with Test now beside them: on one line, centred on each other, where there is
+                room, and Test now on a line of its own where there is not */}
+            <div className="wp-headrow">
               <div className="wp-chips">
                 <span className="wp-chip">{I[kind[0]]}{kind[1]}</span>
                 <span className="wp-chip" title="The model this workload uses now, which every other model is compared with">
@@ -232,22 +239,17 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
                   </button>
                 )}
               </div>
-            </div>
-            <div className="wp-headacts">
-              <span className={`wp-pill is-${pill.tone}`}><span className="wp-pd" />{pill.text}</span>
-              <span className="wp-testnow">
+              <div className="wp-headacts">
+                <span className={`wp-pill is-${pill.tone}`}><span className="wp-pd" />{pill.text}</span>
                 <button type="button" className="wp-btn" disabled={!m.canRun || busy || live.starting || running} onClick={live.start}
                   title={m.canRun && m.atMostUsd > 0 ? `About ${cents(m.aboutUsd)}, and never more than ${cents(m.atMostUsd)}` : undefined}>
                   {live.starting ? 'Starting…' : m.canRun && m.aboutUsd > 0 && !running ? `Test now, about ${cents(m.aboutUsd)}` : 'Test now'}
                 </button>
-                {/* what a test would cost, before anybody presses it: the most it may spend is where it stops. Under the button
-                    it is about, wherever the button wraps to */}
-                {!running && m.canRun && m.atMostUsd > 0 && <span className="wp-most">Never more than {cents(m.atMostUsd)}</span>}
-              </span>
+              </div>
             </div>
+            {/* under the button, on a line of its own, so it never runs over the chips or the button */}
+            {headNote && <p className="wp-headnote">{headNote}</p>}
           </div>
-          {/* why Test now cannot run, unless it is that there are too few requests yet, which the top says */}
-          {!running && !m.canRun && m.reason && pg.enough.yes && <p className="wp-why">{m.reason}</p>}
         </div>
 
         {judgingOpen && w.judgeChoice && <Judging w={w} busy={busy} act={act} onClose={() => setJudgingOpen(false)} />}
