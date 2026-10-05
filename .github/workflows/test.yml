@@ -1,16 +1,32 @@
-# Every push and pull request runs the whole suite against a real Postgres and builds the screens,
-# because pushing main deploys it within a minute and nothing else stood between a change and customers.
+# Every pull request, and every change that lands on main, runs the whole suite against a real Postgres, the error-rate
+# harness and the screens build, because pushing main deploys it within a minute and nothing else stood between a change
+# and customers. A push to a branch with no pull request runs nothing: it is checked once, when it is proposed.
+#
+# The suite is dealt over seven machines by how long each file takes here (scripts/test-shard.mjs, test/times.json),
+# each running its files one at a time so timing checks are not fighting each other and saying what each took, beside
+# the harness and the build, so a change is checked in about two minutes rather than eleven. A newer push to the same
+# pull request stops the older run.
 name: test
 
 on:
-  push:
-    branches: ['**']
   pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
+  suite:
+    name: suite ${{ matrix.machine }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        machine: [1, 2, 3, 4, 5, 6, 7]
     services:
       postgres:
         image: postgres:16
@@ -21,9 +37,9 @@ jobs:
         ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U understudy"
-          --health-interval 5s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 60
     env:
       # each test file makes and drops its own database from this one
       DATABASE_URL: postgresql://understudy:understudy@localhost:5432/postgres
@@ -35,9 +51,33 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci --no-audit --no-fund
-      - name: the suite, one file at a time so timing checks are not fighting each other
-        run: node --test --test-concurrency=1 test/*.test.js
+      - name: this machine's share of the suite, one file at a time so timing checks are not fighting each other
+        run: node scripts/test-shard.mjs --run ${{ matrix.machine }} ${{ strategy.job-total }}
+
+  harness:
+    name: harness and screens
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --no-audit --no-fund
       - name: the error-rate harness
         run: node scripts/harness.mjs > /dev/null
       - name: the screens build
         run: npx vite build
+
+  # one check that is green only when every machine and the harness are, whatever the number of machines
+  every-check:
+    name: every check
+    if: always()
+    needs: [suite, harness]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "suite: ${{ needs.suite.result }}, harness and screens: ${{ needs.harness.result }}"
+          test "${{ needs.suite.result }}" = success
+          test "${{ needs.harness.result }}" = success
