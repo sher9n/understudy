@@ -2,9 +2,10 @@
 # harness and the screens build, because pushing main deploys it within a minute and nothing else stood between a change
 # and customers. A push to a branch with no pull request runs nothing: it is checked once, when it is proposed.
 #
-# The suite is dealt over six machines by how long each file takes (scripts/test-shard.mjs, test/times.json), each
-# running its files one at a time so timing checks are not fighting each other, beside the harness and the build, so a
-# change is checked in about two minutes rather than eleven. A newer push to the same pull request stops the older run.
+# The suite is dealt over seven machines by how long each file takes here (scripts/test-shard.mjs, test/times.json),
+# each running its files one at a time so timing checks are not fighting each other and saying what each took, beside
+# the harness and the build, so a change is checked in about two minutes rather than eleven. A newer push to the same
+# pull request stops the older run.
 name: test
 
 on:
@@ -25,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        machine: [1, 2, 3, 4, 5, 6]
+        machine: [1, 2, 3, 4, 5, 6, 7]
     services:
       postgres:
         image: postgres:16
@@ -51,11 +52,7 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - name: this machine's share of the suite, one file at a time so timing checks are not fighting each other
-        run: |
-          files=$(node scripts/test-shard.mjs ${{ matrix.machine }} ${{ strategy.job-total }})
-          if [ -z "$files" ]; then echo "no files for this machine"; exit 0; fi
-          echo "$files"
-          node --test --test-concurrency=1 $files
+        run: node scripts/test-shard.mjs --run ${{ matrix.machine }} ${{ strategy.job-total }}
 
   harness:
     name: harness and screens
