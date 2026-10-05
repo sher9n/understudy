@@ -25,7 +25,13 @@
 .wp .wp-crumb a:hover { color: var(--ink); text-decoration: underline; }
 .wp .wp-link { color: var(--brand-read); text-decoration: none; font-weight: 600; }
 .wp .wp-link:hover { text-decoration: underline; }
-.wp .wp-wlhead { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 14px 20px; align-items: flex-end; }
+/* its name; its chips with where it stands and Test now on the last line of them, lined up on their text, where there is
+   room (Test now on a line of its own, at the right, where there is not); and under the button a note on a line of its
+   own, so it sits right under the button however many lines the chips take, and never runs over them or the button.
+   (flex-end where a browser does not line items up on their last line: the button sits a few pixels high there) */
+.wp .wp-wlhead { display: grid; }
+.wp .wp-headrow { display: flex; flex-wrap: wrap; align-items: flex-end; align-items: last baseline; gap: 12px 20px; }
+.wp .wp-headrow > .wp-chips { flex: 1 1 340px; min-width: 0; }
 .wp .wp-title { font-size: 28px; font-weight: 700; letter-spacing: -0.03em; margin: 4px 0 8px; line-height: 1.5; overflow-wrap: anywhere; }
 .wp .wp-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .wp .wp-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 4px 10px; border-radius: 999px;
@@ -55,12 +61,11 @@
 .wp .wp-btn.pri:hover:not(:disabled) { filter: brightness(1.06); border-color: var(--brand); }
 .wp .wp-btn:disabled { opacity: 0.5; cursor: default; }
 .wp .wp-btn.small { padding: 6px 12px; font-size: 13px; }
-/* the pill is lined up with the middle of the button beside it (8px shorter), not with the caption under the button */
-.wp .wp-headacts { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
-.wp .wp-headacts > .wp-pill { margin-top: 4px; }
-.wp .wp-testnow { display: inline-flex; flex-direction: column; align-items: center; gap: 4px; }
-.wp .wp-most { font-size: 12px; line-height: 1.4; color: var(--mut-read); white-space: nowrap; }
-.wp .wp-why { font-size: 13px; color: var(--mut-read); margin: -8px 0 0; text-align: right; }
+/* the pill and the button centred on each other, at the right of the line they are on */
+.wp .wp-headacts { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-left: auto; }
+/* what a test would cost, or why it cannot run: under the button, its right edge on the button's, at most a readable width */
+.wp .wp-headnote { font-size: 13px; line-height: 1.45; color: var(--mut-read); margin: 8px 0 0; justify-self: end; max-width: 62ch;
+  text-align: right; }
 .wp .wp-err { font-size: 13.5px; color: var(--bad); background: var(--badq); border-radius: 10px; padding: 10px 12px; display: flex; gap: 12px; align-items: center; justify-content: space-between; }
 .wp .wp-textbtn { font-size: 13px; font-weight: 600; color: var(--brand-read); cursor: pointer; padding: 0; background: none; border: 0; }
 .wp .wp-textbtn:hover { text-decoration: underline; }
@@ -407,7 +412,9 @@
 @media (max-width: 640px) {
   /* room at the foot for the phone's bar of places, as every page has */
   .shellmain .page:has(> .wp-page) { padding: 20px 16px calc(92px + env(safe-area-inset-bottom)); }
-  .wp .wp-why { text-align: left; margin-top: 0; }
+  /* on a phone the pill and Test now start their own line at the left, and the note under them with them */
+  .wp .wp-headacts { margin-left: 0; }
+  .wp .wp-headnote { justify-self: start; text-align: left; }
   /* the summary on a phone: its figures one to a line, the label at one end and the number at the other */
   .wp .wp-sum { padding: 16px; gap: 14px; }
   .wp .wp-headline { font-size: 18.5px; }
