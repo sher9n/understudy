@@ -10,7 +10,7 @@ import { startSignUp, checkPassword, startSession, endSession, session, requireU
 import send, { codeEmail, accountExistsEmail, noticeEmail } from './email.js';
 import { issueKey, listKeys, revokeKey, revealKey, revealKeyById } from './keys.js';
 import { workloadStats, dailySpend, recentActivity, recentCalls, addActivity, track } from './traffic.js';
-import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available, optimizeSpent, spentOnCalls, maybeTopUp, testingLimitOf } from './billing.js';
+import { account, ledger, gateRouting, stripe, topUpAmountOf, allowanceLeft, available, optimizeSpent, spentOnCalls, maybeTopUp, testingLimitOf, balanceAlert } from './billing.js';
 import { notifyPrefs, NOTIFY_KINDS } from './notify.js';
 import { routedSavings } from './eval/actual.js';
 import { adviceFor } from './eval/advice.js';
@@ -612,6 +612,10 @@ api.get('/overview', async (req, res) =>
 api.get('/workloads', async (req, res) =>
   res.json(await overview(req.workspace.id, periodFrom(req.query?.days))));
 
+/* Whether the balance is too low to keep going, for the thin red bar across the top of every screen: read when the app
+   opens, every minute while it is in view, and whenever a screen is read (balanceAlert in src/billing.js). */
+api.get('/balance/alert', async (req, res) => res.json(await balanceAlert(req.workspace.id)));
+
 api.get('/workloads/:id', async (req, res) => {
   const w = await db.prepare('SELECT * FROM workloads WHERE id = ? AND workspace_id = ?')
     .get(req.params.id, req.workspace.id);
@@ -653,6 +657,9 @@ api.get('/workloads/:id', async (req, res) => {
     canAsk: !!plan.canAsk && !running && !waiting,
     overLimit: !!plan.askFirst,
     limitUsd: plan.limitUsd ?? null,
+    // a balance that cannot cover it: what it needs and what is free, said in red beside a way to add credit
+    lowBalance: plan.lowBalance && !running && !waiting
+      ? { needUsd: plan.aboutUsd ?? null, freeUsd: plan.freeUsd ?? 0, allowanceUsd: plan.allowanceUsd ?? 0 } : null,
     reason: running ? 'A measurement is running now.'
       : waiting ? 'A measurement is waiting to start.' : plan.reason,
     pool: plan.pool,

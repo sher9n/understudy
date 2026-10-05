@@ -119,6 +119,13 @@
 .wp .wp-tile .wp-v.words { font-size: 15px; font-family: inherit; }
 .wp .wp-tile.hero .wp-v { font-size: 30px; color: var(--ok); }
 .wp .wp-tile .wp-n { font-size: 12.5px; color: var(--mut-read); }
+/* a test waiting for credit, said in red where the page says what is next or why Test now cannot run, beside a way to add
+   credit (the theme's red on its pale red, about 4.9 to 1 in the light theme and 6 to 1 in the dark) */
+.wp .wp-tile.is-bad { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); background: var(--badq); }
+.wp .wp-tile.is-bad .wp-k, .wp .wp-tile.is-bad .wp-v, .wp .wp-tile.is-bad .wp-n { color: var(--bad); }
+.wp .wp-headnote.is-bad, .wp .wp-cardhead .wp-s.is-bad { color: var(--bad); }
+.wp .wp-cardhead .wp-s.is-bad { font-weight: 600; }
+.wp .is-bad a { color: inherit; font-weight: 650; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
 .wp .wp-rollout { display: flex; gap: 12px 16px; align-items: center; flex-wrap: wrap; justify-content: space-between; font-size: 13.5px; color: var(--mut-read);
   border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; }
 .wp .wp-rollout b { color: var(--ink); font-weight: 600; }

@@ -3,6 +3,7 @@ import { db, now } from './db/index.js';
 import config from './config.js';
 import { stripe, move, account, stripeErrorKind } from './billing.js';
 import { addActivity } from './traffic.js';
+import { resumeAfterCredit } from './eval/schedule.js';
 
 /* Credits are written here and nowhere else, keyed on the Stripe object under a unique
    index, so a retried event cannot credit the same money twice.
@@ -196,6 +197,8 @@ async function credit(workspaceId, amountUsd, ref, note) {
     await addActivity(workspaceId, {
       kind: 'bill', title: `Added $${amountUsd.toFixed(2)} of credit`, detail: note,
     });
+    // the tests that were waiting for it start now, not at their next look (the red bar said "add credit to continue")
+    await resumeAfterCredit(workspaceId).catch((err) => console.error(`resuming tests after credit failed: ${err?.message || err}`));
   }
 }
 
@@ -264,5 +267,6 @@ async function giveBackDispute(workspaceId, disputeId) {
       kind: 'bill', title: `$${r.taken.toFixed(2)} is back on your balance`,
       detail: 'The bank upheld a payment that had been disputed, so its credit is back on your balance. Automatic top up stays off until you switch it on.',
     });
+    await resumeAfterCredit(workspaceId).catch((err) => console.error(`resuming tests after credit failed: ${err?.message || err}`));
   }
 }

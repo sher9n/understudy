@@ -5,6 +5,7 @@ import { parse, go as navigate, onPop, PUBLIC, LEGACY, titleFor, safeNext, here 
   href } from './router.js';
 import { plainClick } from './nav.jsx';
 import Notice from './Notice.jsx';
+import LowBalanceBar from './LowBalanceBar.jsx';
 import Shell from './Shell.jsx';
 import Auth from './screens/Auth.jsx';
 import { SiteHome, SiteHow, SiteRouting } from './screens/site/SitePage.jsx';
@@ -141,6 +142,18 @@ export default function App() {
     .then((who) => { setMe(who); setTries(0); })
     .catch((e) => { setMe({ signedIn: false, offline: true, why: e?.message }); setTries((n) => n + 1); }), []);
   useEffect(() => { askWho(); }, [askWho]);
+
+  /* Whether the balance is too low to keep going, for the thin red bar across the top (LowBalanceBar): read when somebody
+     signed in opens the app, whenever a screen or a workload is opened or a payment comes back, and every minute while
+     the app is in view, so it goes soon after credit lands and comes when the balance runs short. */
+  const [lowBal, setLowBal] = useState(null);
+  const readLowBal = useCallback(() => api.balanceAlert().then(setLowBal).catch(() => { /* the bar stays as it was */ }), []);
+  useEffect(() => {
+    if (!me?.signedIn) { setLowBal(null); return undefined; }
+    const t = setInterval(() => { if (document.visibilityState === 'visible') readLowBal(); }, 60000);
+    return () => clearInterval(t);
+  }, [me?.signedIn, readLowBal]);
+  useEffect(() => { if (me?.signedIn) readLowBal(); }, [me?.signedIn, screen, openId, credit, readLowBal]);
   useEffect(() => {
     if (!me?.offline) return undefined;
     const t = setTimeout(askWho, AGAIN_MS[Math.min(tries - 1, AGAIN_MS.length - 1)] ?? 3000);
@@ -561,6 +574,7 @@ export default function App() {
   if (screen === 'connect' && !me.onboarded) {
     return (
       <div className="u" data-mode={mode}>
+        <LowBalanceBar alert={lowBal} go={go} />
         <Shell here="connect" me={me} go={go} dark={dark} setDark={setDark}
           locked onSignOut={signOut}>
           {endedNote}
@@ -620,6 +634,7 @@ export default function App() {
 
   return (
     <div className="u" data-mode={mode}>
+      <LowBalanceBar alert={lowBal} go={go} />
       <Shell
         here={here}
         me={me}

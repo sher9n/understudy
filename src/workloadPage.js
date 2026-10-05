@@ -1,6 +1,6 @@
 import { db, now, round8 } from './db/index.js';
 import config from './config.js';
-import { withFee } from './billing.js';
+import { withFee, gateEval, skipNeedUsd } from './billing.js';
 import { barNeed, usableCalls, sampleSizeFor } from './eval/plan.js';
 import { callsToClear, extract, differingFields } from './eval/compare.js';
 import { LASTING_STATUSES } from './eval/replay.js';
@@ -380,11 +380,15 @@ export async function pageOf(w) {
     flow: await flowOf(w, t),
     /* why the last test nobody asked for did not run, where that is what the page should say instead of a date: paused at
        the testing limit, until credit is added, or over what one test may spend (noteSkip in src/eval/run.js) */
-    skip: (() => {
-      try {
-        const s = JSON.parse(w.test_skip_json || 'null');
-        return s && s.short ? { reason: s.reason, short: s.short, text: s.text ?? null, at: Number(s.at) || null } : null;
-      } catch { return null; }
+    /* (one paused for want of balance says so only while the balance still cannot cover it: once credit has landed it is
+       no longer what stands in the way, and its next look starts it, see resumeAfterCredit) */
+    skip: await (async () => {
+      let s = null;
+      try { s = JSON.parse(w.test_skip_json || 'null'); } catch { return null; }
+      if (!s || !s.short) return null;
+      const needUsd = s.reason === 'balance' ? skipNeedUsd(s) : null;
+      if (s.reason === 'balance' && (await gateEval(w.workspace_id, { estimatedUsd: needUsd ?? 0.01 })).ok) return null;
+      return { reason: s.reason, short: s.short, text: s.text ?? null, at: Number(s.at) || null, needUsd };
     })(),
     /* what testing it has cost this month, in India's calendar, our fee included: its tests, and the background answers,
        answers read in the background and daily checks against the original model (optimizingSince) */

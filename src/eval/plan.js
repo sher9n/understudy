@@ -286,7 +286,10 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   if (memo && !forRun) {
     const key = [workload.speed_pref, workload.judge_mode, workload.routed_model, workload.reference_model, workload.status, canRoute].join('|');
     const hit = pageMemo.get(workload.id);
-    if (hit && hit.key === key && Date.now() - hit.at < PAGE_MEMO_MS) return hit.plan;
+    /* (one turned down for want of balance is kept only while the balance still cannot cover it: credit that has just
+       landed shows on the page at once, as it does in the red bar across the top) */
+    if (hit && hit.key === key && Date.now() - hit.at < PAGE_MEMO_MS
+      && !(hit.plan.lowBalance && (await gateEval(workload.workspace_id, { estimatedUsd: hit.plan.aboutUsd })).ok)) return hit.plan;
     const plan = await planFor(workload, { canRoute, forRun: false });
     pageMemo.set(workload.id, { key, at: Date.now(), plan });
     return plan;
@@ -555,6 +558,9 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   if (!gate.ok) {
     const free = Math.max(0, Number(gate.free ?? 0));
     plan.lowBalance = true;
+    // what is free, for the page's note that says so in red beside a way to add credit
+    plan.freeUsd = round8(free);
+    plan.allowanceUsd = round8(Math.max(0, Number(gate.allowance) || 0));
     plan.reason = `This would cost about $${plan.aboutUsd.toFixed(2)}, and `
       + (gate.allowance > 0 ? `$${gate.allowance.toFixed(2)} of this month's allowance and ` : '')
       + `$${free.toFixed(2)} of balance are free. Add credit and it can run.`;

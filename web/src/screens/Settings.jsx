@@ -188,7 +188,12 @@ function Switching({ data, busy, run }) {
 
 /* The balance and adding to it, topping it up by itself, the most requests may cost, the card, and every movement. */
 function Billing({ data, busy, run, setErr }) {
-  const [picking, setPicking] = useState(false);
+  /* The red bar's "Add credit" and the workload page's link to it land here with #add-credit: the amounts to add are
+     open, and the balance is brought into view, where a payment can be made. */
+  const [picking, setPicking] = useState(() => window.location.hash === '#add-credit' && !!data.canBill);
+  useEffect(() => {
+    if (window.location.hash === '#add-credit') document.getElementById('st-balance')?.scrollIntoView({ block: 'center' });
+  }, []);
   const [paying, setPaying] = useState(null);
   const [withTopUp, setWithTopUp] = useState(false);
   const [history, setHistory] = useState(false);

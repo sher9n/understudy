@@ -214,6 +214,8 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
   const headNote = running ? null
     : m.canRun || m.canAsk ? (m.atMostUsd > 0 ? `Never more than ${cents(m.atMostUsd)}` : null)
       : m.reason && pg.enough.yes ? m.reason : null;
+  // a balance that cannot cover a test: said in red under Test now instead, beside a way to add credit
+  const low = !running && m.lowBalance ? m.lowBalance : null;
   // Test now opens its price check, which starts the test once the person says yes, whatever the test costs
   const canStart = !!(m.canRun || m.canAsk);
 
@@ -254,7 +256,12 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
               </div>
             </div>
             {/* under the button, on a line of its own, so it never runs over the chips or the button */}
-            {headNote && <p className="wp-headnote">{headNote}</p>}
+            {low ? (
+              <p className="wp-headnote is-bad" role="status">
+                Your balance is too low for this test: it needs about {cents(low.needUsd)}, and{' '}
+                {cents((Number(low.freeUsd) || 0) + (Number(low.allowanceUsd) || 0))} is free. <AddCredit go={go} /> to run it.
+              </p>
+            ) : headNote && <p className="wp-headnote">{headNote}</p>}
           </div>
         </div>
 
@@ -274,7 +281,7 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
         {waitsForPerson
           ? <Waiting w={w} cand={cand} busy={busy} copiesOnly={copiesOnly} act={act} go={go} goTo={goTo} />
           : <div className="wp-calm">{I.check}<b>Nothing needs you.</b></div>}
-        <Measurements w={w} pg={pg} live={live} goTo={goTo}
+        <Measurements w={w} pg={pg} live={live} goTo={goTo} go={go}
           optimize={{
             k: optPending === 'default' ? (w.routingModeDefault || 'balance') : optPending || w.routingModeUsed || 'balance',
             // its own choice, or the workspace's (null on the workload), as it will be once what was chosen is saved
@@ -486,6 +493,12 @@ async function stopOutcome(workloadId) {
   return STOPPED;
 }
 
+/* The way to add credit, where the page says a test waits for it: opens the amount to add in Settings (#add-credit). */
+function AddCredit({ go }) {
+  const to = href('settings', null, 'add-credit');
+  return <a href={to} onClick={go ? plainClick(() => go('settings', null, { hash: 'add-credit' })) : undefined}>Add credit</a>;
+}
+
 /* When a workload is next tested, in a few words: a date, soon, when a person asks, or once it has the requests a test
    needs; or why the last one nobody asked for did not run, where that is what stands in the way (pageOf's skip). */
 const nextWords = (e, skip = null) => {
@@ -569,10 +582,13 @@ function Summary({ w, pg, cand, waitsForPerson, copiesOnly, running, busy, act, 
       <span className="wp-v">{cents(pg.spentMonth)}<small>this month</small></span>
     </div>
   );
+  // a test waiting for credit says so in red, with a way to add it (the page drops the note once the balance covers it)
+  const forCredit = pg.skip?.reason === 'balance';
   const nextTile = (
-    <div className="wp-tile">
+    <div className={forCredit ? 'wp-tile is-bad' : 'wp-tile'}>
       <span className="wp-k">Next test</span>
       <span className="wp-v words" title={pg.skip?.text || undefined}>{nextWords(e, pg.skip)}</span>
+      {forCredit && <span className="wp-n"><AddCredit go={go} /> to continue running tests.</span>}
     </div>
   );
 
@@ -805,7 +821,7 @@ function Judging({ w, busy, act, onClose }) {
 
 /* 2. Model tests: a test running now first, with its progress and Stop, then each one there has been, newest first,
    the newest open. */
-function Measurements({ w, pg, live, goTo, optimize }) {
+function Measurements({ w, pg, live, goTo, go, optimize }) {
   const rows = pg.measurements.filter((r) => !r.live);
   /* The test the page's address names (#run_...) opens instead of the newest, and is brought into view: that is where Back
      from one of its models' pages lands, and what a link to one test shows. */
@@ -831,7 +847,9 @@ function Measurements({ w, pg, live, goTo, optimize }) {
     <section className="wp-card" aria-labelledby="wp-runs-h">
       <div className="wp-cardhead">
         <h3 id="wp-runs-h">Tests</h3>
-        <span className="wp-s" title={pg.skip?.text || undefined}>Next: {nextWords(pg.enough, pg.skip)}</span>
+        {pg.skip?.reason === 'balance' ? (
+          <span className="wp-s is-bad" title={pg.skip?.text || undefined}>Next: {nextWords(pg.enough, pg.skip)}. <AddCredit go={go} /></span>
+        ) : <span className="wp-s" title={pg.skip?.text || undefined}>Next: {nextWords(pg.enough, pg.skip)}</span>}
       </div>
       {live.notice && !live.run && <p className="wp-empty" style={{ paddingTop: 10, paddingBottom: 0 }}>{live.notice}</p>}
       {!count ? (

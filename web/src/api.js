@@ -102,6 +102,8 @@ const health = async () => {
 
 export const api = {
   me: () => send('GET', '/me'),
+  // whether the balance is too low to keep going, for the red bar across the top (balanceAlert in src/billing.js)
+  balanceAlert: () => send('GET', '/balance/alert'),
   // the public pages: the contact form, and what is working right now
   contact: (b) => send('POST', '/contact', b),
   status: () => send('GET', '/status'),

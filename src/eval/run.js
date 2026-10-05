@@ -370,8 +370,9 @@ async function noteSkip(workload, plan) {
   let prev = null;
   try { prev = JSON.parse(workload.test_skip_json || 'null'); } catch { prev = null; }
   const short = SKIP_SHORT[reason] ?? null;
+  // with what it would have cost: a note for want of balance stops counting once the balance covers it (balanceAlert)
   await db.prepare('UPDATE workloads SET test_skip_json = ? WHERE id = ?')
-    .run(JSON.stringify({ reason, short, text: plan.reason ?? null, at: now() }), workload.id);
+    .run(JSON.stringify({ reason, short, text: plan.reason ?? null, at: now(), needUsd: plan.aboutUsd ?? null }), workload.id);
   if (!short || (prev?.reason === reason && now() - Number(prev.at || 0) < 86400000)) return;
   await addActivity(workload.workspace_id, {
     kind: 'floor', title: `A test of ${workload.slug} did not run by itself`, detail: plan.reason, workloadId: workload.id,
