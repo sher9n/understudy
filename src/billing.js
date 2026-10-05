@@ -604,6 +604,48 @@ export async function gateEval(workspaceId, { estimatedUsd = 0 } = {}) {
   };
 }
 
+/* What a test turned down for want of balance needed (noteSkip in src/eval/run.js keeps it on the workload's note): the
+   amount the note carries, or, on a note written before it carried one, the "about $1.02" its sentence says. Null when
+   neither says. */
+export function skipNeedUsd(skipJson) {
+  let s = null;
+  try { s = typeof skipJson === 'string' ? JSON.parse(skipJson || 'null') : skipJson; } catch { s = null; }
+  if (!s) return null;
+  const n = Number(s.needUsd);
+  if (Number.isFinite(n) && n > 0) return n;
+  const m = /about \$([\d,]+(?:\.\d+)?)/.exec(String(s.text || ''));
+  return m ? Number(m[1].replace(/,/g, '')) : null;
+}
+
+/* Whether the balance is too low to keep going, for the thin red bar across the top of every screen (LowBalanceBar in
+   web/src): empty, so the calls a workspace sends through Understudy are turned away (gateRouting), once it has sent any;
+   or short of what a test waiting for credit needs (one nobody asked for, turned down for want of balance, whose need the
+   balance still does not cover by the rule that turned it down, gateEval). A note written before credit landed stops
+   counting the moment the balance covers it, so the bar goes when the credit comes. */
+export async function balanceAlert(workspaceId) {
+  const forCalls = await available(workspaceId, db, { forCalls: true });
+  const forTests = await available(workspaceId);
+  const ws = await db.prepare('SELECT mode FROM workspaces WHERE id = ?').get(workspaceId);
+  // any workload of its own whose test waits for credit, whatever state it is in, short of having been merged into another
+  const rows = await db.prepare(`SELECT id, test_skip_json FROM workloads WHERE workspace_id = ? AND merged_into IS NULL
+      AND test_skip_json LIKE '%"reason":"balance"%'`).all(workspaceId);
+  let waiting = 0;
+  let needUsd = 0;
+  for (const r of rows) {
+    const need = skipNeedUsd(r.test_skip_json) ?? 0.01;
+    if ((await gateEval(workspaceId, { estimatedUsd: need })).ok) continue;
+    waiting += 1;
+    needUsd = Math.max(needUsd, need);
+  }
+  // a workspace that has sent nothing yet is setting up, and the guide says where credit comes in
+  const sent = !(forCalls.free > 0) && !!(await db.prepare(
+    `SELECT 1 FROM calls WHERE workspace_id = ? AND source NOT IN ('replay', 'test') LIMIT 1`).get(workspaceId));
+  const empty = !(forCalls.free > 0) && sent;
+  const two = (x) => Math.round(Number(x) * 100) / 100;
+  return { low: empty || waiting > 0, empty, routes: ws?.mode === 'route', balanceUsd: two(Math.max(0, forCalls.balance)),
+    freeUsd: two(Math.max(0, forTests.free)), waiting, needUsd: two(needUsd) };
+}
+
 /* What this workspace spent on optimizing over the last thirty days, with our fee: measurements,
    background answers and answers read in the background, the three things charged as optimizing. */
 export async function optimizeSpent(workspaceId, days = 30) {

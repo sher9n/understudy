@@ -578,3 +578,48 @@ test('a yes never goes past the testing limit or the balance', async () => {
     for (const x of [w, pw]) assert.equal((await queuedTests(x.id)).length, 0, 'nothing queued');
   });
 });
+
+/* 7. A balance too low to keep going ------------------------------------------------------------------------ */
+
+test('a balance too low to keep testing shows in the red bar and on the workload, and goes the moment credit lands', async () => {
+  forgetQuoteCalibration();
+  const { ws, email } = await account(0.05);
+  const w = await workloadWithCalls(ws);
+  const me = await signedIn(email, '203.0.113.65');
+  // the test nobody asked for is turned down for want of balance, and its note keeps what it needed
+  const out = await runEvaluation(w.id, { trigger: 'automatic' });
+  assert.equal(out.ok, false, JSON.stringify(out));
+  const note = JSON.parse((await db.prepare('SELECT test_skip_json FROM workloads WHERE id = ?').get(w.id)).test_skip_json);
+  assert.equal(note.reason, 'balance');
+  const free = Math.max(0, (await available(ws.id)).free);
+  assert.ok(note.needUsd > free, `it needed ${note.needUsd}, more than the ${free} free`);
+  // the bar across the top
+  const bar = (await me.get('/balance/alert')).body;
+  assert.deepEqual([bar.low, bar.empty, bar.waiting], [true, false, 1], JSON.stringify(bar));
+  near(bar.needUsd, Math.round(note.needUsd * 100) / 100, 'what the waiting test needs', 1e-9);
+  near(bar.freeUsd, Math.round(free * 100) / 100, 'and what is free', 1e-9);
+  // the workload: Test now says why, and the next test is paused for credit
+  const wl = (await me.get(`/workloads/${w.id}`)).body;
+  assert.ok(wl.measure.lowBalance && wl.measure.lowBalance.needUsd > free, JSON.stringify(wl.measure.lowBalance));
+  near(wl.measure.lowBalance.freeUsd, free, 'what is free, under Test now', 1e-6);
+  const page = (await me.get(`/workloads/${w.id}/page`)).body;
+  assert.equal(page.skip?.reason, 'balance');
+  near(page.skip.needUsd, note.needUsd, 'what it needs, on the page', 1e-9);
+  // credit lands: the bar goes, and the workload no longer says it waits for credit, before its next look
+  await move(ws.id, { kind: 'credit', amountUsd: 50, note: 'test' });
+  assert.equal((await me.get('/balance/alert')).body.low, false);
+  assert.equal((await me.get(`/workloads/${w.id}/page`)).body.skip, null);
+  assert.equal((await me.get(`/workloads/${w.id}`)).body.measure.lowBalance, null);
+});
+
+test('an empty balance turns requests away, which the bar says once the workspace has sent any', async () => {
+  const { ws, email } = await account(0);
+  const me = await signedIn(email, '203.0.113.66');
+  assert.equal((await me.get('/balance/alert')).body.low, false, 'nothing sent yet: still setting up');
+  await workloadWithCalls(ws, { n: 25 });
+  const bar = (await me.get('/balance/alert')).body;
+  assert.deepEqual([bar.low, bar.empty], [true, true], JSON.stringify(bar));
+  assert.equal(bar.routes, (await db.prepare('SELECT mode FROM workspaces WHERE id = ?').get(ws.id)).mode === 'route');
+  await move(ws.id, { kind: 'credit', amountUsd: 5, note: 'test' });
+  assert.equal((await me.get('/balance/alert')).body.low, false, 'and goes once there is credit');
+});

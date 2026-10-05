@@ -4,7 +4,8 @@ import { FOUND, OUTCOME_OF, cheaperCleared, confirmed } from './outcome.js';
 import { wouldTry, usableCalls, unseenCalls } from './plan.js';
 import { callsToClear } from './compare.js';
 import { optimizeFor } from './score.js';
-import { HANDED_OVER } from '../jobs.js';
+import { HANDED_OVER, enqueue, wakeJobs } from '../jobs.js';
+import { gateEval, skipNeedUsd } from '../billing.js';
 
 /* When a workload is next measured by itself.
  *
@@ -201,6 +202,30 @@ export async function deferAutomatic(workloadId, { waitMs = null } = {}) {
   const at = Math.round(now() + wait);
   await db.prepare('UPDATE workloads SET recheck_after = ? WHERE id = ?').run(at, workloadId);
   return at;
+}
+
+/* Credit has just landed (src/stripe-webhook.js): every test that was waiting for it, its last look turned down for want of
+   balance (noteSkip in src/eval/run.js), that the balance now covers by the rule that turned it down (gateEval), is due now
+   and queued at once, rather than at its next look up to six hours later, so "add credit to continue running tests" means
+   what it says. Only in a workspace that tests by itself, and never one being tested or already queued. Answers the
+   workloads it queued. */
+export async function resumeAfterCredit(workspaceId) {
+  if (!(await cadenceOf(workspaceId))) return [];
+  const rows = await db.prepare(
+    `SELECT w.id, w.test_skip_json FROM workloads w
+      WHERE w.workspace_id = ? AND w.state = 'live' AND w.merged_into IS NULL AND w.test_skip_json LIKE '%"reason":"balance"%'
+        AND NOT EXISTS (SELECT 1 FROM eval_runs r WHERE r.workload_id = w.id AND r.status = 'running')
+        AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'eval_run' AND j.status IN ('queued', 'claimed')
+                          AND (j.payload::jsonb ->> 'workloadId') = w.id)`).all(workspaceId);
+  const queued = [];
+  for (const w of rows) {
+    if (!(await gateEval(workspaceId, { estimatedUsd: skipNeedUsd(w.test_skip_json) ?? 0.01 })).ok) continue;
+    await db.prepare('UPDATE workloads SET recheck_after = ? WHERE id = ?').run(now(), w.id);
+    await enqueue('eval_run', { workloadId: w.id, trigger: 'automatic' }, { unique: true });
+    queued.push(w.id);
+  }
+  if (queued.length) wakeJobs();
+  return queued;
 }
 
 /* Moved later, never earlier: a booking already further out (a backoff after re-checks that found

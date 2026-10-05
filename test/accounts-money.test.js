@@ -372,6 +372,50 @@ test('a test payment never becomes balance on a public deployment', async () => 
   config.ALLOW_TEST_PAYMENTS = true;
 });
 
+test('a payment that lands starts the tests that were waiting for it at once, and leaves the ones it does not cover', async () => {
+  const s = await billing.stripe();
+  s.paymentIntents.retrieve = async (id) => ({ id, payment_method: null });
+  // a workload whose last test nobody asked for was turned down for want of balance, the way noteSkip writes it
+  const paused = async (workspaceId, slug, needUsd) => {
+    const t = now();
+    await db.prepare(`INSERT INTO workloads (id, workspace_id, slug, fingerprint, shape_kind, reference_model, sample_prompt, created_at, updated_at,
+        state, status, recheck_after, test_skip_json) VALUES (?, ?, ?, ?, 'json', ?, 'Answer.', ?, ?, 'live', 'new', ?, ?)`)
+      .run(`wl_${slug}`, workspaceId, slug, `fp_${slug}`, MODEL, t, t, t + 6 * 3600000, JSON.stringify({ reason: 'balance',
+        short: 'paused until credit is added', text: `This would cost about $${needUsd.toFixed(2)}, and $0.12 of balance are free. Add credit and it can run.`,
+        at: t, needUsd }));
+    return `wl_${slug}`;
+  };
+  const queuedFor = async (wid) => (await db.prepare(`SELECT payload FROM jobs WHERE kind = 'eval_run' AND status = 'queued'
+      AND (payload::jsonb ->> 'workloadId') = ?`).all(wid)).map((j) => JSON.parse(j.payload));
+  const pay = (workspaceId, id, cents) => webhook(event('checkout.session.completed', { id, object: 'checkout.session', mode: 'payment',
+    payment_status: 'paid', amount_total: cents, payment_intent: `pi_${id}`, metadata: { workspace_id: workspaceId } }));
+  const { workspace } = await auth.createAccount({ email: 'resumer@example.test', password: 'password-123' });
+  const cheap = await paused(workspace.id, 'resume-cheap', 1.02);
+  const dear = await paused(workspace.id, 'resume-dear', 50);
+  const before = await billing.balanceAlert(workspace.id);
+  assert.deepEqual([before.low, before.waiting, before.needUsd], [true, 2, 50], JSON.stringify(before));
+  // $20 lands: the test it covers starts now, the one it does not keeps waiting
+  await pay(workspace.id, 'cs_resume_1', 2000);
+  const started = await queuedFor(cheap);
+  assert.equal(started.length, 1, 'the test that was waiting for credit is queued at once');
+  assert.equal(started[0].trigger, 'automatic');
+  assert.ok(Number((await db.prepare('SELECT recheck_after FROM workloads WHERE id = ?').get(cheap)).recheck_after) <= now(), 'and due now');
+  assert.equal((await queuedFor(dear)).length, 0, 'the dearer one still waits');
+  const after = await billing.balanceAlert(workspace.id);
+  assert.deepEqual([after.low, after.waiting, after.needUsd], [true, 1, 50], 'the bar now counts only the one still short');
+  // the same payment told twice starts nothing more
+  await pay(workspace.id, 'cs_resume_1', 2000);
+  assert.equal((await queuedFor(cheap)).length, 1);
+  // a workspace that tests only when asked starts nothing by itself, credit or not
+  const { workspace: asks } = await auth.createAccount({ email: 'asker@example.test', password: 'password-123' });
+  await db.prepare('UPDATE workspaces SET measure_every_days = 0 WHERE id = ?').run(asks.id);
+  const theirs = await paused(asks.id, 'resume-asks', 1.02);
+  await pay(asks.id, 'cs_resume_2', 2000);
+  assert.equal((await queuedFor(theirs)).length, 0, 'nothing starts by itself there');
+  await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE kind = 'eval_run' AND status = 'queued'
+      AND (payload::jsonb ->> 'workloadId') IN (?, ?, ?)`).run(cheap, dear, theirs);
+});
+
 test('only money that arrived is credited, and money that went back comes off again', async () => {
   const { workspace } = await auth.createAccount({ email: 'payer@example.test', password: 'password-123' });
   const s = await billing.stripe();

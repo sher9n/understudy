@@ -180,6 +180,24 @@ aside.side.mini {
 /* Above the sign-in form, which fills the screen, the notice is a strip across the top. */
 .u > .appnote { margin: 0; border-radius: 0; border-width: 0 0 1px; padding: 11px 20px; }
 
+/* The balance too low to keep going (LowBalanceBar): a thin red bar across the top of the app, above the menu and the page,
+   in the theme's own red, white words on it in the light theme and near black on the dark theme's lighter red (both about
+   6.5 to 1). Its link adds credit. On a phone it wraps, the dot staying with the first line. */
+.lowbar { display: flex; align-items: center; gap: 10px; padding: 7px 20px; background: var(--bad); color: #fff;
+  font-size: 13px; line-height: 1.45; }
+[data-mode='dark'] .lowbar { color: #1a0503; }
+.lowbar p { margin: 0; flex: 1 1 auto; min-width: 0; }
+.lowbar b { font-weight: 650; }
+.lowbar a { color: inherit; font-weight: 650; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+.lowbar a:hover { text-decoration-thickness: 2px; }
+.lowbar a:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; border-radius: 4px; }
+.lowbardot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
+@media (max-width: 640px) {
+  .lowbar { align-items: flex-start; padding: 7px 16px; font-size: 12.5px; }
+  .lowbardot { margin-top: 6px; }
+  .lowbarwhy { display: none; }
+}
+
 /* The dashboard, when it cannot read itself: the figures stay, and this says how old they are. */
 .reconn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 0; padding: 9px 12px;
   border: 1px solid var(--warn); border-radius: 10px; background: var(--warnq); font-size: 13px;
