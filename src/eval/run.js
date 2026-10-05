@@ -3,7 +3,7 @@ import config, { canRoute } from '../config.js';
 import { priceCall } from '../openrouter.js';
 import { addActivity } from '../traffic.js';
 import { gateEval, chargeEval, hold, release as releaseHold, allowanceLeft, withFee } from '../billing.js';
-import { planFor, ownArmKey, barNeed, sampleSizeFor } from './plan.js';
+import { planFor, ownArmKey, barNeed, sampleSizeFor, ceilingFor } from './plan.js';
 import { judgeBarPair, judgeCandidate, judgeQuality, canJudge, translated, readRequests, numbersDiffer, numbersOf } from './judge.js';
 import { factsFor, keepsCheck, keepsRequest } from './keeps.js';
 import { checklistFor, breakOne } from './checklist.js';
@@ -354,16 +354,19 @@ const measuringAlready = (trigger) => (trigger === 'automatic' || trigger === 'f
   : { snoozeMs: config.EVAL_STALE_MIN * 60000, note: 'another measurement of this workload is running' });
 
 /* Why the last test nobody asked for did not run, kept on the workload for its page ("Next: paused at your testing limit"),
-   and said on the workspace's activity the first time in a day that one stops for the testing limit, the balance, or the
-   most one test may spend. One that waits for requests, or would not pay for itself yet, is only kept for the page. */
+   and said on the workspace's activity the first time in a day that one stops for the testing limit, the balance, or
+   costing more than a test may spend without asking (overLimit in src/eval/plan.js, which waits for a person to start
+   it). One that waits for requests is only kept for the page, as are the notes of before 5 Oct 2026, when a test nobody
+   asked for also had to pay for itself within EVAL_PAYBACK_MONTHS ('worth'). */
 const SKIP_SHORT = {
   limit: 'paused at your testing limit',
   balance: 'paused until credit is added',
-  ceiling: 'over what one test may spend',
+  // it costs more than a test may spend without asking, so it waits for a person, who sees its price first
+  ceiling: 'when you start it',
 };
 async function noteSkip(workload, plan) {
   const reason = plan.limitReached ? 'limit' : plan.lowBalance ? 'balance' : plan.needCalls > plan.pool ? 'calls'
-    : plan.notWorth ? 'worth' : /one test of this workload may spend/.test(plan.reason || '') ? 'ceiling' : 'other';
+    : plan.overLimit ? 'ceiling' : plan.notWorth ? 'worth' : 'other';
   let prev = null;
   try { prev = JSON.parse(workload.test_skip_json || 'null'); } catch { prev = null; }
   const short = SKIP_SHORT[reason] ?? null;
@@ -431,7 +434,10 @@ export async function runEvaluation(workloadId, opts = {}) {
   }
 }
 
-async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, box = { holdId: null }) {
+/* `agreedUsd`: a person's yes to the price its page showed them (the most it may spend, our fee included), carried by
+   the job from POST /workloads/:id/measure. The test never spends more than that, and may cost more than a test may
+   spend without asking (see planFor). Only for a test a person asked for. */
+async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd = null } = {}, box = { holdId: null }) {
   const workload = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId);
   if (!workload) return { ok: false, reason: 'gone' };
   if (!canRoute()) return { snoozeMs: 15 * 60000, note: 'no OPENROUTER_API_KEY' };
@@ -478,7 +484,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
     if (workload.status === 'measuring') await rest(workloadId);
     return { ok: false, reason: 'Nothing waits for a second look any more.' };
   }
-  const plan = await planFor(workload, { canRoute: canRoute(), forRun: true, automatic, only: pending ? pending.models : null });
+  const plan = await planFor(workload, { canRoute: canRoute(), forRun: true, automatic, only: pending ? pending.models : null,
+    agreedUsd: trigger === 'manual' ? agreedUsd : null });
   if (!plan.canRun) {
     /* Looked at again when it is due rather than on every hourly pass, which would work the plan out
        over and over to reach the same answer. */
@@ -747,7 +754,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
      last. It used to be set only once the race began, as the larger of the quote and what one measurement may spend, so
      the bar was never held to anything, and a test quoted at thirty cents could spend two dollars. */
   const capLimit = Number(plan.capRaw) > 0 ? Number(plan.capRaw)
-    : Math.max(Number(plan.ceilingUsd) || config.EVAL_MAX_USD_PER_RUN, Number(plan.estimateUsd) || 0);
+    : Math.max(Number(plan.ceilingUsd) || ceilingFor(null), Number(plan.estimateUsd) || 0);
   // what stops the next call: the test's own limit reached ('budget'), or a balance that no longer covers it ('balance')
   const outOfRoom = (ahead = 0) => (lowBalance ? 'balance' : spentTotal + outUsd + ahead >= capLimit ? 'budget' : null);
   let reusedCount = 0;
@@ -2398,7 +2405,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
   let accountHit = null;
   let overQuote = false;
   const quote = Number(plan.estimateUsd) || 0;
-  const softLimit = Math.min(quote > 0 ? quote * 1.5 : config.EVAL_MAX_USD_PER_RUN, capLimit);
+  const softLimit = Math.min(quote > 0 ? quote * 1.5 : ceilingFor(null), capLimit);
   /* Never past the most this test may spend (capLimit, its quote's "at most" before our fee), which already allows for
      what one measurement of this workload may spend, the testing limit left and the balance free. */
   const hardLimit = capLimit;
@@ -2620,7 +2627,19 @@ async function measure(workloadId, { trigger = 'manual', jobId = null } = {}, bo
      Worked out afresh, as it used to be, a re-check scored some other router than the one serving. No new
      one of this kind is made: routing by kind of request replaced it. */
   const frozenRouterFor = async (cand, st, spec) => {
-    const picks = st.calls.map((c) => predict(spec, featuresOf(kept[c.i].body)));
+    /* Each call's pick as the router serves it (routeFor in src/learn/serve.js): a call its small model cannot be read for
+       (a router saved without its weights, say), or one with no cheap model to send it to, goes to the customer's own
+       model, so it is never the cheap one here either. Read as it was, such a router threw, and the whole test with it. */
+    const pickOf = (body) => {
+      if (!spec.cheap?.model) return -Infinity;
+      try {
+        const p = predict(spec, featuresOf(body));
+        return Number.isFinite(p) ? p : -Infinity;
+      } catch {
+        return -Infinity;
+      }
+    };
+    const picks = st.calls.map((c) => pickOf(kept[c.i].body));
     const readingAs = (lenient) => simulateRouter(st.calls.map((c, k) => ({ ok: c.ok, score: readingOf(c, lenient) ?? (kept[c.i].noise ?? noiseMean),
       cost: c.cost, latency: c.latency, ttft: c.ttft, p: picks[k], ref: refOfPair(kept[c.i]) })), { thresholds: [spec.threshold] })[0];
     // its row with every difference counted, like every other; as it serves, which alone decides whether it keeps serving (keepOf)

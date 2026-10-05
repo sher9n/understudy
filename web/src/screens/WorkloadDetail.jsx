@@ -113,6 +113,9 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
   const [busy, setBusy] = useState(false);
   // how its answers are judged, opened from the chip under its name
   const [judgingOpen, setJudgingOpen] = useState(false);
+  // Test now's price check, open over the page until the person says yes or not (ConfirmTest); focus goes back to the button
+  const [pricing, setPricing] = useState(false);
+  const testBtn = useRef(null);
   /* What it optimizes for, as just chosen: the tables re-sort at once. It is saved once the choosing stops, only the
      last choice, one save at a time, and the workload is read again after: the arrow keys pass through the other
      choices on the way to one, and each of them saved was the workload's setting for a moment, while the choice turned
@@ -209,8 +212,10 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
   /* Under Test now: what a test would cost before anybody presses it (the most it may spend is where it stops), or why it
      cannot run, unless that is too few requests yet, which the top of the page says. */
   const headNote = running ? null
-    : m.canRun ? (m.atMostUsd > 0 ? `Never more than ${cents(m.atMostUsd)}` : null)
+    : m.canRun || m.canAsk ? (m.atMostUsd > 0 ? `Never more than ${cents(m.atMostUsd)}` : null)
       : m.reason && pg.enough.yes ? m.reason : null;
+  // Test now opens its price check, which starts the test once the person says yes, whatever the test costs
+  const canStart = !!(m.canRun || m.canAsk);
 
   return (
     <div className="wp-page">
@@ -241,9 +246,10 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
               </div>
               <div className="wp-headacts">
                 <span className={`wp-pill is-${pill.tone}`}><span className="wp-pd" />{pill.text}</span>
-                <button type="button" className="wp-btn" disabled={!m.canRun || busy || live.starting || running} onClick={live.start}
-                  title={m.canRun && m.atMostUsd > 0 ? `About ${cents(m.aboutUsd)}, and never more than ${cents(m.atMostUsd)}` : undefined}>
-                  {live.starting ? 'Starting…' : m.canRun && m.aboutUsd > 0 && !running ? `Test now, about ${cents(m.aboutUsd)}` : 'Test now'}
+                <button ref={testBtn} type="button" className="wp-btn" disabled={!canStart || busy || live.starting || running}
+                  onClick={() => setPricing(true)} aria-haspopup="dialog"
+                  title={canStart && m.atMostUsd > 0 ? `About ${cents(m.aboutUsd)}, and never more than ${cents(m.atMostUsd)}` : undefined}>
+                  {live.starting ? 'Starting…' : canStart && m.aboutUsd > 0 && !running ? `Test now, about ${cents(m.aboutUsd)}` : 'Test now'}
                 </button>
               </div>
             </div>
@@ -253,6 +259,7 @@ export default function WorkloadDetail({ id, onBack, onChanged, go, goTo }) {
         </div>
 
         {judgingOpen && w.judgeChoice && <Judging w={w} busy={busy} act={act} onClose={() => setJudgingOpen(false)} />}
+        {pricing && canStart && !running && <ConfirmTest w={w} m={m} live={live} anchor={testBtn} onClose={() => setPricing(false)} />}
 
         {(actErr || live.err) && (
           <div className="wp-err" role="alert">
@@ -331,15 +338,23 @@ function useLive(w, reload) {
     return () => clearInterval(t);
   }, [run, wid]);
 
-  const start = async () => {
+  /* Started with the most the person said yes to (agreedUsd), which the test never spends past. Answers what happened:
+     started, or a price to say yes to again (`confirm`, when it went up since the page was read); anything else that
+     stops it is said on the page. */
+  const start = async (agreedUsd = null) => {
     setStarting(true); setErr(''); setNotice('');
     stopAsked.current = false; stopReply.current = null; sawStopping.current = false;
     try {
-      await api.measure(wid);
+      await api.measure(wid, agreedUsd);
       const d = await api.workload(wid);
       setRun(d.measure?.running || { queued: true, total: 0, done: 0, spend: 0, phase: null });
       again.current();
-    } catch (e) { setErr(e.message); } finally { setStarting(false); }
+      return { started: true };
+    } catch (e) {
+      if (e.status === 409 && e.body?.confirm) return { confirm: e.body.confirm };
+      setErr(e.message);
+      return { started: false };
+    } finally { setStarting(false); }
   };
 
   const stop = async () => {
@@ -364,6 +379,98 @@ function useLive(w, reload) {
   };
 
   return { run, starting, start, stop, asking, setAsking, halting, notice, setNotice, err, setErr };
+}
+
+/* How long a test takes to repay what it costs out of what it should find, in words: "within a month", "in about 3
+   months", "in about 2 years". */
+const paybackWords = (costUsd, perMonthUsd) => {
+  const months = costUsd / perMonthUsd;
+  if (months <= 1) return 'within a month';
+  const n = Math.round(months);
+  if (n < 2) return 'in about a month';
+  if (n < 24) return `in about ${n} months`;
+  return `in about ${Math.round(months / 12)} years`;
+};
+
+/* Test now's price check, before anything is spent: what the test will cost and the most it may spend, what it should
+   find and how soon that repays it, and whether it costs more than a test may spend without asking. Nothing starts until
+   the person says yes, and the yes carries the most they saw, which the test never spends past (agreedUsd). A price that
+   went up since the page was read comes back in its place, to say yes to again. It opens over the page inside the app's
+   own box, so it takes the light or dark theme's colours; Escape or a click outside it closes it, focus stays in it while
+   it is open, and goes back to Test now after. */
+function ConfirmTest({ w, m, live, anchor, onClose }) {
+  const [q, setQ] = useState(() => ({
+    aboutUsd: m.aboutUsd, atMostUsd: m.atMostUsd, limitUsd: m.limitUsd, overLimit: !!m.overLimit, worth: m.worth || null,
+  }));
+  const [changed, setChanged] = useState(false);
+  const [sending, setSending] = useState(false);
+  const box = useRef(null);
+  const yes = useRef(null);
+  const titleId = useId();
+  const bodyId = useId();
+  const close = () => { if (!sending) onClose(); };
+  // on the yes when it opens, and again once a new price is back (a disabled button cannot take focus, so after it renders)
+  useEffect(() => { if (!sending) yes.current?.focus(); }, [sending]);
+  useEffect(() => {
+    const back = anchor.current;
+    // the page behind does not scroll under it
+    const root = document.documentElement;
+    const was = root.style.overflow;
+    root.style.overflow = 'hidden';
+    return () => { root.style.overflow = was; back?.focus?.(); };
+  }, [anchor]);
+  const onKey = (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); close(); return; }
+    if (e.key !== 'Tab') return;
+    const all = [...box.current.querySelectorAll('button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])')];
+    if (!all.length) return;
+    if (e.shiftKey && document.activeElement === all[0]) { e.preventDefault(); all[all.length - 1].focus(); }
+    else if (!e.shiftKey && document.activeElement === all[all.length - 1]) { e.preventDefault(); all[0].focus(); }
+  };
+  const go = async () => {
+    setSending(true);
+    const out = await live.start(q.atMostUsd);
+    if (out?.confirm) {
+      const c = out.confirm;
+      setQ({ aboutUsd: c.aboutUsd, atMostUsd: c.atMostUsd, limitUsd: c.limitUsd, overLimit: !!c.overLimit, worth: c.worth || null });
+      setChanged(true);
+      setSending(false);
+      return;
+    }
+    setSending(false);
+    onClose();
+  };
+  const about = Number(q.aboutUsd) || 0;
+  const finds = Number(q.worth?.expectedMonthlyUsd) || 0;
+  const keeps = Number(q.worth?.protectedMonthlyUsd) || 0;
+  /* What it is for: once switched, mostly keeping the saving there is (how long it takes to repay itself out of what more
+     it finds would say little); otherwise what it should find, and how soon that repays it. */
+  const worthLine = !q.worth ? null
+    : keeps >= 0.005 ? `It checks that the model you switched to still holds up, which keeps the ${cents(keeps)} a month it saves now`
+      + (finds >= 0.005 ? `, and it should find about ${cents(finds)} a month more.` : '.')
+      : finds >= 0.005 ? `On what we know so far, it should find savings of about ${cents(finds)} a month, so the test pays for itself ${paybackWords(about, finds)}.`
+        : 'On what we know so far, it should find savings of under a cent a month, so it may never pay for itself, but you will see how cheaper models do on your requests.';
+  return createPortal(
+    <div className="wp wp-modal" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
+      <div ref={box} className="wp-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={bodyId} onKeyDown={onKey}>
+        <h2 id={titleId}>Test {w.name}?</h2>
+        <div id={bodyId} className="wp-dialog-body">
+          {changed && <p className="wp-dialog-note" role="status">Its price changed since this page was loaded. This is the new one.</p>}
+          <p className="wp-dialog-price">
+            It will cost about <b>{cents(about)}</b>{Number(q.atMostUsd) > 0 ? <>, and never more than <b>{cents(q.atMostUsd)}</b></> : null}.
+          </p>
+          {worthLine && <p>{worthLine}</p>}
+          {q.overLimit && Number(q.limitUsd) > 0 && <p>That is more than the {cents(q.limitUsd)} a test may spend without asking you.</p>}
+          <p>You can stop it at any time, and you pay only for what has run.</p>
+        </div>
+        <div className="wp-acts">
+          <button type="button" className="wp-btn" disabled={sending} onClick={close}>Cancel</button>
+          <button ref={yes} type="button" className="wp-btn pri" disabled={sending} onClick={go}>{sending ? 'Starting…' : 'Run the test'}</button>
+        </div>
+      </div>
+    </div>,
+    anchor.current?.closest('[data-mode]') ?? document.body,
+  );
 }
 
 const STOPPED = 'Stopped. You were charged only for what it had already run, and nothing was switched.';

@@ -1,5 +1,9 @@
 import React from 'react';
+import { usd } from '../../money.js';
 import { Doc, Sec, To } from './Public.jsx';
+
+// what a test nobody asked for may spend, our fee included (EVAL_MAX_USD_PER_RUN in src/config.js)
+const TEST_WITHOUT_ASKING = usd(20);
 
 /* What happens to a customer's traffic, told as the path one call takes, then what is kept and
  * for how long, who else touches it, what it costs, and how to turn each part of it off.
@@ -73,8 +77,7 @@ export default function Traffic({ go }) {
           <li>Group your calls into workloads, by the job each call does.</li>
           <li>Replay a sample of a workload&rsquo;s calls on other models to measure them. Those replays go
             through OpenRouter under your workspace&rsquo;s retention choice, and they are charged to you. A
-            measurement nobody asked for only runs when what it can be expected to find would pay for itself
-            within two months.</li>
+            measurement nobody asked for only runs when it costs no more than {TEST_WITHOUT_ASKING}.</li>
           <li>Judge answers, to see whether two answers mean the same thing and how well a model suits a task.</li>
           <li>On a workload running live experiments, read a few of its answers each day in the background to
             see how often each way of serving gets them right. Those reads are charged like measuring.</li>

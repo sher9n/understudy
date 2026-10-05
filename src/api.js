@@ -648,6 +648,11 @@ api.get('/workloads/:id', async (req, res) => {
   const runCount = (await db.prepare('SELECT COUNT(*) AS n FROM eval_runs WHERE workload_id = ?').get(w.id)).n;
   const measure = {
     canRun: plan.canRun && !running && !waiting,
+    /* It would cost more than a test may spend without asking (limitUsd, our fee included): Test now still starts it,
+       once the person has seen its price and said yes (POST /workloads/:id/measure with agreedUsd). */
+    canAsk: !!plan.canAsk && !running && !waiting,
+    overLimit: !!plan.askFirst,
+    limitUsd: plan.limitUsd ?? null,
     reason: running ? 'A measurement is running now.'
       : waiting ? 'A measurement is waiting to start.' : plan.reason,
     pool: plan.pool,
@@ -660,8 +665,8 @@ api.get('/workloads/:id', async (req, res) => {
     aboutUsd: plan.aboutUsd ?? null,
     atMostUsd: plan.atMostUsd ?? null,
     /* What a measurement is worth: what it is expected to find a month, what the switch already saves
-       and protects, and the most one may spend on this workload. A measurement nobody asks for runs
-       only when it would pay for itself within EVAL_PAYBACK_MONTHS. */
+       and protects, and what that pays back within EVAL_PAYBACK_MONTHS (budgetUsd, worthIt), which the
+       price a person says yes to is shown beside. It no longer decides whether one nobody asked for runs. */
     worth: plan.worth ? { ...plan.worth, paybackMonths: config.EVAL_PAYBACK_MONTHS } : null,
     ceilingUsd: plan.ceilingUsd ?? null,
     optimizeBudget: plan.optimizeBudget ?? null,
@@ -1263,14 +1268,33 @@ api.post('/workloads/:id/measure', async (req, res) => {
      LIMIT 1`).get(w.id, w.id, now() - config.EVAL_PLANNING_MAX_MS);
   if (running) return res.json({ ok: true, already: true });
 
-  const plan = await planFor(w, { canRoute: canRoute() });
+  /* A person's yes to the price its page showed them: the most it may spend, our fee included (agreedUsd). The test never
+     spends past it, and with it a test may cost more than a test may spend without asking. Without one, a test that would
+     cost more is answered with its price to say yes to (409, `confirm`), as is a yes given to a price that has since gone
+     up by more than a tenth; within that, it runs and stops at what was agreed. */
+  const asked = Number(req.body?.agreedUsd);
+  const agreedUsd = Number.isFinite(asked) && asked > 0 ? Math.round(asked * 100) / 100 : null;
+  const plan = await planFor(w, { canRoute: canRoute(), agreedUsd });
+  const confirm = () => ({
+    aboutUsd: plan.aboutUsd, atMostUsd: plan.quotedMostUsd ?? plan.atMostUsd, limitUsd: plan.limitUsd, overLimit: !!plan.askFirst,
+    worth: plan.worth ? { ...plan.worth, paybackMonths: config.EVAL_PAYBACK_MONTHS } : null,
+  });
+  if (plan.canAsk) return res.status(409).json({ error: plan.reason, confirm: confirm() });
   if (!plan.canRun) return fail(res, 400, plan.reason);
+  if (agreedUsd !== null && Number(plan.quotedMostUsd) > agreedUsd * 1.1 + 0.01) {
+    return res.status(409).json({
+      error: `Its price has gone up since you saw it: about $${plan.aboutUsd.toFixed(2)}, and never more than `
+        + `$${plan.quotedMostUsd.toFixed(2)}. Say yes to the new price to start it.`,
+      confirm: confirm(),
+    });
+  }
 
-  await enqueue('eval_run', { workloadId: w.id, trigger: 'manual' }, { unique: true });
+  await enqueue('eval_run', { workloadId: w.id, trigger: 'manual', ...(agreedUsd !== null ? { agreedUsd } : {}) }, { unique: true });
   // looked at now, not at the next tick: somebody is watching for it to start (it has places of its own, see src/jobs.js)
   wakeJobs();
   await db.prepare(`UPDATE workloads SET status = 'measuring', updated_at = ? WHERE id = ?`).run(now(), w.id);
-  return res.json({ ok: true, sample: plan.sample, models: plan.candidates.length, estimateUsd: plan.estimateUsd });
+  return res.json({ ok: true, sample: plan.sample, models: plan.candidates.length, estimateUsd: plan.estimateUsd,
+    aboutUsd: plan.aboutUsd, atMostUsd: plan.atMostUsd });
 });
 
 /* Stop measuring. What already ran is kept and charged like any other call, and nothing is
@@ -1415,6 +1439,8 @@ api.get('/settings', async (req, res) => {
     evalModelsMax: config.EVAL_MODELS_MAX,
     measureEveryDays: req.workspace.measure_every_days ?? config.MEASURE_EVERY_DAYS,
     measureChoices: MEASURE_OPTIONS,
+    // what any test may spend without asking, our fee included (ceilingFor in src/eval/plan.js)
+    testWithoutAskingUsd: config.EVAL_MAX_USD_PER_RUN,
     retentionChoices: RETENTION_CHOICES,
     zdrOnly: req.workspace.zdr_required !== 0,
     zdrForced: config.ZDR_FORCED,

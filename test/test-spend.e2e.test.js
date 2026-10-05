@@ -436,3 +436,145 @@ test('a test nobody asked for that the balance cannot cover says so on its page,
     config.EVAL_PAYBACK_MONTHS = savedPayback;
   }
 });
+
+/* 6. A test's price, said yes to --------------------------------------------------------------------------- */
+
+// the workspace's own routes, signed in as its owner, each answer read as JSON
+async function signedIn(email, ip) {
+  const r = await fetch(`http://127.0.0.1:${APP_PORT}/api/auth/sign-in`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-real-ip': ip },
+    body: JSON.stringify({ email, password: 'correct-horse-battery' }),
+  });
+  assert.equal(r.status, 200, 'signed in');
+  const cookie = (r.headers.get('set-cookie') || '').split(';')[0];
+  const call = async (method, path, body) => {
+    const res = await fetch(`http://127.0.0.1:${APP_PORT}/api${path}`, {
+      method, headers: { cookie, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+  return { get: (path) => call('GET', path), post: (path, body) => call('POST', path, body) };
+}
+// what a test may spend without asking (our fee included), and how soon what it finds must repay it, for one test, put back after
+async function withLimits({ limitUsd = null, paybackMonths = null }, fn) {
+  const saved = [config.EVAL_MAX_USD_PER_RUN, config.EVAL_RUN_CAP_USD, config.EVAL_PAYBACK_MONTHS];
+  try {
+    if (limitUsd !== null) [config.EVAL_MAX_USD_PER_RUN, config.EVAL_RUN_CAP_USD] = [limitUsd, limitUsd];
+    if (paybackMonths !== null) config.EVAL_PAYBACK_MONTHS = paybackMonths;
+    return await fn();
+  } finally {
+    [config.EVAL_MAX_USD_PER_RUN, config.EVAL_RUN_CAP_USD, config.EVAL_PAYBACK_MONTHS] = saved;
+  }
+}
+const queuedTests = (wid) => db.prepare(`SELECT * FROM jobs WHERE kind = 'eval_run' AND status = 'queued'
+    AND (payload::jsonb ->> 'workloadId') = ?`).all(wid);
+
+test('any test may spend $20 without asking, whatever the workload\'s size and however long what it finds takes to repay it', async () => {
+  forgetQuoteCalibration();
+  await withLimits({ limitUsd: 20, paybackMonths: 0.0001 }, async () => {
+    const { ws, email } = await account(50);
+    const w = await workloadWithCalls(ws);
+    const plan = await planFor(w, { canRoute: true, automatic: true });
+    assert.equal(plan.worth.worthIt, false, 'what it can find would take far longer than the payback months to repay it');
+    assert.equal(plan.canRun, true, plan.reason);
+    near(plan.limitUsd, 20, 'the most a test may spend without asking, our fee included', 1e-6);
+    assert.ok(plan.atMostUsd <= 20 + 1e-6, `and it stops there: ${plan.atMostUsd}`);
+    const out = await runEvaluation(w.id, { trigger: 'automatic' });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    // Settings says it as it is
+    const me = await signedIn(email, '203.0.113.60');
+    assert.equal((await me.get('/settings')).body.testWithoutAskingUsd, 20);
+  });
+});
+
+test('a test dearer than a test may spend without asking waits for a person, who sees its price and starts it with a yes it never spends past', async () => {
+  forgetQuoteCalibration();
+  await withLimits({ limitUsd: 0.01 }, async () => {
+    const { ws, email } = await account(50);
+    const w = await workloadWithCalls(ws);
+    // nobody asked: it waits for a person, says why, and spends nothing
+    const auto = await runEvaluation(w.id, { trigger: 'automatic' });
+    assert.equal(auto.ok, false);
+    assert.match(auto.reason, /more than the \$0\.01 a test may spend without asking you, so it waits for you to start it from its page/);
+    const skip = JSON.parse((await db.prepare('SELECT test_skip_json FROM workloads WHERE id = ?').get(w.id)).test_skip_json);
+    assert.deepEqual([skip.reason, skip.short], ['ceiling', 'when you start it']);
+    assert.equal((await db.prepare('SELECT COUNT(*)::int AS n FROM eval_runs WHERE workload_id = ?').get(w.id)).n, 0, 'no test, nothing spent');
+    // its page offers it all the same, with its price
+    const me = await signedIn(email, '203.0.113.61');
+    const page = await me.get(`/workloads/${w.id}`);
+    assert.equal(page.status, 200);
+    const m = page.body.measure;
+    assert.deepEqual([m.canRun, m.canAsk, m.overLimit], [false, true, true], m.reason);
+    near(m.limitUsd, 0.01, 'the most a test may spend without asking', 1e-9);
+    assert.ok(m.aboutUsd > 0.01 && m.atMostUsd >= m.aboutUsd, JSON.stringify(m));
+    // started without a yes: answered with its price, and nothing is queued
+    const no = await me.post(`/workloads/${w.id}/measure`);
+    assert.equal(no.status, 409);
+    assert.match(no.body.error, /It starts once you say yes to its price/);
+    near(no.body.confirm.atMostUsd, m.atMostUsd, 'the price to say yes to is the one the page showed', 0.005);
+    assert.equal(no.body.confirm.overLimit, true);
+    assert.equal((await queuedTests(w.id)).length, 0, 'nothing queued');
+    // with a yes to that price: queued, carrying the yes
+    const yes = await me.post(`/workloads/${w.id}/measure`, { agreedUsd: no.body.confirm.atMostUsd });
+    assert.equal(yes.status, 200, JSON.stringify(yes.body));
+    const [job] = await queuedTests(w.id);
+    const payload = JSON.parse(job.payload);
+    assert.equal(payload.trigger, 'manual');
+    near(payload.agreedUsd, Math.round(no.body.confirm.atMostUsd * 100) / 100, 'the yes travels with the test', 1e-9);
+    // the test the job starts runs, and never spends past the yes
+    const out = await runEvaluation(w.id, { trigger: 'manual', jobId: job.id, agreedUsd: payload.agreedUsd });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const run = await db.prepare('SELECT * FROM eval_runs WHERE id = ?').get(out.runId);
+    assert.ok(Number(run.cap_usd) <= payload.agreedUsd + 1e-6, `its most: ${run.cap_usd} of the ${payload.agreedUsd} agreed`);
+    assert.ok(withFee(Number(run.spend_usd)) <= payload.agreedUsd + 0.05, `spent ${withFee(Number(run.spend_usd))} of the ${payload.agreedUsd} agreed`);
+    await db.prepare(`UPDATE jobs SET status = 'done' WHERE id = ?`).run(job.id);
+  });
+});
+
+test('a yes to a price that has since gone up by more than a tenth is asked again; within that, the test stops at what was agreed', async () => {
+  forgetQuoteCalibration();
+  const { ws, email } = await account(50);
+  const w = await workloadWithCalls(ws);
+  const me = await signedIn(email, '203.0.113.62');
+  const quoted = (await me.get(`/workloads/${w.id}`)).body.measure;
+  assert.equal(quoted.canRun, true, quoted.reason);
+  // a yes to half the price it has now: asked again, with the price it has now
+  const low = await me.post(`/workloads/${w.id}/measure`, { agreedUsd: Math.round(quoted.atMostUsd * 50) / 100 });
+  assert.equal(low.status, 409);
+  assert.match(low.body.error, /Its price has gone up since you saw it/);
+  near(low.body.confirm.atMostUsd, quoted.atMostUsd, 'with the price it has now', 0.005);
+  assert.equal((await queuedTests(w.id)).length, 0);
+  // a yes a little under it: it runs, and stops at the yes
+  const agreed = Math.round(quoted.atMostUsd * 95) / 100;
+  const ok = await me.post(`/workloads/${w.id}/measure`, { agreedUsd: agreed });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.ok(ok.body.atMostUsd <= agreed + 1e-9, `its most is the yes: ${ok.body.atMostUsd} of ${agreed}`);
+  const plan = await planFor(w, { canRoute: true, forRun: true, agreedUsd: agreed });
+  assert.ok(plan.atMostUsd <= agreed + 1e-9 && plan.capRaw <= agreed / FEE + 1e-9, JSON.stringify([plan.atMostUsd, plan.capRaw]));
+  near(plan.quotedMostUsd, quoted.atMostUsd, 'what it is quoted without the yes', 0.005);
+  for (const j of await queuedTests(w.id)) await db.prepare(`UPDATE jobs SET status = 'cancelled' WHERE id = ?`).run(j.id);
+});
+
+test('a yes never goes past the testing limit or the balance', async () => {
+  forgetQuoteCalibration();
+  await withLimits({ limitUsd: 0.01 }, async () => {
+    const { ws, email } = await account(50);
+    const w = await workloadWithCalls(ws);
+    await db.prepare('UPDATE workspaces SET optimize_budget_usd = 0.01 WHERE id = ?').run(ws.id);
+    const me = await signedIn(email, '203.0.113.63');
+    const m = (await me.get(`/workloads/${w.id}`)).body.measure;
+    assert.deepEqual([m.canRun, m.canAsk], [false, false], 'Test now cannot open a price to say yes to');
+    assert.match(m.reason, /testing limit for the last thirty days/);
+    const limited = await me.post(`/workloads/${w.id}/measure`, { agreedUsd: 100 });
+    assert.equal(limited.status, 400);
+    assert.match(limited.body.error, /testing limit for the last thirty days/);
+    // a balance that cannot cover it
+    const poor = await account(0.001);
+    const pw = await workloadWithCalls(poor.ws);
+    const them = await signedIn(poor.email, '203.0.113.64');
+    const broke = await them.post(`/workloads/${pw.id}/measure`, { agreedUsd: 100 });
+    assert.equal(broke.status, 400);
+    assert.match(broke.body.error, /Add credit and it can run/);
+    for (const x of [w, pw]) assert.equal((await queuedTests(x.id)).length, 0, 'nothing queued');
+  });
+});

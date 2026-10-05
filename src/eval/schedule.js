@@ -189,8 +189,9 @@ export async function waitOf(workload) {
 }
 
 /* A measurement nobody asked for that the plan turned down for any other reason: looked at again later,
-   rather than at every hourly pass. After one of the workspace's own periods when it would not pay for itself
-   (a week when it measures only when asked, for the page's sake), or after `waitMs`. */
+   rather than at every hourly pass. After one of the workspace's own periods when it would cost more than a test may
+   spend without asking, which waits for a person to start it (a week when it measures only when asked, for the page's
+   sake), or after `waitMs`. */
 export async function deferAutomatic(workloadId, { waitMs = null } = {}) {
   const w = await db.prepare('SELECT workspace_id FROM workloads WHERE id = ?').get(workloadId);
   if (!w) return null;

@@ -171,14 +171,18 @@ nothing is switched. A bar that everything clears is worse than no bar.
 ## What a measurement costs, and when it runs
 
 Every measurement is quoted before it starts, second look included, and never spends past what
-one measurement of that workload may: at least `EVAL_MAX_USD_PER_RUN`, more for a workload worth
-more, never past `EVAL_RUN_CAP_USD`. Answers already paid for, and the ones your own model gave
-you, are used again rather than bought twice.
+one measurement of that workload may without asking: `EVAL_MAX_USD_PER_RUN` ($20, our fee
+included) whatever the workload's size, more for a workload whose saving repays more within
+`EVAL_PAYBACK_MONTHS`, never past `EVAL_RUN_CAP_USD`. Test now always shows the price first and asks
+for a yes; past that limit a test runs only with that yes, and never spends more than the most the
+person agreed to. Answers already paid for, and the ones your own model gave you, are used again
+rather than bought twice.
 
 A measurement nobody asked for (the schedule, a new model worth trying) runs only when it can
-show something (enough calls for a clear to be possible) and when what it can be expected to
-find pays for it within `EVAL_PAYBACK_MONTHS`, net of our fee. A person can always ask. A
-workspace can also set its own thirty-day optimizing budget.
+show something (enough calls for a clear to be possible) and costs no more than a measurement may
+spend without asking, however long what it could find takes to repay it: people like to try a
+workload out. One that would cost more waits for a person to start it. A workspace can also set
+its own thirty-day testing limit, which holds for every test, whoever starts it.
 
 Re-checks that keep finding what the last one did space themselves out, doubling up to eight
 times the workspace's rhythm. A new or much cheaper model brings a workload's next measurement

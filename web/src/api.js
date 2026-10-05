@@ -8,12 +8,13 @@
  * chosen by its status, never a bare number. */
 
 export class ApiError extends Error {
-  constructor(message, { status = 0, network = false, signedOut = false } = {}) {
+  constructor(message, { status = 0, network = false, signedOut = false, body = null } = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;          // 0 when the request never got an answer
     this.network = network;        // true when the server could not be reached at all
     this.signedOut = signedOut;    // true when the session behind the request has ended
+    this.body = body;              // what the server answered, for the few refusals that carry more than words
   }
 }
 
@@ -69,7 +70,7 @@ const send = async (method, path, body) => {
   if (!res.ok) {
     const signedOut = res.status === 401 && !path.startsWith('/auth/') && path !== '/me';
     if (signedOut) for (const fn of endedListeners) fn();
-    throw new ApiError(messageOf(json, res.status), { status: res.status, signedOut });
+    throw new ApiError(messageOf(json, res.status), { status: res.status, signedOut, body: json });
   }
   return json;
 };
@@ -129,7 +130,9 @@ export const api = {
   setDefaultRouting: (mode, applyToExisting = false) => send('POST', '/settings/default-routing', { mode, applyToExisting }),
   promote: (id, model) => send('POST', `/workloads/${id}/promote`, { model }),
   revert: (id) => send('POST', `/workloads/${id}/revert`),
-  measure: (id) => send('POST', `/workloads/${id}/measure`),
+  /* a test, started by a person who has seen its price: agreedUsd is the most they said yes to (our fee included). A test
+     that needs a yes, or whose price went up past it, is refused with 409 and its price in `body.confirm`. */
+  measure: (id, agreedUsd = null) => send('POST', `/workloads/${id}/measure`, agreedUsd ? { agreedUsd } : undefined),
   stopMeasuring: (id) => send('POST', `/workloads/${id}/measure/stop`),
   models: () => send('GET', '/models'),
   setModel: (id, enabled) => send('POST', `/models/${id}/enabled`, { enabled }),

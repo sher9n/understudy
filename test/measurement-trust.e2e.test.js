@@ -656,17 +656,29 @@ test('workloads left waiting on a guessed time are measured at once when they ha
   for (const w of [ready, queued]) await cancelFor(w.id);
 });
 
-test('a measurement nobody asked for runs only when what it can find pays for it', async () => {
+test('a measurement nobody asked for runs however long what it can find takes to repay it, up to what a test may spend without asking', async () => {
   // two hundred calls over a month: a measurement would cost more than two months of what it could find
   const { workload } = await seed({ n: 200, days: 30, enabled: ['vendor/steady-small'] });
   const plan = await planFor(workload, { canRoute: true, automatic: true, forRun: false });
-  assert.equal(plan.notWorth, true, plan.reason);
-  assert.match(plan.reason, /Not worth measuring by itself yet|Waiting for more calls/);
-  assert.ok(plan.worth.expectedMonthlyUsd >= 0);
-  // the same workload measured on request is quoted as usual
+  assert.equal(plan.worth.worthIt, false, 'it would not repay itself within two months');
+  assert.equal(plan.canRun, true, `and runs all the same: ${plan.reason}`);
+  assert.equal(plan.notWorth, false);
+  // the same workload measured on request is quoted as usual, and its page can still say how slowly it repays itself
   const asked = await planFor(workload, { canRoute: true });
   assert.equal(asked.canRun, true, asked.reason);
-  assert.equal(asked.worth.worthIt, false, 'and the page can say it would not pay for itself');
+  assert.equal(asked.worth.worthIt, false);
+  // only one dearer than a test may spend without asking waits, and for a person, not for its saving to grow
+  const saved = [config.EVAL_MAX_USD_PER_RUN, config.EVAL_RUN_CAP_USD];
+  try {
+    config.EVAL_MAX_USD_PER_RUN = 0.01;
+    config.EVAL_RUN_CAP_USD = 0.01;
+    const dear = await planFor(workload, { canRoute: true, automatic: true, forRun: false });
+    assert.equal(dear.canRun, false);
+    assert.equal(dear.overLimit, true);
+    assert.match(dear.reason, /more than the \$0\.01 a test may spend without asking you, so it waits for you to start it/);
+  } finally {
+    [config.EVAL_MAX_USD_PER_RUN, config.EVAL_RUN_CAP_USD] = saved;
+  }
 });
 
 test('re-checks that change nothing space out, and a change brings the next one forward', async () => {
