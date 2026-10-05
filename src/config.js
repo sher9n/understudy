@@ -163,12 +163,14 @@ export const config = {
      mean anything, so nothing may be certified against it. */
   EVAL_NOISE_MAX_PCT: num('EVAL_NOISE_MAX_PCT', 40),
   EVAL_REVIEW_BAND: num('EVAL_REVIEW_BAND', 1.25),
-  /* What one measurement may spend. Anybody may ask for one up to EVAL_MAX_USD_PER_RUN; a workload
-     worth more may spend more, up to what its expected saving pays back in EVAL_PAYBACK_MONTHS and
-     never past EVAL_RUN_CAP_USD. A measurement nobody asked for (a re-check, a new model worth
-     trying) only runs when its expected saving pays for it within EVAL_PAYBACK_MONTHS; a workload
-     already switched counts EVAL_PROTECT_SHARE of the saving it protects towards that. */
-  EVAL_MAX_USD_PER_RUN: num('EVAL_MAX_USD_PER_RUN', 2),
+  /* What one test may spend without asking anybody (ceilingFor in src/eval/plan.js), our fee included, as the testing
+     limit is. Any test may spend EVAL_MAX_USD_PER_RUN, whatever the workload's size and whether or not anybody asked for
+     it, however long what it could find takes to repay it: people like to try a workload out. A workload worth more may
+     spend more, up to what its expected saving pays back in EVAL_PAYBACK_MONTHS (a workload already switched counting
+     EVAL_PROTECT_SHARE of the saving it protects), never past EVAL_RUN_CAP_USD. A test that would cost more than that only
+     runs when a person starts it, has seen its price and says yes, and then never spends more than they agreed to. Was $2
+     until 5 Oct 2026, when a test nobody asked for also had to pay for itself within EVAL_PAYBACK_MONTHS. */
+  EVAL_MAX_USD_PER_RUN: num('EVAL_MAX_USD_PER_RUN', 20),
   EVAL_RUN_CAP_USD: num('EVAL_RUN_CAP_USD', 20),
   EVAL_PAYBACK_MONTHS: num('EVAL_PAYBACK_MONTHS', 2),
   EVAL_PROTECT_SHARE: num('EVAL_PROTECT_SHARE', 0.5),

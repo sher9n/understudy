@@ -213,6 +213,26 @@
 .wp-tipbox p { margin: 0; }
 .wp-tipbox p + p { margin-top: 6px; }
 .wp-tipbox b { font-weight: 700; }
+/* Test now's price check (ConfirmTest): a dialog over the page, in the app's own box so it takes the theme's colours, with
+   the page dimmed behind it. On a phone it keeps a 16px margin and its two buttons take a line each, the yes on top. */
+.wp.wp-modal { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 16px; box-sizing: border-box;
+  background: rgba(13, 13, 18, 0.42); }
+[data-mode='dark'] .wp.wp-modal { background: rgba(0, 0, 0, 0.66); }
+.wp .wp-dialog { box-sizing: border-box; width: min(460px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; overscroll-behavior: contain;
+  display: grid; gap: 16px; padding: 22px 22px 18px; border-radius: 14px; background: var(--raise); color: var(--ink);
+  border: 1px solid var(--line-strong); box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22); }
+.wp .wp-dialog h2 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.35; overflow-wrap: anywhere; }
+.wp .wp-dialog-body { display: grid; gap: 10px; }
+.wp .wp-dialog-body p { margin: 0; color: var(--mut-read); }
+.wp .wp-dialog-body .wp-dialog-price { color: var(--ink); font-size: 15px; }
+.wp .wp-dialog-price b { font-weight: 700; font-variant-numeric: tabular-nums; }
+.wp .wp-dialog-body .wp-dialog-note { color: var(--warn); background: var(--warnq); border-radius: 9px; padding: 8px 10px; }
+.wp .wp-dialog .wp-acts { justify-content: flex-end; }
+@media (max-width: 480px) {
+  .wp .wp-dialog { padding: 18px 16px 16px; }
+  .wp .wp-dialog .wp-acts { flex-direction: column-reverse; align-items: stretch; }
+  .wp .wp-dialog .wp-acts .wp-btn { width: 100%; }
+}
 /* a model's circle on a test's chart, and what it says when pointed at, focused or tapped (outside .wp: it floats) */
 .wp .wp-sv .wp-dot { cursor: pointer; outline: none; }
 .wp .wp-sv .wp-dot circle { stroke: transparent; stroke-width: 0; transition: stroke-width 0.12s; }

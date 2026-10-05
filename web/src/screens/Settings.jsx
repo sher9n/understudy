@@ -158,7 +158,7 @@ function Switching({ data, busy, run }) {
       </Row>
       <Row label="How often to re-test" id="st-retest"
         say={retest
-          ? 'At most this often, and only when a test is likely to pay for itself. A new or cheaper model can bring one forward. So can new requests, when a model came close or is waiting for its second test.'
+          ? `At most this often, and only when a test costs no more than ${usd(data.testWithoutAskingUsd ?? 20)}: a test that would cost more waits for you to start it. A new or cheaper model can bring one forward. So can new requests, when a model came close or is waiting for its second test.`
           : 'Nothing is tested until you press Test now on a workload. A model you switched to is still checked on your live requests.'}>
         <Pick id="st-retest-pick" label="How often to re-test" value={retest} busy={busy}
           options={(data.measureChoices || []).map((c) => ({ value: c.days, label: c.label }))}

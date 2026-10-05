@@ -38,8 +38,9 @@ await settleOutcomes();
 
 /* What the background does ------------------------------------------------------ */
 
-handle('eval_run', async ({ workloadId, trigger }, job) =>
-  await runEvaluation(workloadId, { trigger, jobId: job?.id ?? null }));
+// a test a person started carries their yes to its price (agreedUsd), which it never spends past
+handle('eval_run', async ({ workloadId, trigger, agreedUsd = null }, job) =>
+  await runEvaluation(workloadId, { trigger, jobId: job?.id ?? null, agreedUsd }));
 
 // a call charged from its tokens, corrected to what OpenRouter recorded for it (see trueup.js)
 handle('true_up', async (payload, job) => await trueUp(payload, job));

@@ -485,6 +485,25 @@ test('a router whose spec names a setup it does not have, or none at all, sends 
   assert.equal(old.use.model, REF);
 });
 
+test('a test re-checks an older router whose weights are gone as it serves, every request to the customer\'s own model, and finishes', async () => {
+  const shop = await seed({ enabled: [CHEAP, STEADY] });
+  const spec = { kind: 'router', cheap: { model: CHEAP, recipe: null }, strong: { model: REF, recipe: null }, threshold: 0.5 };
+  const armId = `arm_${Math.random().toString(36).slice(2, 14)}`;
+  await db.prepare(`INSERT INTO arms (id, workspace_id, workload_id, kind, key, spec_json, label, status, origin_run_id, offline_json,
+      stats_json, created_at, updated_at) VALUES (?, ?, ?, 'router', ?, ?, 'an older router', 'serving', NULL, NULL, NULL, ?, ?)`)
+    .run(armId, shop.workspace.id, shop.workload.id, armKey(spec), JSON.stringify(spec), now(), now());
+  await db.prepare(`UPDATE workloads SET routed_model = ?, routed_arm_id = ?, promoted_at = ?, status = 'promoted' WHERE id = ?`)
+    .run(CHEAP, armId, now(), shop.workload.id);
+  // it threw while the strategies were worked out, and the whole test with it (a test nobody asked for, since 5 Oct 2026)
+  const out = await runEvaluation(shop.workload.id, { trigger: 'automatic' });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const row = (await resultsOf(out.runId)).find((r) => {
+    try { const a = JSON.parse(r.arm_json || 'null'); return a?.kind === 'router' && !a.version; } catch { return false; }
+  });
+  assert.ok(row, 'the router serving was worked out again, as it serves');
+  assert.ok(Number(row.cost_ratio) > 0.95, `every request to the customer's own model: it costs ${row.cost_ratio} of it`);
+});
+
 /* 6. A workload optimizing for quality with nothing it is sure enough of --------------------------------- */
 
 test('what a workload optimizing for quality is not sure enough of is never looked at again, offered or tried, and it says so', async () => {

@@ -104,8 +104,9 @@ async function monthOf(workloadId) {
    that beyond what it saves now, and its measurement also protects the saving it has (a model that
    slipped is caught), which counts for EVAL_PROTECT_SHARE of it.
 
-   A measurement nobody asked for runs only when that pays for it within EVAL_PAYBACK_MONTHS, and our
-   fee is taken off the saving first, because the saving is only worth what the customer keeps.
+   What that saving pays back within EVAL_PAYBACK_MONTHS (budgetUsd), our fee taken off it first because the saving is
+   only worth what the customer keeps, lets a test of a big workload spend more without asking than the least any test
+   may (ceilingFor). It is no longer a reason for a test nobody asked for not to run.
 
    What serves is found by its own name (`servingAs`, see servingKey): the customer's own model
    thinking less, or from its cheapest provider, is the reference by model, and looked for by model it
@@ -136,9 +137,13 @@ export function worthOf({ ranked, refPer, month, serving, servingAs = null, trie
   return { monthlyUsd: Math.round(perMonth * 100) / 100, expectedMonthlyUsd, protectedMonthlyUsd, budgetUsd, chanceAny: Math.round((1 - none) * 1000) / 1000 };
 }
 
-/** The most one measurement may spend on this workload: at least what anybody may ask for, more when it is worth more. */
-export const ceilingFor = (worth) => Math.max(config.EVAL_MAX_USD_PER_RUN,
-  Math.min(config.EVAL_RUN_CAP_USD, Number(worth?.budgetUsd) || 0));
+/** The most one test of this workload may spend without asking anybody, before our fee: what any test may spend
+    (EVAL_MAX_USD_PER_RUN, our fee included), whatever the workload's size, and more for a workload whose saving pays back
+    more within EVAL_PAYBACK_MONTHS, never past EVAL_RUN_CAP_USD (our fee included too). A dearer test runs only when a
+    person has seen its price and said yes. */
+export function ceilingFor(worth, fee = 1 + config.ROUTING_FEE_PCT / 100) {
+  return Math.max(config.EVAL_MAX_USD_PER_RUN / fee, Math.min(config.EVAL_RUN_CAP_USD / fee, Number(worth?.budgetUsd) || 0));
+}
 
 /* How far tests have run over their raw estimate lately (quote_usd, before our fee), from every workspace's tests of the
    last QUOTE_WINDOW_DAYS that compared models: the median, which makes a quote's "about", and the 90th percentile, which
@@ -274,7 +279,10 @@ export const forgetPlanAll = () => pageMemo.clear();
 /* `only`, a set of setup names (a model, or "…#lighter"), plans a measurement of those alone: a second look at the ones that
    passed once and are waiting for new calls (a run with trigger 'second_look', see pendingSecondLook in
    src/eval/schedule.js), quoted and turned down on what that costs, not on what a whole measurement would. */
-export async function planFor(workload, { canRoute, forRun = false, memo = false, automatic = false, only = null } = {}) {
+/* `agreedUsd` is a person's yes to a test's price: the most they agreed it may spend, our fee included, as its page showed
+   it to them before it started (POST /workloads/:id/measure). A test then never spends more than that, whatever its plan
+   works out when it starts, and one dearer than a test may spend without asking (askFirst) may run. */
+export async function planFor(workload, { canRoute, forRun = false, memo = false, automatic = false, only = null, agreedUsd = null } = {}) {
   if (memo && !forRun) {
     const key = [workload.speed_pref, workload.judge_mode, workload.routed_model, workload.reference_model, workload.status, canRoute].join('|');
     const hit = pageMemo.get(workload.id);
@@ -295,7 +303,12 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
     aboutUsd: null, atMostUsd: null, capRaw: null,
     judge: jevUsable() ? 'jev' : 'llm', jevResting: jevResting(), factsAt: {}, speed: null, profile: null, pendingJev: 0,
     difficulty: null, cachedBar: 0, refThinks: null, recordedShare, worth: null, notWorth: false,
-    ceilingUsd: config.EVAL_MAX_USD_PER_RUN, optimizeBudget: null, unseenPool: pool, yardstick: null,
+    ceilingUsd: ceilingFor(null), optimizeBudget: null, unseenPool: pool, yardstick: null,
+    /* Whether it would cost more than a test may spend without asking (ceilingUsd; limitUsd as people see it, our fee
+       included): one nobody asked for then waits (overLimit), and one a person starts waits for their yes to its price
+       (askFirst, and canAsk once nothing else stands in the way). quotedMostUsd is the most it may spend as quoted, before
+       any yes; agreedUsd the yes it was given. */
+    limitUsd: null, overLimit: false, askFirst: false, canAsk: false, quotedMostUsd: null, agreedUsd: null,
     // how many setups of a router serving now are measured whatever the model count says (0 when none serves)
     routerParts: 0,
   };
@@ -344,7 +357,7 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const survivors = first.ranked.map((r) => r.model);
 
   /* What a measurement is worth, from what is known before Jev reads anything, so one nobody asked for
-     that would not pay for itself costs nothing at all to turn down. */
+     that would cost more than a test may spend without asking costs nothing at all to turn down. */
   const month = await monthOf(workload.id);
   const tries = Math.max(models, Math.round(models * config.EVAL_TRY_MULTIPLE));
   /* The calls this run would draw, and how many of them earlier measurements already paid a bar for;
@@ -404,15 +417,21 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   // how far tests have run over their estimates lately, which every figure a person sees is corrected by
   const cal = await quoteCalibration();
   const fee = 1 + config.ROUTING_FEE_PCT / 100;
-  // (a plan of some models only is quoted on those models, below, never on everything a whole measurement would try)
+  /* A test nobody asked for runs whenever it costs no more than a test may spend without asking (ceilingFor), however
+     long what it could find takes to repay it. One that would cost more costs nothing to turn down, before Jev reads
+     anything, and waits its rhythm for a person to start it. (A plan of some models only is quoted on those models,
+     below, never on everything a whole measurement would try.) */
   if (automatic && first.order.length && !only) {
     const early = estimate({ ...plan, order: first.order, refPrice: first.refPrice }, profile, facts, workload);
     // held to what it is expected to cost, as corrected, not to the raw estimate, which runs short
-    if (early * cal.about > plan.worth.budgetUsd) {
+    if (early * cal.about > ceilingFor(plan.worth)) {
       plan.notWorth = true;
+      plan.overLimit = true;
       plan.estimateUsd = early;
       plan.aboutUsd = round8(early * cal.about * fee);
-      plan.reason = notWorthReason(plan.aboutUsd, plan.worth);
+      plan.ceilingUsd = ceilingFor(plan.worth);
+      plan.limitUsd = round8(plan.ceilingUsd * fee);
+      plan.reason = overLimitReason(plan, workload);
       return plan;
     }
   }
@@ -492,30 +511,26 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   plan.estimateUsd = estimate(plan, profile, facts, workload);
   plan.worth = worthOf({ ranked: sel.ranked, refPer: sel.refPrice ?? 0, month, serving: workload.routed_model, servingAs, tries });
   plan.ceilingUsd = ceilingFor(plan.worth);
+  plan.limitUsd = round8(plan.ceilingUsd * fee);
   /* The quote, corrected by how far recent tests ran over theirs, our fee included: about what it will cost, and the most
      it may spend, which is where the run stops (capRaw, before our fee). Each limit below can only bring the most down. */
   const expectedRaw = plan.estimateUsd * cal.about;
   plan.aboutUsd = round8(expectedRaw * fee);
-  let capRaw = Math.min(plan.estimateUsd * cal.most, plan.ceilingUsd);
+  // whether what it could find repays it within EVAL_PAYBACK_MONTHS: said when a person is asked, never a reason not to run
   plan.worth.worthIt = expectedRaw <= plan.worth.budgetUsd;
   if (expectedRaw > plan.ceilingUsd) {
-    /* Testing fewer models brings it down only to the setups of the router serving now, which are always
-       checked: said as that where they are what the measurement tests, rather than advice that cannot help. */
-    const forced = plan.routerParts > 0 && plan.models <= plan.routerParts;
-    plan.reason = `This would cost about $${plan.aboutUsd.toFixed(2)}, over the $`
-      + `${(plan.ceilingUsd * fee).toFixed(2)} one test of this workload may spend. `
-      + (forced
-        ? `It checks all ${plan.routerParts} models of the router serving it now, however few models you test in Settings. `
-          + `Its live requests are still watched${config.CONTROL_ENABLED ? `, and, within your testing limit, a few a day are checked against ${short(workload.reference_model)} in the background` : ''}.`
-        : 'Testing fewer models in Settings brings it down.');
-    return plan;
+    // nobody to ask: it waits its rhythm for a person to start it
+    if (automatic) {
+      plan.notWorth = true;
+      plan.overLimit = true;
+      plan.reason = overLimitReason(plan, workload);
+      return plan;
+    }
+    /* A person may start it all the same, once they have seen its price and said yes (agreedUsd): it then stops at the
+       most they agreed to rather than at the most a test may spend without asking. */
+    plan.askFirst = true;
   }
-  /* A measurement nobody asked for runs only when it pays for itself. A person can always ask. */
-  if (automatic && !plan.worth.worthIt) {
-    plan.notWorth = true;
-    plan.reason = notWorthReason(plan.aboutUsd, plan.worth);
-    return plan;
-  }
+  let capRaw = plan.askFirst ? plan.estimateUsd * cal.most : Math.min(plan.estimateUsd * cal.most, plan.ceilingUsd);
   /* The testing limit: the most tests and the checks after a switch may spend in any thirty days, our fee included (a
      default until the workspace chooses, or none if it chose none). Nothing is spent past it, whoever asks. */
   const budget = testingLimitOf(ws);
@@ -548,13 +563,26 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   capRaw = Math.min(capRaw, (Math.max(0, Number(gate.free) || 0) + (Number(gate.allowance) || 0)) / fee);
   plan.capRaw = round8(Math.max(capRaw, expectedRaw));
   plan.atMostUsd = round8(plan.capRaw * fee);
+  plan.quotedMostUsd = plan.atMostUsd;
+  /* A person's yes to its price: never more than they agreed to, whatever this plan works out now (a test plans itself
+     again when it starts, and its models and prices can move in between), and a test that needed their yes may run. */
+  const agreed = !automatic && Number(agreedUsd) > 0 ? Number(agreedUsd) : null;
+  if (agreed !== null) {
+    plan.agreedUsd = agreed;
+    plan.capRaw = round8(Math.min(plan.capRaw, agreed / fee));
+    plan.atMostUsd = round8(plan.capRaw * fee);
+  } else if (plan.askFirst) {
+    plan.canAsk = true;
+    plan.reason = askReason(plan);
+    return plan;
+  }
   plan.canRun = true;
   return plan;
 }
 
 /* What a measurement is expected to cost, from this workload's own average call: what the run will
- * actually do, so that the quote a person sees, the test of whether a measurement nobody asked for
- * pays for itself, and the limit a run keeps to are never below what it spends.
+ * actually do, so that the quote a person sees and says yes to, the test of whether a measurement nobody
+ * asked for may run without asking, and the limit a run keeps to are never below what it spends.
  *
  * The bar: the customer's own model twice on each sampled call, one of the two read from the call
  * itself where its own answer was recorded, less the calls whose bar is already paid for among the
@@ -690,11 +718,24 @@ function estimate(plan, profile, facts, workload) {
   return Math.round(total * 1e8) / 1e8;
 }
 
-function notWorthReason(cost, worth) {
-  return `Not worth measuring by itself yet: it would cost about $${cost.toFixed(2)}, and we expect it to find `
-    + `about $${worth.expectedMonthlyUsd.toFixed(2)} a month`
-    + (worth.protectedMonthlyUsd > 0 ? `, on top of the $${worth.protectedMonthlyUsd.toFixed(2)} a month it saves now` : '')
-    + `. It runs by itself once it would pay for itself within ${config.EVAL_PAYBACK_MONTHS} months; you can measure now whenever you like.`;
+/* Why a test nobody asked for did not run: it would cost more than a test may spend without asking, which its page says,
+   and the activity once a day (noteSkip in src/eval/run.js). A person can still start it, and sees its price first.
+   Testing fewer models brings it down only to the setups of the router serving now, which are always checked: said as
+   that where they are what the test checks, rather than advice that cannot help. */
+function overLimitReason(plan, workload) {
+  const forced = plan.routerParts > 0 && plan.models <= plan.routerParts;
+  return `This would cost about $${plan.aboutUsd.toFixed(2)}, more than the $${plan.limitUsd.toFixed(2)} a test may spend `
+    + 'without asking you, so it waits for you to start it from its page, where you see its price first. '
+    + (forced
+      ? `It checks all ${plan.routerParts} models of the router serving it now, however few models you test in Settings. `
+        + `Its live requests are still watched${config.CONTROL_ENABLED ? `, and, within your testing limit, a few a day are checked against ${short(workload.reference_model)} in the background` : ''}.`
+      : 'Testing fewer models in Settings brings it down.');
+}
+
+// why a test a person asked for waits: it would cost more than a test may spend without asking, so it needs their yes
+function askReason(plan) {
+  return `This would cost about $${plan.aboutUsd.toFixed(2)}, and never more than $${plan.quotedMostUsd.toFixed(2)}: more than `
+    + `the $${plan.limitUsd.toFixed(2)} a test may spend without asking you. It starts once you say yes to its price.`;
 }
 
 function mostCommon(excluded) {

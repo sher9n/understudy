@@ -5,6 +5,8 @@ import { Doc, Sec, To } from './Public.jsx';
 /* The figures, written the way every amount in the app is written. */
 const TOPUP_LOW = usd(5);
 const TOPUP_HIGH = usd(500);
+// what a test nobody asked for may spend, our fee included (EVAL_MAX_USD_PER_RUN in src/config.js)
+const TEST_WITHOUT_ASKING = usd(20);
 
 /* What Understudy costs, all of it on one page.
  *
@@ -50,7 +52,7 @@ export default function Pricing({ go }) {
         <p>
           A workload&rsquo;s page shows an estimate of what measuring it will cost before anything runs, and
           Settings can hold measuring back until you ask for it. A measurement nobody asked for only runs when
-          what it can be expected to find would pay for itself within two months, and a single measurement
+          it costs no more than {TEST_WITHOUT_ASKING}, and a single measurement
           never spends more than its cap. Experiments have a daily limit, set on each workload.
         </p>
         <p>
