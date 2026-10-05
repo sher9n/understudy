@@ -27,6 +27,12 @@ file creates and drops a database of its own). `node scripts/harness.mjs` prints
 measurement and the live decisions are wrong, from simulations; `test/harness.test.js` holds the
 numbers that must stay true.
 
+On GitHub, every pull request and every change to main runs the suite dealt over six machines by
+how long each file takes (`scripts/test-shard.mjs`, from `test/times.json`), beside the harness and
+the screens build, in about two minutes. After adding a test file, or making one much slower,
+`node scripts/test-shard.mjs --measure` times each file on its own and rewrites `test/times.json`;
+a file it has no time for still runs, counted as the slowest.
+
 ## What needs a key
 
 Everything below works with no keys at all, on real endpoints:
