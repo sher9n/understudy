@@ -3,13 +3,13 @@ import { db, id, now } from '../db/index.js';
 import { addActivity, track } from '../traffic.js';
 import { chargeEval } from '../billing.js';
 import { extract, disagreement, structuredCompare, proseText, heldFieldChanged } from '../eval/compare.js';
-import { judgeBarPair, judgeQuality, numbersDiffer } from '../eval/judge.js';
+import { judgeBarPair, judgeQuality, judgeStructured, numbersDiffer } from '../eval/judge.js';
 import { factsFor, keepsCheck, keepsRequest } from '../eval/keeps.js';
 import { keptChecklist } from '../eval/checklist.js';
 import { promote, revert, everReverted, keyOfSpec, rollBack } from '../eval/promote.js';
 import { diffRange } from './decide.js';
 import { notify } from '../notify.js';
-import { upsertArm, armsFor, setStatus, referenceSpec, armKey, specOfResult, labelOf } from './arms.js';
+import { upsertArm, armsFor, setStatus, referenceSpec, armKey, specOfResult, labelOf, leadModel } from './arms.js';
 import { posterior, explorePlan, pickFrom, thompsonShares } from './bandit.js';
 import { decide } from './decide.js';
 import { serveWith } from './serve.js';
@@ -548,9 +548,14 @@ async function agreementOf(body, used, other, shape, scope, bar = null) {
       return { agreement: 0, cost: 0, judgedBy: 'fields' };
     }
     const text = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
-    // the background answer judged against the used one, as a measurement judges a model against the customer's
-    const j = await judgeQuality(requestText(body), text(b.value), text(a.value), { scope, prefer: bar.prefer, checklist: bar.checklist });
-    if (j.transient || j.score === null || j.score === undefined) return { agreement: null, cost: j.cost || 0, judgedBy: 'not judged' };
+    /* the background answer judged against the used one, as a measurement judges a model against the customer's: a structured
+       one by the three (judgeStructured), the customer's own model breaking a tie, never by a judge whose own answer it is */
+    const j = shape !== 'free_text' && bar.panel
+      ? await judgeStructured(requestText(body), b.value, a.value, shape, { scope, prefer: bar.prefer, tieBreaker: bar.tieBreaker ?? null,
+        judged: bar.judged ?? null, body })
+      : await judgeQuality(requestText(body), text(b.value), text(a.value), { scope, prefer: bar.prefer, checklist: bar.checklist });
+    // a reading that rests on a tie-break that did not come back says nothing, and is read again next time
+    if (j.transient || j.score === null || j.score === undefined || j.once) return { agreement: null, cost: j.cost || 0, judgedBy: 'not judged' };
     return { agreement: 1 - j.score, cost: j.cost || 0, judgedBy: j.judgedBy };
   }
   if (shape === 'free_text') {
@@ -605,7 +610,9 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
   const yardstick = ['quality', 'keeps'].includes(bar.yardstick) ? bar.yardstick : 'agreement';
   // and a structured answer held to the fields that measurement read its model giving the same way (agreementOf)
   const judging = yardstick !== 'agreement'
-    ? { yardstick, prefer: bar.prefer, checklist: workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null, stable: bar.stable }
+    ? { yardstick, prefer: bar.prefer, checklist: workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null, stable: bar.stable,
+      // read by the three where that measurement was, the customer's own model breaking the judges' ties (judgeChoices)
+      panel: !!bar.panel, tieBreaker: workload.reference_model, judged: leadModel(arm.spec || {})?.model ?? null }
     : null;
   let out = null;
   let status = 200;
@@ -619,6 +626,8 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
     if (err?.spent) out = { cost: err.spent };
   }
   if (out?.json) {
+    // the model that answered, as its provider names it, never judges its own answer
+    if (judging && typeof out.json?.model === 'string' && out.json.model) judging.judged = out.json.model;
     try {
       reading = await agreementOf(body, response, out.json, workload.shape_kind, workload.workspace_id, judging);
     } catch {

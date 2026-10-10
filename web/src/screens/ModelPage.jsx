@@ -223,7 +223,8 @@ export default function ModelPage({ wid, runId, model, go, goTo }) {
   const first = (got.page - 1) * got.per + 1;
   const words = {
     same: keeps ? 'Kept what matters' : quality ? 'At least as good' : 'Same answer',
-    partly: keeps ? 'Partly missed' : quality ? 'Partly worse' : 'Matched one of the two',
+    // a half under the three judges is a difference nobody could call (judgeChoices), never a partly worse answer
+    partly: keeps ? 'Partly missed' : quality ? (got.panel ? "Couldn't call" : 'Partly worse') : 'Matched one of the two',
     different: keeps ? 'Missed something' : quality ? 'Clearly worse' : 'Different',
     failed: 'Failed', busy: 'Provider busy', unjudged: 'Not judged',
   };
@@ -388,6 +389,8 @@ export default function ModelPage({ wid, runId, model, go, goTo }) {
                   <p>
                     {keeps
                       ? "The original model answered every request twice. The facts both of its answers give, and that matter to someone relying on the answer, such as a figure, a date, a decision or what happens next, are listed once. This model's answer scores 0 when it gives every one of those facts, in any words, gets nothing wrong compared with the request, and follows the request's instructions as the original model does. It scores 1 when it leaves one of those facts out, gets something wrong, isn't in the original model's language, or breaks a rule the request's instructions set."
+                      : quality && got.panel
+                        ? `Where this model's answer differs from the original model's, two judges read the request and both answers, each twice, once in each order, and where they disagree ${ref} settles it. It scores 0 when this model's answer is at least as good, 1 when it is clearly worse or changes a figure ${ref} gave the same way both times, and 0.5 when nobody can call it.`
                       : quality
                         ? "A judge reads this model's answer beside the original model's twice, once in each order. It scores 0 when this model's answer is at least as good, and 1 when both readings find it clearly worse or it breaks a rule the request's instructions set."
                         : "The original model answered every request twice, because it doesn't always give the same answer. This model's answer is compared with each of those two answers. It scores 0 when it matches both, 0.5 when it matches one of them, and 1 when it matches neither."}
@@ -639,7 +642,61 @@ const NAMED_WORDS = {
 function Readings({ r, facts }) {
   if (r.way === 'keeps') return <KeepsReadings r={r} facts={facts} />;
   if (r.way === 'same') return <SameReadings r={r} />;
+  if (r.way === 'choices') return <ChoiceReadings r={r} />;
   return <QualityReadings r={r} />;
+}
+
+/* What the judges said of a structured answer that differed from the original model's (readingsWords in src/workloadPage.js).
+   Two judges each read the request and both answers twice, swapped round the second time, because a judge can lean to
+   whichever answer it reads first. Where they agreed, that decided it; where they did not, or one could not tell, the
+   original model read the two answers twice too and settled it. Where nobody could call it, it counts half. */
+const WHO_WORDS = { jev: 'Jev', llm: 'The second judge', tie: 'The original model, settling it' };
+const CALLED_WORDS = {
+  worse: "found the original model's answer better both times",
+  better: "found this model's answer better both times",
+  fine: "didn't find the original model's answer better either time",
+  unsure: "couldn't tell: one reading found the original model's answer better and the other didn't",
+};
+function ChoiceReadings({ r }) {
+  const judges = Array.isArray(r.judges) ? r.judges : [];
+  const panel = judges.filter((j) => j.who !== 'tie');
+  const settledBy = judges.some((j) => j.who === 'tie');
+  const said = r.verdict === 'worse' ? "So it counts as clearly worse."
+    : r.verdict === 'unsure' ? "So nobody could call it, and it counts as half a difference."
+      : r.verdict === 'better' ? "So it counts as at least as good, and better."
+        : "So it counts as at least as good.";
+  // who read it, as it happened: both judges, one of them, or the original model alone where no judge could
+  const who = panel.length >= 2 ? 'Two judges, Jev and a larger language model, each read'
+    : panel.length === 1 ? `${panel[0].who === 'jev' ? 'Jev' : 'A larger language model'} read`
+      : 'No judge could read it, so the original model read';
+  const reading = (e, k) => {
+    const where = k === 0 ? 'first' : 'swapped round';
+    // a lean too slight to count was read as a tie, and is said as one
+    return e.leaned
+      ? `${where}, about equally good (it leaned to ${e.leaned === 'answer' ? "this model's answer" : "the original model's"}${sureWords(e.sure)}, too little to count)`
+      : `${where}, ${SIDE_WORDS[e.side] || SIDE_WORDS.equal}${sureWords(e.sure)}`;
+  };
+  return (
+    <div className="wp-ansblock wp-readings">
+      <p className="wp-sub">What the judges said</p>
+      <p className="wp-ansnote">
+        {who} the request and both answers twice, swapped round the second time.
+        {panel.length && settledBy ? ' They did not settle it between them, so the original model read them twice too and settled it.' : ''}
+      </p>
+      {judges.length > 0 && (
+        <ul className="wp-readlist">
+          {judges.map((j, i) => (
+            <li key={i}>
+              <b>{WHO_WORDS[j.who] || j.who}:</b>{' '}
+              {(j.each || []).map(reading).join('; ')}.
+              {j.verdict && CALLED_WORDS[j.verdict] ? ` It ${CALLED_WORDS[j.verdict]}.` : ''}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className={`wp-ansnote${r.verdict === 'worse' ? ' is-decide' : ''}`}>{said}</p>
+    </div>
+  );
 }
 
 /* What the judge said of one answer held to "the same answer" (readingsWords in src/workloadPage.js): against each of the

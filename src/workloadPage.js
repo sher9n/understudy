@@ -466,6 +466,10 @@ function secondWhy(r, differs) {
   }
   if (r.confirm_verdict === 'slower') return `${first} ${on} it was too slow, so it isn't switched to.`;
   if (r.confirm_verdict === 'busy') return `${first} ${on} its provider couldn't keep up, so it isn't switched to.`;
+  // held back by its figures test or by answers the judges could not read, which the second look says in its own words
+  if (r.confirm_note && ['review', 'missed', 'insufficient'].includes(r.confirm_verdict)) {
+    return `${first} ${on} ${r.confirm_note}. So it isn't switched to, and the next test looks again.`;
+  }
   const fig = r.confirm_gap === null || r.confirm_gap === undefined ? '' : ` on ${pct(r.confirm_gap)} of them`;
   const allowed = r.confirm_floor === null || r.confirm_floor === undefined ? '' : `, where ${pct(r.confirm_floor)} is allowed`;
   const close = r.confirm_verdict === 'review' ? ' it came too close to the limit to be sure:' : '';
@@ -478,6 +482,12 @@ function candOf(r, { sample, serving, refPer, refP50 = null, metric, avg, switch
   const isServing = !!serving && r.model_id === serving;
   const differs = keeps ? 'missed something that matters or got something wrong'
     : quality ? "gave clearly worse answers than the original model's" : 'answered differently from the original model';
+  /* which check held it back where its own figure did not (record in src/eval/run.js): its figures test, a figure the original
+     model gives the same way every time changed too often, or answers the judges could not read */
+  let rank = {};
+  try { rank = JSON.parse(r.rank_json || 'null') || {}; } catch { rank = {}; }
+  const pctIn = (x) => `${Math.round(Number(x) * 10) / 10}%`;
+  const FIGURE = 'a figure the original model gives the same way every time, such as an amount, a date or a code';
   let out;
   if (r.verdict === 'failed' && r.stopped === 'busy') {
     // its provider could not keep up (EVAL_KEEP_UP_REFUSALS): failed for good on this workload
@@ -505,6 +515,20 @@ function candOf(r, { sample, serving, refPer, refP50 = null, metric, avg, switch
     out = ['bad', 'Passed once, not again', secondWhy(r, differs)];
   } else if (r.verdict === 'cleared') {
     out = ['ok', 'Passed once', "It stayed within the allowed difference on this test's requests. It's tested again on new requests before anything switches."];
+  } else if (rank.heldBy === 'figures' && rank.figures && r.verdict === 'missed') {
+    out = ['bad', 'Changed figures', `It changed ${FIGURE}, on ${pctIn(rank.figures.gap)} of requests, where up to ${pctIn(rank.figures.bar)} `
+      + 'is allowed. A figure like that has one right value, so this counts against it however the rest of its answers read.'];
+  } else if (rank.heldBy === 'figures' && rank.figures && r.verdict === 'review') {
+    out = ['warn', 'Close match', `It changed ${FIGURE}, on ${pctIn(rank.figures.gap)} of requests, close to the ${pctIn(rank.figures.bar)} `
+      + "allowed, so the test isn't yet confident it stays within it."];
+  } else if (rank.heldBy === 'figures' && rank.figures && r.verdict === 'insufficient') {
+    out = ['warn', 'Too few to be sure', `A figure the original model gives the same way every time, such as an amount, a date or a code, may `
+      + `change on no more than ${pctIn(rank.figures.bar)} of requests, and this test had too few requests to show that. It's tested again `
+      + 'once there are more.'];
+  } else if (rank.heldBy === 'unread' && r.verdict === 'review') {
+    const of = Number(rank.answered) > 0 ? ` of its ${rank.answered}` : '';
+    out = ['warn', 'Too few read', `The judges could not read ${rank.unread}${of} answers, more than 1 in 10, so what is left isn't enough `
+      + 'to switch on. The next test reads them again.'];
   } else if (r.verdict === 'review' && unsure && floorPct !== null && Number(r.gap_hi ?? r.gap_pct) <= floorPct) {
     /* Held back only because the judge missed an answer planted as clearly worse (see chooseJudge in src/eval/run.js):
        it stayed within the allowed difference as the judge read it, which is not "close". */
@@ -674,12 +698,33 @@ function takeOf(run, cands, w, opts) {
       : why === 'chosen'
         ? "As this workload's setting asks, each model was checked for answers at least as good as the original model's, rather than "
           + 'the same answers.'
-        : 'Because the original model answers the same request differently each time, each model was checked for answers at '
-          + "least as good as the original model's, rather than the same answers.");
+        : why === 'choices'
+          ? 'These answers pick from a set of choices, such as a label or a level, and two good answers can pick differently. So where '
+            + "a model's choice differed from the original model's, two judges read the request and both answers and said whether it "
+            + 'was clearly worse, and the original model settled any they disagreed on. A figure the original model gave the same way '
+            + 'both times still had to match exactly.'
+          : why === 'flips'
+            ? 'The original model gave two different answers to some of the same requests. So where a model differed on something the '
+              + 'original model itself was unsure of, two judges read the request and both answers and said whether it was clearly '
+              + 'worse, and the original model settled any they disagreed on. A figure the original model gave the same way both '
+              + 'times still had to match exactly.'
+            : 'Because the original model answers the same request differently each time, each model was checked for answers at '
+              + "least as good as the original model's, rather than the same answers.");
   } else if (compared && plan?.judging?.mode === 'same' && cands.length) {
     notes.push("As this workload's setting asks, each model was checked for the same answers as the original model's.");
   }
-  if (compared && Number(check?.errors) > 0 && cands.length) {
+  /* The judges of a structured answer's choices failed their test on answers whose right verdict is known (chooseJudge in
+     src/eval/run.js): they were not used, and every difference counted, as before choices were judged. */
+  if (compared && plan?.judging?.fallback && cands.length) {
+    notes.push(Number(plan.judging.fallback.planted) > 0
+      ? 'The judges were first tested on answers whose right verdict is already known, and got some of them wrong, so they '
+        + 'were not used: every answer that differed from the original model counted against the model that gave it. The next '
+        + 'test checks the judges again.'
+      : "No answers whose right verdict is known could be made from this test's requests to test the judges first, so they were "
+        + 'not used: every answer that differed from the original model counted against the model that gave it. The next test '
+        + 'tries again.');
+  }
+  if (compared && Number(check?.errors) > 0 && cands.length && !plan?.judging?.fallback) {
     const planted = Number(check.planted) || Number(check.errors);
     notes.push(`The judge was first tested on ${planted} answers whose right verdict is already known, and it got ${check.errors} wrong, `
       + 'so nothing is switched on its word. The next test checks the judge again.');
@@ -905,7 +950,8 @@ export async function runPageOf(w, run) {
   const switchRun = !!w.routed_model && w.promoted_run_id === run.id;
   let check = null;
   try { check = run.judge_check_json ? JSON.parse(run.judge_check_json) : null; } catch { check = null; }
-  const unsure = Number(check?.errors) > 0;
+  // the judges failed their planted answers and were used all the same; never where they were set aside (judging.fallback)
+  const unsure = Number(check?.errors) > 0 && !plan?.judging?.fallback;
   const floorPct = run.floor_pct === null || run.floor_pct === undefined ? null : Number(run.floor_pct);
   const quality = run.yardstick === 'quality';
   const keeps = run.yardstick === 'keeps';
@@ -1002,7 +1048,30 @@ export async function runPageOf(w, run) {
     // how often the original model differed from itself (or was clearly worse than itself): the allowed difference is set from it
     noise: run.noise_pct === null || run.noise_pct === undefined ? null : round8(Number(run.noise_pct) / 100),
     self: selfOf(run, plan),
+    // the original model tested as if it were another model, against this test's pass mark, in words (ownTestOf)
+    ownTest: ownTestOf(plan, refName),
   };
+}
+
+/* The original model tested as if it were one of the others (fairBar in src/eval/compare.js): its own second answers held
+   against its first, exactly as every other model's answers were held, read against the pass mark. A pass mark it cannot
+   pass is no fair test, so where it could not have passed the usual one on these requests, the pass mark was raised to
+   where it does, and that is said. Null for a test from before this was kept. */
+export function ownTestOf(plan, refName) {
+  const t = plan?.selfTest;
+  if (!t || !t.verdict) return null;
+  const pct = (x) => `${Math.round(Number(x) * 10) / 10}%`;
+  const who = refName ? `your original model, ${refName},` : 'your original model';
+  const lead = 'Tested the same way as the other models, its own second answers held against its first,';
+  const words = t.verdict === 'cleared'
+    ? t.raised
+      ? `${lead} ${who} passes. The usual pass mark would have been ${pct(t.rawPct)}, which even it could not be shown to pass on `
+        + `these ${t.n} requests, so the pass mark was set at ${pct(t.barPct)}, where it does: a pass mark your own model cannot pass is not a fair test.`
+      : `${lead} ${who} passes the ${pct(t.barPct)} pass mark.`
+    : t.verdict === 'insufficient'
+      ? `${lead} ${who} could not be shown to pass either: on ${t.n} requests no model can, so this test is too small to show one passing.`
+      : `${lead} ${who} did not clearly pass the ${pct(t.barPct)} pass mark either, so read this test's results with care.`;
+  return { verdict: t.verdict, raised: !!t.raised, words };
 }
 
 const ANSWERS_PER_PAGE = 10;
@@ -1042,6 +1111,7 @@ const DIFF_WORDS = {
   instruction: "it doesn't follow the instructions in the request", empty: 'it is empty',
   'unparseable json': "it isn't valid JSON", 'no tool call': 'it calls no tool', 'unparseable arguments': "its tool's arguments aren't valid JSON",
   refused: 'its provider refused or failed it', language: "it isn't in the original model's language",
+  unsure: "the judges couldn't say whether it is worse",
 };
 // held to "keeps what matters", the kinds keepsCheck in src/eval/keeps.js names say something else
 const KEEPS_DIFF_WORDS = {
@@ -1106,6 +1176,12 @@ function comparedWords(by, shape, scored) {
   if (b === 'numbers' || b.endsWith('+numbers')) return "A figure in it differs from the original model's";
   if (b === 'fields') return 'A field the original model gave the same way twice differs in it';
   if (b === 'jev-quality' || b === 'llm-quality') return 'Read by a judge model twice, once each way round';
+  // a structured answer that differed, read by two judges each way round, the original model settling what they disagreed on
+  if (b.includes('-choices')) {
+    return b.includes('+tie') ? 'Read by the judges each way round, and settled by the original model where they disagreed'
+      : b.includes('+') ? 'Read by two judges, each twice, once each way round' : 'Read by a judge twice, once each way round';
+  }
+  if (b === 'same') return 'The same answer, field by field';
   if (b.includes('keeps')) return "Checked fact by fact against what both of the original model's answers keep, and against the request";
   if (b) return 'Read by a judge model';
   return scored && shape !== 'free_text' ? 'Compared field by field' : null;
@@ -1177,6 +1253,32 @@ export function readingsWords(r, { purged = false } = {}) {
     };
   }
   const side = (pick, i) => (pick === 'equal' || !pick ? 'equal' : (pick === 'first') === (i === 0) ? 'answer' : 'original');
+  /* 'choices', a structured answer read by the three (judgeChoices in src/eval/judge.js): each judge's two readings, the answer
+     judged being first in the first and second in the second, Jev's chance for each, what each judge made of its two, the
+     original model's two readings where it settled a disagreement, and the verdict ('worse', 'unsure', 'fine', 'better'). */
+  if (r.way === 'choices') {
+    const verdictOf = (picks) => {
+      const s = (Array.isArray(picks) ? picks : []).map((p, i) => side(p, i));
+      if (s.length < 2) return null;
+      if (s.every((x) => x === 'original')) return 'worse';
+      if (s.every((x) => x === 'answer')) return 'better';
+      return s.includes('original') ? 'unsure' : 'fine';
+    };
+    const judge = (who, x) => (x && Array.isArray(x.picks) ? {
+      who, model: x.model ?? null,
+      each: x.picks.map((p, i) => {
+        // what Jev leaned to where its lean was too slight to count, which is then a tie, never "sure" of the tie
+        const leaned = Array.isArray(x.seen) ? side(x.seen[i], i) : null;
+        return { side: side(p, i), leaned: leaned && leaned !== side(p, i) ? leaned : null, sure: Array.isArray(x.chances) ? x.chances[i] ?? null : null };
+      }),
+      verdict: verdictOf(x.picks),
+    } : null);
+    return {
+      way: 'choices',
+      judges: [judge('jev', r.jev), judge('llm', r.llm), judge('tie', r.tie)].filter(Boolean),
+      verdict: r.verdict ?? null, better: !!r.better,
+    };
+  }
   const picks = Array.isArray(r.picks) ? r.picks : [];
   return {
     way: 'quality',
@@ -1212,6 +1314,8 @@ function answerVerdict(row, yard) {
   const s = Number(row.score);
   if (s <= 0) return { tone: 'ok', text: keeps ? 'Kept what matters' : quality ? 'At least as good' : 'Same answer' };
   if (s >= 0.999) return { tone: 'bad', text: keeps ? 'Missed something' : quality ? 'Clearly worse' : 'Different' };
+  // a structured answer the judges, and the original model after them, could not call (judgeChoices): it counts half
+  if (quality && String(row.judged_by || '').includes('-choices')) return { tone: 'warn', text: "The judges couldn't call it, so it counts half" };
   // held to "the same answer": the same as one of the original model's two answers and not the other. Held to "at least
   // as good", a split between the two readings is a tie, so a score between 0 and 1 only comes from an older reading, and
   // held to keeping what matters, a score is 0 or 1 (named as the model page names it, should one ever come between)
@@ -1330,6 +1434,8 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
     reference: run.reference_model,
     referenceName: known(run.reference_model),
     yardstick: yard,
+    // whether this test read a structured answer's differences by the three judges (judgeChoices), which tests before it did not
+    panel: Array.isArray(plan?.yardstick?.choices),
     shape,
     metric: ttft ? 'ttft' : 'latency',
     sample: Number(run.sample_size) || 0,

@@ -2,7 +2,7 @@ import config from '../config.js';
 import { db, id, now } from '../db/index.js';
 import { chargeEval, account, backgroundLeft } from '../billing.js';
 import { extract, disagreement, structuredCompare, proseText, heldFieldChanged } from '../eval/compare.js';
-import { judgeCandidate, judgeBarPair, judgeQuality, numbersDiffer, numbersOf } from '../eval/judge.js';
+import { judgeCandidate, judgeBarPair, judgeQuality, judgeStructured, numbersDiffer, numbersOf } from '../eval/judge.js';
 import { factsFor, keepsCheck, keepsRequest } from '../eval/keeps.js';
 import { askOf } from '../eval/ask.js';
 import { keptChecklist } from '../eval/checklist.js';
@@ -56,7 +56,8 @@ const short = (m) => String(m || '').split('/').pop();
  * it states again makes the served answer worse whatever a reading says, since a judge can see that two answers give
  * different figures, not which one is right. `twice` says the customer's model was asked that second time.
  */
-export async function scoreServed(body, served, ref, shape, { scope = null, yardstick = 'agreement', prefer = null, checklist = null, again = null, stable = null } = {}) {
+export async function scoreServed(body, served, ref, shape, { scope = null, yardstick = 'agreement', prefer = null, checklist = null, again = null, stable = null,
+  tieBreaker = null, judged = null, panel = false } = {}) {
   const a = extract(served, shape);
   const b = extract(ref, shape);
   if (!b.ok) return { score: null, better: 0, judgedBy: null, cost: 0, kind: null };
@@ -117,8 +118,17 @@ export async function scoreServed(body, served, ref, shape, { scope = null, yard
       }
     }
     const text = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
-    const j = await judgeQuality(askOf(body), text(a.value), text(b.value), { scope, prefer, checklist });
+    /* A structured answer is read as the measurement that set the bar read it: by the three (judgeStructured in
+       src/eval/judge.js; Jev and the language model, the customer's own model breaking a tie, never a judge whose own answer
+       it is) where that measurement was read so (`panel`), and as written work is read (judgeQuality) for a bar set before,
+       which was read that way and allows only for that. A difference nobody could call, or one that rests on a tie-break that
+       did not come back, says nothing here: such a reading counts against a setup being switched to, never towards switching
+       back one that serves. */
+    const j = shape !== 'free_text' && panel
+      ? await judgeStructured(askOf(body), a.value, b.value, shape, { scope, prefer, tieBreaker, judged, body })
+      : await judgeQuality(askOf(body), text(a.value), text(b.value), { scope, prefer, checklist });
     if (j.transient || j.score === null || j.score === undefined) return { score: null, better: 0, judgedBy: null, cost: (j.cost || 0) + extra, kind: null, twice };
+    if (j.score > 0 && (j.once || j.detail?.verdict === 'unsure')) return { score: null, better: 0, judgedBy: null, cost: (j.cost || 0) + extra, kind: null, twice };
     return { score: j.score, better: j.detail?.candBetter ? 1 : 0, judgedBy: j.judgedBy, cost: (j.cost || 0) + extra,
       kind: j.score > 0 ? (j.detail?.kind || 'worse') : null, twice };
   }
@@ -177,12 +187,17 @@ export async function barOf(workload) {
   const stable = plan?.yardstick?.stableFields;
   const bar = {
     yardstick: ['quality', 'keeps'].includes(row?.yardstick) ? row.yardstick : 'agreement',
-    prefer: check?.prefer === 'llm' ? 'llm' : null,
+    // the judges the planted answers found reliable: both (null), or one alone ('llm', or 'jev' for a structured answer)
+    prefer: ['llm', 'jev'].includes(check?.prefer) ? check.prefer : null,
     floorPct: Number(row?.floor_pct) > 0 ? Number(row.floor_pct)
       : Number(workload.floor_pct) > 0 ? Number(workload.floor_pct) : config.EVAL_FLOOR_MIN_PCT,
     /* the fields of a structured answer its customer's model gives the same way on nearly every call, as that measurement
        read them (stablePaths in src/eval/compare.js); null for one measured before they were read, which holds none */
     stable: Array.isArray(stable) ? new Set(stable) : null,
+    // whether that measurement read a structured answer by the three judges (judgeChoices), which the checks then do too
+    panel: Array.isArray(plan?.yardstick?.choices),
+    // and the bar of its figures test (exactBar in src/eval/run.js), which a served answer's changed figures are held to
+    exactBarPct: Number(plan?.yardstick?.exactBarPct) > 0 ? Number(plan.yardstick.exactBarPct) : null,
   };
   bars.set(workload.id, { at: Date.now(), bar });
   if (bars.size > 5000) bars.clear();
@@ -240,7 +255,10 @@ async function control(workload, { body, response, callId, decision }, { serve }
   if (!(Number(acct?.balance_usd) > 0.05)) return null;
 
   // judged by the yardstick of the bar it is held to, and marked with it (see controlRecord)
-  const { yardstick, prefer, stable } = await barOf(workload);
+  const { yardstick, prefer, stable, panel } = await barOf(workload);
+  /* what gave the served answer, which never judges it: the model its provider says answered, and failing that, the customer's
+     own model where a cascade sent the call on to it, and the model leading what serves otherwise */
+  const judged = (typeof response?.model === 'string' && response.model) || (decision.escalated ? workload.reference_model : workload.routed_model) || null;
   const checklist = yardstick !== 'agreement' && workload.shape_kind === 'free_text' ? await keptChecklist(workload.id) : null;
   const row = {
     id: id('ctl'), workspace_id: workload.workspace_id, workload_id: workload.id, arm_id: workload.routed_arm_id,
@@ -278,7 +296,8 @@ async function control(workload, { body, response, callId, decision }, { serve }
     row.cost_usd += Number(own.cost) || 0;
     let s = null;
     try {
-      s = await scoreServed(body, response, own.json, workload.shape_kind, { scope: workload.workspace_id, yardstick, prefer, checklist, again, stable });
+      s = await scoreServed(body, response, own.json, workload.shape_kind, { scope: workload.workspace_id, yardstick, prefer, checklist, again, stable,
+        tieBreaker: workload.reference_model, judged, panel });
     } catch {
       s = null;
     }
@@ -314,15 +333,18 @@ export async function controlRecord(workload) {
   if (!workload?.routed_arm_id) return null;
   const from = Math.max(Number(workload.promoted_at) || 0, now() - config.CONTROL_WINDOW_DAYS * DAY);
   // the pass mark and the yardstick of one measurement (barOf)
-  const { floorPct, yardstick } = await barOf(workload);
+  const { floorPct, yardstick, exactBarPct } = await barOf(workload);
+  /* and its figures test, where that measurement set one (exactBar in src/eval/run.js): served answers that changed a figure
+     the customer's model gives the same way both times ('fields'), or gave nothing usable ('no answer'), held to its own bar */
   const r = await db.prepare(
     `SELECT COUNT(*) FILTER (WHERE score IS NOT NULL AND yardstick = ?) AS n,
             COUNT(*) FILTER (WHERE score IS NOT NULL) AS judged,
             COALESCE(SUM(score) FILTER (WHERE yardstick = ?), 0) AS worse,
             COALESCE(SUM(better) FILTER (WHERE score IS NOT NULL AND yardstick = ?), 0) AS better,
+            COUNT(*) FILTER (WHERE score IS NOT NULL AND yardstick = ? AND judged_by IN ('fields', 'no answer')) AS changed,
             COALESCE(SUM(cost_usd), 0) AS cost, MAX(created_at) AS last
        FROM control_checks WHERE workload_id = ? AND arm_id = ? AND created_at >= ?`)
-    .get(yardstick, yardstick, yardstick, workload.id, workload.routed_arm_id, from);
+    .get(yardstick, yardstick, yardstick, yardstick, workload.id, workload.routed_arm_id, from);
   const n = Number(r?.n) || 0;
   // the checks since the switch compared the other way, which the page says rather than hides
   const otherWay = Math.max(0, (Number(r?.judged) || 0) - n);
@@ -331,9 +353,15 @@ export async function controlRecord(workload) {
   // a record with nothing worse yet is read as having half of one, so it is still uncertain rather than exact
   const q = n ? Math.max(worse, 0.5) / n : 0.5;
   const half = n ? Math.sqrt((q * (1 - q)) / n) * zSeq(n, { alpha: config.LEARN_ALPHA / 2 }) : 1;
+  const changed = Number(r?.changed) || 0;
+  const changedRate = n ? changed / n : 0;
+  const cq = n ? Math.max(changed, 0.5) / n : 0.5;
+  const changedHalf = n ? Math.sqrt((cq * (1 - cq)) / n) * zSeq(n, { alpha: config.LEARN_ALPHA / 2 }) : 1;
   return {
     n, otherWay, worse: Math.round(worse * 100) / 100, better: Number(r?.better) || 0, rate,
     lo: Math.max(0, rate - half), hi: Math.min(1, rate + half), floorPct, yardstick,
+    // the figures test (null where none was set): how many served answers changed a held figure, and the range of that rate
+    figures: exactBarPct ? { changed, rate: changedRate, lo: Math.max(0, changedRate - changedHalf), barPct: exactBarPct } : null,
     costUsd: Number(r?.cost) || 0, since: from, last: r?.last ? Number(r.last) : null,
     enough: n >= config.CONTROL_MIN_CHECKS,
   };
@@ -349,6 +377,12 @@ const BREACH_WORDS = {
 /** Whether the control group says what serves is clearly worse than the pass mark allows, and why, in words. */
 export function controlBreach(rec, reference) {
   if (!rec || !rec.enough) return null;
+  // a figure changed clearly more often than its figures test allows, however the judges read the rest
+  if (rec.figures && rec.figures.lo * 100 > rec.figures.barPct) {
+    return `Checked against ${short(reference)} in the background since the switch: of ${rec.n} of its answers, ${rec.figures.changed} `
+      + `changed a figure ${short(reference)} gives the same way every time, or gave nothing usable (${(rec.figures.rate * 100).toFixed(1)}%), `
+      + `clearly past the ${rec.figures.barPct.toFixed(1)}% its figures may change.`;
+  }
   if (!(rec.lo * 100 > rec.floorPct)) return null;
   const worse = Number.isInteger(rec.worse) ? rec.worse : rec.worse.toFixed(1);
   return `Checked against ${short(reference)} in the background since the switch: of ${rec.n} of its answers, ${worse} `

@@ -141,13 +141,23 @@ The bar is how much your own model disagrees with itself, measured fresh. We sam
 calls, spread across the last thirty days and stratified by answer length, and take two answers
 from your current model for each: the one it gave you, where it was kept, and one replay. The
 disagreement between the two is the noise; the bar is `max(1.25 × noise, 3%)`. A candidate is
-replayed once on the same calls and compared against both answers.
+replayed once on the same calls and compared against both answers. The bar is never one your own
+model would fail: its own second answers, scored exactly as a candidate's are, are tested against
+it, and where a sample this size can show anything passes, the bar is raised to where they pass.
+The test page says how your own model did.
 
-Structured answers are compared field by field by what each field is: a deciding field that
-differs (a label, an amount, a date, which tool) makes the answer wrong, and a written field that
-differs only in wording is read for meaning by a judge. Written answers are judged whole. A
-judgement that did not come back is left out of every number rather than counted either way, and
-the judge is tested on pairs whose answer is known on every run that leans on it.
+Structured answers are compared field by field by what each field is. A figure, a date, a name or
+a code your own model gives the same way both times has one right value: one that differs makes
+the answer wrong, decided in code, and those changes are held to a bar of their own as strict as
+"the same answer". A choice (a label, a level on a scale, a yes or no, which of several tools),
+read from what the request declares or from the values its instruction lists, can differ with both
+answers right, so a choice that differs goes to judges: Jev and a language model each read the
+request and both answers, both ways round, and where they disagree your own model settles it. A
+difference nobody can call counts half. A written field that differs only in wording is read for
+meaning by a judge. Written answers are judged whole. A judgement that did not come back is left
+out of every number rather than counted either way, and on more than one answer in ten nothing is
+switched on what is left. The judges are tested on answers whose verdict is known on every run
+that leans on them; where they get any wrong, the workload is compared for the same answer.
 
 A candidate clears only when even the high end of the range its disagreement could be in is
 inside the bar (a one-sided 95% bound). That takes about 90 calls for a perfect run at the 3%

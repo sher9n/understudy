@@ -65,6 +65,9 @@ const JUDGED_WHY = {
   varied: 'the original model answers the same request differently each time',
   chosen: "this workload's setting asks for it",
   sourced: 'these requests ask for an answer built from text they give, like a summary or a translation',
+  // a structured answer read by judges where it differs (judgeChoices in src/eval/judge.js)
+  choices: 'its answers pick from a set of choices, such as a label or a level, and two good answers can pick differently',
+  flips: 'the original model gave two different answers to some of the same requests',
 };
 /* The words for how a test judged answers (its yardstick: 'agreement', the same answer; 'quality', at least as good; 'keeps',
    keeps what matters), wherever the page says what a figure counts. */
@@ -950,6 +953,7 @@ function RunRow({ w, r, open, onToggle, goTo, optimize }) {
         ) : (
           <>
             <div className="wp-take">{I.info}<span>{rp.take}</span></div>
+            {rp.ownTest && <p className="wp-owntest"><b>Your own model as a candidate.</b> {rp.ownTest.words}</p>}
             {rp.cands.length > 0 ? <RunDetail rp={rp} wid={w.id} goTo={goTo} optimize={optimize} /> : rp.self && (
               <div className="wp-chartbox wp-selfbox">
                 <p className="wp-sub">{rp.self.noise !== null ? 'Original model against itself' : 'How far it got'}</p>

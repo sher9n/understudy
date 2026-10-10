@@ -1220,7 +1220,7 @@ api.post('/workloads/:id/judging', async (req, res) => {
   if (!JUDGE_MODES.includes(mode)) return fail(res, 400, 'That is not one of the choices.');
   // answers with a shape (JSON, a tool call, a label) are compared field by field, as their fields decide
   if (mode !== 'auto' && w.shape_kind && w.shape_kind !== 'free_text') {
-    return fail(res, 400, 'Only written answers can be judged another way. Answers with a set shape are compared field by field.');
+    return fail(res, 400, 'Only written answers can be judged another way. Answers with a set shape are compared field by field, and a choice that differs is read by judges.');
   }
   await db.prepare('UPDATE workloads SET judge_mode = ?, updated_at = ? WHERE id = ?')
     .run(mode === 'auto' ? null : mode, now(), w.id);

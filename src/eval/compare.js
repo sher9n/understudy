@@ -571,7 +571,301 @@ export function heldFieldChanged(answer, refA, refB, shapeKind, { figuresOnly = 
 }
 
 // what heldFieldChanged and stablePaths call which tool a tool-calling answer called
-const TOOL_PATH = 'the tool called';
+export const TOOL_PATH = 'the tool called';
+
+/* Choices. A field of a structured answer that picks one of a known set: a label or a category, a level on a scale, a yes
+   or a no, which tool to call. Two answers can pick differently and both be right, as the customer's own model shows when
+   it gives a different priority to the same ticket on its second answer, so a choice that differs is never a mistake on
+   its own: a judge reads the request and both answers and says whether one is clearly worse (judgeStructured in
+   src/eval/judge.js). A figure, a date, a code or a name is not a choice: one the customer's model states the same way
+   both times stays held exactly (heldFieldChanged). Held exactly, a choice made a test nothing could pass: on 5 Oct 2026 a
+   ticket-priority workload's own model gave another priority on 3 of 120 tickets, its bar came out at 3.1%, and that
+   model's own second answers, tested as if they were a cheaper model's, could not clear it (upper reading 6.1%).
+
+   Which fields are choices is read, never guessed from their names: what the requests declare (a list of allowed values,
+   a true or false field, a whole number on a short scale, the tools to choose from and their arguments' allowed values),
+   and, where nothing is declared, a yes or no field, or a short field whose values the workload's own instruction lists
+   ("classify it as low, medium, high or urgent"). A short field whose values the instruction does not list is read as a
+   fact: a currency or a country copied from the request is not a choice the model makes. */
+
+// a field's place in an answer, at whatever position of a list: items[3].category is items[].category
+export const normPath = (path) => String(path).replace(/\[\d+\]/g, '[]');
+// a whole number on a scale this short is a level to pick (1 to 5, 0 to 10), not a quantity
+const SCALE_MAX = 10;
+// how deep a schema is read, and how much of it: deep enough for a model three definitions down, never without end
+const SCHEMA_DEPTH = 40;
+const SCHEMA_NODES = 4000;
+
+/* A schema's own definitions, which a field points to rather than repeats ("$ref": "#/$defs/Priority"), as schemas made from
+   code usually do: read where they point, within the same schema. Null for one that points anywhere else. */
+function pointedTo(s, root) {
+  const ref = s?.$ref;
+  if (typeof ref !== 'string' || !ref.startsWith('#/') || !root || typeof root !== 'object') return null;
+  let at = root;
+  for (const part of ref.slice(2).split('/')) {
+    const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
+    if (!at || typeof at !== 'object' || !(key in at)) return null;
+    at = at[key];
+  }
+  return at && typeof at === 'object' ? at : null;
+}
+
+/* A schema's parts, nearest the top first: the schema itself, then what it points to, combines (allOf, anyOf, oneOf, unless
+   that is a set of consts, which is one choice: `isList`), its fields and its list's items, each with its place in an answer
+   (`path`). A definition is followed where it is pointed to, never into itself again on the same path (a node that holds a
+   list of nodes), and read no deeper than SCHEMA_DEPTH. `see` reads each part and answers true to stop. Breadth first, and
+   no more than SCHEMA_NODES parts: a schema of many definitions that all point to each other has more paths than anything
+   could read (fourteen give billions), and depth first, the budget ran out deep inside the first of them, so a choice
+   declared beside it at the top went unread. */
+function eachSchemaPart(schema, prefix, see, { isList = () => false } = {}) {
+  if (!schema || typeof schema !== 'object') return;
+  const queue = [{ s: schema, path: prefix, refs: new Set(), depth: 0 }];
+  let budget = SCHEMA_NODES;
+  for (let k = 0; k < queue.length && budget > 0; k += 1) {
+    const { s, path, refs, depth } = queue[k];
+    queue[k] = null;
+    if (!s || typeof s !== 'object' || depth > SCHEMA_DEPTH) continue;
+    budget -= 1;
+    if (see(s, path)) return;
+    // what is left to read is never more than the budget could read
+    const next = (x, p, r = refs) => { if (queue.length - k <= budget) queue.push({ s: x, path: p, refs: r, depth: depth + 1 }); };
+    if (typeof s.$ref === 'string' && !refs.has(s.$ref)) {
+      const there = pointedTo(s, schema);
+      if (there) next(there, path, new Set([...refs, s.$ref]));
+    }
+    if (Array.isArray(s.allOf)) for (const x of s.allOf) next(x, path);
+    for (const key of ['anyOf', 'oneOf']) {
+      if (Array.isArray(s[key]) && s[key].length && !isList(s[key])) for (const x of s[key]) next(x, path);
+    }
+    if (s.properties && typeof s.properties === 'object') {
+      for (const [name, v] of Object.entries(s.properties)) next(v, path ? `${path}.${name}` : name);
+    }
+    if (s.items && typeof s.items === 'object' && !Array.isArray(s.items)) next(s.items, `${path}[]`);
+  }
+}
+
+// a set of consts, each one allowed value: one choice, read as its list of values
+const isConstList = (xs) => xs.every((x) => x && typeof x === 'object' && 'const' in x);
+
+/* Every choice a schema declares, by place, with the values it allows where it lists them: an enum or a set of consts in the
+   order given, and a whole number on a short scale as every value on it. */
+function walkSchema(schema, prefix) {
+  const out = new Map();
+  eachSchemaPart(schema, prefix, (s, path) => {
+    const at = normPath(path || '$');
+    const types = Array.isArray(s.type) ? s.type : [s.type];
+    const lo = Number(s.minimum);
+    const hi = Number(s.maximum);
+    if (Array.isArray(s.enum) && s.enum.length) {
+      if (!out.get(at)) out.set(at, s.enum.filter((x) => x !== null));
+    } else if (types.includes('boolean')) {
+      if (!out.has(at)) out.set(at, null);
+    } else if (types.includes('integer') && Number.isFinite(lo) && Number.isFinite(hi) && hi >= lo && hi - lo <= SCALE_MAX) {
+      if (!out.get(at)) out.set(at, Array.from({ length: hi - lo + 1 }, (_, k) => lo + k));
+    }
+    for (const key of ['anyOf', 'oneOf']) {
+      if (Array.isArray(s[key]) && s[key].length && isConstList(s[key]) && !out.get(at)) out.set(at, s[key].map((x) => x.const));
+    }
+    return false;
+  }, { isList: isConstList });
+  return out;
+}
+
+// the schemas a request gives its answer: its response_format's, or each tool's parameters (read as a list of calls' arguments)
+function schemasOf(body, shapeKind) {
+  if (!body || typeof body !== 'object' || shapeKind === 'free_text') return [];
+  if (shapeKind === 'tool_call') {
+    return (Array.isArray(body.tools) ? body.tools : []).map((t) => t?.function?.parameters ?? t?.parameters).filter(Boolean)
+      .map((params) => [params, '[]']);
+  }
+  const rf = body.response_format;
+  const schema = rf?.json_schema?.schema ?? rf?.schema;
+  return schema ? [[schema, '']] : [];
+}
+
+/* Which tool to call is a choice only where there is one to make: two tools or more, and a request that does not name the one
+   it wants (tool_choice). A single tool, or one the request forces, is called every time, by every model. */
+const toolIsChosen = (body) => {
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  const choice = body?.tool_choice;
+  const forced = choice && typeof choice === 'object' && (choice.function?.name || choice.name);
+  return tools.length >= 2 && !forced;
+};
+
+/** The choices one request declares for its answer, by their places (normPath): which tool to call, where there is a choice
+    of them, and its arguments' allowed values for a tool call, the schema's allowed values otherwise, and the whole answer of
+    a workload of one label. */
+export function declaredChoices(body, shapeKind) {
+  const out = new Set();
+  if (!body || typeof body !== 'object' || shapeKind === 'free_text') return out;
+  if (shapeKind === 'tool_call' && toolIsChosen(body)) out.add(TOOL_PATH);
+  for (const [schema, prefix] of schemasOf(body, shapeKind)) for (const p of walkSchema(schema, prefix).keys()) out.add(p);
+  // a workload of one label: the label, or the answer itself where a model gave the label bare
+  if (shapeKind === 'enum') out.add('$');
+  return out;
+}
+
+/** The values a request allows for each choice it lists them for (an enum, a set of consts, every whole number on a short
+    scale), by place (normPath), in the order given. */
+export function declaredOptions(body, shapeKind) {
+  const out = new Map();
+  for (const [schema, prefix] of schemasOf(body, shapeKind)) {
+    for (const [p, list] of walkSchema(schema, prefix)) if (Array.isArray(list) && list.length && !out.has(p)) out.set(p, list);
+  }
+  return out;
+}
+
+/** Whether a request's answer has written fields: text with no list of allowed values (a reason, a summary, a note), which
+    two answers word differently, and which a judge then reads (judgeStructured). What the quote counts the readings of. */
+export function hasWrittenFields(body, shapeKind) {
+  let found = false;
+  const written = (s) => {
+    const types = Array.isArray(s.type) ? s.type : [s.type];
+    found = types.includes('string') && !Array.isArray(s.enum) && !('const' in s) && !s.format;
+    return found;
+  };
+  for (const [schema, prefix] of schemasOf(body, shapeKind)) {
+    eachSchemaPart(schema, prefix, written);
+    if (found) return true;
+  }
+  return false;
+}
+
+/* Where the allowed values of a choice are a scale, each value's place on it, so the far end of it can be planted as clearly
+   worse (plantedStructured in src/eval/run.js): numbers, numbers written as text or with a letter before them (P1, sev2), and
+   the words that name levels (low, medium, high, urgent). Null for any other list, such as departments, where no value is
+   further from another than any other is, and so none is clearly worse than another. */
+const LEVEL_WORDS = { lowest: 0, none: 0, 'very low': 1, low: 2, minor: 2, normal: 3, medium: 3, moderate: 3, high: 4, major: 4,
+  'very high': 5, urgent: 6, critical: 6, severe: 6, emergency: 7, highest: 7, blocker: 7 };
+export function scaleOf(list) {
+  if (!Array.isArray(list) || list.length < 3) return null;
+  const numeric = list.map((x) => (typeof x === 'number' ? x
+    : typeof x === 'string' && /^\s*(?:p|sev|s|level|tier)?\s*-?\d+(?:\.\d+)?\s*$/i.test(x) ? Number(x.replace(/[^\d.-]/g, '')) : NaN));
+  if (numeric.every(Number.isFinite)) return numeric;
+  const words = list.map((x) => (typeof x === 'string' ? LEVEL_WORDS[x.trim().toLowerCase().replace(/[_-]+/g, ' ')] : undefined));
+  return words.every((x) => x !== undefined) ? words : null;
+}
+
+/** The leaves of a structured answer, by place, as heldFieldChanged and stablePaths read them (a tool call's arguments as a
+    list of them, one for each call made). */
+export function answerLeaves(value, shapeKind) {
+  const v = shapeKind === 'tool_call' ? (Array.isArray(value) ? value : []).map((c) => c?.args) : value;
+  return leaves(v);
+}
+
+// a place in a structured answer (as leaves gives it) read back out of it: "lines[3].category", "[0].level", "$"
+export const segmentsOf = (path) => [...String(path).matchAll(/\[(\d+)\]|([^.[\]]+)/g)].map((m) => (m[1] !== undefined ? Number(m[1]) : m[2]));
+export function valueAt(value, path) {
+  if (path === '$') return value;
+  let o = value;
+  for (const k of segmentsOf(path)) {
+    if (o === null || typeof o !== 'object') return undefined;
+    o = o[k];
+  }
+  return o;
+}
+
+/* Where a structured answer is too long for a judge to read whole (Jev reads 2,500 characters of each, the language model
+   4,000), the parts of the two answers that differ: each item of a list that holds a difference, whole, and each other field
+   that differs, each under its place. A difference on the thirtieth line of an invoice was otherwise past what either judge
+   read, both read the same text, and the answer was forgiven. Null where both are short enough to read whole. */
+export const FOCUS_CHARS = 1800;
+export function focusOf(a, b, shapeKind) {
+  const text = (v) => JSON.stringify(v, null, 2) ?? '';
+  if (text(a).length <= FOCUS_CHARS && text(b).length <= FOCUS_CHARS) return null;
+  let x = a;
+  let y = b;
+  if (shapeKind === 'tool_call') {
+    const names = (calls) => (Array.isArray(calls) ? calls.map((c) => c?.name ?? '') : []);
+    if (names(a).join('|') !== names(b).join('|')) return [{ 'the tools called': names(a) }, { 'the tools called': names(b) }];
+    x = (Array.isArray(a) ? a : []).map((c) => c?.args);
+    y = (Array.isArray(b) ? b : []).map((c) => c?.args);
+  }
+  const lx = leaves(x);
+  const ly = leaves(y);
+  const places = new Set();
+  for (const p of new Set([...lx.keys(), ...ly.keys()])) {
+    const vx = lx.get(p);
+    const vy = ly.get(p);
+    if (lx.has(p) && ly.has(p) && (isProse(vx) && isProse(vy) ? vx.trim() === vy.trim() : sameValue(vx, vy))) continue;
+    // the item of a list it sits in, whole, where it sits in one; the field itself otherwise
+    const item = String(p).match(/^(.*\[\d+\])/);
+    places.add(item ? item[1] : p);
+  }
+  const pick = (v) => Object.fromEntries([...places].map((p) => [p, valueAt(v, p) ?? null]));
+  return [pick(x), pick(y)];
+}
+
+/** What a request's own instruction says, as one text: its system and developer messages. */
+export function instructionOf(body) {
+  const msgs = Array.isArray(body?.messages) ? body.messages : [];
+  return msgs.filter((m) => m?.role === 'system' || m?.role === 'developer')
+    .map((m) => (typeof m.content === 'string' ? m.content
+      : Array.isArray(m.content) ? m.content.map((x) => (typeof x?.text === 'string' ? x.text : '')).join(' ') : ''))
+    .join('\n');
+}
+
+// what a field's values may be to be read as a choice where nothing declares one: a few, short, repeated words
+const CHOICE_VALUES_MAX = 12;
+const CHOICE_CHARS = 40;
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The choices the answers themselves show where nothing declares them (see above): every yes or no field, and every short
+    field with a few repeated values, each with a letter in it, that the instruction lists. A figure written as text is never
+    one, however a numbered instruction happens to read ("1. Read the order. 2. ..."). `values` are answers as extract reads
+    them. */
+export function observedChoices(values, instruction, shapeKind) {
+  const out = new Set();
+  if (shapeKind === 'free_text') return out;
+  const by = new Map();
+  for (const v0 of values || []) {
+    if (v0 === undefined || v0 === null) continue;
+    const v = shapeKind === 'tool_call' ? (Array.isArray(v0) ? v0 : []).map((c) => c?.args) : v0;
+    for (const [path, x] of leaves(v)) {
+      const k = normPath(path);
+      if (!by.has(k)) by.set(k, []);
+      by.get(k).push(x);
+    }
+  }
+  const text = String(instruction || '').toLowerCase();
+  const listed = (s) => {
+    const t = String(s).trim().toLowerCase();
+    return !!t && new RegExp(`(^|[^\\p{L}\\p{N}_])${escapeRe(t)}($|[^\\p{L}\\p{N}_])`, 'u').test(text);
+  };
+  for (const [k, xs] of by) {
+    if (xs.length < 4) continue;
+    if (xs.every((x) => typeof x === 'boolean')) { out.add(k); continue; }
+    if (!xs.every((x) => typeof x === 'string' && x.trim() && x.trim().length <= CHOICE_CHARS && !isProse(x) && /\p{L}/u.test(x))) continue;
+    const distinct = new Set(xs.map((x) => x.trim().toLowerCase()));
+    if (distinct.size < 2 || distinct.size > CHOICE_VALUES_MAX || distinct.size * 3 > xs.length) continue;
+    if (xs.filter(listed).length >= 0.8 * xs.length) out.add(k);
+  }
+  return out;
+}
+
+/** Every choice a workload's answers make, by place (normPath, TOOL_PATH): what its requests declare (`bodies`) and what its
+    customer's model's answers show (`values`, read against the first request's instruction). Empty for written answers. */
+export function choicePathsOf({ bodies = [], values = [], shapeKind } = {}) {
+  const out = new Set();
+  if (!shapeKind || shapeKind === 'free_text') return out;
+  // what the requests declare is the same for nearly all of a workload's requests: a few different ones read, not every one
+  const read = new Set();
+  let instruction = '';
+  for (const b of bodies) {
+    const key = JSON.stringify([b?.response_format ?? null, b?.tool_choice ?? null,
+      (Array.isArray(b?.tools) ? b.tools : []).map((t) => [t?.function?.name ?? t?.name, t?.function?.parameters ?? t?.parameters ?? null])]);
+    if (!read.has(key) && read.size < 5) {
+      read.add(key);
+      for (const p of declaredChoices(b, shapeKind)) out.add(p);
+    }
+    if (!instruction) instruction = instructionOf(b);
+  }
+  for (const p of observedChoices(values, instruction, shapeKind)) out.add(p);
+  return out;
+}
+
+/** Whether a field, by the place leaves or heldFieldChanged gives it, is one of `choices` (choicePathsOf). */
+export const isChoicePath = (path, choices) => !!choices?.size && (choices.has(path) || choices.has(normPath(path)));
 
 /* The fields of a structured answer its customer's model gives the same way on both of its answers to a call, on nearly
    every call: what heldFieldChanged holds a candidate to. Nearly every call is read as a range, not a share: the exact
@@ -582,10 +876,12 @@ const TOOL_PATH = 'the tool called';
    field, there on half the answers, is not held, nor is the fourth line of a list that is sometimes three lines long. A
    written field counts by its figures, where both answers state any. `pairs` are the customer's model's two answers to
    each call, as a measurement's bar reads them. Answers a Set of paths, named as heldFieldChanged reads them before naming
-   them for a page ('$' for an answer that is a single value). */
-export function stablePaths(pairs, shapeKind, { least = 10, share = 0.9 } = {}) {
+   them for a page ('$' for an answer that is a single value). A choice (`except`, from choicePathsOf) is never held, however
+   steadily the customer's model makes it: a judge reads a choice that differs. */
+export function stablePaths(pairs, shapeKind, { least = 10, share = 0.9, except = null } = {}) {
   const tally = new Map();
   const count = (path, agreed) => {
+    if (isChoicePath(path, except)) return;
     const t = tally.get(path) || [0, 0];
     t[0] += agreed ? 1 : 0;
     t[1] += 1;
@@ -791,6 +1087,26 @@ export function verdictWith(scores, floorPct, { reviewBand = 1.25, z = Z95 } = {
   if (hiPct <= floorPct) return { verdict: 'cleared', gap, lo: loPct, hi: hiPct };
   if (loPct > floorPct * reviewBand) return { verdict: 'missed', gap, lo: loPct, hi: hiPct };
   return { verdict: 'review', gap, lo: loPct, hi: hiPct };
+}
+
+/* The bar is never one the customer's own model would fail. Its second answers, held to its first by the same yardstick,
+   are the answers of a model exactly as good as itself, and a test it could not pass is no fair test of anybody: a bar of
+   1.25 times how often it disagrees with itself leaves less than one extra difference in 120 requests when that is 2.5%,
+   and a sample has to show, nineteen times in twenty, that a model is under it. So the bar is raised, where it has to be,
+   to the top of the range the customer's model's own scores read at (the self-test), and that self-test is kept with the
+   test for its page. Only where a sample of this size could show anything passes at all (a perfect run would clear the
+   bar as it was): on fewer requests, a raise to the self-test's range would let a perfect run on a handful clear a bar
+   it could never show it keeps, and "too few to be sure" is the answer there. `ownScores` are the customer's model's own
+   per-request scores, read as the bar reads them; `z` the strictness the verdict is held to. Answers { bar, self (the
+   self-test's verdict against the bar answered), raised, rawPct }. */
+export function fairBar(rawPct, ownScores, { z = Z95, cap = 55 } = {}) {
+  const scores = Array.isArray(ownScores) ? ownScores.filter((x) => Number.isFinite(Number(x))).map(Number) : [];
+  if (!scores.length) return { bar: rawPct, self: null, raised: false, rawPct };
+  const first = verdictWith(scores, rawPct, { z });
+  if (wilson(0, scores.length, z).hi * 100 > rawPct) return { bar: rawPct, self: first, raised: false, rawPct };
+  const bar = Math.max(rawPct, Math.min(first.hi, Math.max(cap, rawPct)));
+  const raised = bar > rawPct + 1e-9;
+  return { bar, self: raised ? verdictWith(scores, bar, { z }) : first, raised, rawPct };
 }
 
 /** Kept for the pages that still read a verdict from a gap alone; every measurement uses verdictWith. */
