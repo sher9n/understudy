@@ -151,12 +151,13 @@ a code your own model gives the same way both times has one right value: one tha
 the answer wrong, decided in code, and those changes are held to a bar of their own as strict as
 "the same answer". A choice (a label, a level on a scale, a yes or no, which of several tools),
 read from what the request declares or from the values its instruction lists, can differ with both
-answers right, so a choice that differs goes to judges: Jev and a language model each read the
-request and both answers, both ways round, and where they disagree your own model settles it. A
-difference nobody can call counts half. A written field that differs only in wording is read for
+answers right where your own model makes it differently from one answer to the next. Such a choice
+that differs goes to judges: Jev and a language model each read the request and both answers, both
+ways round, and where they disagree your own model settles it. A difference nobody can call counts
+half. A choice your own model always makes the same way is held exactly, like a figure. A written field that differs only in wording is read for
 meaning by a judge. Written answers are judged whole. A judgement that did not come back is left
-out of every number rather than counted either way, and on more than one answer in ten nothing is
-switched on what is left. The judges are tested on answers whose verdict is known on every run
+out of every number rather than counted either way, and where those answers, read as worse, would
+have held a model back, nothing is switched on what is left. The judges are tested on answers whose verdict is known on every run
 that leans on them; where they get any wrong, the workload is compared for the same answer.
 
 A candidate clears only when even the high end of the range its disagreement could be in is

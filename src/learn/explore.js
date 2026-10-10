@@ -538,7 +538,8 @@ async function agreementOf(body, used, other, shape, scope, bar = null) {
     const b = extract(other, shape);
     if (!a.ok) return { agreement: null, cost: 0 };
     if (!b.ok) return { agreement: 0, cost: 0, judgedBy: 'no answer' };
-    if (typeof a.value === 'string' && typeof b.value === 'string' && numbersDiffer(b.value, a.value)) {
+    // a written answer's figures, checked in code; a structured one's bare label ("P2") is a choice for the judges
+    if (shape === 'free_text' && typeof a.value === 'string' && typeof b.value === 'string' && numbersDiffer(b.value, a.value)) {
       return { agreement: 0, cost: 0, judgedBy: 'numbers' };
     }
     /* A structured answer's figures are read as strictly: one that changes a figure the customer's model gives the same way
@@ -550,9 +551,11 @@ async function agreementOf(body, used, other, shape, scope, bar = null) {
     const text = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
     /* the background answer judged against the used one, as a measurement judges a model against the customer's: a structured
        one by the three (judgeStructured), the customer's own model breaking a tie, never by a judge whose own answer it is */
+    /* held against the answer served, whose model (`referenceBy`) may be the language-model judge's own after a switch to it:
+       that judge is then left out, as it is for its own answer */
     const j = shape !== 'free_text' && bar.panel
       ? await judgeStructured(requestText(body), b.value, a.value, shape, { scope, prefer: bar.prefer, tieBreaker: bar.tieBreaker ?? null,
-        judged: bar.judged ?? null, body })
+        judged: bar.judged ?? null, referenceBy: bar.referenceBy ?? null, body })
       : await judgeQuality(requestText(body), text(b.value), text(a.value), { scope, prefer: bar.prefer, checklist: bar.checklist });
     // a reading that rests on a tie-break that did not come back says nothing, and is read again next time
     if (j.transient || j.score === null || j.score === undefined || j.once) return { agreement: null, cost: j.cost || 0, judgedBy: 'not judged' };
@@ -626,8 +629,13 @@ export async function maybeShadow({ workload, body, response, callId = null }, {
     if (err?.spent) out = { cost: err.spent };
   }
   if (out?.json) {
-    // the model that answered, as its provider names it, never judges its own answer
+    // the model that answered, as its provider names it, never judges its own answer, nor the one served against it
     if (judging && typeof out.json?.model === 'string' && out.json.model) judging.judged = out.json.model;
+    if (judging) {
+      // what served it: as its provider named it, or what serves now, or the customer's own model where nothing is switched
+      judging.referenceBy = typeof response?.model === 'string' && response.model ? response.model
+        : st.serving?.spec ? leadModel(st.serving.spec)?.model ?? null : workload.reference_model;
+    }
     try {
       reading = await agreementOf(body, response, out.json, workload.shape_kind, workload.workspace_id, judging);
     } catch {

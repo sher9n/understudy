@@ -8,8 +8,8 @@ import { judgeBarPair, judgeCandidate, judgeQuality, judgeStructured, canJudge, 
 import { factsFor, keepsCheck, keepsRequest } from './keeps.js';
 import { checklistFor, breakOne } from './checklist.js';
 import { extract, disagreement, gates, floorFrom, marginFloor, verdictWith, sampleCalls, barIsMeaningful, structuredCompare, proseText, callsToClear,
-  heldFieldChanged, stablePaths, choicePathsOf, fairBar, declaredOptions, answerLeaves, isChoicePath, isProse, normPath, sameValue,
-  segmentsOf, scaleOf, TOOL_PATH } from './compare.js';
+  heldFieldChanged, stablePaths, choicePathsOf, fairBar, declaredOptions, answerLeafEntries, isChoicePath, normPath, sameValue,
+  scaleOf, differingFields, TOOL_PATH } from './compare.js';
 import { promote, revert, trafficOf, everReverted } from './promote.js';
 import { replayOnce } from './replay.js';
 import { thinkingFit } from './select.js';
@@ -51,8 +51,19 @@ import { HANDED_OVER, HANDED_OVER_DEPLOY, requeueDead } from '../jobs.js';
 const DAY = 86400000;
 // which of two verdicts says the answers fail more: the one a model keeps where it is held to two tests (the figures test)
 const FAILS_MORE = { cleared: 0, insufficient: 1, review: 2, missed: 3 };
-// the most of a model's answers the judges may leave unread before what is left is not enough to switch on
-const UNREAD_MAX = 0.1;
+/* Whether a figures test's verdict holds a model back further than its judged answers do: only on what its calls show, a
+   figure changed too often ('review', 'missed'), never for want of calls. Its judged answers already count every changed
+   figure as a difference, so where there are too few calls to show the figures bar, the judged bar is the one that binds.
+   Held back for want of calls, a model matching every answer read "too few to be sure" on fewer than 88 calls, and a
+   cautious second look, which needs 125 at a 3% bar, could never pass, and was booked and paid for again and again. */
+export const heldBack = (figures, verdict) => figures !== 'insufficient' && FAILS_MORE[figures] > (FAILS_MORE[verdict] ?? -1);
+/* Whether answers the judges could not read decide a verdict: read as worse, every one of them, would what was read still
+   clear? Where it would not, what was read is not enough to switch on. Counted against all of a model's answers, twelve
+   unread differences among 120 answers whose others were the same cleared on the same answers alone. */
+export function unreadDecides(scores, unread, bar, { reviewBand = 1.25, z } = {}) {
+  if (!unread) return false;
+  return verdictWith([...scores, ...Array(unread).fill(1)], bar, { reviewBand, ...(z ? { z } : {}) }).verdict !== 'cleared';
+}
 
 /** What a month of this workload would cost on a model at list price, from its real traffic. */
 async function monthlyOn(workloadId, modelId) {
@@ -819,7 +830,12 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
   /* A structured answer is read by the three (judgeStructured in src/eval/judge.js): Jev and the language model, each both ways
      round, and the customer's own model where they do not agree, never by a judge whose own answer it is (`judged`, the model
      that gave it). The same answer by the field rules needs no judge at all. Written answers as ever. */
-  const qualityOf = (body, answer, refAnswer, { judged = null } = {}) => (shape !== 'free_text'
+  /* A structured answer judged "at least as good" is read by the three (judgeStructured), its figures held to a test of their
+     own, its judges checked on planted structured answers, and the checks after a switch read it the same way: all of it
+     choice judging (EVAL_JUDGE_CHOICES), and all of it off together where that is, so turning it off restores exactly the
+     judging before it, a structured answer read as its JSON, as written work is. */
+  const panelOn = config.EVAL_JUDGE_CHOICES && shape !== 'free_text';
+  const qualityOf = (body, answer, refAnswer, { judged = null } = {}) => (panelOn
     ? judgeStructured(askOf(body), answer, refAnswer, shape, { scope: workload.workspace_id, prefer: judgePrefer, tieBreaker: reference, judged, body })
     : judgeQuality(askOf(body), asText(answer), asText(refAnswer), { scope: workload.workspace_id, prefer: judgePrefer, checklist }));
   /* Under "keeps what matters": an answer to one of the sampled requests held to the facts both of the customer's answers to
@@ -834,10 +850,14 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
      structured answer is held the same way to every field that model gives the same way both times (heldFieldChanged in
      src/eval/compare.js), before any judge reads it: it used to go to the judge as its JSON, fields and all. */
   // written answers only: a structured one's figures are held field by field (above), and a bare label such as P2 is a choice
-  const figuresHeld = (a, b) => yardstick === 'quality' && shape === 'free_text' && typeof a === 'string' && typeof b === 'string'
+  const figuresHeld = (a, b) => yardstick === 'quality' && !panelOn && typeof a === 'string' && typeof b === 'string'
     && numbersOf(a).length > 0 && !numbersDiffer(a, b);
   // the fields held, once the bar has read which ones the customer's model gives the same way on nearly every call
   let stableFields = null;
+  /* and of those, its figures (a figure, a date, a name, a code): every held field but a choice its model happens to make the
+     same way every time, which is held exactly on each answer but is not a figure, and is never what the figures test, and
+     its words ("it changed a figure"), are about (figureFields) */
+  let figureFields = null;
   // the choices its answers make (choicePathsOf in src/eval/compare.js), which are never held: a judge reads one that differs
   let choices = new Set();
   /* The figures test, for a structured answer judged "at least as good": a model passes only where it also changes a field the
@@ -852,7 +872,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
   const exactOf = (value, p) => {
     const refs = [p.a, p.b].filter((x) => x?.ok);
     if (!refs.length) return null;
-    return refs.reduce((n, ref) => n + (heldFieldChanged(value, ref.value, ref.value, shape, { only: stableFields || new Set() }) ? 1 : 0), 0) / refs.length;
+    return refs.reduce((n, ref) => n + (heldFieldChanged(value, ref.value, ref.value, shape, { only: figureFields || new Set() }) ? 1 : 0), 0) / refs.length;
   };
   const qualityAgainst = (body, answer, refA, refB, { judged = null } = {}) => {
     const held = yardstick === 'quality' && shape !== 'free_text'
@@ -1295,10 +1315,33 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
      gave another priority on 3 of 120 tickets had a bar its own model could not pass (wl_mufk6hj618tsyl0r, 5 Oct 2026). A
      structured workload with no choice stays on "the same answer", however its model differs from itself: moved for one
      figure it read two ways, a model that changed figures three times as often as that one was switched to nearly one
-     time in five. */
-  if (shape !== 'free_text' && config.EVAL_JUDGE_CHOICES) {
-    choices = choicePathsOf({ bodies: kept.map((p) => p.body), shapeKind: shape,
+     time in five.
+
+     Only the choices the customer's own model makes differently are read by the judges: the ones its two answers to one
+     request differ on, here or in an earlier measurement while its requests still offer them. That is where two good
+     answers can differ, and its own model shows it. A choice it makes the same way every time (a "paid" yes or no read off
+     an invoice, a currency it copies) is held exactly, like any other field: moved to the judges' bar, a steady field like
+     that lost its holding, and a model that flipped it on 2 tickets in 120 cleared a 5% bar where "the same answer" of 3%
+     held it back. Read from this sample alone, a choice its model flips one time in two hundred came and went from one
+     test to the next, and the workload with it. */
+  let choicesFound = new Set();
+  if (panelOn) {
+    choicesFound = choicePathsOf({ bodies: kept.map((p) => p.body), shapeKind: shape,
       values: kept.flatMap((p) => [p.a, p.b].filter((x) => x?.ok).map((x) => x.value)) });
+    for (const p of kept) {
+      if (!p.a?.ok || !p.b?.ok) continue;
+      for (const f of differingFields(p.a.value, p.b.value, shape).decide) {
+        const path = f === 'the answer' ? '$' : f;
+        if (isChoicePath(path, choicesFound)) choices.add(path === TOOL_PATH ? TOOL_PATH : normPath(path));
+      }
+    }
+    if (choicesFound.size) {
+      const before = await db.prepare(`SELECT plan_json FROM eval_runs WHERE workload_id = ? AND id <> ? AND status = 'done'
+          AND yardstick IS NOT NULL ORDER BY created_at DESC LIMIT 1`).get(workload.id, run.id);
+      let earlier = [];
+      try { earlier = JSON.parse(before?.plan_json || 'null')?.judging?.choices ?? []; } catch { earlier = []; }
+      for (const c of Array.isArray(earlier) ? earlier : []) if (choicesFound.has(c)) choices.add(c);
+    }
   }
   const flips = shape === 'free_text' ? 0
     : kept.filter((p) => p.a?.ok && p.b?.ok && structuredCompare(p.a.value, p.b.value, shape).decision > 0).length;
@@ -1321,7 +1364,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       judge: workRead.sourced.judgedBy, ps: workRead.sourced.ps ?? [], ...(wasReason === 'sourced' ? { kept: true } : {}) } : null,
     // a structured answer's choices, read from what its requests declare and what its answers show, and how many of the
     // customer's model's own pairs of answers differed in a field that decides something
-    ...(shape !== 'free_text' ? { choices: [...choices], flips } : {}),
+    ...(shape !== 'free_text' ? { choices: [...choices], offered: [...choicesFound], flips } : {}),
   };
   /* Choices read by judges only where the judges get answers planted with a known verdict right (chooseJudge): a value
      outside the ones allowed, the far end of a scale. Where they do not, or nothing could be planted to test them, nothing is
@@ -1331,7 +1374,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
   let checkedFirst = null;
   if (!keepsWay && judgeReason === 'choices' && config.EVAL_QUALITY_YARDSTICK && canJudge()) {
     if (await step(0, 'Checking the judges on answers whose right verdict is known')) return await endStopped();
-    checkedFirst = await chooseJudge(kept, { scope: workload.workspace_id, addJudge, checklist, shape, choices, reference, strict: true });
+    checkedFirst = await chooseJudge(kept, { scope: workload.workspace_id, addJudge, checklist, shape, choices, reference, strict: true, panel: panelOn });
     judgeCheck = checkedFirst.check;
     if (checkedFirst.unsure) {
       planRecord.judging.fallback = { planted: Number(checkedFirst.check?.planted) || 0, errors: Number(checkedFirst.check?.errors) || 0 };
@@ -1470,7 +1513,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
        reads this run. Where both miss, nothing either settles is switched to on its word alone. Read already above for a
        structured answer judged for its choices or its figures (checkedFirst). */
     if (!checkedFirst && await step(0, 'Checking the judge on answers whose right verdict is known')) return await endStopped();
-    const chosen = checkedFirst || await chooseJudge(kept, { scope: workload.workspace_id, addJudge, checklist, shape, choices, reference });
+    const chosen = checkedFirst || await chooseJudge(kept, { scope: workload.workspace_id, addJudge, checklist, shape, choices, reference, panel: panelOn });
     judgePrefer = chosen.prefer;
     judgeCheck = chosen.check;
     judgeUnsure = chosen.unsure;
@@ -1515,15 +1558,27 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       // never a choice, however steadily the customer's model makes it: a judge reads a choice that differs
       stableFields = stablePaths(kept.filter((p) => p.a?.ok && p.b?.ok).map((p) => [p.a.value, p.b.value]), shape, { except: choices });
       if (stableFields.size) worse.splice(0, worse.length, ...heldBar(kept, stableFields, shape));
-      /* The figures test's bar (exactBar): how often the customer's model's own two answers to a call differ in a field it gives
+      // of which the figures: every held field but a choice its model makes the same way every time (figureFields, above)
+      figureFields = new Set([...stableFields].filter((p) => !isChoicePath(p, choicesFound)));
+      /* The figures test's bar (exactBar): how often the customer's model's own two answers to a call differ in a figure it gives
          the same way on nearly every call, or one of them failed, read as "the same answer" reads it (a pair the provider was
          only too busy for says nothing), and set as "the same answer" sets its bar. */
-      exactNoise = kept.filter((p) => !p.ra?.transient && !p.rb?.transient)
-        .map((p) => (!p.a?.ok || !p.b?.ok ? 1 : heldFieldChanged(p.b.value, p.a.value, p.a.value, shape, { only: stableFields }) ? 1 : 0));
+      for (const p of kept) {
+        // each pair's own, which a strategy's call sent on to the customer's model reads as (refOfPair)
+        p.exactOwn = p.ra?.transient || p.rb?.transient ? 0
+          : !p.a?.ok || !p.b?.ok ? 1 : heldFieldChanged(p.b.value, p.a.value, p.a.value, shape, { only: figureFields }) ? 1 : 0;
+      }
+      exactNoise = kept.filter((p) => !p.ra?.transient && !p.rb?.transient).map((p) => p.exactOwn);
       const exactRaw = floorFrom(mean(exactNoise) * 100, { multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT });
       // only where there is a figure to hold: an answer that is only a label has none, and its failures count in its own figure
-      exactBar = !stableFields.size ? null : config.EVAL_FAIR_BAR ? fairBar(exactRaw, exactNoise).bar : exactRaw;
+      exactBar = !panelOn || !figureFields.size ? null : config.EVAL_FAIR_BAR ? fairBar(exactRaw, exactNoise).bar : exactRaw;
     }
+    /* And its own failures, as every other model's count: an answer it refused, cut short or gave in a shape the request does
+       not ask for scores 1, as a candidate's does. Left out, its bar and its self-test read only the pairs it answered, and a
+       model exactly as good as it, failing exactly as often, could not pass a bar the page said its own model passes. A pair
+       the provider was only too busy for says nothing, as everywhere. */
+    const ownFailed = kept.filter((p) => !p.ra?.transient && !p.rb?.transient && (!p.a?.ok || !p.b?.ok)).length;
+    for (let k = 0; k < ownFailed; k += 1) worse.push(1);
     noise = mean(worse);
     /* From here on the bar is "at least as good", and so is every reading of it: the second look's pooled bar, and
        the customer's model's own score on a call a strategy sends on to it. Pooled with the agreement scores, which
@@ -1537,9 +1592,10 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       marginPct: config.EVAL_QUALITY_MARGIN_PCT, judge: judgeCheck?.judge ?? null, checklist: checklist.map((x) => x.say),
       stableFields: stableFields ? [...stableFields] : null,
       // the choices read, never held, which the daily checks and live experiments leave to the judges too (barOf)
-      ...(shape !== 'free_text' ? { choices: [...choices], tieBreaker: reference } : {}),
+      ...(panelOn ? { choices: [...choices], tieBreaker: reference } : {}),
       // and the figures test: how often the customer's model's own answers changed a figure, and the bar it sets (exactBar)
-      ...(exactBar !== null ? { exactNoisePct: round8(mean(exactNoise) * 100), exactBarPct: round8(exactBar) } : {}),
+      // with the figures it reads, which the checks after a switch tell apart from a steady choice changed (scoreServed)
+      ...(exactBar !== null ? { exactNoisePct: round8(mean(exactNoise) * 100), exactBarPct: round8(exactBar), figureFields: [...figureFields] } : {}),
     };
     await db.prepare('UPDATE eval_runs SET plan_json = ?, yardstick = ? WHERE id = ?').run(JSON.stringify(planRecord), 'quality', run.id);
   } else if (shape === 'free_text') {
@@ -1554,6 +1610,11 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
   const fair = config.EVAL_FAIR_BAR ? fairBar(rawFloor, barScores) : { bar: rawFloor, raised: false, rawPct: rawFloor,
     self: barScores.length ? verdictWith(barScores, rawFloor) : null };
   const floor = fair.bar;
+  /* How many requests anything here needs (a second look, a router, a test to wait for), read from the bar before any raise
+     for the self-test, as the workload keeps it: a second look sized by the raised bar drew too few calls to clear the bar its
+     own pooled sample then set (a perfect model read "too few to be sure" about seven times in ten), and was booked and paid
+     for again. */
+  const sizeFloor = fair.rawPct ?? floor;
   planRecord.selfTest = fair.self ? {
     verdict: fair.self.verdict, gapPct: round8(fair.self.gap), loPct: round8(fair.self.lo), hiPct: round8(fair.self.hi),
     rawPct: round8(fair.rawPct), barPct: round8(fair.bar), raised: fair.raised, n: barScores.length,
@@ -1855,6 +1916,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       let settled;
       // the figures test: whether it changed a figure the customer's model gives the same way (exactOf; null where it says nothing)
       let exact = null;
+      // whether it answered and the judges could not read the answer (unreadDecides): a strategy over it is held to that too
+      let unread = false;
       if (!r.ok) {
         st.errors += 1;
         st.errorText = st.errorText || r.error;
@@ -1916,7 +1979,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
           if (yardstick === 'quality' && (judged.once || judged.detail?.verdict === 'unsure') && score > 0) settled = null;
           /* a judgement that did not come back says nothing about this model's answer either, nor does a request with no list
              of what to keep (keepsOf), which is not a judge failing */
-          if (judged.transient) { scored = false; if (!judged.unlisted) { judgeMisses += 1; st.unread = (st.unread || 0) + 1; } }
+          if (judged.transient) { scored = false; if (!judged.unlisted) { judgeMisses += 1; st.unread = (st.unread || 0) + 1; unread = true; } }
           if (exactBar !== null) exact = exactOf(got.value, p);
         } else {
           /* Held to each of the customer's two answers and averaged, the way the bar is set: the
@@ -1956,7 +2019,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       // everything about this call a strategy built on this model would need to be worked out later
       st.calls.push({
         i, ok: !!r.ok && !failure, answered: !!r.ok, transient: !r.ok && !!r.transient, scored, score, better,
-        settled: settled === undefined ? score : settled, exact,
+        settled: settled === undefined ? score : settled, exact, unread,
         json: r.ok ? r.json : null, cost: r.ok ? paid(r) : 0, latency: r.latencyMs ?? null, ttft: r.ttftMs ?? r.latencyMs ?? null,
       });
       await keepReplay(run.id, p.s.id, key, 0, r, { score, judged, failure, scored, readings: judged ? readingsFor(yardstick, judged) : null });
@@ -2033,6 +2096,9 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
     // its answers the judges could not read, of the ones it gave
     const unread = Number(st.unread) || 0;
     const answeredCalls = st.calls.filter((c) => c.answered).length;
+    /* what serves now is never held back for answers the judges could not read: judges failing say nothing about it, and
+       would take away what keeps it serving (its keep verdict, and the margin a challenger has to beat) on no evidence */
+    const serving = keyOf(cand) === servingNow;
     const judge = (scores) => {
       const read = verdictWith(scores, floor, { reviewBand });
       let verdict;
@@ -2048,17 +2114,17 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       else if (st.stopped === 'bar' && st.runs < kept.length) verdict = 'missed';
       else {
         verdict = read.verdict;
-        // and no better than the figures test says, where one is set (exactBar): passing takes passing both
-        if (figures && FAILS_MORE[figures.verdict] > FAILS_MORE[verdict]) { verdict = figures.verdict; heldBy = 'figures'; }
+        // and no better than the figures test says, where one is set (exactBar): passing takes passing both, on evidence (heldBack)
+        if (figures && heldBack(figures.verdict, verdict)) { verdict = figures.verdict; heldBy = 'figures'; }
         if ((verdict === 'cleared' || verdict === 'review') && tooSlow(st, { final: true })) verdict = 'slower';
         // one refusal along the way is worth a look before anything is switched
         if (verdict === 'cleared' && st.errors > 0) verdict = 'review';
         // a judge that failed its known pairs this run settles nothing on its own
         if (judgeUnsure && verdict === 'cleared') verdict = 'review';
-        /* Answers the judges could not read say nothing either way, so they are left out of its figure; on more than one call
-           in ten, what is left is not enough to switch on, however good it looks: a model whose differing answers nobody read
-           cleared on its identical ones alone. */
-        if (verdict === 'cleared' && unread > UNREAD_MAX * Math.max(1, answeredCalls)) { verdict = 'review'; heldBy = 'unread'; }
+        /* Answers the judges could not read say nothing either way, so they are left out of its figure; where, read as worse,
+           they would have held it back, what is left is not enough to switch on (unreadDecides): a model whose differing
+           answers nobody read cleared on its identical ones alone. */
+        if (verdict === 'cleared' && !serving && unreadDecides(scores, unread, floor, { reviewBand })) { verdict = 'review'; heldBy = 'unread'; }
       }
       const gap = scores.length ? (scores.reduce((x, y) => x + y, 0) / scores.length) * 100 : 100;
       return { read, verdict, gap, heldBy };
@@ -2113,10 +2179,12 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
        unsettled: kept beside its row and never written, that alone decides whether it keeps serving (keepOf). Its
        row ranks against the rest on every difference, as theirs does: ranked on the other, it came first where it
        should not have, and a cheaper setup behind it was never looked at again. */
-    if (keyOf(cand) === servingNow) {
+    if (serving) {
       const settled = st.calls.map((c) => readingOf(c, true)).filter((x) => x !== null);
       const asServed = judge(settled);
-      row.keep = { verdict: keepVerdict(asServed.verdict, settled.length, st.calls.length), gap: round8(asServed.gap) };
+      // and where its figures test decided it, that test's own figures, for the words that say why (keepWords)
+      row.keep = { verdict: keepVerdict(asServed.verdict, settled.length, st.calls.length), gap: round8(asServed.gap),
+        ...(asServed.heldBy === 'figures' && figures ? { figures: { gap: round8(figures.gap), bar: round8(exactBar) } } : {}) };
     }
     await insertResult(row);
     // failed as unable to keep up: out of this workload's live experiments at once, as well as its tests (restBusyArms)
@@ -2281,7 +2349,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
        the same way on nearly every call, or one of them failed; nothing where the provider was only too busy for one */
     const busyRef = [ra, rb].some((x) => !x.ok && x.transient);
     const exactNoiseHere = exactBar === null || busyRef ? null : refs.length === 2
-      ? (heldFieldChanged(refs[1].value, refs[0].value, refs[0].value, shape, { only: stableFields || new Set() }) ? 1 : 0)
+      ? (heldFieldChanged(refs[1].value, refs[0].value, refs[0].value, shape, { only: figureFields || new Set() }) ? 1 : 0)
       : 1;
     const seen = { refs: usable, facts, noise, exactNoise: exactNoiseHere, refLatency,
       refTtft: timed ? (timed.ttftMs ?? timed.latencyMs) : (refSpeed.ttftP50 ?? refLatency) };
@@ -2297,7 +2365,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
   /* `busy`, when given, names the model (by its row's key) a look has found cannot keep up, or null: the look then sends
      nothing more, ends as 'busy', and that model's row says it failed (failBusy). */
   const lookAgain = async (r, freshCalls, { label, answer, busy = () => null }) => {
-    const least = callsToClear(floor, confirmZ);
+    const least = callsToClear(sizeFloor, confirmZ);
     const from = freshCalls.filter((c) => !seenBefore.has(c.id));
     if (from.length < least) {
       await db.prepare('UPDATE eval_results SET confirm_runs = 0, confirm_verdict = ? WHERE id = ?').run('insufficient', r.id);
@@ -2310,7 +2378,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
        bound, not by reading more calls. Sized by its own bound it read about 250 calls at a 3% bar rather
        than 176, which let it clear with two worse answers where the usual look allows one, so a cautious
        workload switched more often, and in simulation to a setup past its bar more often, than a balanced one. */
-    const n = Math.min(from.length, Math.max(least, config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(floor)), samples.length));
+    const n = Math.min(from.length, Math.max(least, config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(sizeFloor)), samples.length));
     lookCalls = lookCalls || sampleCalls(from, n, (now() % 99991) + 13);
     const picks = lookCalls;
     // the calls it will send: its own one, and one or two of the customer's model where they are not in hand
@@ -2391,30 +2459,32 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
        Both samples are read by the same yardstick: under "at least as good", the first look's bar
        scores are the quality ones (see barScores), as these are, and the bar is theirs plus the margin. */
     const pooled = [...barScores, ...freshNoise];
-    // never one the customer's own model would fail on both samples either, at this look's strictness (fairBar)
-    const bar = !pooled.length ? floor : config.EVAL_FAIR_BAR ? fairBar(barFrom(mean(pooled) * 100), pooled, { z: confirmZ }).bar
+    /* never one the customer's own model would fail on both samples either (fairBar), raised at the usual strictness: raised
+       at this look's own, a cautious workload's stricter bound was cancelled by a bar raised by just as much */
+    const bar = !pooled.length ? floor : config.EVAL_FAIR_BAR ? fairBar(barFrom(mean(pooled) * 100), pooled).bar
       : barFrom(mean(pooled) * 100);
     const v = verdictWith(scores, bar, { reviewBand, z: confirmZ });
     let verdict = judgeUnsure && v.verdict === 'cleared' ? 'review' : v.verdict;
     // what held it back where that was not its own figure, in words its page puts after "on the new requests" (secondWhy)
     let note = null;
     const pctWords = (x) => `${Math.round(Number(x) * 10) / 10}%`;
-    /* and the figures test, read from both samples as the bar is, where one is set: passing the look takes passing both */
+    /* and the figures test, read from both samples as the bar is, where one is set: passing the look takes passing both, on
+       what these calls show (heldBack) */
     if (exactBar !== null && exactScores.length) {
       const pooledExact = [...exactNoise, ...freshExact];
       const rawExact = floorFrom(mean(pooledExact) * 100, { multiple: config.EVAL_FLOOR_MULTIPLE, minPct: config.EVAL_FLOOR_MIN_PCT });
-      const exactLook = config.EVAL_FAIR_BAR ? fairBar(rawExact, pooledExact, { z: confirmZ }).bar : rawExact;
+      const exactLook = config.EVAL_FAIR_BAR ? fairBar(rawExact, pooledExact).bar : rawExact;
       const fr = verdictWith(exactScores, exactLook, { reviewBand, z: confirmZ });
-      if (FAILS_MORE[fr.verdict] > (FAILS_MORE[verdict] ?? -1)) {
+      if (heldBack(fr.verdict, verdict)) {
         verdict = fr.verdict;
         note = `it changed a figure the original model gives the same way every time on ${pctWords(fr.gap)} of them, where up to `
           + `${pctWords(exactLook)} is allowed${fr.verdict === 'missed' ? '' : ', too close to be sure'}`;
       }
     }
-    // answers the judges could not read on more than one call in ten leave too little to switch on (see record)
-    if (verdict === 'cleared' && unread > UNREAD_MAX * Math.max(1, answeredHere + unread)) {
+    // answers the judges could not read hold it back where, read as worse, they would have (unreadDecides, see record)
+    if (verdict === 'cleared' && unreadDecides(scores, unread, bar, { reviewBand, z: confirmZ })) {
       verdict = 'review';
-      note = `the judges could not read ${unread} of its ${answeredHere + unread} answers, too many to be sure of it`;
+      note = `the judges could not read ${unread} of its ${answeredHere + unread} answers, and read as worse they would have held it back`;
     }
     if (verdict === 'cleared' && limit && tooSlow({ lat, ttft }, { final: true })) {
       verdict = 'slower';
@@ -2597,9 +2667,9 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
      a count may be wrong. */
   const sampledIds = new Set(samples.map((x) => x.id));
   const unseenCalls = pool.filter((c) => !sampledIds.has(c.id) && !seenBefore.has(c.id)).length;
-  const lookSize = Math.min(unseenCalls, Math.max(callsToClear(floor, confirmZ), config.EVAL_CONFIRM_MIN,
-    Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(floor)), samples.length));
-  looksAhead = unseenCalls >= callsToClear(floor, confirmZ) ? lookSize * (1 + Math.max(1, config.EVAL_CONFIRM_TRIES)) : 0;
+  const lookSize = Math.min(unseenCalls, Math.max(callsToClear(sizeFloor, confirmZ), config.EVAL_CONFIRM_MIN,
+    Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(sizeFloor)), samples.length));
+  looksAhead = unseenCalls >= callsToClear(sizeFloor, confirmZ) ? lookSize * (1 + Math.max(1, config.EVAL_CONFIRM_TRIES)) : 0;
   remaining = () => {
     let left = 0;
     for (const n of answered.values()) left += Math.max(0, kept.length - n) * perCall;
@@ -2686,7 +2756,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
     const timed = [p.ra, p.rb].find((r) => r?.ok && !r.recorded && Number.isFinite(r.latencyMs));
     const latency = timed?.latencyMs ?? refSpeed.latencyP50 ?? null;
     const ttft = timed ? (timed.ttftMs ?? timed.latencyMs) : (refSpeed.ttftP50 ?? latency);
-    return { cost: p.refCost, latency, ttft, noise: p.noise ?? noiseMean };
+    // and its own figures test on this call (exactOwn), what a call sent on to it reads as there
+    return { cost: p.refCost, latency, ttft, noise: p.noise ?? noiseMean, exact: p.exactOwn ?? 0 };
   };
   const quickEnough = (xs) => {
     if (!limit) return true;
@@ -2707,7 +2778,10 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       ttft_p50: pct(reading.ttft, 0.5), ttft_p90: pct(reading.ttft, 0.9),
       errors: 0, stopped: null, error_text: null, difference: extra.difference ?? null, reused: 0,
       rank_json: JSON.stringify({ chance: cand.chance, savingShare: cand.savingShare, parts: cand.parts, family: cand.family,
-        ...(extra.rank || {}) }),
+        ...(extra.rank || {}),
+        // where its figures test held it back (verdictOf), as a single model's row says it (record)
+        ...(reading.figures ? { heldBy: 'figures', figures: { gap: round8(reading.figures.gap), bar: round8(reading.figures.bar),
+          verdict: reading.figures.verdict } } : {}) }),
       recipe_json: cand.recipe ? JSON.stringify(cand.recipe) : null,
       cost_ratio: reading.ratio === null ? null : round8(reading.ratio),
       arm_json: JSON.stringify(spec), escalated_pct: round8(reading.escalated * 100),
@@ -2720,10 +2794,24 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
   };
   /* A strategy's verdict comes from its held-out per-call scores (see crossFit), through the same
      interval rule as a plain model's. */
-  const verdictOf = (reading) => {
+  const verdictOf = (reading, { keep = false } = {}) => {
     const read = verdictWith(reading.scores || [], floor, { reviewBand });
     reading.read = read;
     let v = read.verdict;
+    /* answers the judges could not read stand in its scores as the customer's model's own noise: where, read as worse, they
+       would have held it back, what was read is not enough to switch on (unreadDecides). Never for what serves (`keep`), which
+       judges failing say nothing about. */
+    if (v === 'cleared' && !keep && Array.isArray(reading.unreads) && reading.unreads.some(Boolean)) {
+      const worst = (reading.scores || []).map((s, k) => (reading.unreads[k] ? 1 : s));
+      if (verdictWith(worst, floor, { reviewBand }).verdict !== 'cleared') v = 'review';
+    }
+    /* and its figures test, where one is set, on the answers it served (exacts): a router or a cascade that changes a held
+       figure too often is held back as a single model is, and what serves is switched back for it; without, a cascade over a
+       model held back for exactly that cleared on its judged answers alone */
+    if (exactBar !== null && Array.isArray(reading.exacts) && reading.exacts.length) {
+      const fr = verdictWith(reading.exacts, exactBar, { reviewBand });
+      if (heldBack(fr.verdict, v)) { v = fr.verdict; reading.figures = { gap: fr.gap, bar: exactBar, verdict: fr.verdict }; }
+    }
     if ((v === 'cleared' || v === 'review') && !quickEnough(metric === 'ttft' ? reading.ttft : reading.latency)) v = 'slower';
     if (reading.slow && (v === 'cleared' || v === 'review')) v = 'slower';
     /* A judge that got answers planted to test it wrong settles nothing on its own, and a strategy's scores are its
@@ -2732,6 +2820,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
     if (judgeUnsure && v === 'cleared') v = 'review';
     return v;
   };
+  // what serves held back by its figures test (verdictOf), in that test's figures, for the words that say why it is switched back
+  const figuresOfKeep = (reading) => (reading?.figures ? { figures: { gap: round8(reading.figures.gap), bar: round8(reading.figures.bar) } } : {});
   const fastEnough = (r) => quickEnough(metric === 'ttft' ? r.ttft : r.latency);
   const plainResult = (r) => !r.arm_json || String(r.model_id).endsWith('#lighter') || String(r.model_id).endsWith('#cheapest');
   // what a result is called in the activity feed and in email: a strategy by its words, a model by its name
@@ -2773,7 +2863,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
        that alone decides whether it keeps serving (keepOf). Both from the checks above: nothing is asked twice. */
     const judgedAs = (lenient) => {
       const calls = st.calls.map((c, k) => ({ ok: c.ok, score: readingOf(c, lenient) ?? (kept[c.i].noise ?? noiseMean),
-        cost: c.cost, latency: c.latency, ttft: c.ttft, check: checks[k], ref: refOfPair(kept[c.i]) }));
+        exact: c.exact ?? null, unread: !!c.unread, cost: c.cost, latency: c.latency, ttft: c.ttft, check: checks[k], ref: refOfPair(kept[c.i]) }));
       const cf = crossFit(calls.map((c, k) => ({ ...c, liveCost: checks[k].liveCost, ms: checks[k].ms })), readingsOf,
         (rs) => bestOf(rs, { floor, reviewBand, fast: fastEnough }));
       const best = { ...cf.heldOut, threshold: cf.threshold, inside: cf.inSample.inside, near: cf.inSample.near, slow: cf.inSample.slow };
@@ -2786,7 +2876,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       const wrong = calls.filter((c, k) => c.ok && c.score > 0 && checks[k]?.structureOk);
       const caught = wrong.filter((c) => !(Number(c.check.p) >= best.threshold)).length;
       const catchRate = wrong.length ? caught / wrong.length : null;
-      let verdict = verdictOf(best);
+      let verdict = verdictOf(best, { keep: lenient });
       if (verdict === 'cleared' && catchRate !== null && wrong.length >= 5 && catchRate < config.CASCADE_MIN_CATCH) verdict = 'review';
       return { best, verdict, catchRate, wrong: wrong.length };
     };
@@ -2796,7 +2886,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
     });
     if (serving) {
       const asServed = judgedAs(true);
-      row.keep = { verdict: asServed.verdict, gap: round8(asServed.best.gap) };
+      row.keep = { verdict: asServed.verdict, gap: round8(asServed.best.gap), ...figuresOfKeep(asServed.best) };
     }
     await insertResult(row);
     return true;
@@ -2821,12 +2911,13 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
     };
     const picks = st.calls.map((c) => pickOf(kept[c.i].body));
     const readingAs = (lenient) => simulateRouter(st.calls.map((c, k) => ({ ok: c.ok, score: readingOf(c, lenient) ?? (kept[c.i].noise ?? noiseMean),
-      cost: c.cost, latency: c.latency, ttft: c.ttft, p: picks[k], ref: refOfPair(kept[c.i]) })), { thresholds: [spec.threshold] })[0];
+      exact: c.exact ?? null, unread: !!c.unread, cost: c.cost, latency: c.latency, ttft: c.ttft, p: picks[k], ref: refOfPair(kept[c.i]) })),
+      { thresholds: [spec.threshold] })[0];
     // its row with every difference counted, like every other; as it serves, which alone decides whether it keeps serving (keepOf)
     const reading = readingAs(false);
     const row = strategyRow(cand, spec, reading, verdictOf(reading));
     const asServed = readingAs(true);
-    row.keep = { verdict: verdictOf(asServed), gap: round8(asServed.gap) };
+    row.keep = { verdict: verdictOf(asServed, { keep: true }), gap: round8(asServed.gap), ...figuresOfKeep(asServed) };
     await insertResult(row);
     return true;
   };
@@ -2846,7 +2937,8 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       // read as it serves (settled: the router serving now), a call whose every difference was left unsettled says nothing
       const s = readingOf(c, settled);
       if (s === null && c.scored && unknown !== MISSING) return unknown;
-      return { ok: c.ok, score: s ?? (p.noise ?? noiseMean), cost: c.cost, latency: c.latency, ttft: c.ttft };
+      return { ok: c.ok, score: s ?? (p.noise ?? noiseMean), exact: c.exact ?? null, unread: !!c.unread, cost: c.cost, latency: c.latency,
+        ttft: c.ttft };
     }),
     ref: refOfPair(p),
   }));
@@ -2899,12 +2991,12 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
   const secondLookSize = () => {
     const sampled = new Set(samples.map((x) => x.id));
     const from = pool.filter((c) => !sampled.has(c.id) && !seenBefore.has(c.id)).length;
-    const least = callsToClear(floor, confirmZ);
-    return Math.max(least, Math.min(from, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(floor)), samples.length)));
+    const least = callsToClear(sizeFloor, confirmZ);
+    return Math.max(least, Math.min(from, Math.max(config.EVAL_CONFIRM_MIN, Math.ceil(config.EVAL_CONFIRM_MULTIPLE * callsToClear(sizeFloor)), samples.length)));
   };
   const kindsRouter = async () => {
     const options = routerOptions();
-    if (!options.length || kept.length < Math.max(2 * config.ROUTER_KIND_MIN_CALLS, callsToClear(floor))) return false;
+    if (!options.length || kept.length < Math.max(2 * config.ROUTER_KIND_MIN_CALLS, callsToClear(sizeFloor))) return false;
     const cf = crossFitRouter(routedCalls(options), options, {
       floorPct: floor, margin: config.ROUTER_KIND_MARGIN, shrink: config.ROUTER_KIND_SHRINK, kMax: config.ROUTER_KINDS_MAX,
       minSize: config.ROUTER_KIND_MIN_CALLS, minSilhouette: config.ROUTER_KINDS_MIN_SILHOUETTE, seed: 7,
@@ -2963,9 +3055,9 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
     const refused = options.find((o, j) => o.st.stopped === 'refused'
       && o.st.calls.some((x) => !x.answered && !x.transient && routes[x.i] === j));
     // on too few of its calls, a router that looks fine is not said to clear: 'insufficient' switches nothing
-    const judge = (calls) => {
+    const judge = (calls, { keep = false } = {}) => {
       const reading = simulateRoutes(spec, calls);
-      let verdict = verdictOf(reading);
+      let verdict = verdictOf(reading, { keep });
       if (refused) verdict = 'failed';
       else if (calls.length < all.length * 0.9 && verdict === 'cleared') verdict = 'insufficient';
       // nor said to be clearly worse on under half of them, which would switch it back for good on a few readings
@@ -2973,10 +3065,10 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       return { reading, verdict };
     };
     const strict = judge(known);
-    const asServed = judge(knownAsServed);
+    const asServed = judge(knownAsServed, { keep: true });
     const row = strategyRow(lead.cand, spec, strict.reading, strict.verdict, { difference: labelOf(spec, reference) });
     row.runs = known.length;
-    row.keep = { verdict: asServed.verdict, gap: round8(asServed.reading.gap) };
+    row.keep = { verdict: asServed.verdict, gap: round8(asServed.reading.gap), ...figuresOfKeep(asServed.reading) };
     if (refused) {
       row.stopped = 'refused';
       row.error_text = refused.st.errorText ?? null;
@@ -3017,7 +3109,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
       ...[...pool, ...close].filter((r) => r !== forced).sort((a, b) => a.cost_month_usd - b.cost_month_usd).slice(0, 3)];
     /* A router is only worked out on calls enough for one to clear at all: a perfect run needs
        callsToClear of them, and with fewer, finishing dropped models for a router was money for nothing. */
-    const routing = config.ROUTER_V2 && kept.length >= Math.max(2 * config.ROUTER_KIND_MIN_CALLS, callsToClear(floor));
+    const routing = config.ROUTER_V2 && kept.length >= Math.max(2 * config.ROUTER_KIND_MIN_CALLS, callsToClear(sizeFloor));
     if (worth.length && (jevUsable() || routing || forced)) {
       strategyLeft = worth.length * kept.length;
       remaining = () => strategyLeft + looksAhead;
@@ -3252,7 +3344,12 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
     let soft = true;
     // what serves is judged here as it serves (keepOf), never on differences a reading left unsettled
     if (mine && keepOf(mine) === 'missed') {
-      why = `it no longer clears your bar: ${Number(keepGap(mine)).toFixed(1)}% against a ${floor.toFixed(1)}% bar`;
+      /* in the figures that decided it: its figures test's, where that is what found it wanting (a figure changed too often
+         though its judged answers were inside the bar), and its judged answers' otherwise */
+      const fig = mine.keep?.figures;
+      why = fig ? `it changes a figure ${reference} gives the same way every time too often: ${Number(fig.gap).toFixed(1)}% against `
+        + `the ${Number(fig.bar).toFixed(1)}% its figures may change`
+        : `it no longer clears your bar: ${Number(keepGap(mine)).toFixed(1)}% against a ${floor.toFixed(1)}% bar`;
       /* For good, because answers that no longer match are a lasting fact about a model. Not so a router
          by kind of request: its setups are each measured on their own too, and what it may have lost is its
          table, when the kinds of request the workload gets have moved. Out for a while, and a later
@@ -3341,7 +3438,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
      workspace that measures only when asked, and never for a bar no sample could clear. One that came close waits for
      the more of that and what a test on twice as many needs, so the test they start can switch and reads each model more
      closely; said as the sample it gives. */
-  const need = callsToClear(floor);
+  const need = callsToClear(sizeFloor);
   const small = kept.length < need && need <= config.EVAL_SAMPLE_MAX && measuresItself
     ? barNeed(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId)).calls : 0;
   const waitFor = Math.max(small, sharper?.calls || 0);
@@ -3515,7 +3612,7 @@ async function measure(workloadId, { trigger = 'manual', jobId = null, agreedUsd
      are now. However the looks this test took ended: one that found the first in line wanting left the rest a month. */
   if (!best) {
     await bookSecondLook(await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workloadId),
-      { least: callsToClear(floor, confirmZ), keepBooking: true });
+      { least: callsToClear(sizeFloor, confirmZ), keepBooking: true });
   }
   return { ok: true, runId: run.id, floor, results: results.length, partial: halt === 'balance', reused: reusedCount };
 }
@@ -3891,26 +3988,28 @@ async function plantedFor(kept, { checklist = [], shape, addJudge }) {
 
 /* Answers planted to test the judges of a structured answer (see chooseJudge), each the customer's model's own answer to a
    request it answered the same way both times in every field that decides something (its written fields may be worded
-   differently, as a model's reasons usually are), with one field changed so that the answer is clearly worse:
+   differently, as a model's reasons usually are), with one choice changed so that the answer is clearly worse:
    - a choice set to a value that is not one of the ones allowed (or a call to a tool that does not exist);
    - a choice on a scale (scaleOf: levels such as low to urgent, numbers, P1 to P4) set to the value furthest from the customer's
      model's own, two steps or more away (low for a ticket it calls urgent both times). Never on a list of no order, such as
-     departments, where another value can be as right on a request that could go either way;
-   - and where its answers make no choice, a figure or a name set to another request's, where its value differs.
-   At most two of each. Answers whose change is only one of spacing or of the order of keys are never planted: they need no
-   judge (judgeStructured), so they would test nothing. */
+     departments, where another value can be as right on a request that could go either way.
+   At most two of each, and only on the choices the judges will read (the ones the customer's model flips): a figure the
+   customer's model gives the same way both times is decided in code, never by a judge, so an answer planted with another
+   request's figure tested the judges on something they never decide, and could fail them for it. Answers whose change is
+   only one of spacing or of the order of keys are never planted: they need no judge (judgeStructured). The field changed is
+   found by its keys (answerLeafEntries), never by its place read back: a field named "Prio." is not a field "Prio". */
 const NOT_ALLOWED = 'not_one_of_the_allowed_values';
-// a copy of a structured answer with the field at `path` (a place as answerLeaves gives it) set to `value`
-function withField(answer, path, value, shape) {
+// a copy of a structured answer with the field at `segs` (its keys and positions, answerLeafEntries) set to `value`
+function withField(answer, segs, value, shape) {
   const copy = JSON.parse(JSON.stringify(answer));
-  if (path === TOOL_PATH) { if (Array.isArray(copy) && copy[0]) copy[0].name = value; return copy; }
-  if (path === '$') return shape === 'tool_call' ? copy : value;
+  if (segs === TOOL_PATH) { if (Array.isArray(copy) && copy[0]) copy[0].name = value; return copy; }
+  if (!segs.length) return shape === 'tool_call' ? copy : value;
+  // a tool call's arguments, as answerLeafEntries reads them: the list of calls, each its arguments
   const root = shape === 'tool_call' ? (Array.isArray(copy) ? copy : []).map((c) => c?.args) : copy;
-  const seg = segmentsOf(path);
   let o = root;
-  for (const k of seg.slice(0, -1)) { if (o === null || typeof o !== 'object') return null; o = o[k]; }
+  for (const k of segs.slice(0, -1)) { if (o === null || typeof o !== 'object') return null; o = o[k]; }
   if (o === null || typeof o !== 'object') return null;
-  o[seg[seg.length - 1]] = value;
+  o[segs[segs.length - 1]] = value;
   return copy;
 }
 function plantedStructured(kept, { shape, choices }) {
@@ -3925,7 +4024,8 @@ function plantedStructured(kept, { shape, choices }) {
     used.add(p);
     return true;
   };
-  const choiceLeaves = (p) => [...answerLeaves(p.a.value, shape)].filter(([path, v]) => isChoicePath(path, choices) && v !== null && typeof v !== 'object');
+  const choiceLeaves = (p) => [...answerLeafEntries(p.a.value, shape)]
+    .filter(([path, e]) => isChoicePath(path, choices) && e.value !== null && typeof e.value !== 'object');
   let invalid = 0;
   let far = 0;
   for (const p of pool) {
@@ -3936,14 +4036,15 @@ function plantedStructured(kept, { shape, choices }) {
       const toolCall = shape === 'tool_call' && choices.has(TOOL_PATH) && Array.isArray(p.a.value) && p.a.value.length;
       const leaf = leavesHere[0];
       if (toolCall && invalid === 0 ? add(p, withField(p.a.value, TOOL_PATH, 'no_such_tool', shape), 'no such tool', null)
-        : leaf && add(p, withField(p.a.value, leaf[0], typeof leaf[1] === 'string' ? NOT_ALLOWED : 'maybe', shape), 'not allowed', leaf[0])) {
+        : leaf && add(p, withField(p.a.value, leaf[1].segs, typeof leaf[1].value === 'string' ? NOT_ALLOWED : 'maybe', shape), 'not allowed', leaf[0])) {
         invalid += 1;
         continue;
       }
     }
     if (far < 2) {
       const options = declaredOptions(p.body, shape);
-      for (const [path, v] of leavesHere) {
+      for (const [path, e] of leavesHere) {
+        const v = e.value;
         const list = options.get(normPath(path));
         const ranks = scaleOf(list);
         if (!ranks) continue;
@@ -3955,31 +4056,7 @@ function plantedStructured(kept, { shape, choices }) {
         let end = at;
         for (let j = 0; j < list.length; j += 1) if (Math.abs(stepOf(j) - stepOf(at)) > Math.abs(stepOf(end) - stepOf(at))) end = j;
         if (Math.abs(stepOf(end) - stepOf(at)) < 2) continue;
-        if (add(p, withField(p.a.value, path, list[end], shape), 'far choice', `${v} to ${list[end]}`)) { far += 1; break; }
-      }
-    }
-  }
-  if (invalid + far > 0) return out;
-  /* No choice to plant: a figure or a name taken from another request, in a field the customer's model gives the same way on
-     nearly every call (stablePaths), so it is a fact of each request's: a field it gives differently from one call to the
-     next (a category it picks afresh) may have two good answers, and another request's could be one of them. Any other
-     request will do, however alike the two read, where it gives that field another value: two invoices written the same
-     way with two totals have two totals, where two near-identical requests for a poem have interchangeable poems (which is
-     what plantedFor keeps "another request's answer" from). Figures first. */
-  const steady = stablePaths(kept.filter((p) => p.a?.ok && p.b?.ok).map((p) => [p.a.value, p.b.value]), shape, { except: choices });
-  let other = 0;
-  for (const p of pool) {
-    if (other >= 2) break;
-    const here = [...answerLeaves(p.a.value, shape)]
-      .filter(([path, v]) => steady.has(path) && (typeof v === 'number' || (typeof v === 'string' && v.trim() && !isProse(v))))
-      .sort(([, x], [, y]) => (typeof x === 'number' ? 0 : 1) - (typeof y === 'number' ? 0 : 1));
-    let planted = false;
-    for (const q of pool) {
-      if (planted || q === p || userText(q.body).trim() === userText(p.body).trim()) continue;
-      const there = answerLeaves(q.a.value, shape);
-      for (const [path, v] of here) {
-        if (!there.has(path) || sameValue(there.get(path), v)) continue;
-        if (add(p, withField(p.a.value, path, there.get(path), shape), 'another figure', path)) { planted = true; other += 1; break; }
+        if (add(p, withField(p.a.value, e.segs, list[end], shape), 'far choice', `${v} to ${list[end]}`)) { far += 1; break; }
       }
     }
   }
@@ -3991,7 +4068,6 @@ const PLANTED_WORDS = {
   'not allowed': (x) => `an answer with ${x.note === '$' ? 'its value' : x.note} set to a value that is not allowed read as at least as good`,
   'no such tool': () => 'a call to a tool that does not exist read as at least as good',
   'far choice': (x) => `an answer with ${String(x.note)} read as at least as good`,
-  'another figure': (x) => `an answer with ${x.note} taken from another request read as at least as good`,
   cut: () => 'an answer cut to its first third read as at least as good',
   'another request': () => "another request's answer read as at least as good",
   'ignored instruction': (x) => `an answer that ignores the instruction (${String(x.note).toLowerCase()}) read as at least as good`,
@@ -4157,8 +4233,9 @@ async function chooseKeepsJudge(listed, { scope, addJudge, checklist }) {
    choices (`strict`), they are untested and not trusted either, and its page says so; for one judged "at least as good" for
    another reason (its model varies too much to match), the answers planted for written work are planted instead (plantedFor,
    read as its JSON), as they were before structured ones were, and with none of those either it is judged as before. */
-async function chooseJudge(kept, { scope, addJudge, checklist, shape, choices = new Set(), reference = null, strict = false }) {
-  const structured = shape !== 'free_text';
+async function chooseJudge(kept, { scope, addJudge, checklist, shape, choices = new Set(), reference = null, strict = false, panel = true }) {
+  // read by the three only with choice judging on (panelOn in measure); without it, a structured answer is checked as before
+  const structured = panel && shape !== 'free_text';
   let planted = structured ? plantedStructured(kept, { shape, choices }) : [];
   // read as written work reads them: the planted answers of plantedFor, and the judges of judgeQuality
   const asText = !planted.length;

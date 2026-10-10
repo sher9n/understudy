@@ -10,7 +10,7 @@ import { brokenAgainst } from './checklist.js';
 /* a request is fitted to what Jev reads well as askOf fits one: the instructions' start, the newest turn whole where it
    fits, never cut from its end, where the question being answered is (src/eval/ask.js) */
 import { refit } from './ask.js';
-import { numbersOf, numbersDiffer, structuredCompare, focusOf } from './compare.js';
+import { numbersOf, numbersDiffer, structuredCompare, focusParts } from './compare.js';
 import { zdrFor } from '../workspace.js';
 
 /* Deciding whether two written answers say the same thing.
@@ -821,37 +821,52 @@ const BETTER_RULES = {
 // whether a model is the language-model judge's own, as a provider may name it with a dated or tagged suffix
 const isJudgeModel = (m) => !!m && !!config.EVAL_JUDGE_MODEL
   && (m === config.EVAL_JUDGE_MODEL || String(m).startsWith(`${config.EVAL_JUDGE_MODEL}-`) || String(m).startsWith(`${config.EVAL_JUDGE_MODEL}:`));
+/* Whether the language-model judge would read its own answer against another model's: exactly one of the two is its own, the
+   answer judged (`judged`, the model that gave it) or the one it is held against (`referenceBy`). Where both are, as when the
+   customer's model is the judge's and its own two answers set the bar, it has no side to lean to, and reads them. */
+const ownSide = (judged, referenceBy) => isJudgeModel(judged) !== isJudgeModel(referenceBy);
+// a request that asks for zero data retention itself, which every call made with its words keeps (buildUpstream)
+const asksKeepNothing = (body) => body?.provider?.zdr === true;
 
 /* A structured answer that differs from the customer's, judged by three.
 
    A difference in a choice (a label, a level, a yes or no, which tool), or in a field the customer's model does not give the
    same way from call to call, is read by judges rather than counted: two answers can pick differently and both be right.
    Two judges read it, each both ways round, since a judge leans towards whichever answer it reads first or second: Jev, and
-   the language model in EVAL_JUDGE_MODEL. Where they agree, that is the verdict. Where they do not, where either cannot tell,
-   or where one of them gave no reading this time, the customer's own model (`tieBreaker`) reads the pair both ways round and
-   decides: it can do the task, since it does it, and it leans towards its own answers, which errs on the side of keeping
-   quality. Where no judge can read it at all, it reads alone. Where it cannot tell either, the difference counts as half,
-   neither forgiven nor held against the answer in full. A verdict reached without every judge that should have read it, or
-   without the tie-break it needed, counts this time and is read again next time (`once`), never kept.
+   the language model in EVAL_JUDGE_MODEL. Where they agree, that is the verdict. Where they do not, or where one cannot tell,
+   the customer's own model (`tieBreaker`) reads the pair both ways round and decides: it can do the task, since it does it,
+   and it leans towards its own answers, which errs on the side of keeping quality. It only ever breaks the judges' ties:
+   where no judge the planted answers tested could read it, the difference is unread (transient), never decided by the
+   customer's model alone, which nothing tested and which favours its own answers. Where the tie-break cannot tell either,
+   the difference counts as half, neither forgiven nor held against the answer in full. A judge missing this time matters
+   only where the ones that read it agree (had it read otherwise, the tie-break would have decided): that verdict, and one
+   whose tie-break did not come back, counts this time and is read again next time (`once`), never kept.
 
-   A judge never reads its own answer, nor one held against its own: where the answer judged (`judged`, the model that gave
-   it) or the customer's model (`tieBreaker`) is the language-model judge, that judge is left out. `prefer` leaves out a
-   judge the planted answers found unreliable on this workload, as chooseJudge decides ('llm': Jev is left out; 'jev': the
-   language model is). `rules` is what an answer must follow (rulesOf), read by every judge beside the request. The
-   customer's own model is asked as its workspace's requests are, keeping nothing where the workspace asks for that (`zdr`).
-   Answers { score: 1 clearly worse, 0.5 cannot tell, 0 at least as good, judgedBy, detail: { jev, llm, tie, verdict,
-   candBetter, kind }, cost }, and { transient: true } where nobody gave a reading. */
+   A judge never reads its own answer against another model's (ownSide): the language-model judge is left out where exactly
+   one of the two answers is its own, the answer judged (`judged`) or the one it is held against (`referenceBy`, the
+   customer's model where not said). `prefer` leaves out a judge the planted answers found unreliable on this workload, as
+   chooseJudge decides ('llm': Jev is left out; 'jev': the language model is). `rules` is what an answer must follow
+   (rulesOf), read by every judge beside the request. The judges and the customer's own model are asked keeping nothing
+   where the workspace asks for that, or the request itself did (`keepNothing`). Answers { score: 1 clearly worse, 0.5
+   cannot tell, 0 at least as good, judgedBy, detail: { jev, llm, tie, verdict, candBetter, kind }, cost }, and
+   { transient: true } where no judge gave a reading. */
 export async function judgeChoices(request, answer, reference, { scope = null, prefer = null, tieBreaker = null, judged = null, rules = '',
-  askFn = ask } = {}) {
+  referenceBy = null, keepNothing: asked = false, askFn = ask } = {}) {
   if (String(answer).trim() === String(reference).trim()) return { score: 0, judgedBy: 'same text', detail: null, cost: 0 };
   const jevOn = prefer !== 'llm' && (jevUsable() || askFn !== ask);
-  const llmOn = prefer !== 'jev' && !!config.EVAL_JUDGE_MODEL && !isJudgeModel(judged) && !isJudgeModel(tieBreaker);
-  const key = keyOf('choices', 2, scope, jevOn ? config.JEV_MODEL : null, llmOn ? config.EVAL_JUDGE_MODEL : null, tieBreaker || null,
+  const llmOn = prefer !== 'jev' && !!config.EVAL_JUDGE_MODEL && !ownSide(judged, referenceBy ?? tieBreaker);
+  const expected = (jevOn ? 1 : 0) + (llmOn ? 1 : 0);
+  // no tested judge can read it impartially this time: it says nothing about the answer, and is read again next time
+  if (!expected) return { score: null, judgedBy: null, detail: null, cost: 0, transient: true };
+  const key = keyOf('choices', 3, scope, jevOn ? config.JEV_MODEL : null, llmOn ? config.EVAL_JUDGE_MODEL : null, tieBreaker || null,
     config.EVAL_QUALITY_SURE, rules || '', request, answer, reference);
   const hit = await cached(key);
   if (hit) return hit;
-  // a workspace that asks for nothing to be kept keeps the judge model to providers that keep nothing too
-  const keepNothing = scope ? await zdrFor(scope) : null;
+  /* A workspace or a request that asks for nothing to be kept keeps every model asked to providers that keep nothing too. A
+     workspace that turned that off keeps its own model reachable for the tie-break (o3 has no provider that keeps nothing),
+     unless the request itself asked: the request's own wish holds wherever its words go (buildUpstream). */
+  const workspaceKeeps = scope ? await zdrFor(scope) : null;
+  const keepNothing = asked || workspaceKeeps === true;
   let cost = 0;
   const detail = {};
   const read = [];
@@ -881,24 +896,25 @@ export async function judgeChoices(request, answer, reference, { scope = null, p
   };
   await Promise.all([jevOn ? jevReading() : null, llmOn ? llmReading() : null]);
   read.sort((x, y) => (x.by === 'jev' ? -1 : 1) - (y.by === 'jev' ? -1 : 1));
-  const expected = (jevOn ? 1 : 0) + (llmOn ? 1 : 0);
-  // decided by the judges only where every one that should have read it did, and they agree
-  let verdict = read.length === expected ? agreed(read.map((r) => r.verdict)) : null;
-  let once = read.length < expected;
+  // no judge gave a reading: it says nothing about the answer, and the customer's own model never decides alone
+  if (!read.length) return { score: null, judgedBy: null, detail: Object.keys(detail).length ? detail : null, cost, transient: true };
+  // decided by the judges where every one that should have read it did, and they agree
+  const together = agreed(read.map((r) => r.verdict));
+  const complete = read.length === expected;
+  let verdict = complete ? together : null;
+  // a judge missing matters only where the ones that read agree: where they did not, the tie-break decides whatever it said
+  let once = !complete && together !== null;
   if (!verdict) {
-    if (!tieBreaker) {
-      if (!read.length) return { score: null, judgedBy: null, detail: null, cost, transient: true };
-      verdict = 'unsure';
-    } else {
-      const way = { rules, zdr: scope ? await zdrFor(scope) : null, way: await tieOptions(tieBreaker) };
+    if (!tieBreaker) verdict = 'unsure';
+    else {
+      const way = { rules, zdr: asked ? true : workspaceKeeps, way: await tieOptions(tieBreaker) };
       const [one, two] = await Promise.all([qualityRead(request, answer, reference, tieBreaker, way), qualityRead(request, reference, answer, tieBreaker, way)]);
       cost += one.cost + two.cost;
       if (one.pick && two.pick) {
         detail.tie = { model: tieBreaker, picks: [one.pick, two.pick] };
         verdict = choiceVerdict(detail.tie.picks);
       } else {
-        // nobody gave a reading at all: it says nothing about the answer, and nothing is counted
-        if (!read.length) return { score: null, judgedBy: null, detail: Object.keys(detail).length ? detail : null, cost, transient: true };
+        // the tie the judges left was not broken: half, this time
         verdict = 'unsure';
         once = true;
       }
@@ -919,24 +935,36 @@ export async function judgeChoices(request, answer, reference, { scope = null, p
     order of keys, the case of a one-word label: structuredCompare) needs no judge. One that differs only in its written
     fields is read for being at least as good, as written answers are (judgeQuality). One that differs in a field that decides
     something goes to the three (judgeChoices), shown whole where it is short, and where it is long, only the parts of the two
-    that differ (focusOf), each under its place, so a difference late in a long answer is never past what a judge reads.
-    `body` is the request, whose rules an answer must follow (rulesOf). */
+    that differ (focusParts), each under its place, so a difference late in a long answer is never past what a judge reads.
+    Where its deciding differences alone are more than every judge reads (DECIDE_CHARS), no judge could vouch for all of
+    them, and it counts as a difference, in code, as it did before choices were judged. `body` is the request, whose rules
+    an answer must follow (rulesOf), and which may ask for nothing to be kept. */
+const DECIDE_CHARS = 2400;
 export async function judgeStructured(request, answer, reference, shapeKind, opts = {}) {
   const c = structuredCompare(answer, reference, shapeKind);
   if (!c.decision && !c.prose.length) return { score: 0, judgedBy: 'same', detail: null, cost: 0 };
   const text = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
   const { body = null, ...rest } = opts;
   const rules = rest.rules ?? (body ? rulesOf(body) : '');
-  if (!c.decision) {
-    // only the wording differs: read as written work is, never by a judge whose own answer it is
-    const prefer = isJudgeModel(rest.judged) ? 'jev' : rest.prefer === 'jev' || rest.prefer === 'llm' ? rest.prefer : null;
-    return judgeQuality(request, text(answer), text(reference), { scope: rest.scope ?? null, prefer, askFn: rest.askFn });
-  }
-  const focus = focusOf(answer, reference, shapeKind);
-  if (!focus) return judgeChoices(request, text(answer), text(reference), { ...rest, rules });
+  const parts = focusParts(answer, reference, shapeKind);
   const shown = 'Only the parts of the two answers that differ are shown, each under its place in the answer.';
-  return judgeChoices(request, JSON.stringify(focus[0], null, 1), JSON.stringify(focus[1], null, 1),
-    { ...rest, rules: rules ? `${rules}\n${shown}` : shown });
+  if (!c.decision) {
+    /* only the wording differs: read as written work is, the written fields that differ alone where the answer is long, never
+       by a judge whose own answer it is against another's, and by nobody where no other judge was found reliable */
+    const mine = ownSide(rest.judged, rest.referenceBy ?? rest.tieBreaker);
+    if (mine && rest.prefer === 'llm') return { score: null, judgedBy: null, detail: null, cost: 0, transient: true };
+    const prefer = mine ? 'jev' : rest.prefer === 'jev' || rest.prefer === 'llm' ? rest.prefer : null;
+    const [x, y] = parts ? parts.written.map((p) => JSON.stringify(p, null, 1)) : [text(answer), text(reference)];
+    return judgeQuality(request, x, y, { scope: rest.scope ?? null, prefer, askFn: rest.askFn });
+  }
+  const keepNothing = rest.keepNothing || asksKeepNothing(body);
+  if (!parts) return judgeChoices(request, text(answer), text(reference), { ...rest, rules, keepNothing });
+  if (Math.max(...parts.decide.map((p) => JSON.stringify(p, null, 1).length)) > DECIDE_CHARS) {
+    return { score: 1, judgedBy: 'too many', detail: { kind: 'decision', verdict: 'worse' }, cost: 0 };
+  }
+  // the deciding differences, then the written ones, so a judge reads every one that decides before any wording
+  const [fa, fb] = [0, 1].map((i) => JSON.stringify({ ...parts.decide[i], ...parts.written[i] }, null, 1));
+  return judgeChoices(request, fa, fb, { ...rest, rules: rules ? `${rules}\n${shown}` : shown, keepNothing });
 }
 
 /* Whether a workload asks for open-ended writing: a poem, a story, a joke, a slogan, where many quite different replies

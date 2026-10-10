@@ -712,7 +712,8 @@ function estimate(plan, profile, facts, workload) {
        pairs on the share of them that differed last time, and every other model's answers on the share of theirs that did
        (plan.differs, generous where nothing is known), each by the three; and the judges are tested on a few planted
        answers, each alone. */
-    if (quality && !text) {
+    // (with choice judging on: off, a structured answer is read whole as written work is, and priced as that below)
+    if (quality && !text && config.EVAL_JUDGE_CHOICES) {
       const read = prices.choices.read;
       const differs = plan.differs || { ref: 0.15, cand: 0.3, written: 0 };
       // a choice or a figure that differs goes to the three; wording alone is read as written work is

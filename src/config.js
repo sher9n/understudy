@@ -278,11 +278,13 @@ export const config = {
   /* Written work with no one right answer is held to "at least as good" when it cannot be held to
      "the same answer". */
   EVAL_QUALITY_YARDSTICK: bool('EVAL_QUALITY_YARDSTICK', true),
-  /* A structured answer that makes choices (a label, a level, a yes or no, which of several tools) is held to "at least as
-     good" too: a choice that differs goes to the judges (judgeChoices in src/eval/judge.js), while a figure the customer's
-     model states the same way both times is still held exactly, to a bar as strict as "the same answer" (the figures test in
-     src/eval/run.js). Off, such a workload is held to "the same answer" as before, where every differing choice counts as a
-     mistake. */
+  /* A structured answer whose model makes a choice differently from one answer to the next (a label, a level, a yes or no,
+     which of several tools) is held to "at least as good" too: a choice that differs goes to the judges (judgeChoices in
+     src/eval/judge.js), while a figure the customer's model states the same way both times is still held exactly, to a bar
+     as strict as "the same answer" (the figures test in src/eval/run.js). Off, all of it is off, everywhere: such a workload
+     is held to "the same answer" as before, where every differing choice counts as a mistake; one held to "at least as good"
+     for another reason is read whole as written work is, its judges checked as before, with no figures test; and the checks
+     after a switch read answers the same way, whatever their measurement did. */
   EVAL_JUDGE_CHOICES: bool('EVAL_JUDGE_CHOICES', true),
   /* A bar the customer's own model would fail is no fair test of anybody: where a sample of this size can show a pass at all,
      the bar is raised to where that model's own scores pass it (fairBar in src/eval/compare.js), on the first look and the

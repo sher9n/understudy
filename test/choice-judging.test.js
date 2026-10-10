@@ -10,10 +10,12 @@ process.env.JOBS_ENABLED = 'false';
 process.env.ALERTS_ENABLED = 'false';
 
 const { declaredChoices, declaredOptions, observedChoices, choicePathsOf, stablePaths, fairBar, isChoicePath, normPath, verdictWith,
-  floorFrom, scaleOf, focusOf, hasWrittenFields, FOCUS_CHARS, TOOL_PATH } = await import('../src/eval/compare.js');
-const { choiceVerdict, rulesOf } = await import('../src/eval/judge.js');
+  floorFrom, scaleOf, focusOf, focusParts, hasWrittenFields, answerLeafEntries, valueAtSegs, FOCUS_CHARS, TOOL_PATH } = await import('../src/eval/compare.js');
+const { choiceVerdict, rulesOf, judgeStructured } = await import('../src/eval/judge.js');
 const { ownTestOf } = await import('../src/workloadPage.js');
 const { controlBreach } = await import('../src/learn/control.js');
+const { heldBack, unreadDecides } = await import('../src/eval/run.js');
+const { simulateCascade, simulateRouter, crossFit } = await import('../src/learn/simulate.js');
 
 const LEVELS = ['low', 'medium', 'high', 'urgent'];
 const ticket = { messages: [{ role: 'system', content: 'Set the priority of the ticket.' }, { role: 'user', content: 'Ticket 1' }],
@@ -268,4 +270,111 @@ test('the checks after a switch fail a figure changed too often first, however t
   assert.match(controlBreach({ ...rec, worse: 30, rate: 0.15, lo: 0.1, figures: null }, 'openai/gpt-5.4'), /30 were worse \(15\.0%\), clearly past your 6\.0% pass mark/);
   // too few checks yet: never
   assert.equal(controlBreach({ ...rec, enough: false }, 'openai/gpt-5.4'), null);
+  // counted out of every answer whose figures were compared, the ones the judges left unsettled included
+  assert.match(controlBreach({ ...rec, figures: { ...rec.figures, compared: 320 } }, 'openai/gpt-5.4'), /of 320 of its answers, 16 changed a figure/);
+});
+
+test('the figures test holds a model back on what its calls show, never for want of calls', () => {
+  // a figure changed too often, or too close to say: held back further than its judged answers
+  assert.equal(heldBack('missed', 'cleared'), true);
+  assert.equal(heldBack('review', 'cleared'), true);
+  assert.equal(heldBack('missed', 'review'), true);
+  // too few calls to show the figures bar: its judged answers, which count every changed figure, decide
+  assert.equal(heldBack('insufficient', 'cleared'), false);
+  // never kinder than its judged answers
+  assert.equal(heldBack('cleared', 'review'), false);
+  assert.equal(heldBack('review', 'missed'), false);
+  // 60 calls with no figure changed: "too few" for a 3% figures bar, which held a perfect model back before
+  const none = Array(60).fill(0);
+  assert.equal(verdictWith(none, 3).verdict, 'insufficient');
+  assert.equal(verdictWith(none, 5).verdict, 'cleared');
+});
+
+test('answers the judges could not read hold a model back only where, read as worse, they would have', () => {
+  // 108 answers the same, 12 nobody read: cleared on the same answers alone, held back once the 12 could be worse
+  assert.equal(verdictWith(Array(108).fill(0), 6).verdict, 'cleared');
+  assert.equal(unreadDecides(Array(108).fill(0), 12, 6), true);
+  // one nobody read beside 119 the same: read as worse it still clears, so it does not decide
+  assert.equal(unreadDecides(Array(119).fill(0), 1, 6), false);
+  assert.equal(unreadDecides(Array(119).fill(0), 0, 6), false);
+  // at a stricter bound, the same answers decide sooner
+  assert.equal(unreadDecides(Array(118).fill(0), 2, 5, { z: 1.96 }), true);
+});
+
+test('choices declared through a tree of nodes, the whole schema, or allowed values beside a null are read; a steady instruction is every version of it', () => {
+  const body = (schema) => ({ messages: [], response_format: { type: 'json_schema', json_schema: { schema } } });
+  // a node holding a list of nodes declares its choice on its children and grandchildren too
+  const tree = { $defs: { Node: { type: 'object', properties: { kind: { enum: ['leaf', 'branch'] }, children: { type: 'array', items: { $ref: '#/$defs/Node' } } } } },
+    $ref: '#/$defs/Node' };
+  const got = declaredChoices(body(tree), 'json');
+  assert.ok(['kind', 'children[].kind', 'children[].children[].kind'].every((p) => got.has(p)), JSON.stringify([...got]));
+  // the whole schema, pointed to by "#"
+  const root = { type: 'object', properties: { level: { enum: ['low', 'high', 'urgent'] }, sub: { $ref: '#' } } };
+  assert.ok(declaredChoices(body(root), 'json').has('sub.level'));
+  // allowed values with a null beside them, as TypeBox and Zod write an optional one
+  const nullable = { type: 'object', properties: { tier: { anyOf: [{ const: 'gold' }, { const: 'silver' }, { type: 'null' }] } } };
+  assert.deepEqual(declaredOptions(body(nullable), 'json').get('tier'), ['gold', 'silver']);
+  // a value listed only by a second version of the instruction is still listed
+  const v1 = { messages: [{ role: 'system', content: 'Route the message.' }] };
+  const v2 = { messages: [{ role: 'system', content: 'Route the message to billing, bug or other.' }] };
+  const values = Array.from({ length: 30 }, (_, i) => ({ team: ['billing', 'bug', 'other'][i % 3] }));
+  assert.ok(choicePathsOf({ bodies: [v1, v2], values, shapeKind: 'json' }).has('team'));
+});
+
+test('a long answer shows a judge each difference itself, the line it is on only where that line is short, and finds a field by its keys', () => {
+  // a priority after a 4,500-character description in the same call: the priority alone, never the whole call
+  const description = 'The customer forwarded the whole email thread. '.repeat(95);
+  const a = [{ name: 'create_ticket', args: { description, priority: 'low' } }];
+  const b = [{ name: 'create_ticket', args: { description, priority: 'urgent' } }];
+  assert.deepEqual(focusParts(a, b, 'tool_call').decide, [{ '[0].priority': 'low' }, { '[0].priority': 'urgent' }]);
+  // a trailing note worded differently on a long order: written, never deciding
+  const lines = Array.from({ length: 40 }, (_, k) => ({ sku: `SKU-${k}`, qty: k + 1 }));
+  const parts = focusParts({ lines, notes: 'Hold the whole order: the customer has asked to cancel it before it ships.' },
+    { lines, notes: 'Deliver to the loading dock before noon, and call the warehouse when it arrives.' }, 'json');
+  assert.deepEqual(parts.decide, [{}, {}]);
+  assert.deepEqual(Object.keys(parts.written[0]), ['notes']);
+  // a field whose own name reads as two fields or as a list is shown with its values, never as null on both sides
+  const long = 'x'.repeat(FOCUS_CHARS);
+  const docA = { 'Doc. type': 'invoice', 'Price [EUR]': 12, body: long };
+  const docB = { 'Doc. type': 'credit_note', 'Price [EUR]': 12, body: long };
+  assert.deepEqual(focusOf(docA, docB, 'json'), [{ 'Doc. type': 'invoice' }, { 'Doc. type': 'credit_note' }]);
+  const entries = answerLeafEntries(docA, 'json');
+  assert.deepEqual(entries.get('Doc. type').segs, ['Doc. type']);
+  assert.equal(valueAtSegs(docA, entries.get('Price [EUR]').segs), 12);
+});
+
+test('a long answer whose deciding differences are more than any judge reads counts as different, in code', async () => {
+  const a = { lines: Array.from({ length: 100 }, (_, k) => ({ sku: `SKU-${k}`, category: 'food' })) };
+  const b = { lines: a.lines.map((l) => ({ ...l, category: 'travel' })) };
+  const j = await judgeStructured('Lines #1', a, b, 'json', { tieBreaker: 'openai/gpt-5.4', judged: 'vendor/x' });
+  assert.equal(j.score, 1);
+  assert.equal(j.judgedBy, 'too many');
+  assert.equal(j.cost, 0, 'no judge was asked');
+});
+
+test('a router or a cascade carries each call\'s figures test and unread answers as the answer that served it', () => {
+  const ref = { cost: 1, latency: 10, ttft: 5, noise: 0, exact: 0 };
+  const calls = [
+    { ok: true, score: 0, exact: 1, unread: false, cost: 0.1, latency: 5, ttft: 2, check: { structureOk: true, p: 0.9 }, p: 0.9, ref },
+    { ok: true, score: 0, exact: 0, unread: true, cost: 0.1, latency: 5, ttft: 2, check: { structureOk: true, p: 0.9 }, p: 0.9, ref },
+    // sent on to the customer's model: its own figures, and nothing unread
+    { ok: true, score: 1, exact: 1, unread: true, cost: 0.1, latency: 5, ttft: 2, check: { structureOk: true, p: 0.1 }, p: 0.1, ref: { ...ref, exact: 0 } },
+  ];
+  const [cascade] = simulateCascade(calls, { thresholds: [0.5] });
+  assert.deepEqual(cascade.exacts, [1, 0, 0]);
+  assert.deepEqual(cascade.unreads, [false, true, false]);
+  const [router] = simulateRouter(calls, { thresholds: [0.5] });
+  assert.deepEqual(router.exacts, [1, 0, 0]);
+  assert.deepEqual(router.unreads, [false, true, false]);
+  const cf = crossFit(calls, (cs) => simulateCascade(cs, { thresholds: [0.5] }), (rs) => rs[0], { folds: 3 });
+  assert.equal(cf.heldOut.exacts.length, 3);
+  assert.equal(cf.heldOut.unreads.filter(Boolean).length, 1);
+});
+
+test('reading a workload of thousands of line items for its choices takes no time', () => {
+  const values = Array.from({ length: 200 }, (_, i) => ({ lines: Array.from({ length: 60 }, (_, k) => ({ category: ['food', 'travel', 'office'][(i + k) % 3] })) }));
+  const t0 = Date.now();
+  const got = observedChoices(values, 'Give each line one category: food, travel or office.', 'json');
+  assert.ok(got.has('lines[].category'));
+  assert.ok(Date.now() - t0 < 500, `${Date.now() - t0} ms`);
 });

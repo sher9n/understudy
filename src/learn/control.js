@@ -57,7 +57,7 @@ const short = (m) => String(m || '').split('/').pop();
  * different figures, not which one is right. `twice` says the customer's model was asked that second time.
  */
 export async function scoreServed(body, served, ref, shape, { scope = null, yardstick = 'agreement', prefer = null, checklist = null, again = null, stable = null,
-  tieBreaker = null, judged = null, panel = false } = {}) {
+  tieBreaker = null, judged = null, panel = false, figures = null } = {}) {
   const a = extract(served, shape);
   const b = extract(ref, shape);
   if (!b.ok) return { score: null, better: 0, judgedBy: null, cost: 0, kind: null };
@@ -105,9 +105,17 @@ export async function scoreServed(body, served, ref, shape, { scope = null, yard
       extra += Number(more?.cost) || 0;
       const c = more?.json ? extract(more.json, shape) : null;
       const held = c?.ok ? heldFieldChanged(a.value, b.value, c.value, shape, { only }) : null;
-      if (held) return { score: 1, better: 0, judgedBy: 'fields', cost: extra, kind: 'fact', twice, field: held.path };
+      /* 'fields' for a figure, which the figures test counts (controlRecord); 'held' for a choice its model makes the same way
+         every time, held exactly but no figure (`figures`, as the measurement read them; every held field where none were) */
+      if (held) {
+        const figure = !(figures instanceof Set) || figures.has(held.path);
+        return { score: 1, better: 0, judgedBy: figure ? 'fields' : 'held', cost: extra, kind: figure ? 'fact' : 'decision', twice, field: held.path };
+      }
     }
-    if (again && typeof a.value === 'string' && typeof b.value === 'string' && numbersOf(b.value).length > 0 && numbersDiffer(a.value, b.value)) {
+    /* a written answer's figures, checked in code; never a structured one's, whose held figures are read above and whose bare
+       label ("P2", "sev2") is a choice for the judges, as the measurement read it */
+    if (again && shape === 'free_text' && typeof a.value === 'string' && typeof b.value === 'string' && numbersOf(b.value).length > 0
+      && numbersDiffer(a.value, b.value)) {
       let more = null;
       try { more = await again(); } catch { more = null; }
       twice = true;
@@ -127,8 +135,11 @@ export async function scoreServed(body, served, ref, shape, { scope = null, yard
     const j = shape !== 'free_text' && panel
       ? await judgeStructured(askOf(body), a.value, b.value, shape, { scope, prefer, tieBreaker, judged, body })
       : await judgeQuality(askOf(body), text(a.value), text(b.value), { scope, prefer, checklist });
-    if (j.transient || j.score === null || j.score === undefined) return { score: null, better: 0, judgedBy: null, cost: (j.cost || 0) + extra, kind: null, twice };
-    if (j.score > 0 && (j.once || j.detail?.verdict === 'unsure')) return { score: null, better: 0, judgedBy: null, cost: (j.cost || 0) + extra, kind: null, twice };
+    /* nothing settled by the judges, though every held figure matched: kept as 'unsettled', which the figures test counts among
+       the answers it compared (controlRecord), as the measurement counts every answer it read the figures of */
+    const unsettled = { score: null, better: 0, judgedBy: 'unsettled', cost: (j.cost || 0) + extra, kind: null, twice };
+    if (j.transient || j.score === null || j.score === undefined) return unsettled;
+    if (j.score > 0 && (j.once || j.detail?.verdict === 'unsure')) return unsettled;
     return { score: j.score, better: j.detail?.candBetter ? 1 : 0, judgedBy: j.judgedBy, cost: (j.cost || 0) + extra,
       kind: j.score > 0 ? (j.detail?.kind || 'worse') : null, twice };
   }
@@ -189,15 +200,22 @@ export async function barOf(workload) {
     yardstick: ['quality', 'keeps'].includes(row?.yardstick) ? row.yardstick : 'agreement',
     // the judges the planted answers found reliable: both (null), or one alone ('llm', or 'jev' for a structured answer)
     prefer: ['llm', 'jev'].includes(check?.prefer) ? check.prefer : null,
-    floorPct: Number(row?.floor_pct) > 0 ? Number(row.floor_pct)
-      : Number(workload.floor_pct) > 0 ? Number(workload.floor_pct) : config.EVAL_FLOOR_MIN_PCT,
+    /* the bar as its customer's model's answers set it, before any raise that let a sample of 120 show its own model passes
+       (plan_json.selfTest, fairBar in src/eval/compare.js): checked over hundreds of calls, a setup slipping to twice its
+       model's own rate is clearly past that, and held to the raised bar it was never switched back */
+    floorPct: Number(plan?.selfTest?.rawPct) > 0 ? Number(plan.selfTest.rawPct)
+      : Number(row?.floor_pct) > 0 ? Number(row.floor_pct)
+        : Number(workload.floor_pct) > 0 ? Number(workload.floor_pct) : config.EVAL_FLOOR_MIN_PCT,
     /* the fields of a structured answer its customer's model gives the same way on nearly every call, as that measurement
        read them (stablePaths in src/eval/compare.js); null for one measured before they were read, which holds none */
     stable: Array.isArray(stable) ? new Set(stable) : null,
     // whether that measurement read a structured answer by the three judges (judgeChoices), which the checks then do too
-    panel: Array.isArray(plan?.yardstick?.choices),
+    // (and only while choice judging is on: turned off, the checks read answers as they did before it, whatever was measured)
+    panel: !!config.EVAL_JUDGE_CHOICES && Array.isArray(plan?.yardstick?.choices),
     // and the bar of its figures test (exactBar in src/eval/run.js), which a served answer's changed figures are held to
-    exactBarPct: Number(plan?.yardstick?.exactBarPct) > 0 ? Number(plan.yardstick.exactBarPct) : null,
+    exactBarPct: config.EVAL_JUDGE_CHOICES && Number(plan?.yardstick?.exactBarPct) > 0 ? Number(plan.yardstick.exactBarPct) : null,
+    // the held fields that test reads (figureFields in src/eval/run.js): a held choice that changed is held, never a figure
+    figures: Array.isArray(plan?.yardstick?.figureFields) ? new Set(plan.yardstick.figureFields) : null,
   };
   bars.set(workload.id, { at: Date.now(), bar });
   if (bars.size > 5000) bars.clear();
@@ -255,7 +273,7 @@ async function control(workload, { body, response, callId, decision }, { serve }
   if (!(Number(acct?.balance_usd) > 0.05)) return null;
 
   // judged by the yardstick of the bar it is held to, and marked with it (see controlRecord)
-  const { yardstick, prefer, stable, panel } = await barOf(workload);
+  const { yardstick, prefer, stable, panel, figures } = await barOf(workload);
   /* what gave the served answer, which never judges it: the model its provider says answered, and failing that, the customer's
      own model where a cascade sent the call on to it, and the model leading what serves otherwise */
   const judged = (typeof response?.model === 'string' && response.model) || (decision.escalated ? workload.reference_model : workload.routed_model) || null;
@@ -297,7 +315,7 @@ async function control(workload, { body, response, callId, decision }, { serve }
     let s = null;
     try {
       s = await scoreServed(body, response, own.json, workload.shape_kind, { scope: workload.workspace_id, yardstick, prefer, checklist, again, stable,
-        tieBreaker: workload.reference_model, judged, panel });
+        tieBreaker: workload.reference_model, judged, panel, figures });
     } catch {
       s = null;
     }
@@ -309,7 +327,7 @@ async function control(workload, { body, response, callId, decision }, { serve }
         row.judged_by = s.judgedBy;
         row.detail_json = JSON.stringify({ kind: s.kind ?? null, escalated: !!decision.escalated, ...(s.twice ? { askedTwice: true } : {}),
           ...(s.field ? { field: s.field } : {}) });
-      }
+      } else if (s.judgedBy === 'unsettled') row.judged_by = 'unsettled';
     }
   }
   await db.prepare(`INSERT INTO control_checks (id, workspace_id, workload_id, arm_id, call_id, score, better, judged_by, yardstick,
@@ -335,16 +353,20 @@ export async function controlRecord(workload) {
   // the pass mark and the yardstick of one measurement (barOf)
   const { floorPct, yardstick, exactBarPct } = await barOf(workload);
   /* and its figures test, where that measurement set one (exactBar in src/eval/run.js): served answers that changed a figure
-     the customer's model gives the same way both times ('fields'), or gave nothing usable ('no answer'), held to its own bar */
+     the customer's model gives the same way both times ('fields'), or gave nothing usable ('no answer'), held to its own bar,
+     out of every answer whose figures were compared, those the judges then left unsettled included ('unsettled'): counted only
+     where a judge settled the rest, the share of changed figures grew with every reading the judges could not settle, and a
+     setup inside its figures bar was switched back */
   const r = await db.prepare(
     `SELECT COUNT(*) FILTER (WHERE score IS NOT NULL AND yardstick = ?) AS n,
             COUNT(*) FILTER (WHERE score IS NOT NULL) AS judged,
             COALESCE(SUM(score) FILTER (WHERE yardstick = ?), 0) AS worse,
             COALESCE(SUM(better) FILTER (WHERE score IS NOT NULL AND yardstick = ?), 0) AS better,
             COUNT(*) FILTER (WHERE score IS NOT NULL AND yardstick = ? AND judged_by IN ('fields', 'no answer')) AS changed,
+            COUNT(*) FILTER (WHERE yardstick = ? AND (score IS NOT NULL OR judged_by = 'unsettled')) AS compared,
             COALESCE(SUM(cost_usd), 0) AS cost, MAX(created_at) AS last
        FROM control_checks WHERE workload_id = ? AND arm_id = ? AND created_at >= ?`)
-    .get(yardstick, yardstick, yardstick, yardstick, workload.id, workload.routed_arm_id, from);
+    .get(yardstick, yardstick, yardstick, yardstick, yardstick, workload.id, workload.routed_arm_id, from);
   const n = Number(r?.n) || 0;
   // the checks since the switch compared the other way, which the page says rather than hides
   const otherWay = Math.max(0, (Number(r?.judged) || 0) - n);
@@ -354,14 +376,15 @@ export async function controlRecord(workload) {
   const q = n ? Math.max(worse, 0.5) / n : 0.5;
   const half = n ? Math.sqrt((q * (1 - q)) / n) * zSeq(n, { alpha: config.LEARN_ALPHA / 2 }) : 1;
   const changed = Number(r?.changed) || 0;
-  const changedRate = n ? changed / n : 0;
-  const cq = n ? Math.max(changed, 0.5) / n : 0.5;
-  const changedHalf = n ? Math.sqrt((cq * (1 - cq)) / n) * zSeq(n, { alpha: config.LEARN_ALPHA / 2 }) : 1;
+  const compared = Math.max(Number(r?.compared) || 0, n);
+  const changedRate = compared ? changed / compared : 0;
+  const cq = compared ? Math.max(changed, 0.5) / compared : 0.5;
+  const changedHalf = compared ? Math.sqrt((cq * (1 - cq)) / compared) * zSeq(compared, { alpha: config.LEARN_ALPHA / 2 }) : 1;
   return {
     n, otherWay, worse: Math.round(worse * 100) / 100, better: Number(r?.better) || 0, rate,
     lo: Math.max(0, rate - half), hi: Math.min(1, rate + half), floorPct, yardstick,
-    // the figures test (null where none was set): how many served answers changed a held figure, and the range of that rate
-    figures: exactBarPct ? { changed, rate: changedRate, lo: Math.max(0, changedRate - changedHalf), barPct: exactBarPct } : null,
+    // the figures test (null where none was set): how many served answers changed a held figure, of how many, and that rate's range
+    figures: exactBarPct ? { changed, compared, rate: changedRate, lo: Math.max(0, changedRate - changedHalf), barPct: exactBarPct } : null,
     costUsd: Number(r?.cost) || 0, since: from, last: r?.last ? Number(r.last) : null,
     enough: n >= config.CONTROL_MIN_CHECKS,
   };
@@ -379,7 +402,7 @@ export function controlBreach(rec, reference) {
   if (!rec || !rec.enough) return null;
   // a figure changed clearly more often than its figures test allows, however the judges read the rest
   if (rec.figures && rec.figures.lo * 100 > rec.figures.barPct) {
-    return `Checked against ${short(reference)} in the background since the switch: of ${rec.n} of its answers, ${rec.figures.changed} `
+    return `Checked against ${short(reference)} in the background since the switch: of ${rec.figures.compared ?? rec.n} of its answers, ${rec.figures.changed} `
       + `changed a figure ${short(reference)} gives the same way every time, or gave nothing usable (${(rec.figures.rate * 100).toFixed(1)}%), `
       + `clearly past the ${rec.figures.barPct.toFixed(1)}% its figures may change.`;
   }

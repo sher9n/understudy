@@ -204,8 +204,13 @@ async function doingOf(w, v, t) {
 }
 
 // how many of the answers planted to test a test's judge it got wrong
+/* what the judge got wrong on the answers planted to test it, where its word was then held back: none where those mistakes
+   meant the judges were not used at all, and the test compared answers for the same answer instead (judging.fallback) */
 const judgeErrors = (run) => {
-  try { return Number(JSON.parse(run.judge_check_json || 'null')?.errors) || 0; } catch { return 0; }
+  try {
+    if (JSON.parse(run.plan_json || 'null')?.judging?.fallback) return 0;
+    return Number(JSON.parse(run.judge_check_json || 'null')?.errors) || 0;
+  } catch { return 0; }
 };
 
 // a test whose requests were too few for any model to be shown close enough, however well it matched
@@ -282,6 +287,13 @@ async function measurementsOf(w) {
             quote_about_usd, cap_usd
        FROM eval_runs WHERE workload_id = ? ORDER BY created_at DESC LIMIT 30`).all(w.id);
   if (!runs.length) return [];
+  /* what the plan says of its judges, read only for a test whose judges got planted answers wrong, the few its tag reads it
+     for (judgeErrors): a plan is too long to read for every test of the list */
+  for (const r of runs) {
+    let wrong = 0;
+    try { wrong = Number(JSON.parse(r.judge_check_json || 'null')?.errors) || 0; } catch { wrong = 0; }
+    if (wrong > 0) r.plan_json = (await db.prepare('SELECT plan_json FROM eval_runs WHERE id = ?').get(r.id))?.plan_json ?? null;
+  }
   const first = await db.prepare('SELECT id FROM eval_runs WHERE workload_id = ? ORDER BY created_at LIMIT 1').get(w.id);
   const serving = w.routed_model ? await servingKey(w) : null;
   // the second looks that did not hold up, by the rule every screen reads (failedSecondLook in src/eval/outcome.js)
@@ -1175,6 +1187,10 @@ function comparedWords(by, shape, scored) {
   if (b === 'checklist' || b.endsWith('+checklist')) return 'Checked against the instructions in the request';
   if (b === 'numbers' || b.endsWith('+numbers')) return "A figure in it differs from the original model's";
   if (b === 'fields') return 'A field the original model gave the same way twice differs in it';
+  // a choice the original model makes the same way every time, held exactly (scoreServed in src/learn/control.js)
+  if (b === 'held') return 'A choice the original model made the same way every time differs in it';
+  // a long answer whose deciding differences were more than any judge reads (judgeStructured in src/eval/judge.js)
+  if (b === 'too many') return 'Too many of its choices differ for a judge to read them all, so it counts as different';
   if (b === 'jev-quality' || b === 'llm-quality') return 'Read by a judge model twice, once each way round';
   // a structured answer that differed, read by two judges each way round, the original model settling what they disagreed on
   if (b.includes('-choices')) {
@@ -1466,6 +1482,8 @@ export async function runAnswersOf(w, run, key, { page = 1, per: perAsked = ANSW
       verdict: r.confirm_verdict || null,
       figure: r.confirm_gap === null || r.confirm_gap === undefined ? null : round8(Number(r.confirm_gap) / 100),
       bar: r.confirm_floor === null || r.confirm_floor === undefined ? null : round8(Number(r.confirm_floor) / 100),
+      // where its figures test or answers nobody could read held it back, rather than its own figure, in the look's own words
+      ...(['review', 'missed'].includes(r.confirm_verdict) && r.confirm_note ? { heldBy: r.confirm_note } : {}),
     },
     // the answers of one kind of result only, when asked for, and how many there are
     filter,

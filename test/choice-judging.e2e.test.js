@@ -60,12 +60,15 @@ const { db, now } = await import('../src/db/index.js');
 const { default: migrate } = await import('../src/db/migrate.js');
 const { default: config } = await import('../src/config.js');
 const { createAccount } = await import('../src/auth.js');
+const { forgetWorkspace } = await import('../src/workspace.js');
 const { workloadFor, recordCall } = await import('../src/traffic.js');
 const { saveCatalog } = await import('../src/openrouter.js');
 const { runEvaluation } = await import('../src/eval/run.js');
+const { judgeStructured } = await import('../src/eval/judge.js');
+const { tieOptions, TIE_ROOM } = await import('../src/eval/way.js');
 const { move } = await import('../src/billing.js');
 const { barOf, scoreServed, forgetBar, controlRecord, controlBreach } = await import('../src/learn/control.js');
-const { runPageOf, runAnswersOf } = await import('../src/workloadPage.js');
+const { runPageOf, runAnswersOf, pageOf } = await import('../src/workloadPage.js');
 const { planFor } = await import('../src/eval/plan.js');
 const { forgetProfile } = await import('../src/eval/profile.js');
 
@@ -86,8 +89,11 @@ const lv = (i) => LEVELS[(i * 7 + 1) % 4];
 const borderline = (i) => i % 9 === 0;
 const next = (l) => LEVELS[LEVELS.indexOf(l) === 3 ? 2 : LEVELS.indexOf(l) + 1];
 const okLevels = (i) => (borderline(i) ? [lv(i), next(lv(i))] : [lv(i)]);
-// the customer's model is unsure of one borderline ticket in four: it gives the other level on its second answer
-const refFlips = (i) => borderline(i) && i % 36 === 0;
+/* the customer's model is unsure of one borderline ticket in two: it gives the other level on its second answer. Often enough
+   that any sample of half the tickets holds some (fourteen in 240): with seven, about one sample in a hundred held none, and
+   a test read the workload as one whose model never picks two ways, which is right for that sample and wrong for the test */
+const flipsOf = { every: 18 };
+const refFlips = (i) => borderline(i) && i % flipsOf.every === 0;
 const levelBadness = (i, l) => {
   if (!LEVELS.includes(l)) return 9;
   if (okLevels(i).includes(l)) return 0;
@@ -134,10 +140,14 @@ const parse = (t) => { try { return JSON.parse(t); } catch { return null; } };
 /* How wrong an answer is for its request, by kind: 0 right, more the further off. The fake judges read the request and
    both answers and prefer the one less wrong; one that cannot tell says they are about as good. */
 const KIND_OF = { Ticket: 'ticket', Refund: 'refund', Tool: 'tool', Flag: 'flag', Rate: 'rate', Route: 'route', Invoice: 'invoice',
-  Scan: 'scan', Echo: 'echo', Tags: 'tags', Triage: 'triage', Lines: 'lines', Lookup: 'lookup' };
+  Scan: 'scan', Echo: 'echo', Tags: 'tags', Triage: 'triage', Lines: 'lines', Lookup: 'lookup', Steady: 'steady', Dotted: 'dotted',
+  Flaky: 'flaky', Varied: 'varied' };
 function badness(kind, i, v, { lenient = false } = {}) {
   if (v === null || v === undefined) return 9;
-  if (kind === 'ticket' || kind === 'triage') { const b = levelBadness(i, v?.priority); return lenient && b === 2 ? 0 : b; }
+  if (['ticket', 'triage', 'steady', 'flaky'].includes(kind)) { const b = levelBadness(i, v?.priority); return lenient && b === 2 ? 0 : b; }
+  if (kind === 'dotted') return levelBadness(i, v?.['Prio.']);
+  // a category picked afresh is never wrong; the code the request states is
+  if (kind === 'varied') return v?.code === `C-${i}` ? 0 : 3;
   if (kind === 'lines') {
     // a whole answer, or the parts of one a judge was shown, each under its place ("lines[33]")
     const rows = Array.isArray(v.lines) ? v.lines.map((l, k) => [k, l])
@@ -226,7 +236,11 @@ const ANSWERS = {
     'vendor/bad-triager': (i) => JSON.stringify({ priority: !borderline(i) && i % 10 === 5 ? farAway(i) : lv(i), reason: reasonOf(i, 'Briefly,') }),
   },
   lines: {
-    [REF]: (i) => JSON.stringify({ order: `PO-${i}`, lines: linesOf(i) }),
+    // the other right category on its loose lines, on its second answer to one order in ten
+    [REF]: (i) => {
+      const flip = i % 10 === 3 && nth(`ln${i}`) % 2 === 1;
+      return JSON.stringify({ order: `PO-${i}`, lines: linesOf(i, (ii, k) => (flip && catLoose(ii, k) ? otherCat(ii, k) : catOf(ii, k))) });
+    },
     // the other right category on a loose line, late in the order
     'vendor/good-liner': (i) => JSON.stringify({ order: `PO-${i}`, lines: linesOf(i, (ii, k) => (k >= 30 && catLoose(ii, k) ? otherCat(ii, k) : catOf(ii, k))) }),
     // a wrong category on the thirty-sixth line of one clear order in four, past what a judge reads of the whole answer
@@ -237,8 +251,32 @@ const ANSWERS = {
     [REF]: (i) => ({ tool: 'find_order', args: { order: `A-${i * 3}` } }),
     'vendor/good-lookup': (i) => ({ tool: 'find_order', args: { order: `A-${i * 3}` } }),
   },
+  // a priority under a field whose own name reads as two fields
+  dotted: {
+    [REF]: (i) => JSON.stringify({ 'Prio.': refFlips(i) && nth(`d${i}`) % 2 === 1 ? next(lv(i)) : lv(i) }),
+    'vendor/dotted-good': (i) => JSON.stringify({ 'Prio.': borderline(i) ? next(lv(i)) : lv(i) }),
+  },
+  // tickets its customer's model cannot answer on its second answer now and then, and a model as good that fails as often
+  flaky: {
+    [REF]: (i) => (i % 20 === 5 && nth(`fk${i}`) % 2 === 1 ? 'Sorry, I cannot set a priority for this ticket.'
+      : JSON.stringify({ priority: refFlips(i) && nth(`fp${i}`) % 2 === 1 ? next(lv(i)) : lv(i) })),
+    'vendor/flaky-twin': (i) => (i % 20 === 5 ? 'Sorry, I cannot set a priority for this ticket.' : JSON.stringify({ priority: lv(i) })),
+  },
+  // a category its customer's model picks afresh on three messages in four, beside a code it states the same way every time
+  varied: {
+    [REF]: (i) => JSON.stringify({ category: i % 4 !== 0 && nth(`vr${i}`) % 2 === 1 ? 'beta' : 'alpha', code: `C-${i}` }),
+    // a word of its own every time, as good as either of the customer's model's
+    'vendor/varied-any': (i) => JSON.stringify({ category: 'gamma', code: `C-${i}` }),
+  },
+  // tickets whose customer's model never picks another priority on its second answer: its priority is held exactly
+  steady: {
+    [REF]: (i) => JSON.stringify({ priority: lv(i) }),
+    'vendor/steady-copy': (i) => JSON.stringify({ priority: lv(i) }),
+    'vendor/steady-other': (i) => JSON.stringify({ priority: borderline(i) ? next(lv(i)) : lv(i) }),
+  },
   refund: {
-    [REF]: (i) => JSON.stringify({ department: deptAmbiguous(i) && i % 40 === 0 && nth(`r${i}`) % 2 === 1 ? otherDept(i) : dept(i), amount: amount(i) }),
+    // the other department, on its second answer to every refund that could go either way
+    [REF]: (i) => JSON.stringify({ department: deptAmbiguous(i) && nth(`r${i}`) % 2 === 1 ? otherDept(i) : dept(i), amount: amount(i) }),
     'vendor/good-router': (i) => JSON.stringify({ department: deptAmbiguous(i) ? otherDept(i) : dept(i), amount: amount(i) }),
     // right on every department, and a wrong amount on one refund in six: a figure the customer's model states every time
     'vendor/amount-slip': (i) => JSON.stringify({ department: dept(i), amount: i % 6 === 1 ? amount(i) + 1 : amount(i) }),
@@ -250,17 +288,19 @@ const ANSWERS = {
     'vendor/wrong-tool': (i) => (!borderline(i) && i % 8 === 4 ? { tool: 'escalate', args: { team: 'ops' } } : { tool: 'set_priority', args: { level: lv(i) } }),
   },
   flag: {
-    [REF]: (i) => JSON.stringify({ flagged: flagAmbiguous(i) && i % 45 === 7 && nth(`f${i}`) % 2 === 1 ? !flagged(i) : flagged(i) }),
+    [REF]: (i) => JSON.stringify({ flagged: flagAmbiguous(i) && nth(`f${i}`) % 2 === 1 ? !flagged(i) : flagged(i) }),
     'vendor/good-flagger': (i) => JSON.stringify({ flagged: flagAmbiguous(i) ? !flagged(i) : flagged(i) }),
     'vendor/bad-flagger': (i) => JSON.stringify({ flagged: !flagAmbiguous(i) && i % 8 === 2 ? !flagged(i) : flagged(i) }),
   },
   rate: {
-    [REF]: (i) => JSON.stringify({ score: score(i) }),
+    // a step the other way, on its second answer to one loose request in three
+    [REF]: (i) => JSON.stringify({ score: scoreLoose(i) && i % 21 === 0 && nth(`rt${i}`) % 2 === 1 ? (score(i) === 5 ? 4 : score(i) + 1) : score(i) }),
     'vendor/good-rater': (i) => JSON.stringify({ score: scoreLoose(i) ? (score(i) === 5 ? 4 : score(i) + 1) : score(i) }),
     'vendor/bad-rater': (i) => JSON.stringify({ score: !scoreLoose(i) && i % 8 === 3 ? (score(i) <= 2 ? score(i) + 2 : score(i) - 2) : score(i) }),
   },
   route: {
-    [REF]: (i) => JSON.stringify({ team: team(i) }),
+    // the other team, on its second answer to one message in two that could go either way
+    [REF]: (i) => JSON.stringify({ team: teamAmbiguous(i) && i % 20 === 4 && nth(`ro${i}`) % 2 === 1 ? TEAMS[(TEAMS.indexOf(team(i)) + 1) % 3] : team(i) }),
     'vendor/good-route': (i) => JSON.stringify({ team: teamAmbiguous(i) ? TEAMS[(TEAMS.indexOf(team(i)) + 1) % 3] : team(i) }),
   },
   invoice: {
@@ -279,7 +319,8 @@ const ANSWERS = {
     'vendor/bad-scanner': (i) => JSON.stringify({ total: i % 8 === 1 ? total(i) + 9 : total(i), currency: 'EUR' }),
   },
   tags: {
-    [REF]: (i) => JSON.stringify({ tags: tagsOf(i) }),
+    // the same labels the other way round, on its second answer to one message in fifteen
+    [REF]: (i) => JSON.stringify({ tags: i % 15 === 0 && nth(`tg${i}`) % 2 === 1 ? [...tagsOf(i)].reverse() : tagsOf(i) }),
     // the same labels, the other way round on every third request
     'vendor/good-tagger': (i) => JSON.stringify({ tags: i % 3 === 0 ? [...tagsOf(i)].reverse() : tagsOf(i) }),
   },
@@ -337,6 +378,16 @@ const BODIES = {
     tools: [{ type: 'function', function: { name: 'find_order', description: 'Find an order by its number',
       parameters: { type: 'object', properties: { order: { type: 'string' } }, required: ['order'] } } }],
     tool_choice: { type: 'function', function: { name: 'find_order' } } }),
+  steady: (i) => ({ model: REF, messages: [{ role: 'system', content: 'Set the priority of the support ticket.' },
+    { role: 'user', content: `Steady #${i}: the customer writes about an order, case ${i * 37}.` }], response_format: schema('priority', TICKET_SCHEMA) }),
+  dotted: (i) => ({ model: REF, messages: [{ role: 'system', content: 'Set the priority of the support ticket.' },
+    { role: 'user', content: `Dotted #${i}: the customer writes about an order, case ${i * 41}.` }],
+    response_format: schema('prio', { type: 'object', properties: { 'Prio.': { type: 'string', enum: LEVELS } }, required: ['Prio.'], additionalProperties: false }) }),
+  flaky: (i) => ({ model: REF, messages: [{ role: 'system', content: 'Set the priority of the support ticket.' },
+    { role: 'user', content: `Flaky #${i}: the customer writes about an order, case ${i * 43}.` }], response_format: schema('priority', TICKET_SCHEMA) }),
+  varied: (i) => ({ model: REF, messages: [{ role: 'system', content: 'Describe the message in a word, and give its code.' },
+    { role: 'user', content: `Varied #${i}: a message about an order, code C-${i}.` }],
+    response_format: schema('described', { type: 'object', properties: { category: { type: 'string' }, code: { type: 'string' } }, required: ['category', 'code'] }) }),
 };
 // what the customer's model said when each call was made, kept with it
 const RECORDED = {
@@ -348,11 +399,17 @@ const RECORDED = {
   triage: (i) => JSON.stringify({ priority: lv(i), reason: reasonOf(i, 'Here') }),
   lines: (i) => JSON.stringify({ order: `PO-${i}`, lines: linesOf(i) }),
   lookup: (i) => ({ tool: 'find_order', args: { order: `A-${i * 3}` } }),
+  steady: T,
+  dotted: (i) => JSON.stringify({ 'Prio.': lv(i) }),
+  flaky: T,
+  varied: (i) => JSON.stringify({ category: 'alpha', code: `C-${i}` }),
 };
 
 /* ---------- the provider, Jev, the language-model judge, and the customer's model as a judge ---------- */
 
 const counts = { jevBetter: 0, llmQuality: 0, tieQuality: 0, jevSame: 0 };
+// the provider settings each tie-break was sent with, newest last
+const tieProviders = [];
 const fenced = (text, label) => (String(text).match(new RegExp(`<<<${label}\\n([\\s\\S]*?)\\n${label}>>>`)) || [])[1] || '';
 const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
 const message = (said) => (said && typeof said === 'object'
@@ -395,7 +452,7 @@ const server = http.createServer((req, res) => {
     // a judge's reading, by the language-model judge or by the customer's own model breaking a tie
     if (sys.includes('say which one serves')) {
       const tie = model === REF;
-      if (tie) counts.tieQuality += 1; else counts.llmQuality += 1;
+      if (tie) { counts.tieQuality += 1; tieProviders.push(p.provider ?? null); } else counts.llmQuality += 1;
       const how = tie ? mode.tie : mode.llm;
       if (how === 'down') return json(res, 400, { error: { message: 'judge unavailable' } });
       const c = pick(how, fenced(user, 'REQUEST'), fenced(user, 'FIRST'), fenced(user, 'SECOND'));
@@ -417,7 +474,8 @@ const CANDIDATES = ['vendor/good-labeler', 'vendor/step-slip', 'vendor/far-slip'
   'vendor/amount-slip', 'vendor/good-tooler', 'vendor/wrong-tool', 'vendor/good-flagger', 'vendor/bad-flagger', 'vendor/good-rater',
   'vendor/bad-rater', 'vendor/good-route', 'vendor/good-invoicer', 'vendor/locale-invoicer', 'vendor/currency-slip',
   'vendor/good-scanner', 'vendor/bad-scanner', 'vendor/good-tagger', 'vendor/echo', 'vendor/wobbly', 'vendor/good-triager',
-  'vendor/bad-triager', 'vendor/good-liner', 'vendor/late-slip', 'vendor/good-lookup'];
+  'vendor/bad-triager', 'vendor/good-liner', 'vendor/late-slip', 'vendor/good-lookup', 'vendor/steady-copy', 'vendor/steady-other',
+  'vendor/dotted-good', 'vendor/flaky-twin', 'vendor/varied-any'];
 
 test.before(async () => {
   await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
@@ -480,6 +538,8 @@ async function measured(kind, opts) {
 const fair = () => { mode.jev = 'fair'; mode.llm = 'fair'; mode.tie = 'fair'; };
 
 const tickets = {};
+// runs a later test reads again: the fallback when the judges fail their planted answers, and the figures test deciding
+const shared = {};
 
 test('a ticket priority on a scale: picking the other of two right levels passes, a wrong level fails, and the original model passes its own test', async () => {
   fair();
@@ -488,7 +548,9 @@ test('a ticket priority on a scale: picking the other of two right levels passes
   const { run, plan } = t;
   assert.equal(run.yardstick, 'quality', 'judged "at least as good"');
   assert.equal(plan.judging.reason, 'choices');
-  assert.deepEqual([...plan.judging.choices].sort(), ['$', 'priority'], JSON.stringify(plan.judging.choices));
+  // read as a choice where the requests declare one, and judged because the customer's own model picks it two ways
+  assert.deepEqual([...plan.judging.offered].sort(), ['$', 'priority'], JSON.stringify(plan.judging));
+  assert.deepEqual(plan.judging.choices, ['priority'], JSON.stringify(plan.judging));
   // the priority is a choice, never held exactly, however steadily the customer's model picks it
   assert.deepEqual(plan.yardstick.stableFields, [], JSON.stringify(plan.yardstick.stableFields));
   assert.equal(plan.yardstick.tieBreaker, REF);
@@ -531,6 +593,8 @@ test('a ticket priority on a scale: picking the other of two right levels passes
 test('the same tickets held to "the same answer", as before: the model that only picks the other right level fails, and the bar is raised to one its own model passes', async () => {
   fair();
   config.EVAL_JUDGE_CHOICES = false;
+  // its model unsure of one borderline ticket in four, as the ticket-priority workload's was (about 3 in 120)
+  flipsOf.every = 36;
   try {
     const { run, plan } = await measured('ticket', { enabled: ['vendor/good-labeler', 'vendor/copy'] });
     assert.equal(run.yardstick, 'agreement');
@@ -545,6 +609,7 @@ test('the same tickets held to "the same answer", as before: the model that only
     assert.notEqual(good.verdict, 'cleared', `every borderline ticket counts against it here: ${said(good)}`);
   } finally {
     config.EVAL_JUDGE_CHOICES = true;
+    flipsOf.every = 18;
   }
 });
 
@@ -600,6 +665,7 @@ test('judges that get planted answers wrong are not used: the workload is compar
   mode.tie = 'fair';
   try {
     const { workload, run, plan } = await measured('ticket', { enabled: ['vendor/good-labeler', 'vendor/copy'] });
+    shared.fallback = { workload, run };
     assert.equal(run.yardstick, 'agreement', 'fell back to the same answer');
     assert.equal(plan.judging.reason, 'choices');
     assert.ok(plan.judging.fallback, JSON.stringify(plan.judging));
@@ -650,17 +716,38 @@ test('a department of no order beside an amount the request states: a different 
   for (const r of rows) assert.equal(r.judged_by, 'fields', `a changed amount is decided in code, never by a judge: ${r.judged_by}`);
 });
 
-test('which tool to call is a choice: setting the other right level passes, escalating clear tickets fails', async () => {
+test('a tool call: the level its model sets two ways is judged, the tool it always calls is held, so escalating clear tickets fails in code', async () => {
   fair();
   const { run, plan } = await measured('tool', { enabled: ['vendor/good-tooler', 'vendor/wrong-tool'] });
   assert.equal(run.yardstick, 'quality');
-  assert.ok(plan.judging.choices.includes('the tool called'), JSON.stringify(plan.judging.choices));
-  assert.ok(plan.judging.choices.includes('[].level'), JSON.stringify(plan.judging.choices));
+  // which tool is declared a choice (two tools, none forced), and the customer's model always calls the same one: held
+  assert.ok(plan.judging.offered.includes('the tool called'), JSON.stringify(plan.judging));
+  assert.deepEqual(plan.judging.choices, ['[].level'], JSON.stringify(plan.judging));
+  assert.ok(plan.yardstick.stableFields.includes('the tool called'), JSON.stringify(plan.yardstick.stableFields));
+  assert.equal(plan.yardstick.exactBarPct, undefined, 'a steady choice of tool is held on each answer, but is no figure to test');
   const check = JSON.parse(run.judge_check_json);
-  assert.ok(check.kinds.includes('no such tool'), JSON.stringify(check));
+  assert.ok(!check.kinds.includes('no such tool'), 'no tool is planted where no judge reads which tool');
   assert.equal((await resultOf(run.id, 'vendor/good-tooler')).verdict, 'cleared', said(await resultOf(run.id, 'vendor/good-tooler')));
   const wrong = await resultOf(run.id, 'vendor/wrong-tool');
   assert.notEqual(wrong.verdict, 'cleared', said(wrong));
+  const rows = (await replaysOf(run.id, 'vendor/wrong-tool')).filter((r) => Number(r.score) > 0);
+  assert.ok(rows.length >= 3, `${rows.length}`);
+  for (const r of rows) assert.equal(r.judged_by, 'fields', `another tool is decided in code where the customer's model never varies it: ${r.judged_by}`);
+});
+
+test('negative: a priority its own model never picks two ways stays on "the same answer": held exactly, and no judge', async () => {
+  fair();
+  const before = { ...counts };
+  const { run, plan } = await measured('steady', { enabled: ['vendor/steady-copy', 'vendor/steady-other'] });
+  assert.equal(run.yardstick, 'agreement', JSON.stringify(plan.judging));
+  assert.equal(plan.judging.reason, null);
+  assert.deepEqual([...plan.judging.offered].sort(), ['$', 'priority'], 'read as a choice the requests offer');
+  assert.deepEqual(plan.judging.choices, [], 'but judged only where its own model picks it two ways');
+  assert.equal(counts.jevBetter, before.jevBetter);
+  assert.equal(counts.llmQuality, before.llmQuality);
+  assert.equal(counts.tieQuality, before.tieQuality);
+  assert.equal((await resultOf(run.id, 'vendor/steady-copy')).verdict, 'cleared');
+  assert.notEqual((await resultOf(run.id, 'vendor/steady-other')).verdict, 'cleared', 'another priority counts against it, as before');
 });
 
 test('a yes or no with no schema to declare it is a choice too, read from the answers', async () => {
@@ -781,6 +868,7 @@ test('the figures test: with a judged bar that has room to spare, a model that c
     config.EVAL_QUALITY_MARGIN_PCT = margin;
   }
   const { workload, run, plan } = measuredRun;
+  shared.figures = { workload, run };
   assert.equal(run.yardstick, 'quality');
   assert.ok(Number(run.floor_pct) >= 40, `${run.floor_pct}`);
   assert.equal(Number(plan.yardstick.exactBarPct), 3, JSON.stringify(plan.yardstick));
@@ -794,7 +882,8 @@ test('the figures test: with a judged bar that has room to spare, a model that c
   const row = page.cands.find((c) => c.key === 'vendor/amount-slip');
   assert.equal(row.verdict, 'Changed figures');
   assert.match(row.why, /^It changed a figure the original model gives the same way every time, such as an amount, a date or a code, on \d+(\.\d)?% of requests, where up to 3% is allowed\./);
-  assert.doesNotMatch(row.why, /[–—|]/);
+  // no dash of either length, and no vertical line, in what the page says (the characters by code, so none is in this file)
+  assert.doesNotMatch(row.why, new RegExp(`[${String.fromCharCode(0x2013, 0x2014)}|]`));
   // switched, and checked since: answers that changed the amount break the figures test, whatever the judged bar allows
   const armId = `arm_fig_${process.pid}`;
   await db.prepare('UPDATE workloads SET routed_arm_id = ?, promoted_at = ? WHERE id = ?').run(armId, now() - DAY, workload.id);
@@ -811,6 +900,15 @@ test('the figures test: with a judged bar that has room to spare, a model that c
     assert.equal(rec.figures.barPct, 3);
     assert.ok(rec.lo * 100 < rec.floorPct, 'the judged bar alone would let it be');
     assert.match(controlBreach(rec, REF), /of 200 of its answers, 40 changed a figure gpt-5\.4 gives the same way every time, or gave nothing usable \(20\.0%\), clearly past the 3\.0% its figures may change\./);
+    // checks whose figures matched and whose other differences the judges left unsettled count among those compared
+    for (let j = 0; j < 100; j += 1) {
+      await db.prepare(`INSERT INTO control_checks (id, workspace_id, workload_id, arm_id, score, better, judged_by, yardstick, cost_usd, status, created_at)
+          VALUES (?, ?, ?, ?, NULL, 0, 'unsettled', 'quality', 0.001, 200, ?)`).run(`ctl_fig_${process.pid}_u${j}`, w.workspace_id, w.id, armId, now());
+    }
+    const withUnsettled = await controlRecord(w);
+    assert.equal(withUnsettled.n, 200, 'the judged rate reads only what was settled');
+    assert.equal(withUnsettled.figures.compared, 300);
+    assert.match(controlBreach(withUnsettled, REF), /of 300 of its answers, 40 changed a figure .* \(13\.3%\)/);
   } finally {
     await db.prepare(`DELETE FROM control_checks WHERE id LIKE 'ctl_fig_%'`).run();
     await db.prepare('UPDATE workloads SET routed_arm_id = NULL, promoted_at = NULL WHERE id = ?').run(workload.id);
@@ -871,12 +969,13 @@ test('negative: a written workload is judged as it was, and reads no choice', as
   assert.equal((await resultOf(run.id, 'vendor/echo')).verdict, 'cleared');
 });
 
-test('the daily checks after a switch read a served priority the way the test did', async () => {
+test('the daily checks after a switch read a served priority the way the test did, by the three', async () => {
   fair();
   const { workload } = tickets.fair;
   forgetBar(workload.id);
   const bar = await barOf(workload);
   assert.equal(bar.yardstick, 'quality');
+  assert.equal(bar.panel, true, 'read by the three, as its measurement was');
   assert.equal(bar.stable?.has('priority'), false, 'the priority is never held');
   const i = 9;
   assert.ok(borderline(i));
@@ -884,14 +983,29 @@ test('the daily checks after a switch read a served priority the way the test di
   const as = (x) => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(x) } }] });
   const own = as({ priority: lv(i) });
   const again = async () => ({ json: own, cost: 0.002 });
-  const other = await scoreServed(body, as({ priority: next(lv(i)) }), own, 'enum',
-    { scope: workload.workspace_id, yardstick: 'quality', again, stable: bar.stable, tieBreaker: REF, judged: 'vendor/good-labeler' });
+  const how = { scope: workload.workspace_id, yardstick: 'quality', again, stable: bar.stable, tieBreaker: REF, judged: 'vendor/good-labeler', panel: bar.panel };
+  const other = await scoreServed(body, as({ priority: next(lv(i)) }), own, 'enum', how);
   assert.equal(other.score, 0, JSON.stringify(other));
+  assert.match(String(other.judgedBy), /-choices/, JSON.stringify(other));
   const clear = 10;
   assert.ok(!borderline(clear));
-  const off = await scoreServed(BODIES.ticket(clear), as({ priority: farAway(clear) }), as({ priority: lv(clear) }), 'enum',
-    { scope: workload.workspace_id, yardstick: 'quality', again, stable: bar.stable, tieBreaker: REF, judged: 'vendor/good-labeler' });
+  const off = await scoreServed(BODIES.ticket(clear), as({ priority: farAway(clear) }), as({ priority: lv(clear) }), 'enum', how);
   assert.equal(off.score, 1, JSON.stringify(off));
+  assert.match(String(off.judgedBy), /-choices/, JSON.stringify(off));
+});
+
+test('the daily checks read a bare label such as P2 as a choice for the judges, never as a figure that changed', async () => {
+  fair();
+  const { workload } = tickets.fair;
+  const bare = (x) => ({ choices: [{ finish_reason: 'stop', message: { content: x } }] });
+  let asked = 0;
+  const again = async () => { asked += 1; return { json: bare('P2'), cost: 0.002 }; };
+  const body = { model: REF, messages: [{ role: 'system', content: 'Answer with the priority only: P1, P2, P3 or P4.' },
+    { role: 'user', content: 'Ticket #11: the customer writes about an order.' }] };
+  const s = await scoreServed(body, bare('P3'), bare('P2'), 'enum', { scope: workload.workspace_id, yardstick: 'quality', again,
+    stable: new Set(), tieBreaker: REF, judged: 'vendor/x', panel: true });
+  assert.notEqual(s.judgedBy, 'numbers', JSON.stringify(s));
+  assert.equal(asked, 0, 'the customer\'s model is not asked again to confirm a figure');
 });
 
 test('the quote counts the judges for a workload whose requests declare choices, before any test has run', async () => {
@@ -922,4 +1036,180 @@ test('the quote counts the readings of a reason written beside a choice, before 
   assert.equal(qt.differs.written, 0);
   assert.equal(qg.differs.written, 1);
   assert.ok(qg.estimateUsd > qt.estimateUsd, `${qg.estimateUsd} against ${qt.estimateUsd}`);
+});
+
+const askOfTicket = (i) => `Ticket #${i}: the customer writes about an order, case ${i * 31}.`;
+
+test('a small judged workload: a model that matches every figure clears on fewer requests than the figures bar alone could show', async () => {
+  fair();
+  const { run, plan } = await measured('refund', { n: 120, enabled: ['vendor/good-router', 'vendor/amount-slip'] });
+  assert.equal(run.yardstick, 'quality', JSON.stringify(plan.judging));
+  assert.ok(Number(run.sample_size) < 88, `${run.sample_size} requests, fewer than a 3% figures bar needs`);
+  const good = await resultOf(run.id, 'vendor/good-router');
+  const rank = JSON.parse(good.rank_json);
+  assert.equal(rank.figures?.verdict, 'insufficient', good.rank_json);
+  assert.equal(rank.heldBy, undefined, 'too few calls to show the figures bar never holds it back');
+  assert.equal(good.verdict, 'cleared', said(good));
+  assert.notEqual((await resultOf(run.id, 'vendor/amount-slip')).verdict, 'cleared');
+});
+
+test('a field whose own name reads as two fields ("Prio.") is planted, judged and passed by its keys', async () => {
+  fair();
+  const { run, plan } = await measured('dotted', { enabled: ['vendor/dotted-good'] });
+  assert.equal(run.yardstick, 'quality', `${JSON.stringify(plan.judging)} ${run.judge_check_json}`);
+  assert.deepEqual(plan.judging.choices, ['Prio.']);
+  const check = JSON.parse(run.judge_check_json);
+  assert.equal(check.errors, 0, `the planted answers changed "Prio." itself, which the judges saw: ${JSON.stringify(check)}`);
+  assert.ok(check.kinds.includes('not allowed') && check.kinds.includes('far choice'), JSON.stringify(check.kinds));
+  assert.equal((await resultOf(run.id, 'vendor/dotted-good')).verdict, 'cleared');
+});
+
+test("the tie-break keeps a request's own wish that nothing be kept, where its workspace turned that off", async () => {
+  mode.jev = 'fair';
+  mode.llm = 'lenient';
+  mode.tie = 'fair';
+  try {
+    const { workspace } = await seed('ticket', { n: 4 });
+    await db.prepare('UPDATE workspaces SET zdr_required = 0 WHERE id = ?').run(workspace.id);
+    forgetWorkspace(workspace.id);
+    const how = { scope: workspace.id, tieBreaker: REF, judged: 'vendor/step-slip' };
+    // Jev reads a priority a step off a clear ticket as worse, the lenient judge as fine: the customer's model settles it
+    tieProviders.length = 0;
+    const asked = await judgeStructured(askOfTicket(3), { priority: stepAway(3) }, { priority: lv(3) }, 'enum',
+      { ...how, body: { ...BODIES.ticket(3), provider: { zdr: true } } });
+    assert.equal(asked.detail?.tie?.model, REF, JSON.stringify(asked));
+    assert.ok(tieProviders.length === 2 && tieProviders.every((p) => p?.zdr === true), JSON.stringify(tieProviders));
+    // a request that asked for nothing: the workspace's own choice holds
+    tieProviders.length = 0;
+    const plain = await judgeStructured(askOfTicket(7), { priority: stepAway(7) }, { priority: lv(7) }, 'enum', { ...how, body: BODIES.ticket(7) });
+    assert.equal(plain.detail?.tie?.model, REF, JSON.stringify(plain));
+    assert.ok(tieProviders.length === 2 && tieProviders.every((p) => !p?.zdr), JSON.stringify(tieProviders));
+  } finally {
+    fair();
+  }
+});
+
+test("a difference no tested judge can read is left unread, never settled by the customer's model alone; one the tie-break settled is kept", async () => {
+  fair();
+  const { workspace } = await seed('ticket', { n: 4 });
+  const ties = counts.tieQuality;
+  // the language-model judge's own answer, with Jev found unreliable on this workload: nobody tested can read it
+  const none = await judgeStructured(askOfTicket(3), { priority: stepAway(3) }, { priority: lv(3) }, 'enum',
+    { scope: workspace.id, prefer: 'llm', tieBreaker: REF, judged: 'judge/small' });
+  assert.equal(none.transient, true, JSON.stringify(none));
+  assert.equal(counts.tieQuality, ties, "the customer's model was never asked to decide alone");
+  // Jev cannot tell (it leans the same way both times), the language model gives no reading: the tie-break would have been
+  // asked whatever that one said, so what it decides is kept
+  mode.jev = 'leans';
+  mode.llm = 'down';
+  try {
+    assert.ok(borderline(9));
+    const how = { scope: workspace.id, tieBreaker: REF, judged: 'vendor/good-labeler' };
+    const first = await judgeStructured(askOfTicket(9), { priority: next(lv(9)) }, { priority: lv(9) }, 'enum', how);
+    assert.equal(first.detail?.tie?.model, REF, JSON.stringify(first));
+    assert.equal(first.score, 0);
+    assert.equal(first.once, undefined, 'kept, and read from what was kept next time');
+    const before = counts.tieQuality;
+    await judgeStructured(askOfTicket(9), { priority: next(lv(9)) }, { priority: lv(9) }, 'enum', how);
+    assert.equal(counts.tieQuality, before);
+  } finally {
+    fair();
+  }
+});
+
+test("its own failed answers count in its bar, as a candidate's do: a model as good, failing as often, passes", async () => {
+  fair();
+  const { run, plan } = await measured('flaky', { enabled: ['vendor/flaky-twin'] });
+  assert.equal(run.yardstick, 'quality', JSON.stringify(plan.judging));
+  assert.ok(Number(plan.yardstick.qualityNoisePct) > 0, `its own failures are in its noise: ${plan.yardstick.qualityNoisePct}`);
+  assert.equal(plan.selfTest.verdict, 'cleared', JSON.stringify(plan.selfTest));
+  const twin = await resultOf(run.id, 'vendor/flaky-twin');
+  assert.equal(twin.verdict, 'cleared', said(twin));
+});
+
+test('a second look held back by its figures test says so in its own words, on the run page and the model page', async () => {
+  const { workload, run } = shared.figures;
+  const note = 'it changed a figure the original model gives the same way every time on 8.3% of them, where up to 3% is allowed';
+  await db.prepare(`UPDATE eval_results SET confirm_verdict = 'missed', confirm_runs = 60, confirm_gap = 1.2, confirm_floor = 8, confirm_note = ?
+      WHERE run_id = ? AND model_id = ?`).run(note, run.id, 'vendor/good-router');
+  const page = await runPageOf(workload, run);
+  const row = page.cands.find((c) => c.key === 'vendor/good-router');
+  assert.match(row.why, /on 60 new requests it had never seen it changed a figure the original model gives the same way every time on 8\.3% of them, where up to 3% is allowed\. So it isn't switched to/);
+  const answers = await runAnswersOf(workload, run, 'vendor/good-router', { per: 5 });
+  assert.equal(answers.looks.heldBy, note);
+});
+
+test('a test whose judges failed their planted answers and so were not used is never tagged as held back by an unsure judge', async () => {
+  const { workload, run } = shared.fallback;
+  // a model inside the bar but not cleared, which is what that tag is for where the judges were used
+  await db.prepare(`UPDATE eval_results SET verdict = 'review', gap_hi = 0 WHERE run_id = ? AND model_id = ?`).run(run.id, 'vendor/copy');
+  const w = await db.prepare('SELECT * FROM workloads WHERE id = ?').get(workload.id);
+  const listed = (await pageOf(w)).measurements.find((m) => m.id === run.id);
+  assert.ok(listed, 'the test is listed');
+  assert.notEqual(listed.tag.text, 'Passed, judge unsure', JSON.stringify(listed.tag));
+});
+
+test('with choice judging off, all of it is off: a workload judged for another reason is read whole as before, with no figures test and no tie-break', async () => {
+  fair();
+  const before = { ...counts };
+  config.EVAL_JUDGE_CHOICES = false;
+  try {
+    const { run, plan } = await measured('varied', { enabled: ['vendor/varied-any'] });
+    assert.equal(run.yardstick, 'quality');
+    assert.equal(plan.judging.reason, 'varied');
+    assert.equal(plan.yardstick.choices, undefined, 'the checks after a switch read it as before (barOf: no panel)');
+    assert.equal(plan.yardstick.exactBarPct, undefined, 'no figures test');
+    assert.equal(counts.tieQuality, before.tieQuality, "the customer's model breaks no tie");
+    const rows = (await replaysOf(run.id, 'vendor/varied-any')).filter((r) => r.judged_by && r.judged_by !== 'same');
+    assert.ok(rows.length >= 5, `${rows.length}`);
+    assert.ok(rows.every((r) => !String(r.judged_by).includes('-choices')), [...new Set(rows.map((r) => r.judged_by))].join(', '));
+    assert.equal((await resultOf(run.id, 'vendor/varied-any')).verdict, 'cleared');
+  } finally {
+    config.EVAL_JUDGE_CHOICES = true;
+  }
+  // and on: the same kind of workload read by the three, its code held to a figures test
+  const { run: on, plan: planOn } = await measured('varied', { enabled: ['vendor/varied-any'] });
+  assert.equal(on.yardstick, 'quality');
+  assert.deepEqual(planOn.yardstick.choices, []);
+  assert.ok(Number(planOn.yardstick.exactBarPct) > 0, JSON.stringify(planOn.yardstick));
+  const onRows = (await replaysOf(on.id, 'vendor/varied-any')).filter((r) => String(r.judged_by).includes('-choices'));
+  assert.ok(onRows.length >= 5, `${onRows.length}`);
+});
+
+test('a choice an earlier test saw its model flip stays judged while its requests offer it, so a sample that missed the flip does not swing back', async () => {
+  fair();
+  const first = await measured('steady', { n: 480, enabled: ['vendor/steady-copy'] });
+  assert.equal(first.run.yardstick, 'agreement');
+  // as if that test had seen the customer's model pick the priority two ways
+  const earlier = planOf(first.run);
+  earlier.judging.choices = ['priority'];
+  await db.prepare('UPDATE eval_runs SET plan_json = ? WHERE id = ?').run(JSON.stringify(earlier), first.run.id);
+  const out = await runEvaluation(first.workload.id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const second = await runOf(out.runId);
+  assert.deepEqual(planOf(second).judging.choices, ['priority'], second.plan_json);
+  assert.equal(second.yardstick, 'quality');
+});
+
+test('the checks after a switch hold a steady choice exactly, and count only figures toward the figures test', async () => {
+  fair();
+  const { workload } = tickets.fair;
+  const body = BODIES.refund(5);
+  const as = (x) => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(x) } }] });
+  const ref = as({ department: dept(5), amount: amount(5) });
+  const again = async () => ({ json: ref, cost: 0.002 });
+  const how = { scope: workload.workspace_id, yardstick: 'quality', again, stable: new Set(['department', 'amount']), tieBreaker: REF,
+    judged: 'vendor/x', panel: true, figures: new Set(['amount']) };
+  const team = await scoreServed(body, as({ department: otherDept(5), amount: amount(5) }), ref, 'json', how);
+  assert.equal(team.score, 1, JSON.stringify(team));
+  assert.equal(team.judgedBy, 'held', 'a steady choice changed: held, but no figure');
+  const sum = await scoreServed(body, as({ department: dept(5), amount: amount(5) + 1 }), ref, 'json', how);
+  assert.equal(sum.judgedBy, 'fields', 'a figure changed');
+});
+
+test('the tie-break finds a model by the one its variant is of, and always leaves it room to answer', async () => {
+  await db.prepare('UPDATE models_catalog SET reasoning_json = ? WHERE model_id = ?')
+    .run(JSON.stringify({ supported_efforts: ['low', 'medium', 'high'] }), 'vendor/good-labeler');
+  assert.deepEqual(await tieOptions('vendor/good-labeler:nitro'), { max_tokens: TIE_ROOM, reasoning: { effort: 'low' } });
+  assert.deepEqual(await tieOptions('vendor/never-heard-of'), { max_tokens: TIE_ROOM });
 });

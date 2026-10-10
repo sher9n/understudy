@@ -44,6 +44,26 @@ const leaves = (v, path = '', out = new Map()) => {
   return out;
 };
 
+/* The same leaves, each with the keys and positions that lead to it (`segs`), so a field is found again by those and never
+   by reading its place back: a field named "Doc. type" or "Price [EUR]" has a place that reads as two fields, or as a list. */
+const leafEntries = (v, path = '', segs = [], out = new Map()) => {
+  if (v === null || typeof v !== 'object') { out.set(path || '$', { segs, value: v }); return out; }
+  if (Array.isArray(v)) { v.forEach((x, i) => leafEntries(x, `${path}[${i}]`, [...segs, i], out)); return out; }
+  for (const k of Object.keys(v)) leafEntries(v[k], path ? `${path}.${k}` : k, [...segs, k], out);
+  return out;
+};
+// a value found by its keys and positions (leafEntries), never by its place read back
+export function valueAtSegs(value, segs) {
+  let o = value;
+  for (const k of segs) {
+    if (o === null || typeof o !== 'object') return undefined;
+    o = o[k];
+  }
+  return o;
+}
+// a place written the way leaves writes it, for a person or a judge to read
+const placeOf = (segs) => segs.reduce((p, k) => (typeof k === 'number' ? `${p}[${k}]` : p ? `${p}.${k}` : k), '') || '$';
+
 /* Structured answers, field by field, by what kind of field each one is.
 
    A field that DECIDES something (a label, an amount, a date, an id, a yes or no, which tool was
@@ -600,7 +620,10 @@ const SCHEMA_NODES = 4000;
    code usually do: read where they point, within the same schema. Null for one that points anywhere else. */
 function pointedTo(s, root) {
   const ref = s?.$ref;
-  if (typeof ref !== 'string' || !ref.startsWith('#/') || !root || typeof root !== 'object') return null;
+  if (!root || typeof root !== 'object' || typeof ref !== 'string') return null;
+  // the whole schema, as a tree of nodes points back to its top ("$ref": "#")
+  if (ref === '#') return root;
+  if (!ref.startsWith('#/')) return null;
   let at = root;
   for (const part of ref.slice(2).split('/')) {
     const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
@@ -612,14 +635,16 @@ function pointedTo(s, root) {
 
 /* A schema's parts, nearest the top first: the schema itself, then what it points to, combines (allOf, anyOf, oneOf, unless
    that is a set of consts, which is one choice: `isList`), its fields and its list's items, each with its place in an answer
-   (`path`). A definition is followed where it is pointed to, never into itself again on the same path (a node that holds a
-   list of nodes), and read no deeper than SCHEMA_DEPTH. `see` reads each part and answers true to stop. Breadth first, and
-   no more than SCHEMA_NODES parts: a schema of many definitions that all point to each other has more paths than anything
-   could read (fourteen give billions), and depth first, the budget ran out deep inside the first of them, so a choice
-   declared beside it at the top went unread. */
+   (`path`). A definition is followed where it is pointed to, and into itself again on the same path only REPEATS_MAX times:
+   a node that holds a list of nodes declares its choices on its children and grandchildren too (children[].kind), never
+   without end. Read no deeper than SCHEMA_DEPTH. `see` reads each part and answers true to stop. Breadth first, and no more
+   than SCHEMA_NODES parts: a schema of many definitions that all point to each other has more paths than anything could
+   read (fourteen give billions), and depth first, the budget ran out deep inside the first of them, so a choice declared
+   beside it at the top went unread. */
+const REPEATS_MAX = 3;
 function eachSchemaPart(schema, prefix, see, { isList = () => false } = {}) {
   if (!schema || typeof schema !== 'object') return;
-  const queue = [{ s: schema, path: prefix, refs: new Set(), depth: 0 }];
+  const queue = [{ s: schema, path: prefix, refs: [], depth: 0 }];
   let budget = SCHEMA_NODES;
   for (let k = 0; k < queue.length && budget > 0; k += 1) {
     const { s, path, refs, depth } = queue[k];
@@ -629,9 +654,9 @@ function eachSchemaPart(schema, prefix, see, { isList = () => false } = {}) {
     if (see(s, path)) return;
     // what is left to read is never more than the budget could read
     const next = (x, p, r = refs) => { if (queue.length - k <= budget) queue.push({ s: x, path: p, refs: r, depth: depth + 1 }); };
-    if (typeof s.$ref === 'string' && !refs.has(s.$ref)) {
+    if (typeof s.$ref === 'string' && refs.filter((r) => r === s.$ref).length < REPEATS_MAX) {
       const there = pointedTo(s, schema);
-      if (there) next(there, path, new Set([...refs, s.$ref]));
+      if (there) next(there, path, [...refs, s.$ref]);
     }
     if (Array.isArray(s.allOf)) for (const x of s.allOf) next(x, path);
     for (const key of ['anyOf', 'oneOf']) {
@@ -644,8 +669,11 @@ function eachSchemaPart(schema, prefix, see, { isList = () => false } = {}) {
   }
 }
 
-// a set of consts, each one allowed value: one choice, read as its list of values
-const isConstList = (xs) => xs.every((x) => x && typeof x === 'object' && 'const' in x);
+// a set of consts, each one allowed value, with or without a null beside them (as TypeBox and Zod write an optional one): one
+// choice, read as its list of values
+const isNullPart = (x) => !!x && typeof x === 'object' && (x.type === 'null' || x.const === null) && !('enum' in x);
+const isConstList = (xs) => xs.some((x) => x && typeof x === 'object' && 'const' in x && x.const !== null)
+  && xs.every((x) => isNullPart(x) || (x && typeof x === 'object' && 'const' in x));
 
 /* Every choice a schema declares, by place, with the values it allows where it lists them: an enum or a set of consts in the
    order given, and a whole number on a short scale as every value on it. */
@@ -664,7 +692,9 @@ function walkSchema(schema, prefix) {
       if (!out.get(at)) out.set(at, Array.from({ length: hi - lo + 1 }, (_, k) => lo + k));
     }
     for (const key of ['anyOf', 'oneOf']) {
-      if (Array.isArray(s[key]) && s[key].length && isConstList(s[key]) && !out.get(at)) out.set(at, s[key].map((x) => x.const));
+      if (Array.isArray(s[key]) && s[key].length && isConstList(s[key]) && !out.get(at)) {
+        out.set(at, s[key].filter((x) => !isNullPart(x)).map((x) => x.const));
+      }
     }
     return false;
   }, { isList: isConstList });
@@ -753,47 +783,68 @@ export function answerLeaves(value, shapeKind) {
   return leaves(v);
 }
 
-// a place in a structured answer (as leaves gives it) read back out of it: "lines[3].category", "[0].level", "$"
-export const segmentsOf = (path) => [...String(path).matchAll(/\[(\d+)\]|([^.[\]]+)/g)].map((m) => (m[1] !== undefined ? Number(m[1]) : m[2]));
-export function valueAt(value, path) {
-  if (path === '$') return value;
-  let o = value;
-  for (const k of segmentsOf(path)) {
-    if (o === null || typeof o !== 'object') return undefined;
-    o = o[k];
-  }
-  return o;
+/** The leaves of a structured answer as answerLeaves names them, each with the keys and positions that lead to it (`segs`,
+    for valueAtSegs and a copy with one field changed), never read back from its place. */
+export function answerLeafEntries(value, shapeKind) {
+  const v = shapeKind === 'tool_call' ? (Array.isArray(value) ? value : []).map((c) => c?.args) : value;
+  return leafEntries(v);
 }
 
 /* Where a structured answer is too long for a judge to read whole (Jev reads 2,500 characters of each, the language model
-   4,000), the parts of the two answers that differ: each item of a list that holds a difference, whole, and each other field
-   that differs, each under its place. A difference on the thirtieth line of an invoice was otherwise past what either judge
-   read, both read the same text, and the answer was forgiven. Null where both are short enough to read whole. */
+   4,000), the parts of the two answers that differ, each under its place: a field that differs on its own, or the line of a
+   list it sits on, whole, where that line is short (ITEM_CHARS) and so says what the field is about (a category beside its
+   product code). The fields that decide something come first and the written ones after, so a judge reads every deciding
+   difference before any wording: `decide` and `written`, each a pair of the answer's part and the reference's. A difference
+   on the thirtieth line of an invoice, or a priority after a 4,500-character description in the same call, was otherwise
+   past what either judge read, both read the same text, and the answer was forgiven. Null where both are short enough to
+   read whole. */
 export const FOCUS_CHARS = 1800;
-export function focusOf(a, b, shapeKind) {
+const ITEM_CHARS = 600;
+export function focusParts(a, b, shapeKind) {
   const text = (v) => JSON.stringify(v, null, 2) ?? '';
   if (text(a).length <= FOCUS_CHARS && text(b).length <= FOCUS_CHARS) return null;
   let x = a;
   let y = b;
   if (shapeKind === 'tool_call') {
     const names = (calls) => (Array.isArray(calls) ? calls.map((c) => c?.name ?? '') : []);
-    if (names(a).join('|') !== names(b).join('|')) return [{ 'the tools called': names(a) }, { 'the tools called': names(b) }];
+    if (names(a).join('|') !== names(b).join('|')) {
+      return { decide: [{ 'the tools called': names(a) }, { 'the tools called': names(b) }], written: [{}, {}] };
+    }
     x = (Array.isArray(a) ? a : []).map((c) => c?.args);
     y = (Array.isArray(b) ? b : []).map((c) => c?.args);
   }
-  const lx = leaves(x);
-  const ly = leaves(y);
-  const places = new Set();
-  for (const p of new Set([...lx.keys(), ...ly.keys()])) {
-    const vx = lx.get(p);
-    const vy = ly.get(p);
-    if (lx.has(p) && ly.has(p) && (isProse(vx) && isProse(vy) ? vx.trim() === vy.trim() : sameValue(vx, vy))) continue;
-    // the item of a list it sits in, whole, where it sits in one; the field itself otherwise
-    const item = String(p).match(/^(.*\[\d+\])/);
-    places.add(item ? item[1] : p);
+  const ex = leafEntries(x);
+  const ey = leafEntries(y);
+  const decide = new Map();
+  const written = new Map();
+  const size = (v) => (JSON.stringify(v) ?? '').length;
+  for (const p of new Set([...ex.keys(), ...ey.keys()])) {
+    const both = ex.has(p) && ey.has(p);
+    const vx = ex.get(p)?.value;
+    const vy = ey.get(p)?.value;
+    const wordy = both && isProse(vx) && isProse(vy);
+    if (both && (wordy ? vx.trim() === vy.trim() : sameValue(vx, vy))) continue;
+    const segs = (ex.get(p) || ey.get(p)).segs;
+    let at = segs;
+    // the line of a list it sits on, whole, where that line is short enough to read beside it
+    let last = -1;
+    segs.forEach((s, i) => { if (typeof s === 'number') last = i; });
+    if (last >= 0 && last < segs.length - 1 && !wordy) {
+      const item = segs.slice(0, last + 1);
+      if (Math.max(size(valueAtSegs(x, item)), size(valueAtSegs(y, item))) <= ITEM_CHARS) at = item;
+    }
+    const place = placeOf(at);
+    if (wordy) { if (!decide.has(place)) written.set(place, at); } else { written.delete(place); decide.set(place, at); }
   }
-  const pick = (v) => Object.fromEntries([...places].map((p) => [p, valueAt(v, p) ?? null]));
-  return [pick(x), pick(y)];
+  const pick = (v, places) => Object.fromEntries([...places].map(([place, at]) => [place, valueAtSegs(v, at) ?? null]));
+  return { decide: [pick(x, decide), pick(y, decide)], written: [pick(x, written), pick(y, written)] };
+}
+
+/** focusParts as one part of each answer for a judge to read, the deciding differences first; null where both are short. */
+export function focusOf(a, b, shapeKind) {
+  const parts = focusParts(a, b, shapeKind);
+  if (!parts) return null;
+  return [{ ...parts.decide[0], ...parts.written[0] }, { ...parts.decide[1], ...parts.written[1] }];
 }
 
 /** What a request's own instruction says, as one text: its system and developer messages. */
@@ -828,9 +879,12 @@ export function observedChoices(values, instruction, shapeKind) {
     }
   }
   const text = String(instruction || '').toLowerCase();
+  // read once for each value, never for each of its thousands of places in a workload's line items
+  const seen = new Map();
   const listed = (s) => {
     const t = String(s).trim().toLowerCase();
-    return !!t && new RegExp(`(^|[^\\p{L}\\p{N}_])${escapeRe(t)}($|[^\\p{L}\\p{N}_])`, 'u').test(text);
+    if (!seen.has(t)) seen.set(t, !!t && new RegExp(`(^|[^\\p{L}\\p{N}_])${escapeRe(t)}($|[^\\p{L}\\p{N}_])`, 'u').test(text));
+    return seen.get(t);
   };
   for (const [k, xs] of by) {
     if (xs.length < 4) continue;
@@ -850,7 +904,9 @@ export function choicePathsOf({ bodies = [], values = [], shapeKind } = {}) {
   if (!shapeKind || shapeKind === 'free_text') return out;
   // what the requests declare is the same for nearly all of a workload's requests: a few different ones read, not every one
   const read = new Set();
-  let instruction = '';
+  /* and every version of its instruction among them, a few at most: read from the first sampled request alone, a workload
+     with two versions of its prompt read a field as a choice on one test and as a fact on the next, as the sample fell */
+  const instructions = new Set();
   for (const b of bodies) {
     const key = JSON.stringify([b?.response_format ?? null, b?.tool_choice ?? null,
       (Array.isArray(b?.tools) ? b.tools : []).map((t) => [t?.function?.name ?? t?.name, t?.function?.parameters ?? t?.parameters ?? null])]);
@@ -858,9 +914,9 @@ export function choicePathsOf({ bodies = [], values = [], shapeKind } = {}) {
       read.add(key);
       for (const p of declaredChoices(b, shapeKind)) out.add(p);
     }
-    if (!instruction) instruction = instructionOf(b);
+    if (instructions.size < 5) { const t = instructionOf(b); if (t) instructions.add(t); }
   }
-  for (const p of observedChoices(values, instruction, shapeKind)) out.add(p);
+  for (const p of observedChoices(values, [...instructions].join('\n'), shapeKind)) out.add(p);
   return out;
 }
 
