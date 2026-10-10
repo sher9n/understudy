@@ -199,6 +199,9 @@
 .wp .wp-take { display: flex; gap: 10px; align-items: flex-start; font-size: 13.5px; color: var(--mut-read); background: var(--panel); border: 1px solid var(--line);
   border-radius: 10px; padding: 10px 12px; }
 .wp .wp-take svg { width: 16px; height: 16px; flex: none; margin-top: 2px; color: var(--brand-read); }
+/* The original model tested the same way as the others (ownTestOf in src/workloadPage.js), under a test's summary. */
+.wp .wp-owntest { margin: 8px 0 0; padding: 0 12px 0 38px; font-size: 13px; color: var(--mut-read); }
+.wp .wp-owntest b { color: var(--ink); font-weight: 600; }
 .wp .wp-detailgrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
 .wp .wp-sub { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mut); margin: 0 0 8px; }
 

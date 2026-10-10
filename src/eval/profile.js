@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { db, now } from '../db/index.js';
 import { clip } from '../jev.js';
+import { declaredChoices, hasWrittenFields } from './compare.js';
 
 /* What a workload needs from a model, read from its own traffic.
  *
@@ -100,6 +101,11 @@ export function profileFromRows(workload, rows) {
   let tools = false;
   let toolChoice = false;
   let json = 'none';
+  // whether its requests declare choices for the answer (a list of allowed values, a yes or no, the tools: declaredChoices)
+  let choices = false;
+  // and written fields (hasWrittenFields), read once for each different request shape, never once for every call
+  let written = false;
+  const shapesRead = new Set();
   const inputs = new Set();
   const asked = new Set();
   const caps = [];
@@ -116,6 +122,14 @@ export function profileFromRows(workload, rows) {
     if (b.provider?.zdr === true) zdrAsked += 1;
     if (Array.isArray(b.tools) && b.tools.length) tools = true;
     if (b.tool_choice && b.tool_choice !== 'auto' && b.tool_choice !== 'none') toolChoice = true;
+    if (workload.shape_kind && workload.shape_kind !== 'free_text' && shapesRead.size < 5) {
+      const said = JSON.stringify([b.response_format ?? null, b.tool_choice ?? null, Array.isArray(b.tools) ? b.tools : null]);
+      if (!shapesRead.has(said)) {
+        shapesRead.add(said);
+        if (declaredChoices(b, workload.shape_kind).size) choices = true;
+        if (hasWrittenFields(b, workload.shape_kind)) written = true;
+      }
+    }
     const rf = b.response_format?.type;
     if (rf === 'json_schema') json = 'schema';
     else if (rf === 'json_object' && json === 'none') json = 'object';
@@ -156,6 +170,11 @@ export function profileFromRows(workload, rows) {
     tools,
     toolChoice,
     json,
+    /* whether its requests declare choices for the answer, which are read by judges where they differ (judgeChoices in
+       src/eval/judge.js), so a quote counts that judging before any test has read them */
+    choices,
+    // and whether its answers have written fields, which judges read when worded differently, so the quote counts them
+    written,
     inputs: [...inputs],
     images: inputs.has('image'),
     /* Whether the customer's requests set how much to think: when they do (on, or differently

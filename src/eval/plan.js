@@ -373,8 +373,8 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   plan.unseenPool = Math.round(pool * (1 - drawn.seen));
   // the yardstick the last measurement that compared anything used, when there was one: it decides what the judging costs
   const lastCompared = await db.prepare(
-    `SELECT yardstick, plan_json FROM eval_runs WHERE workload_id = ? AND yardstick IS NOT NULL AND ${FOUND()} AND ${OUTCOME_OF()} = 'compared'
-      ORDER BY created_at DESC LIMIT 1`).get(workload.id);
+    `SELECT id, yardstick, plan_json, noise_pct FROM eval_runs WHERE workload_id = ? AND yardstick IS NOT NULL AND ${FOUND()}
+        AND ${OUTCOME_OF()} = 'compared' ORDER BY created_at DESC LIMIT 1`).get(workload.id);
   plan.yardstick = lastCompared?.yardstick ?? null;
   /* Whether that measurement read the work as plainly not open-ended writing (planRecord.judging in src/eval/run.js): it
      differed from itself in figures, facts or decisions, or few of its requests read as open-ended. Only then is a written
@@ -398,6 +398,29 @@ export async function planFor(workload, { canRoute, forRun = false, memo = false
   const lastBar = await db.prepare(`SELECT noise_pct FROM eval_runs WHERE workload_id = ? AND status = 'done' AND noise_pct IS NOT NULL
       ORDER BY created_at DESC LIMIT 1`).get(workload.id);
   plan.noisy = Number(lastBar?.noise_pct) > config.EVAL_NOISE_MAX_PCT;
+  /* Whether a structured workload is read for its choices (EVAL_JUDGE_CHOICES; judgeReason in src/eval/run.js): its requests
+     declare some (profile.choices), or its last test read some in its answers. */
+  plan.choices = !!config.EVAL_JUDGE_CHOICES && workload.shape_kind !== 'free_text' && config.EVAL_QUALITY_YARDSTICK
+    && (!!profile.choices || (Array.isArray(lastJudging?.choices) && lastJudging.choices.length > 0));
+  /* How many answers a structured workload's judges read: the customer's model's own pairs that differed (how often it
+     disagreed with itself, read as "the same answer" reads it, never as how often it was clearly worse), and other models'
+     answers that differ from its own, which is at least as often as it differs from itself, and as often as the models of
+     its last test differed where that was more. A third more of each, so the quote is never short. */
+  if (workload.shape_kind !== 'free_text') {
+    let lastYard = null;
+    try { lastYard = JSON.parse(lastCompared?.plan_json || 'null')?.yardstick ?? null; } catch { lastYard = null; }
+    const own = Number(lastYard?.agreementNoisePct ?? (lastCompared?.yardstick === 'agreement' ? lastCompared.noise_pct : lastBar?.noise_pct));
+    const gaps = lastCompared?.id && lastCompared.yardstick === 'agreement'
+      ? (await db.prepare(`SELECT gap_pct FROM eval_results WHERE run_id = ? AND verdict NOT IN ('reference', 'failed')
+          AND arm_json IS NULL AND runs >= 10 AND gap_pct IS NOT NULL`).all(lastCompared.id)).map((r) => Number(r.gap_pct)).sort((a, b) => a - b)
+      : [];
+    const middle = gaps.length ? gaps[Math.floor(gaps.length / 2)] : null;
+    const ref = Number.isFinite(own) ? Math.min(1, Math.max(0.05, (own / 100) * 1.5 + 0.02)) : 0.15;
+    /* and where its answers have written fields (a reason beside a label), nearly every answer is worded differently from the
+       customer's model's, and read for that (judgeQuality): counted on every answer, so the quote is never short */
+    plan.differs = { ref, cand: Math.max(ref, middle !== null ? Math.min(1, Math.max(0.1, (middle / 100) * 1.5 + 0.05)) : 0.3),
+      written: profile.written ? 1 : 0 };
+  }
   plan.worth = worthOf({ ranked: first.ranked, refPer: first.refPrice ?? 0, month, serving: workload.routed_model, servingAs, tries });
   /* A measurement nobody asked for waits until it has enough calls to show anything: on too few, even a
      model that matched every answer could not clear the bar, and all it would buy is a bar. */
@@ -637,8 +660,10 @@ function estimate(plan, profile, facts, workload) {
      workload is compared field by field, which is free, unless its model last disagreed with itself too often for that
      to be a bar (plan.noisy), when it is held to "at least as good" like written work. */
   const text = workload.shape_kind === 'free_text';
-  const judged = canJudge() && (text || (config.EVAL_QUALITY_YARDSTICK && (plan.yardstick === 'quality' || plan.noisy)));
-  const prices = judged ? judgePrices(pin, pout, facts.models.get(config.EVAL_JUDGE_MODEL)) : null;
+  /* A structured workload whose answers make choices, or whose model last gave two answers differing in a decision
+     (plan.choices), is held to "at least as good" too, its differing answers read by the three (judgeChoices). */
+  const judged = canJudge() && (text || (config.EVAL_QUALITY_YARDSTICK && (plan.yardstick === 'quality' || plan.noisy || plan.choices)));
+  const prices = judged ? judgePrices(pin, pout, facts.models.get(config.EVAL_JUDGE_MODEL), { tie: refModel }) : null;
   /* Written work is judged as its setting says (workloads.judge_mode), and automatically as the run decides: "at least as
      good" for varied or open-ended work (see judgeMode in src/eval/run.js). Automatically, a workload last held to "the
      same answer" is quoted that alone only where its work read as plainly not open-ended (plan.closedWork). */
@@ -683,6 +708,20 @@ function estimate(plan, profile, facts, workload) {
       return { pair, answer: k.check, cost: s * pair + planted + (finalists.length * s + extra.length * screened) * k.check };
     }
     const quality = yard === 'quality';
+    /* A structured answer is read only where it differs from the customer's (judgeStructured): the customer's model's own
+       pairs on the share of them that differed last time, and every other model's answers on the share of theirs that did
+       (plan.differs, generous where nothing is known), each by the three; and the judges are tested on a few planted
+       answers, each alone. */
+    // (with choice judging on: off, a structured answer is read whole as written work is, and priced as that below)
+    if (quality && !text && config.EVAL_JUDGE_CHOICES) {
+      const read = prices.choices.read;
+      const differs = plan.differs || { ref: 0.15, cand: 0.3, written: 0 };
+      // a choice or a figure that differs goes to the three; wording alone is read as written work is
+      const pair = differs.ref * read + (differs.written || 0) * prices.quality;
+      const answer = differs.cand * read + (differs.written || 0) * prices.quality;
+      const planted = 4 * prices.choices.plant;
+      return { pair, answer, cost: s * pair + planted + (finalists.length * s + extra.length * screened) * answer };
+    }
     const pair = quality ? prices.quality : prices.bar;
     const answer = quality ? prices.quality : prices.candidate;
     /* Every written pair read for sameness first, and again for "at least as good". Held to that, the judge is tested

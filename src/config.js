@@ -278,6 +278,20 @@ export const config = {
   /* Written work with no one right answer is held to "at least as good" when it cannot be held to
      "the same answer". */
   EVAL_QUALITY_YARDSTICK: bool('EVAL_QUALITY_YARDSTICK', true),
+  /* A structured answer whose model makes a choice differently from one answer to the next (a label, a level, a yes or no,
+     which of several tools) is held to "at least as good" too: a choice that differs goes to the judges (judgeChoices in
+     src/eval/judge.js), while a figure the customer's model states the same way both times is still held exactly, to a bar
+     as strict as "the same answer" (the figures test in src/eval/run.js). Off, all of it is off, everywhere: such a workload
+     is held to "the same answer" as before, where every differing choice counts as a mistake; one held to "at least as good"
+     for another reason is read whole as written work is, its judges checked as before, with no figures test; and the checks
+     after a switch read answers the same way, whatever their measurement did. */
+  EVAL_JUDGE_CHOICES: bool('EVAL_JUDGE_CHOICES', true),
+  /* A bar the customer's own model would fail is no fair test of anybody: where a sample of this size can show a pass at all,
+     the bar is raised to where that model's own scores pass it (fairBar in src/eval/compare.js), on the first look and the
+     second, and on the figures test. It costs something: at a 1% disagreement rate a setup twice as error-prone is switched
+     to about 6% of the time rather than 1%, where a setup exactly as good as the customer's is switched to about one time
+     in five rather than almost never. Off, every bar is as its own model's answers set it, as before. */
+  EVAL_FAIR_BAR: bool('EVAL_FAIR_BAR', true),
   /* Under "at least as good", the pass mark is how often the customer's model gives a clearly worse answer than its
      own other one, plus this many points, and never past half plus this many (marginFloor in src/eval/compare.js).
      There is no rate above which such a workload cannot be measured: a varied one simply needs more calls before a

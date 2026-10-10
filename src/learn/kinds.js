@@ -496,6 +496,10 @@ export function simulateRoutes(spec, calls) {
   let refCost = 0;
   let toRef = 0;
   const scores = [];
+  // each call's figures test as the setup it went to answered it (exacts, see simulateCascade in src/learn/simulate.js), and
+  // whether that answer was one the judges could not read (unreads)
+  const exacts = [];
+  const unreads = [];
   const latency = [];
   const ttft = [];
   const served = [];
@@ -507,6 +511,8 @@ export function simulateRoutes(spec, calls) {
       const s = Number(c.ref.noise) || 0;
       sum += s;
       scores.push(s);
+      exacts.push(Number(c.ref.exact) || 0);
+      unreads.push(false);
       cost += Number(c.ref.cost) || 0;
       latency.push(c.ref.latency ?? null);
       ttft.push(c.ref.ttft ?? c.ref.latency ?? null);
@@ -517,6 +523,9 @@ export function simulateRoutes(spec, calls) {
     const s = scoreOf(got);
     sum += s;
     scores.push(s);
+    // an answer that failed changed every figure, as a single model's does
+    exacts.push(!got || got.ok === false ? 1 : Number(got.exact) || 0);
+    unreads.push(!!got?.unread);
     cost += Number(got?.cost) || 0;
     latency.push(got?.latency ?? null);
     ttft.push(got?.ttft ?? got?.latency ?? null);
@@ -524,7 +533,7 @@ export function simulateRoutes(spec, calls) {
   }
   const n = calls.length;
   return {
-    gap: n ? (sum / n) * 100 : 100, scores, cost, refCost, ratio: refCost > 0 ? cost / refCost : null,
+    gap: n ? (sum / n) * 100 : 100, scores, exacts, unreads, cost, refCost, ratio: refCost > 0 ? cost / refCost : null,
     escalated: n ? toRef / n : 1, latency: latency.filter((x) => x !== null), ttft: ttft.filter((x) => x !== null), served,
   };
 }
@@ -539,7 +548,7 @@ export function crossFitRouter(calls, options, opts = {}, { folds = 5 } = {}) {
   if (!full) return null;
   const n = calls.length;
   const k = Math.max(2, Math.min(folds, n));
-  const pooled = { scores: [], latency: [], ttft: [], cost: 0, refCost: 0, toRef: 0, n: 0, served: [] };
+  const pooled = { scores: [], exacts: [], unreads: [], latency: [], ttft: [], cost: 0, refCost: 0, toRef: 0, n: 0, served: [] };
   // how each option does over every call, and the customer's model's own noise: what routing at random would give
   const overall = options.map((_, j) => calls.reduce((a, c) => a + scoreOf(c.results[j]), 0) / n);
   const refNoise = calls.reduce((a, c) => a + (Number(c.ref.noise) || 0), 0) / n;
@@ -553,6 +562,8 @@ export function crossFitRouter(calls, options, opts = {}, { folds = 5 } = {}) {
     const r = spec ? simulateRoutes(spec, test)
       : simulateRoutes({ centroids: [] }, test);
     pooled.scores.push(...r.scores);
+    pooled.exacts.push(...(r.exacts || []));
+    pooled.unreads.push(...(r.unreads || []));
     pooled.latency.push(...r.latency);
     pooled.ttft.push(...r.ttft);
     pooled.cost += r.cost;
@@ -589,7 +600,7 @@ export function crossFitRouter(calls, options, opts = {}, { folds = 5 } = {}) {
   return {
     spec: full,
     heldOut: {
-      gap, scores: pooled.scores, latency: pooled.latency, ttft: pooled.ttft, cost: pooled.cost, refCost: pooled.refCost,
+      gap, scores: pooled.scores, exacts: pooled.exacts, unreads: pooled.unreads, latency: pooled.latency, ttft: pooled.ttft, cost: pooled.cost, refCost: pooled.refCost,
       ratio: pooled.refCost > 0 ? pooled.cost / pooled.refCost : null, escalated: pooled.n ? pooled.toRef / pooled.n : 1,
       randomGap: randomGap * 100, kindsZ, worseKept: observed, worseAtRandom: expected,
     },

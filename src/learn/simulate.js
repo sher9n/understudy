@@ -12,8 +12,11 @@ export const THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9];
 
 /**
  * calls: one per measured call, in order:
- *   { ok, score, cost, latency, ttft, check: { pass(t) -> bool } | { structureOk, p }, ref: { cost, latency, ttft, noise } }
- * Returns one reading per threshold: { threshold, gap, escalated, cost, refCost, ratio, latency: [], ttft: [], served: [] }
+ *   { ok, score, exact, cost, latency, ttft, check: { pass(t) -> bool } | { structureOk, p }, ref: { cost, latency, ttft, noise, exact } }
+ * Returns one reading per threshold: { threshold, gap, escalated, cost, refCost, ratio, latency: [], ttft: [], served: [],
+ * scores: [], exacts: [] }. `exacts` is each call's figures test (exactBar in src/eval/run.js) as the answer served it: the
+ * cheap answer's changed held figures, or the customer's model's own where the call was sent on, so a strategy is held to
+ * that test as a single model is.
  */
 export function simulateCascade(calls, { thresholds = THRESHOLDS, checkCost = () => 0, checkMs = () => 0 } = {}) {
   return thresholds.map((t) => {
@@ -26,12 +29,17 @@ export function simulateCascade(calls, { thresholds = THRESHOLDS, checkCost = ()
     const ttft = [];
     const served = [];
     const scores = [];
+    const exacts = [];
+    // whether the answer it served was one the judges could not read (its score then stands in for nobody's reading)
+    const unreads = [];
     calls.forEach((c, i) => {
       refCost += c.ref.cost;
       const passes = c.ok && c.check && c.check.structureOk && Number(c.check.p) >= t;
       const spentCheck = c.ok && c.check?.structureOk ? checkCost(c, i) : 0;
       const waitedCheck = c.ok && c.check?.structureOk ? checkMs(c, i) : 0;
       const first = c.cost || 0;
+      exacts.push(passes ? Number(c.exact) || 0 : Number(c.ref.exact) || 0);
+      unreads.push(!!(passes && c.unread));
       if (passes) {
         sum += c.score;
         scores.push(c.score);
@@ -63,6 +71,8 @@ export function simulateCascade(calls, { thresholds = THRESHOLDS, checkCost = ()
       ttft,
       served,
       scores,
+      exacts,
+      unreads,
     };
   });
 }
@@ -83,8 +93,13 @@ export function simulateRouter(calls, { thresholds = THRESHOLDS } = {}) {
     const latency = [];
     const ttft = [];
     const scores = [];
+    const exacts = [];
+    const unreads = [];
     for (const c of calls) {
       refCost += c.ref.cost;
+      // its figures test as the answer served it (see simulateCascade): a cheap answer that failed changed them all
+      exacts.push(c.p >= t ? (c.ok ? Number(c.exact) || 0 : 1) : Number(c.ref.exact) || 0);
+      unreads.push(!!(c.p >= t && c.unread));
       if (c.p >= t) {
         sum += c.ok ? c.score : 1;
         scores.push(c.ok ? c.score : 1);
@@ -102,7 +117,7 @@ export function simulateRouter(calls, { thresholds = THRESHOLDS } = {}) {
     }
     const n = calls.length;
     return { threshold: t, gap: n ? (sum / n) * 100 : 100, escalated: n ? toStrong / n : 1, cost, refCost,
-      ratio: refCost > 0 ? cost / refCost : null, latency, ttft, scores };
+      ratio: refCost > 0 ? cost / refCost : null, latency, ttft, scores, exacts, unreads };
   });
 }
 
@@ -140,6 +155,8 @@ export function crossFit(calls, readingsOf, pick, { folds = 5 } = {}) {
   const latency = [];
   const ttft = [];
   const scores = [];
+  const exacts = [];
+  const unreads = [];
   const chosen = [];
   for (let f = 0; f < k; f += 1) {
     const test = calls.filter((_, i) => i % k === f);
@@ -155,11 +172,13 @@ export function crossFit(calls, readingsOf, pick, { folds = 5 } = {}) {
     latency.push(...r.latency);
     ttft.push(...r.ttft);
     scores.push(...(r.scores || []));
+    exacts.push(...(r.exacts || []));
+    unreads.push(...(r.unreads || []));
   }
   const all = pick(readingsOf(calls));
   return {
     heldOut: { gap: n ? (sum / n) * 100 : 100, cost, refCost, ratio: refCost > 0 ? cost / refCost : null,
-      escalated: n ? escalated / n : 1, latency, ttft, scores, thresholds: chosen },
+      escalated: n ? escalated / n : 1, latency, ttft, scores, exacts, unreads, thresholds: chosen },
     threshold: all.threshold,
     inSample: all,
   };
